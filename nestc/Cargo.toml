@@ -1,0 +1,8 @@
+[package]
+name = "nestc"
+description = "Bootstrap compiler for the Nest programming language."
+authors = ["Oliwier Michalik"]
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
