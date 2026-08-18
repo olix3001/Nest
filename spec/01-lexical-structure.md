@@ -77,8 +77,8 @@ Reserved words that cannot be used as identifiers:
 func    struct   enum    trait    namespace   distinct
 let     const    mut     return   defer       match     import
 if      else     for     while    loop        break     continue
-dyn     true     false   self     Self
-and     or       not
+dyn     true     false   self     Self        impl
+and     or       not     extern
 ```
 
 There is no `nil` / `null` keyword: pointers are never null, and the absence of
@@ -86,10 +86,21 @@ a value is the `Option` enum's `.none` case (see
 [03-types.md](03-types.md) §3.6).
 
 `self` names the receiver parameter; `Self` names the implementing type inside a
-`trait` or an `#impl` namespace. `mut` marks a mutable reference (`*mut T`,
-`[]mut T`) or a mutable binding in a pattern; `dyn` forms a trait object
-(`dyn Trait`). Note that `cast` and `assert` are **not** keywords: `$cast` is an
+`trait` or an `impl` namespace. `impl` introduces a trait/inherent implementation
+attached to a type (`impl T { ... }`, `impl Trait for T { ... }`); `for` doubles
+as the loop keyword and the trait-impl separator (unambiguous by position). `mut`
+marks a mutable reference (`*mut T`, `[]mut T`) or a mutable binding in a pattern;
+`dyn` forms a trait object (`dyn Trait`). Note that `cast` and `assert` are **not** keywords: `$cast` is an
 intrinsic and `assert` is a std function (compile-time assertion is `$assert`).
+
+`type` is **not** a reserved word: it is a contextual keyword, recognised only as
+the RHS of an associated-type binding (`Item :: type`). Elsewhere it is an
+ordinary identifier, so `type` may name values, fields, and parameters. (There is
+no `T: type` kind bound — a bare generic parameter is already a type; only `const`
+marks a value parameter.) `extern` selects an ABI on a `func` literal
+(`extern("c") func ...`) or heads an `extern("c") { ... }` block; it is a full
+keyword and sits immediately before `func` or the block, never left of a binding
+name.
 
 Note: `module` is **not** a keyword — namespaces subsume it (see
 [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md)).

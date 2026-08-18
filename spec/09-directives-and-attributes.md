@@ -30,13 +30,15 @@ intrinsic, and a static check inside a struct is the intrinsic statement
   handler :: func () -> Response { ... }
   ```
 - **Directives** sit immediately before the construct they modify — a type or
-  func literal keyword, a field, or (for `#impl`) a `namespace`:
+  func literal keyword, or a field:
   ```
   CatImage :: #packed #align(4) struct { ... }
   render   :: #inline func (self: *CatImage) -> string { ... }
-  #impl(ToJson, CatImage) namespace { ... }
   data: #raw [4096]uint8,              // directive on a field
   ```
+  Implementations are **not** a directive: they use the `impl` keyword
+  (`impl Trait for T { ... }`), see
+  [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md).
 
 Multiple annotations may stack; order among same-kind annotations is not
 significant. Attributes and their arguments are recorded on the declaration for
@@ -66,6 +68,11 @@ Entity :: struct {
   hp: int,
 }
 ```
+
+The remaining compiler-acted attribute is `@link_name(string)`, which overrides
+the external link symbol of an `extern` declaration: the binding keeps its
+in-language name while the compiler emits/links against the string. It is only
+meaningful on `extern` functions — see [11-c-ffi.md](11-c-ffi.md) §11.3.
 
 ```
 @public CatId :: distinct string
@@ -143,13 +150,14 @@ particles: #soa []Particle          // stored column-wise
   shared, unsynchronized state — see
   [02-declarations-and-bindings.md](02-declarations-and-bindings.md) §2.6.
 
-### Dispatch and impl
+### Implementations (not a directive)
 
-- **`#impl(T)` / `#impl(Trait, T)`** — introduce an anonymous `namespace` of
-  inherent items for `T`, or a trait implementation of `Trait` for `T`. The
-  target is an argument, allowing impls for out-of-scope types (see
-  [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md)
-  §4.1).
+Implementations were once the `#impl(...)` directive; they are now the **`impl`
+keyword**. `impl T { ... }` adds inherent items to `T`; `impl Trait for T { ... }`
+implements `Trait` for `T`; `impl <T> ...` parameterizes over a family with
+most-specific-wins selection. The target is in the header, allowing impls for
+out-of-scope types. See
+[04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.1, §4.8.
 
 ### Safety (opt-out of default checks)
 

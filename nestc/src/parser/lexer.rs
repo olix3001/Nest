@@ -51,6 +51,7 @@ pub enum TokenKind {
 
     // ===< Keywords >===
     #[token("func")]      FuncKw,
+    #[token("extern")]    ExternKw,
     #[token("struct")]    StructKw,
     #[token("enum")]      EnumKw,
     #[token("trait")]     TraitKw,

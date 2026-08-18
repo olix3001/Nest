@@ -12,6 +12,7 @@ pattern grammar is reused in three places:
 ```
 pattern =
     '_'                                   // wildcard: matches anything, binds nothing
+  | '*'                                   // glob: import all public members into scope (namespace value only)
   | [ 'mut' ] identifier                  // binding (optionally mutable), matches anything
   | identifier '@' pattern                // binding + sub-pattern (bind the whole, match inside)
   | literal                               // matches an equal value
@@ -41,10 +42,16 @@ field_pat =
   | identifier ':' pattern                // rename / nested destructure
 ```
 
-Pattern power, at a glance: wildcards, (mutable) bindings, `@`-bindings, literal
-and **range** matches, enum variants with tuple or record payloads, struct /
-tuple / **slice** destructuring with a `..` rest, **or-patterns**, pointer
-**dereference** patterns, and **guards**.
+Pattern power, at a glance: wildcards, the `*` **glob** (namespace-import only),
+(mutable) bindings, `@`-bindings, literal and **range** matches, enum variants
+with tuple or record payloads, struct / tuple / **slice** destructuring with a
+`..` rest, **or-patterns**, pointer **dereference** patterns, and **guards**.
+
+The `*` glob is special: it is valid only when the operand is a `namespace` value
+(i.e. destructuring an `import`), where it means "bring every public member into
+scope" rather than binding a name. Either as the whole pattern (`* :: import
+<std>`) or inside a field (`{ http: * } :: import <std>`). See
+[04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.5.
 
 ## 7.2 Destructuring bindings
 
@@ -52,8 +59,9 @@ A `::` / `let` / `const` left-hand side is a pattern, so a compound value is
 pulled apart at the binding site:
 
 ```
-{ CatImage, CatId, HttpPort } :: import "models"
-{ http: { Client, Router, Response } } :: import "network"
+{ CatImage, CatId, HttpPort } :: import "models.nest"
+{ http: { Client, Router, Response } } :: import "network.nest"
+{ http: * } :: import <std>                 // glob std.http's members into scope
 
 const .{ width, height } := cat            // bind two fields
 const (a, b) := pair                        // tuple

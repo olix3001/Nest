@@ -111,7 +111,7 @@ struct types are *structural* (two with the same fields are the same type). A
 struct bound to a name with `::` is **nominal**: it is its own distinct type even
 if another named or anonymous struct has identical fields, and it never
 implicitly converts to or from them (use `$cast`, or an `@using` field — §3.8,
-§3.10). Only named structs can have `#impl` methods; anonymous structs are plain
+§3.10). Only named structs can have `impl` methods; anonymous structs are plain
 data.
 
 ### Arrays and slices
@@ -197,8 +197,10 @@ A `trait` is a set of method signatures a type can implement. Traits serve as
 **dynamic trait objects** via `dyn`.
 
 ```
-trait = [ directive ]* 'trait' '{' { method_sig } '}'
+trait = [ directive ]* 'trait' '{' { trait_member } '}'
+trait_member = method_sig | assoc_type
 method_sig = identifier '::' 'func' [ generics ] '(' params ')' [ '->' type ]
+assoc_type = identifier '::' 'type' [ ':' type { '+' type } ]  // trait bounds on the impl's choice
 ```
 
 ```
@@ -208,11 +210,12 @@ ToJson :: trait {
 ```
 
 - `Self` names the implementing type.
-- A type implements a trait through an anonymous impl namespace declared with the
-  `#impl` directive: `#impl(ToJson, CatImage) namespace { ... }`. The target type
-  is an argument, so a trait may be implemented for a type not in the current
-  namespace (see [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md)
-  §4.1 and [09-directives-and-attributes.md](09-directives-and-attributes.md)).
+- A type implements a trait through an anonymous impl namespace introduced by the
+  `impl` keyword: `impl ToJson for CatImage { ... }`. The target is written in the
+  header, so a trait may be implemented for a type not in the current namespace,
+  and generic impls (`impl <T> ToJson for Storage.<T>`) cover whole families with
+  most-specific-wins selection (see
+  [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.1, §4.8).
 - **Static bound:** `func <T: ToJson>(...)` accepts any `T` implementing `ToJson`
   and is monomorphized — no vtable.
 - **Dynamic dispatch:** the type `dyn ToJson` is a trait object; used behind a
@@ -250,7 +253,7 @@ Function values (including closures) inhabit function types; see
 Absence is modeled by the prelude enum `Option` (there is **no** `?T` sugar):
 
 ```
-Option :: enum <T: type> {
+Option :: enum <T> {
   some(T),
   none,
 }

@@ -17,7 +17,7 @@ Its design combines:
 - **`$`-intrinsics and `#`-directives** — compiler-provided values are intrinsics
   (`$cast`, `$new`, `$make`, `$size_of`, `$embed_file`, …); compiler behavior is
   changed by directives (`#packed`, `#align`, `#soa`, `#inline`, `#const`,
-  `#impl`, `#raw`, `#unsafe`).
+  `#raw`, `#unsafe`). Implementations use the `impl` keyword, not a directive.
 - **Strong compile-time reflection** — *planned*; the design reserves the
   attribute/layout machinery it needs (see
   [12-reflection.md](12-reflection.md)).
@@ -33,7 +33,7 @@ Its design combines:
 
 2. **Everything is a namespace.** There is no "module" concept and no `module`
    keyword: a source file is a namespace, an inline `name :: namespace { ... }`
-   is a namespace, and a type's methods live in an `#impl(...)` namespace. Same
+   is a namespace, and a type's methods live in an `impl` namespace. Same
    construct throughout. See
    [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md).
 
@@ -56,12 +56,12 @@ Its design combines:
 | [01-lexical-structure.md](01-lexical-structure.md) | Source encoding, tokens, comments, literals, keywords |
 | [02-declarations-and-bindings.md](02-declarations-and-bindings.md) | `::` vs `:=`, `let` / `const`, assignment, `distinct` |
 | [03-types.md](03-types.md) | Primitives, `*mut`/`[]mut`, structs, enums, traits, `dyn`, `Option`, `Vector` |
-| [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) | Namespaces, `import`, visibility, `#impl`, merging, lookup rules |
+| [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) | Namespaces, `import`, visibility, `impl`, generic impls, merging, lookup rules |
 | [05-functions-and-generics.md](05-functions-and-generics.md) | `func`, `#const`, parameters, named arguments, generics, `.<T>` / `.<_>` |
 | [06-expressions-and-operators.md](06-expressions-and-operators.md) | Literals, calls, `$`-intrinsics, `$cast`, `$new`/`$make`, precedence |
 | [07-patterns-and-matching.md](07-patterns-and-matching.md) | Patterns (ranges, deref, slices, or-patterns, guards), `match` |
 | [08-error-handling-and-defer.md](08-error-handling-and-defer.md) | `Result`, the `Try` trait, `.?` / `.!`, `defer` |
-| [09-directives-and-attributes.md](09-directives-and-attributes.md) | `@public`/`@private`, custom attributes, `#packed`/`#align`/`#soa`/`#inline`/`#const`/`#impl`/`#raw`/`#unsafe` |
+| [09-directives-and-attributes.md](09-directives-and-attributes.md) | `@public`/`@private`, custom attributes, `#packed`/`#align`/`#soa`/`#inline`/`#const`/`#raw`/`#unsafe` |
 | [10-loops-and-iteration.md](10-loops-and-iteration.md) | `loop` / `while` / `for`, the `Iterator` trait, ranges, adapters |
 | [11-c-ffi.md](11-c-ffi.md) | `core/c`, `c.ptr`, `extern`/`#c`, implicit boundary casts |
 | [12-reflection.md](12-reflection.md) | Compile-time reflection — **planned**, design placeholder |

@@ -1,9 +1,12 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// An interned identifier name.
 /// At this moment as a simple wrapper around [`Box<str>`],
 /// but will be replaced with intering later on.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Symbol(Box<str>);
 
 impl Symbol {

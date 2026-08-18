@@ -37,13 +37,14 @@ The left-hand side is a **pattern** (see
 destructuring works:
 
 ```
-{ http: { Client, Router, Response } } :: import "network"
-{ CatImage, CatId, HttpPort }          :: import "models"
-io                                      :: import "std/io"
+{ http: { Client, Router, Response } } :: import "network.nest"
+{ CatImage, CatId, HttpPort }          :: import "models.nest"
+io                                      :: import <std/io>
 ```
 
 Here the RHS (a namespace value) is destructured by the pattern on the LHS. A
-plain identifier is the trivial pattern.
+plain identifier is the trivial pattern; a bare `*` globs every public member into
+scope (see [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.5).
 
 ## 2.2 Runtime bindings — `let` and `const`
 

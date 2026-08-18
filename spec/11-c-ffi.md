@@ -10,7 +10,7 @@ coerce into their C equivalents at the boundary.
 All C types live in `core/c` and are conventionally imported as `c`:
 
 ```
-c :: import "core/c"
+c :: import <core/c>
 ```
 
 `core/c` provides the C primitive and derived types, named in lowercase to mirror
@@ -61,7 +61,7 @@ An external C function is declared with an `extern("c")` **func** literal — th
 string — and no body:
 
 ```
-c :: import "core/c"
+c :: import <core/c>
 
 strlen :: extern("c") func (s: c.ptr.<c.char>) -> c.size_t
 malloc :: extern("c") func (n: c.size_t) -> c.ptr.<c.void>
@@ -77,8 +77,35 @@ qsort  :: extern("c") func (base: c.ptr.<c.void>, n: c.size_t, size: c.size_t,
 - A signature may use `c.*` types **or** ordinary language types — any type is
   allowed at the boundary. The `c.*` types exist for when you need an *exact* C
   ABI width/shape; language types coerce to their C counterparts per §11.4.
+- The **link symbol** defaults to the binding's own name. To bind a differently
+  named external symbol, attach the `@link_name(string)` attribute: the identifier
+  you write is what the rest of the program calls, while the compiler emits and
+  links against the string. This lets a C-ugly name be renamed to house style:
+
+  ```
+  @link_name("LLVMSomeFunction")
+  some_function :: extern("c") func (m: c.ptr.<Module>) -> c.int
+  // callers write `some_function(...)`; the linker resolves `LLVMSomeFunction`
+  ```
+
+  `@link_name` is an ordinary attribute (`@`), so it sits before the binding like
+  `@public` and works the same on a member inside an `extern("c") { ... }` block.
 - Which library provides the symbol (link flags, header association) is a
   build-system concern layered on this syntax.
+
+Many externals sharing one ABI may be grouped in an `extern("c") { ... }` block
+instead of repeating the modifier. The block is pure surface sugar: each member is
+an ordinary bodyless `func` declaration, and the block **desugars** to the same
+per-function `extern("c")` bindings — there is no distinct block construct in the
+AST or name resolution. Members are function declarations only.
+
+```
+extern("c") {
+  strlen :: func (s: c.ptr.<c.char>) -> c.size_t
+  malloc :: func (n: c.size_t) -> c.ptr.<c.void>
+}
+// identical to writing `strlen :: extern("c") func ...` on each line
+```
 
 ## 11.4 Implicit casts at the boundary
 

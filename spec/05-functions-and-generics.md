@@ -69,11 +69,11 @@ version.
 ### The receiver (`self`)
 
 A parameter named `self` marks the function as a **method** of the type its
-`#impl` namespace targets. Its type is `*T` (read-only receiver), `*mut T`
+`impl` namespace targets. Its type is `*T` (read-only receiver), `*mut T`
 (mutating receiver), or `T` (by-value receiver):
 
 ```
-#impl(Router) namespace {
+impl Router {
   @public
   get :: func (self: *mut Router, path: string, handler: func() -> Response) { ... }
 }
@@ -81,7 +81,7 @@ A parameter named `self` marks the function as a **method** of the type its
 
 A method is invoked with dot syntax, `router.get("/cat", handler)`, binding the
 receiver to `self`; the compiler auto-takes `&router` / `&mut router` as the
-receiver type requires. A function in an `#impl` namespace **without** `self` is
+receiver type requires. A function in an `impl` namespace **without** `self` is
 an **associated function**, called on the type: `CatImage.new(id, url, w, h)`.
 
 ## 5.3 Calls and arguments
@@ -146,21 +146,22 @@ Functions and types may be parameterized. Generic parameters are declared in
 
 ```
 generics      = '<' generic_param { ',' generic_param } '>'
-generic_param = identifier [ ':' constraint ]     // type param; bare `T` == `T: type`
+generic_param = identifier [ ':' constraint ]     // type param; bare `T` is unconstrained
               | 'const' identifier ':' type        // compile-time value param
-constraint    = 'type' | type { '+' type }         // `type` = any type; else trait bounds
+constraint    = type { '+' type }                  // trait bounds; a bare param is already a type
 ```
 
 ```
-get :: func <T: type> (self: *Client, url: string) -> Result.<T, FetchError> {
+get :: func <T> (self: *Client, url: string) -> Result.<T, FetchError> {
   ...
 }
 
 zeros :: func <const N: uint32> () -> [N]byte { ... }   // value param used in a type
 ```
 
-- `T` / `T: type` — `T` is any type (most permissive); the bare form is shorthand
-  for `T: type`.
+- `T` — any type, unconstrained (most permissive). A type parameter needs no kind
+  annotation; the `const` keyword is the only thing that marks a *value* parameter,
+  so there is no `T: type` form.
 - `T: SomeTrait` — constrains `T` to implementors of `SomeTrait`, enabling that
   trait's methods in the body. Multiple bounds: `T: TraitA + TraitB`.
 - `const N: Ty` — a **compile-time value** parameter: a constant of the concrete
@@ -171,6 +172,11 @@ zeros :: func <const N: uint32> () -> [N]byte { ... }   // value param used in a
   (each instantiation generates specialized code), which enables the LLVM backend
   and reflection over `T`. Runtime polymorphism is opt-in via `dyn Trait` (see
   [03-types.md](03-types.md) §3.4).
+
+The same `< >` parameter declaration also heads an **`impl`** block, letting one
+impl cover a whole family of types (blanket, generic-trait, and conditional
+impls), with the most specific matching impl selected per use site. See
+[04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.8.
 
 ### Instantiation and inference — `.<...>` and `_`
 
@@ -194,7 +200,7 @@ collect.<_, string>(iter)      // first inferred, second fixed
 The `.<` token (not bare `<`) removes the C++ `f<a>(b)` ambiguity. `.<...>` is
 **mandatory** for supplying arguments in every position, type and value alike;
 bare `<...>` is never a valid argument list. The only place `<` `>` appears is the
-*declaration* of generic parameters (`func <T: type>` and the type-name
+*declaration* of generic parameters (`func <T>` and the type-name
 equivalent). Whether an omitted turbofish is inferred is settled between the AST
 and IR stages.
 

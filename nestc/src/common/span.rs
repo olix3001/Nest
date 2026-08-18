@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
+
 /// Span represents a range in a source file.
 /// Only information about position inside a file is stored in it,
 /// the file source and location itself should be stored separately.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

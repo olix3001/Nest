@@ -10,7 +10,7 @@ language's syntax.
 `Result` is a prelude enum with **snake_case** variants:
 
 ```
-Result :: enum <T: type, E: type> {
+Result :: enum <T, E> {
   ok(T),
   err(E),
 }
@@ -19,7 +19,7 @@ Result :: enum <T: type, E: type> {
 A fallible function declares its success and error types:
 
 ```
-get :: func <T: type> (self: *Client, url: string) -> Result.<T, FetchError> {
+get :: func <T> (self: *Client, url: string) -> Result.<T, FetchError> {
   return .err(.network_error("Failed to reach endpoint"))
 }
 ```

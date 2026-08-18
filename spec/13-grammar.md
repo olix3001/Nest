@@ -10,13 +10,20 @@ this grammar and the prose chapters disagree, the prose wins.
 
 ```
 file        = { file_item }
-file_item   = namespace_header
-            | import_stmt
-            | declaration
+file_item   = declaration
             | impl_block
+            | extern_block
             | comptime_item
 
-namespace_header = 'namespace' identifier          // file / child namespace
+// Groups external declarations under one ABI. Desugars to individual bodyless
+// `func_expr`s each carrying that `extern(abi)` — purely surface sugar, no
+// distinct AST node. Members are function declarations only (no bodies).
+extern_block = 'extern' '(' string ')' '{' { declaration } '}'
+
+// A source file is an anonymous namespace: its file_items are its members.
+// There is no file header and no bodyless `namespace name` form. Another file's
+// namespace is obtained with `import` (see 04). An `import` is always the RHS of
+// a `const_bind`; there is no standalone import statement.
 
 declaration = { attribute } [ directive ] ( const_bind | local_decl )
 
@@ -30,7 +37,7 @@ const_rhs   = expr
             | func_expr
             | trait_expr
             | namespace_expr
-            | 'import' string
+            | import_expr
 ```
 
 `const_bind` is the single `::` binding form; the RHS category (value, type,
@@ -44,10 +51,16 @@ there is rejected — use `::` for immutable namespace bindings. See
 ## 13.2 Imports
 
 ```
-import_stmt =                       // see 04
-    'import' string                 // glob: bring all public into scope
-  | [ '@public' ] 'import' string   // (with @public: glob re-export)
-  | [ '@public' ] pattern '::' 'import' string   // named / selective (re-export)
+import_expr = 'import' import_path              // see 04; always the RHS of a `::`
+import_path = '<' pkg_path '>'                  // package: std / third-party
+            | string                            // file: resolved on the file system
+pkg_path    = identifier { '/' identifier }     // first segment = package root
+
+// binding forms (the LHS pattern decides the effect):
+//   name        :: import ...     bind whole namespace
+//   *           :: import ...     glob all public members into scope
+//   { ... }     :: import ...     selective / nested destructure ('*' allowed as a field value)
+//   [ '@public' ] pattern :: import ...   additionally re-export what it brings in
 ```
 
 ## 13.3 Type-forming expressions
@@ -67,7 +80,8 @@ variant_payload = '(' type { ',' type } ')' | '{' { field } '}'
 trait_expr    = { directive } 'trait' '{' { trait_member } '}'
 trait_member  = method_sig | assoc_type
 method_sig    = identifier '::' 'func' [ generics ] '(' [ params ] ')' [ '->' type ]
-assoc_type    = identifier '::' 'type'                 // e.g. Item :: type
+assoc_type    = identifier '::' 'type' [ ':' bounds ]  // e.g. Item :: type: Iterator + Clone
+bounds        = type { '+' type }                      // trait bounds only; bare `type` kind is not a bound
 
 type        = type_core
 type_core   = qualified_name [ generic_args ]
@@ -89,12 +103,16 @@ type (usually `*dyn Trait`).
 
 ```
 namespace_expr = 'namespace' '{' { file_item } '}'
-impl_block     = '#impl' '(' type ')' 'namespace' '{' { file_item } '}'
-               | '#impl' '(' type ',' type ')' 'namespace' '{' { file_item } '}'
+impl_block     = 'impl' [ generics ] type [ 'for' type ] '{' { file_item } '}'
+               // no 'for'  => inherent impl, the type is the target
+               // with 'for' => trait impl, `impl <g> Trait for Target`
 ```
 
-`#impl(T) namespace {...}` adds inherent items to `T`; `#impl(Trait, T) namespace
-{...}` implements `Trait` for `T`. See
+`impl T {...}` adds inherent items to `T`; `impl Trait for T {...}` implements
+`Trait` for `T`. Optional `generics` (`impl <T> ...`, same `< >` declaration form
+as `func <T>`) parameterize the impl over a family of types — blanket,
+generic-trait, and conditional impls; on overlap the **most specific** matching
+impl is selected, and incomparable overlap is an error. See
 [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md).
 
 ## 13.5 Functions
@@ -106,9 +124,9 @@ func_type = 'func' [ generics ] '(' [ param_types ] ')' [ '->' type ]
 extern_spec = 'extern' '(' string ')'      // ABI selector, next to `func`; string is e.g. "c"
 
 generics      = '<' generic_param { ',' generic_param } '>'
-generic_param = identifier [ ':' constraint ]     // type param; bare `T` == `T: type`
+generic_param = identifier [ ':' constraint ]     // type param; bare `T` is unconstrained
               | 'const' identifier ':' type        // compile-time value param
-constraint    = 'type' | type { '+' type }
+constraint    = type { '+' type }                 // trait bounds; a bare param is already a type
 
 params    = param { ',' param }
 param     = 'self' [ ':' type ]
@@ -188,7 +206,7 @@ primary = literal
         | if_expr
         | if_match_expr
         | block
-        | 'import' string
+        | import_expr                           // '<pkg>' or "file"; see 13.2
 
 intrinsic_call = intrinsic [ generic_args ] '(' [ args ] ')'     // intrinsic = '$' identifier
 
@@ -232,6 +250,7 @@ bare `expr?`; propagation is the postfix `.?`.
 
 ```
 pattern = '_'
+        | '*'                                            // glob (namespace import only)
         | [ 'mut' ] identifier
         | identifier '@' pattern
         | literal
