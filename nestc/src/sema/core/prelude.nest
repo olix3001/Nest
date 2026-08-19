@@ -1,0 +1,132 @@
+// The bootstrap core library.
+//
+// This is the `core` package: the small set of always-available declarations the
+// compiler wires built-in syntax to (`#lang` items) plus the prelude types every
+// program can name unqualified (`Option`, `Result`, ...). It is embedded in the
+// compiler binary (see `session.rs`) and registered as the package `core`; the
+// prelude globs its `@public` members into every file's outermost scope.
+//
+// Every operator is sugar for a call to the method of the trait carrying the
+// matching `#lang(...)` tag (§6.13); desugaring (`sema::desugar`) reaches each
+// trait by its tag, so they must all live here. Signatures are illustrative —
+// there is no codegen yet.
+
+// ===< Prelude types >===
+
+@public
+Option :: enum <T> {
+  some(T),
+  none,
+}
+
+@public
+Result :: #lang("result") enum <T, E> {
+  ok(T),
+  err(E),
+}
+
+@public
+Ordering :: #lang("ordering") enum {
+  less,
+  equal,
+  greater,
+}
+
+// ===< Arithmetic / bitwise / shift binaries >===
+
+@public Add :: #lang("add") trait <Rhs> {
+  Output :: type
+  add :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+@public Sub :: #lang("sub") trait <Rhs> {
+  Output :: type
+  sub :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+@public Mul :: #lang("mul") trait <Rhs> {
+  Output :: type
+  mul :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+@public Div :: #lang("div") trait <Rhs> {
+  Output :: type
+  div :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+@public Rem :: #lang("rem") trait <Rhs> {
+  Output :: type
+  rem :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+@public BitAnd :: #lang("bitand") trait <Rhs> {
+  Output :: type
+  bitand :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+@public BitOr :: #lang("bitor") trait <Rhs> {
+  Output :: type
+  bitor :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+@public BitXor :: #lang("bitxor") trait <Rhs> {
+  Output :: type
+  bitxor :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+@public Shl :: #lang("shl") trait <Rhs> {
+  Output :: type
+  shl :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+@public Shr :: #lang("shr") trait <Rhs> {
+  Output :: type
+  shr :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+
+// ===< Prefix unaries >===
+
+@public Neg :: #lang("neg") trait {
+  Output :: type
+  neg :: func (self: Self) -> Self.Output
+}
+@public BitNot :: #lang("bitnot") trait {
+  Output :: type
+  bitnot :: func (self: Self) -> Self.Output
+}
+
+// ===< Equality and ordering >===
+
+@public Eq :: #lang("eq") trait {
+  eq :: func (self: Self, rhs: Self) -> bool
+}
+@public Ord :: #lang("ord") trait {
+  cmp :: func (self: Self, rhs: Self) -> Ordering
+}
+
+// ===< Indexing >===
+
+@public Index :: #lang("index") trait <Idx> {
+  Output :: type
+  index :: func (self: *Self, i: Idx) -> *Self.Output
+}
+@public IndexMut :: #lang("index_mut") trait <Idx> {
+  Output :: type
+  index_mut :: func (self: *mut Self, i: Idx) -> *mut Self.Output
+}
+
+// Compound assignment (`a += b`) is not an operator trait: it is pure sugar for
+// `a = a + b`, so it needs no `#lang` item — desugaring rewrites it to the simple
+// assignment and the resulting `+` lowers through `Add` (§6.13, `sema::desugar`).
+
+// ===< Control-flow language items >===
+
+// `for x in it { ... }` lowers through `IntoIterator.into_iter` then
+// `Iterator.next`.
+@public Iterator :: #lang("iterator") trait {
+  Item :: type
+  next :: func (self: *mut Self) -> Option.<Self.Item>
+}
+@public IntoIterator :: #lang("into_iterator") trait {
+  Iter :: type
+  into_iter :: func (self: Self) -> Self.Iter
+}
+
+// `.?` / `.!` lower through `Try`: `branch` splits a value into its success
+// output or the residual that `.?` propagates / `.!` aborts on.
+@public Try :: #lang("try") trait {
+  Output :: type
+  Residual :: type
+  branch :: func (self: Self) -> Result.<Self.Output, Self.Residual>
+}
