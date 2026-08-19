@@ -261,6 +261,15 @@ Inside a `trait` body and inside an `impl` namespace, `Self` refers to the
 implementing/target type. It is used in signatures (`self: *Self`) and return
 types, letting one trait definition apply uniformly to every implementor.
 
+`Self` is **not** a keyword: it is an ordinary identifier that name resolution
+binds — as if by an implicit `::` constant scoped to the trait/impl — to the
+implementing type. It is therefore a plain path, so `Self`, `Self.Residual`, and
+`Self.Item.<T>` resolve their root the same way any other qualified name does.
+Likewise `self` is just the receiver **parameter** (the parameter named `self`;
+see [05-functions-and-generics.md](05-functions-and-generics.md) §5.2). Both names
+are reserved — user code may not rebind them, and neither resolves outside a
+trait/impl/method.
+
 ## 4.8 Generic impls
 
 A plain `impl` names concrete types, so it implements for exactly one type. To

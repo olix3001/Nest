@@ -1,0 +1,28 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nio :: import <std/io>\n{ http: { Client, Router } } :: import \\\"network.nest\\\"\n@public * :: import <prelude>\n\nconfig :: namespace {\n  @public SERVER_PORT :: 8080\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat io
+    Import package <std/io>
+  ConstBind ::
+    StructPat
+      FieldPat http
+        StructPat
+          FieldPat Client
+          FieldPat Router
+    Import file "network.nest"
+  Decl
+    Attribute @public
+    ConstBind ::
+      GlobPat *
+      Import package <prelude>
+  ConstBind ::
+    BindingPat config
+    NamespaceExpr
+      Decl
+        Attribute @public
+        ConstBind ::
+          BindingPat SERVER_PORT
+          Lit Int(8080)

@@ -1,0 +1,55 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nmain :: func () {\n  const a := 1 + 2 * 3 - 4 / 2\n  const b := -x + ~y\n  const c := a == b && c != d || e\n  const d := 1 << 2 | 3 & 4 ^ 5\n  const e := not ready or done\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat main
+    FuncExpr
+      Block
+        LocalDecl const
+          BindingPat a
+          Binary Sub
+            Binary Add
+              Lit Int(1)
+              Binary Mul
+                Lit Int(2)
+                Lit Int(3)
+            Binary Div
+              Lit Int(4)
+              Lit Int(2)
+        LocalDecl const
+          BindingPat b
+          Binary Add
+            Unary Neg
+              Path `x`
+            Unary BitNot
+              Path `y`
+        LocalDecl const
+          BindingPat c
+          Binary Or
+            Binary And
+              Binary Eq
+                Path `a`
+                Path `b`
+              Binary Ne
+                Path `c`
+                Path `d`
+            Path `e`
+        LocalDecl const
+          BindingPat d
+          Binary BitOr
+            Binary Shl
+              Lit Int(1)
+              Lit Int(2)
+            Binary BitXor
+              Binary BitAnd
+                Lit Int(3)
+                Lit Int(4)
+              Lit Int(5)
+        LocalDecl const
+          BindingPat e
+          Binary Or
+            Unary Not
+              Path `ready`
+            Path `done`

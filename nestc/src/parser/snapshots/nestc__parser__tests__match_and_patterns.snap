@@ -1,0 +1,64 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nclassify :: func (code: int, node: *Tree) -> string {\n  return code.match {\n    200 => \\\"ok\\\",\n    301 | 302 => \\\"redirect\\\",\n    400..=499 => \\\"client\\\",\n    500.. => \\\"server\\\",\n    m @ .text(s) if s.len > 280 => \\\"long\\\",\n    .rect { w, h } => \\\"rect\\\",\n    [first, .. rest] => \\\"slice\\\",\n    &.leaf(v) => \\\"leaf\\\",\n    _ => \\\"other\\\",\n  }\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat classify
+    FuncExpr
+      Param code:
+        TypePath
+          Path `int`
+      Param node:
+        PtrType *
+          TypePath
+            Path `Tree`
+      TypePath
+        Path `string`
+      Block
+        Return
+          MatchExpr .match
+            Path `code`
+            MatchArm
+              LitPat Int(200)
+              Lit Str("ok")
+            MatchArm
+              OrPat |
+                LitPat Int(301)
+                LitPat Int(302)
+              Lit Str("redirect")
+            MatchArm
+              RangePat ..= [start, end]
+                Lit Int(400)
+                Lit Int(499)
+              Lit Str("client")
+            MatchArm
+              RangePat .. [start]
+                Lit Int(500)
+              Lit Str("server")
+            MatchArm (guarded)
+              AtPat m @
+                VariantPat .text (tuple)
+                  BindingPat s
+              Binary Gt
+                FieldAccess .len
+                  Path `s`
+                Lit Int(280)
+              Lit Str("long")
+            MatchArm
+              VariantPat .rect (record)
+                FieldPat w
+                FieldPat h
+              Lit Str("rect")
+            MatchArm
+              SlicePat (.. rest)
+                BindingPat first
+              Lit Str("slice")
+            MatchArm
+              RefPat &
+                VariantPat .leaf (tuple)
+                  BindingPat v
+              Lit Str("leaf")
+            MatchArm
+              WildcardPat _
+              Lit Str("other")

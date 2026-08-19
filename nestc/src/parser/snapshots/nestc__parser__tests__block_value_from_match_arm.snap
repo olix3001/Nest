@@ -1,0 +1,29 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\npick :: func (b: bool) -> int {\n  return b.match {\n    true => {\n      const y := 10\n      y + 1\n    },\n    false => 0,\n  }\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat pick
+    FuncExpr
+      Param b:
+        TypePath
+          Path `bool`
+      TypePath
+        Path `int`
+      Block
+        Return
+          MatchExpr .match
+            Path `b`
+            MatchArm
+              LitPat Bool(true)
+              Block (has tail)
+                LocalDecl const
+                  BindingPat y
+                  Lit Int(10)
+                Binary Add
+                  Path `y`
+                  Lit Int(1)
+            MatchArm
+              LitPat Bool(false)
+              Lit Int(0)

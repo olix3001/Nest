@@ -224,6 +224,25 @@ expression whose arms are blocks of a common type:
 const label := if port == 80 { "http" } else { "custom" }
 ```
 
+The trailing expression is what supplies a value to an enclosing `let`/`const`,
+a `match` arm, an `if` arm, or any other expression position:
+
+```
+const area := shape.match {
+  .rect { w, h } => {
+    const scaled := w * dpi
+    scaled * h            // trailing expr -> this arm's value
+  },
+  .point => 0.0,
+}
+```
+
+**A `func` body is the sole exception:** its trailing expression is **not** an
+implicit return — a function returns `void` unless it uses `return` (see
+[05-functions-and-generics.md](05-functions-and-generics.md) §5.1). Blocks used
+as expressions (arms, `let` initializers, nested `{ … }`) do yield their tail;
+only the outermost function-body block discards it.
+
 Loops and iteration have their own chapter (see
 [10-loops-and-iteration.md](10-loops-and-iteration.md)); a `loop` exited with
 `break value` yields that value.

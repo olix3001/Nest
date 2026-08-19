@@ -55,6 +55,7 @@ pub enum TokenKind {
     #[token("struct")]    StructKw,
     #[token("enum")]      EnumKw,
     #[token("trait")]     TraitKw,
+    #[token("impl")]      ImplKw,
     #[token("namespace")] NamespaceKw,
     #[token("distinct")]  DistinctKw,
     #[token("let")]       LetKw,
@@ -74,8 +75,10 @@ pub enum TokenKind {
     #[token("dyn")]       DynKw,
     #[token("true")]      TrueKw,
     #[token("false")]     FalseKw,
-    #[token("self")]      LowerSelfKw, // TODO: Does this need to be a separate keyword?
-    #[token("Self")]      UpperSelfKw,
+    // `self` / `Self` are intentionally NOT keywords: `self` is an ordinary
+    // parameter binding (the receiver) and `Self` is an ordinary name resolved to
+    // the implementing type inside a `trait`/`impl`. They lex as identifiers;
+    // name resolution reserves them.
     #[token("and")]       AndKw,
     #[token("or")]        OrKw,
     #[token("not")]       NotKw,
@@ -533,13 +536,14 @@ mod tests {
 
     #[test]
     fn keywords_idents_intrinsics() {
+        // `self` / `Self` are ordinary identifiers, not keywords.
         assert_eq!(
             kinds("func foo self Self $cast _x"),
             vec![
                 TokenKind::FuncKw,
                 TokenKind::Ident(Symbol::new("foo")),
-                TokenKind::LowerSelfKw,
-                TokenKind::UpperSelfKw,
+                TokenKind::Ident(Symbol::new("self")),
+                TokenKind::Ident(Symbol::new("Self")),
                 TokenKind::Ident(Symbol::new("$cast")),
                 TokenKind::Ident(Symbol::new("_x")),
             ]

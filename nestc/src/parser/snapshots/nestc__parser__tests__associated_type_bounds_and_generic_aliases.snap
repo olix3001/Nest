@@ -1,0 +1,48 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nIntVec :: Vector.<int32>\nPairs :: Map.<string, Vector.<int32>>\nIntoI32 :: Into.<Output = int32>\n\nsum :: func <I: Iterator.<Item = int32> + Clone> (it: I) -> int32 { return 0 }\n\")"
+---
+File
+  ConstBind ::
+    BindingPat IntVec
+    GenericApply .<>
+      Path `Vector`
+      TypePath
+        Path `int32`
+  ConstBind ::
+    BindingPat Pairs
+    GenericApply .<>
+      Path `Map`
+      TypePath
+        Path `string`
+      TypePath
+        Path `Vector`
+        TypePath
+          Path `int32`
+  ConstBind ::
+    BindingPat IntoI32
+    GenericApply .<>
+      Path `Into`
+      AssocBinding Output =
+        TypePath
+          Path `int32`
+  ConstBind ::
+    BindingPat sum
+    FuncExpr
+      GenericTypeParam I
+        Bounds +
+          TypePath
+            Path `Iterator`
+            AssocBinding Item =
+              TypePath
+                Path `int32`
+          TypePath
+            Path `Clone`
+      Param it:
+        TypePath
+          Path `I`
+      TypePath
+        Path `int32`
+      Block
+        Return
+          Lit Int(0)

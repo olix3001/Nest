@@ -1,0 +1,23 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nextern(\\\"c\\\") {\n  strlen :: func (s: *char) -> uint\n  malloc :: func (n: uint) -> *uint8\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat strlen
+    FuncExpr extern("c") (bodyless)
+      Param s:
+        PtrType *
+          TypePath
+            Path `char`
+      TypePath
+        Path `uint`
+  ConstBind ::
+    BindingPat malloc
+    FuncExpr extern("c") (bodyless)
+      Param n:
+        TypePath
+          Path `uint`
+      PtrType *
+        TypePath
+          Path `uint8`

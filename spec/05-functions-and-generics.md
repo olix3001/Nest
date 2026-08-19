@@ -151,6 +151,22 @@ generic_param = identifier [ ':' constraint ]     // type param; bare `T` is unc
 constraint    = type { '+' type }                  // trait bounds; a bare param is already a type
 ```
 
+A bound is any `type`, so a trait carrying an **associated-type equality** —
+`Iterator.<Item = int32>` — is a legal bound. Inside the `.<...>` turbofish an
+argument may be `name = type` in addition to a positional type or `_`, pinning
+that associated type on the bound (see
+[03-types.md](03-types.md) §3.7 and [13-grammar.md](13-grammar.md) §13.3):
+
+```
+sum :: func <I: Iterator.<Item = int32> + Clone> (it: I) -> int32 { ... }
+collect :: func <I: Iterator, C: FromIterator.<Item = I.Item>> (it: I) -> C { ... }
+```
+
+`Item` must be an associated type declared by the named trait; the constraint
+requires the implementor's choice for that associated type to equal the given
+type. Positional type arguments and `name = type` bindings may be mixed in one
+turbofish (`Map.<K, Value = V>`).
+
 ```
 get :: func <T> (self: *Client, url: string) -> Result.<T, FetchError> {
   ...

@@ -1,0 +1,73 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\n@public\nrender :: #inline func (self: *CatImage) -> string { return self.url }\n\nget :: func <T> (self: *Client, url: string) -> Result.<T, FetchError> {\n  return .err(.network_error(\\\"x\\\"))\n}\n\nzeros :: func <const N: uint32> () -> [N]uint8 { return .{ 0; N } }\n\n@link_name(\\\"LLVMThing\\\")\nsome_fn :: extern(\\\"c\\\") func (m: *Module) -> int32\n\")"
+---
+File
+  Decl
+    Attribute @public
+    ConstBind ::
+      BindingPat render
+      FuncExpr
+        Directive #inline
+        Param self:
+          PtrType *
+            TypePath
+              Path `CatImage`
+        TypePath
+          Path `string`
+        Block
+          Return
+            FieldAccess .url
+              Path `self`
+  ConstBind ::
+    BindingPat get
+    FuncExpr
+      GenericTypeParam T
+      Param self:
+        PtrType *
+          TypePath
+            Path `Client`
+      Param url:
+        TypePath
+          Path `string`
+      TypePath
+        Path `Result`
+        TypePath
+          Path `T`
+        TypePath
+          Path `FetchError`
+      Block
+        Return
+          VariantLit .err (tuple)
+            Arg
+              VariantLit .network_error (tuple)
+                Arg
+                  Lit Str("x")
+  ConstBind ::
+    BindingPat zeros
+    FuncExpr
+      GenericConstParam const N
+        TypePath
+          Path `uint32`
+      ArrayType [N]
+        Path `N`
+        TypePath
+          Path `uint8`
+      Block
+        Return
+          CompositeLit (inferred, repeat)
+            Lit Int(0)
+            Path `N`
+  Decl
+    Attribute @link_name
+      Arg
+        Lit Str("LLVMThing")
+    ConstBind ::
+      BindingPat some_fn
+      FuncExpr extern("c") (bodyless)
+        Param m:
+          PtrType *
+            TypePath
+              Path `Module`
+        TypePath
+          Path `int32`

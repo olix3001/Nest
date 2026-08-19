@@ -1,0 +1,21 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nmain :: func () {\n    nested :: func () {\n        5\n    }\n    const y := nested()\n    y + 1\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat main
+    FuncExpr
+      Block (has tail)
+        ConstBind ::
+          BindingPat nested
+          FuncExpr
+            Block (has tail)
+              Lit Int(5)
+        LocalDecl const
+          BindingPat y
+          Call
+            Path `nested`
+        Binary Add
+          Path `y`
+          Lit Int(1)

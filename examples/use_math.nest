@@ -1,0 +1,12 @@
+// use_math.nest — imports a sibling file and calls into it.
+// `import "math.nest"` yields that file's namespace value, bound here as `math`.
+
+math :: import "math.nest"
+
+@public
+main :: func () {
+  const a := math.add(2, 3)
+  const b := math.square(a)
+  const c := math.factorial(5)
+  const total := math.add(b, c)
+}

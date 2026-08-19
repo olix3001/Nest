@@ -1,0 +1,31 @@
+// math.nest — a tiny library of integer helpers, imported by use_math.nest.
+// Every exported item is marked @public; private helpers stay hidden.
+
+@public
+add :: func (a: int, b: int) -> int {
+  return a + b
+}
+
+@public
+square :: func (n: int) -> int {
+  return n * n
+}
+
+@public
+factorial :: func (n: int) -> int {
+  let acc := 1
+  let i := 2
+  while i <= n {
+    acc = acc * i
+    i += 1
+  }
+  return acc
+}
+
+// Private to this file: not visible to importers.
+clamp_low :: func (n: int, low: int) -> int {
+  if n < low {
+    return low
+  }
+  return n
+}

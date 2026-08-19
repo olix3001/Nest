@@ -1,0 +1,27 @@
+// loops.nest — ranges, `for`, and `loop`/`break value`. No imports.
+
+@public
+sum_to :: func (n: int) -> int {
+  let total := 0
+  for i in 0..=n {
+    total += i
+  }
+  return total
+}
+
+@public
+first_multiple :: func (of: int, above: int) -> int {
+  let x := above
+  return loop {
+    if x % of == 0 {
+      break x
+    }
+    x += 1
+  }
+}
+
+@public
+main :: func () {
+  const s := sum_to(100)
+  const m := first_multiple(7, 20)
+}

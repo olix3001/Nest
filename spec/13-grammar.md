@@ -91,13 +91,30 @@ type_core   = qualified_name [ generic_args ]
             | '(' [ type { ',' type } ] ')'             // tuple / void
             | 'dyn' type                                // trait object
             | func_type
-generic_args = '.<' type_or_hole { ',' type_or_hole } '>'   // always dotted; bare `<...>` never valid here
+generic_args = '.<' generic_arg { ',' generic_arg } '>'   // always dotted; bare `<...>` never valid here
+generic_arg  = type_or_hole | assoc_binding
 type_or_hole = type | '_'                               // '_' = infer this argument
-qualified_name = identifier { '.' identifier }
+assoc_binding = identifier '=' type                     // associated-type equality: Iterator.<Item = int32>
+qualified_name = ( identifier | 'Self' ) { '.' identifier }   // 'Self' may head a type-level path: Self, Self.Residual
 ```
+
+`Self` (a keyword) may head a **type-level** `qualified_name` — `Self`,
+`Self.Residual`, `Self.Item.<T>` — resolving its root to the implementing type
+inside a `trait` / `impl` (see [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.7). Since a type is an ordinary
+compile-time value, the trailing `.<...>` applies to whatever the path denotes,
+so any `A.B.C.<X, Y, Item = int32>` is a well-formed type expression.
 
 There is no `?T`; optionals are `Option.<T>`. `dyn Trait` is the only vtable-bearing
 type (usually `*dyn Trait`).
+
+An `assoc_binding` argument constrains a trait's associated type to a concrete
+type inside the turbofish: `Iterator.<Item = int32>` is the `Iterator` trait with
+its `Item` associated type pinned to `int32`. It is unambiguous against a
+positional `type` argument because a type is never followed by `=` in this
+position. Associated bindings and positional type arguments may be mixed
+(`Trait.<K, Item = V>`); each `name` must be an associated type declared by the
+trait. Because such a constrained trait is itself a `type`, it may appear
+anywhere a bound may — see [05-functions-and-generics.md](05-functions-and-generics.md) §5.4.
 
 ## 13.4 Namespaces and impls
 

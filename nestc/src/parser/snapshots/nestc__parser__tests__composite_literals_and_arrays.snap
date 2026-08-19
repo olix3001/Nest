@@ -1,0 +1,53 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nmain :: func () {\n  const a := Point { x: 1, y: 2 }\n  const b := .{ id: id, url: url }\n  const c := .{ 1, 2, 3 }\n  const d := .{ 0; 16 }\n  const e := Pair(1, 2)\n  const f := [_]int32 { 1, 2, 3 }\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat main
+    FuncExpr
+      Block
+        LocalDecl const
+          BindingPat a
+          CompositeLit (typed, named)
+            Path `Point`
+            FieldInit x:
+              Lit Int(1)
+            FieldInit y:
+              Lit Int(2)
+        LocalDecl const
+          BindingPat b
+          CompositeLit (inferred, named)
+            FieldInit id:
+              Path `id`
+            FieldInit url:
+              Path `url`
+        LocalDecl const
+          BindingPat c
+          CompositeLit (inferred, positional)
+            Lit Int(1)
+            Lit Int(2)
+            Lit Int(3)
+        LocalDecl const
+          BindingPat d
+          CompositeLit (inferred, repeat)
+            Lit Int(0)
+            Lit Int(16)
+        LocalDecl const
+          BindingPat e
+          Call
+            Path `Pair`
+            Arg
+              Lit Int(1)
+            Arg
+              Lit Int(2)
+        LocalDecl const
+          BindingPat f
+          CompositeLit (typed, positional)
+            ArrayType [N]
+              Path `_`
+              TypePath
+                Path `int32`
+            Lit Int(1)
+            Lit Int(2)
+            Lit Int(3)

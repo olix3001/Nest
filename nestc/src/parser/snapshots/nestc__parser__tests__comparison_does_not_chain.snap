@@ -1,0 +1,20 @@
+---
+source: src/parser/tests.rs
+expression: "tree_with_errors(\"main :: func () { const x := a < b < c }\")"
+---
+File
+  ConstBind ::
+    BindingPat main
+    FuncExpr
+      Block (has tail)
+        LocalDecl const
+          BindingPat x
+          Binary Lt
+            Path `a`
+            Path `b`
+        Error
+        Path `c`
+
+--- errors ---
+35..36: comparison operators do not chain; use `&&`
+35..36: expected an expression

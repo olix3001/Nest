@@ -1,0 +1,23 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nmain :: func () {\n  if ready { work() }\n  if (Router { logging: true }).ok { work() }\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat main
+    FuncExpr
+      Block (has tail)
+        If
+          Path `ready`
+          Block (has tail)
+            Call
+              Path `work`
+        If
+          FieldAccess .ok
+            CompositeLit (typed, named)
+              Path `Router`
+              FieldInit logging:
+                Lit Bool(true)
+          Block (has tail)
+            Call
+              Path `work`

@@ -1,0 +1,35 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nmain :: func () {\n  const .{ width, height } := cat\n  const (a, b) := pair\n  let [head, .. tail] := xs\n  defer { cleanup() }\n  const p := &mut buf\n  p.* = 1\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat main
+    FuncExpr
+      Block
+        LocalDecl const
+          StructPat
+            FieldPat width
+            FieldPat height
+          Path `cat`
+        LocalDecl const
+          TuplePat
+            BindingPat a
+            BindingPat b
+          Path `pair`
+        LocalDecl let
+          SlicePat (.. tail)
+            BindingPat head
+          Path `xs`
+        Defer
+          Block (has tail)
+            Call
+              Path `cleanup`
+        LocalDecl const
+          BindingPat p
+          Unary RefMut
+            Path `buf`
+        Assign Assign
+          Deref .*
+            Path `p`
+          Lit Int(1)

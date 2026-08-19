@@ -1,0 +1,55 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nimpl CatImage {\n  @public\n  new :: func (id: CatId, url: string) -> CatImage {\n    return .{ id: id, url: url }\n  }\n}\n\nimpl <T: ToJson> ToJson for Storage.<T> {\n  @public\n  render :: func (self: *Storage.<T>) -> string { return \\\"[]\\\" }\n}\n\")"
+---
+File
+  ImplBlock
+    TypePath
+      Path `CatImage`
+    Decl
+      Attribute @public
+      ConstBind ::
+        BindingPat new
+        FuncExpr
+          Param id:
+            TypePath
+              Path `CatId`
+          Param url:
+            TypePath
+              Path `string`
+          TypePath
+            Path `CatImage`
+          Block
+            Return
+              CompositeLit (inferred, named)
+                FieldInit id:
+                  Path `id`
+                FieldInit url:
+                  Path `url`
+  ImplBlock (trait impl)
+    GenericTypeParam T
+      Bounds +
+        TypePath
+          Path `ToJson`
+    TypePath
+      Path `ToJson`
+    TypePath
+      Path `Storage`
+      TypePath
+        Path `T`
+    Decl
+      Attribute @public
+      ConstBind ::
+        BindingPat render
+        FuncExpr
+          Param self:
+            PtrType *
+              TypePath
+                Path `Storage`
+                TypePath
+                  Path `T`
+          TypePath
+            Path `string`
+          Block
+            Return
+              Lit Str("[]")

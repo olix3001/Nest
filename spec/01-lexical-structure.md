@@ -77,7 +77,7 @@ Reserved words that cannot be used as identifiers:
 func    struct   enum    trait    namespace   distinct
 let     const    mut     return   defer       match     import
 if      else     for     while    loop        break     continue
-dyn     true     false   self     Self        impl
+dyn     true     false   impl
 and     or       not     extern
 ```
 
@@ -85,8 +85,13 @@ There is no `nil` / `null` keyword: pointers are never null, and the absence of
 a value is the `Option` enum's `.none` case (see
 [03-types.md](03-types.md) §3.6).
 
-`self` names the receiver parameter; `Self` names the implementing type inside a
-`trait` or an `impl` namespace. `impl` introduces a trait/inherent implementation
+`self` and `Self` are **not** keywords — they are ordinary identifiers, reserved
+by name resolution rather than the lexer. `self` is the receiver **parameter
+binding** (the parameter literally named `self`), and `Self` is a name **bound to
+the implementing type** inside a `trait` or `impl` (as if by an implicit `::`
+constant), so `Self`, `Self.Residual`, and `*Self` are plain paths. Both names are
+reserved: user code may not rebind them, and using either outside a
+trait/impl/method is a name-resolution error. `impl` introduces a trait/inherent implementation
 attached to a type (`impl T { ... }`, `impl Trait for T { ... }`); `for` doubles
 as the loop keyword and the trait-impl separator (unambiguous by position). `mut`
 marks a mutable reference (`*mut T`, `[]mut T`) or a mutable binding in a pattern;

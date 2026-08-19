@@ -288,6 +288,20 @@ $make.<[]_>(1024)          // element type inferred from context
 collect.<_, string>(iter)  // first type-arg inferred, second fixed
 ```
 
+A turbofish argument may also be an **associated-type equality**, `name = type`,
+which pins an associated type of the instantiated trait rather than supplying a
+positional parameter:
+
+```
+Iterator.<Item = int32>          // the Iterator trait with Item fixed to int32
+Trait.<K, Value = V>             // mixed: positional K, plus Value = V
+```
+
+This is chiefly used to write bounds (see
+[05-functions-and-generics.md](05-functions-and-generics.md) §5.4). `name` names
+an associated type declared by the trait, and `name = type` is unambiguous
+against a positional type argument because a type is never followed by `=` here.
+
 The `.<` token disambiguates generic application from `<` comparison (see
 [01-lexical-structure.md](01-lexical-structure.md)). Whether an omitted turbofish
 is filled in by inference is resolved between the AST and IR stages.

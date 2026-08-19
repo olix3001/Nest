@@ -1,0 +1,27 @@
+// shapes.nest — structs, enums, methods, and pattern matching. No imports.
+
+PI :: 3.14159
+
+Shape :: enum {
+  circle { radius: f64 },
+  rect { w: f64, h: f64 },
+  point,
+}
+
+impl Shape {
+  @public
+  area :: func (self: *Shape) -> f64 {
+    return self.match {
+      .circle { radius } => PI * radius * radius,
+      .rect { w, h } => w * h,
+      .point => 0.0,
+    }
+  }
+}
+
+@public
+main :: func () {
+  const c: Shape := .circle { radius: 2.0 }
+  const r: Shape := .rect { w: 3.0, h: 4.0 }
+  const total := c.area() + r.area()
+}

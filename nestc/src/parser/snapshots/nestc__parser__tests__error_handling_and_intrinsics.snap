@@ -1,0 +1,57 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nload :: func () -> Result.<Config, Error> {\n  const text := read_file(\\\"c\\\").?\n  const n := $size_of.<CatImage>()\n  const p := $new.<CatImage>()\n  const port := to_port(8080).!\n  defer file.close()\n  const bits := $cast.<*dyn ToJson>(&cat)\n  return .ok(parsed)\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat load
+    FuncExpr
+      TypePath
+        Path `Result`
+        TypePath
+          Path `Config`
+        TypePath
+          Path `Error`
+      Block
+        LocalDecl const
+          BindingPat text
+          Try Propagate
+            Call
+              Path `read_file`
+              Arg
+                Lit Str("c")
+        LocalDecl const
+          BindingPat n
+          IntrinsicCall $size_of
+            TypePath
+              Path `CatImage`
+        LocalDecl const
+          BindingPat p
+          IntrinsicCall $new
+            TypePath
+              Path `CatImage`
+        LocalDecl const
+          BindingPat port
+          Try Abort
+            Call
+              Path `to_port`
+              Arg
+                Lit Int(8080)
+        Defer
+          Call
+            FieldAccess .close
+              Path `file`
+        LocalDecl const
+          BindingPat bits
+          IntrinsicCall $cast
+            PtrType *
+              DynType dyn
+                TypePath
+                  Path `ToJson`
+            Arg
+              Unary Ref
+                Path `cat`
+        Return
+          VariantLit .ok (tuple)
+            Arg
+              Path `parsed`

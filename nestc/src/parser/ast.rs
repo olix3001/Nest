@@ -18,7 +18,10 @@
 //! latter matters because `import` pulls nodes in from other files, so a span
 //! alone is ambiguous.
 
+use std::any::{Any, TypeId};
 use std::cell::{Ref, RefCell, RefMut};
+use std::collections::HashMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -217,20 +220,23 @@ pub enum NodeKind {
     File { items: Vec<NodeId> },
 
     // ===< Decorations >===
-    /// `@name(args...)`
+    /// `@name(args...)` — `args` are [`NodeKind::Arg`] nodes (positional or named).
     Attribute { name: Symbol, args: Vec<NodeId> },
-    /// `#name(args...) ...` — trailing `nested` holds directives chained after.
-    Directive {
-        name: Symbol,
-        args: Vec<NodeId>,
-        nested: Vec<NodeId>,
-    },
+    /// `#name(args...)` — one directive. Directives never nest; when several stack
+    /// (`#packed #align(4)`) each is its own node in the modified item's
+    /// `directives` list (or in [`NodeKind::Decl`]`::directives`).
+    Directive { name: Symbol, args: Vec<NodeId> },
 
     // ===< Declarations / bindings >===
-    /// `{attr} [directive] (const_bind | local_decl)` — a decorated declaration.
+    /// `{attr} {directive} (const_bind | local_decl)` — a decorated declaration.
+    /// Only emitted when at least one attribute or declaration-level directive is
+    /// present; an undecorated binding is stored as the bare `item` node. The
+    /// directives here are the ones written *before* the bound name (e.g.
+    /// `#static let ...`); directives written before a `func`/`struct`/`enum`/
+    /// `trait`/`namespace` keyword on the RHS live on that literal node instead.
     Decl {
         attrs: Vec<NodeId>,
-        directive: Option<NodeId>,
+        directives: Vec<NodeId>,
         item: NodeId,
     },
     /// `pattern :: rhs` — the single `::` binding form. The RHS category (value,
@@ -282,19 +288,16 @@ pub enum NodeKind {
     /// expression nodes (the literal chunks are recoverable from spans).
     InterpolatedStr { parts: Vec<NodeId> },
     /// A dotted name: `a.b.c`. A bare identifier is a one-segment path.
+    ///
+    /// `self` and `Self` are **not** special AST nodes: `self` is the ordinary
+    /// path `["self"]` (a receiver parameter binding) and `Self` the ordinary
+    /// path `["Self"]` (resolved to the implementing type inside a `trait`/`impl`).
+    /// Name resolution reserves both names.
     Path { segments: Vec<Symbol> },
-    /// `self`
-    SelfValue,
-    /// `Self`
-    SelfType,
     /// `op operand` — prefix unary.
     Unary { op: UnOp, operand: NodeId },
     /// `lhs op rhs` — binary.
-    Binary {
-        op: BinOp,
-        lhs: NodeId,
-        rhs: NodeId,
-    },
+    Binary { op: BinOp, lhs: NodeId, rhs: NodeId },
     /// `(a, b, c)` — tuple (also `()` for the unit value: empty `elems`).
     Tuple { elems: Vec<NodeId> },
     /// `base.name`
@@ -328,12 +331,14 @@ pub enum NodeKind {
         args: Vec<NodeId>,
     },
     /// `[Type] { body }` / `.{ body }` — record, array, or repeat literal.
+    ///
+    /// The typed tuple-struct form `Type(args...)` is syntactically identical to a
+    /// call and is parsed as [`NodeKind::Call`]; whether the callee is a type
+    /// (construction) or a function is settled during name resolution.
     CompositeLit {
         ty: Option<NodeId>,
         body: CompositeBody,
     },
-    /// `Type(args...)` — typed tuple-struct literal.
-    TupleStructLit { ty: NodeId, args: Vec<NodeId> },
     /// `.variant[payload]` — enum variant value (enum inferred from context).
     VariantLit { name: Symbol, args: VariantArgs },
     /// `name: value` — one entry of a named composite body.
@@ -365,17 +370,27 @@ pub enum NodeKind {
     },
 
     // ===< Type-forming expressions >===
-    /// `path[.<args>]` — a named type, optionally instantiated.
+    /// `path[.<args>]` — a named type, optionally instantiated. A `generic_args`
+    /// entry is a type, a [`NodeKind::TypeHole`], or a [`NodeKind::AssocBinding`]
+    /// (an `Item = T` associated-type constraint).
     TypePath {
         path: NodeId,
         generic_args: Vec<NodeId>,
     },
     /// `_` — an inferred generic argument.
     TypeHole,
+    /// `name = type` inside a `.<...>` argument list — an associated-type
+    /// equality constraint, e.g. `Iterator.<Item = int32>`. Appears only among
+    /// the `generic_args` of a [`NodeKind::TypePath`] / [`NodeKind::GenericApply`].
+    AssocBinding { name: Symbol, ty: NodeId },
     /// `*[mut] T`
     PtrType { mutable: bool, inner: NodeId },
-    /// `[][mut] T`
-    SliceType { mutable: bool, inner: NodeId },
+    /// `[directives] [][mut] T` — directives select layout/repr (e.g. `#soa`).
+    SliceType {
+        directives: Vec<NodeId>,
+        mutable: bool,
+        inner: NodeId,
+    },
     /// `[directives] [len][mut] T` — directives select layout/repr
     /// (e.g. `#simd`, `#soa`).
     ArrayType {
@@ -396,9 +411,10 @@ pub enum NodeKind {
         params: Vec<NodeId>,
         ret: Option<NodeId>,
     },
-    /// `[directives] struct [body]`
+    /// `[directives] struct [<g>] [body]`
     StructType {
         directives: Vec<NodeId>,
+        generics: Vec<NodeId>,
         kind: StructKind,
     },
     /// `[attrs] name: ty` — a struct/enum record field.
@@ -425,6 +441,7 @@ pub enum NodeKind {
     /// type is a `ConstBind` whose RHS is [`NodeKind::AssocType`].
     TraitType {
         directives: Vec<NodeId>,
+        generics: Vec<NodeId>,
         members: Vec<NodeId>,
     },
     /// The `type` RHS of an associated-type binding (`Item :: type [: bounds]`).
@@ -454,14 +471,16 @@ pub enum NodeKind {
     GenericConstParam { name: Symbol, ty: NodeId },
     /// `T + U + ...` — a `+`-separated list of trait bounds; ids are type nodes.
     Bounds { bounds: Vec<NodeId> },
-    /// `name: ty` — a function parameter (`ty` optional for inferred closures).
+    /// `name: ty` — a function parameter (`ty` optional for inferred closures and
+    /// for a bare `self` receiver, whose type defaults to `Self`).
     Param { name: Symbol, ty: Option<NodeId> },
-    /// `self [: ty]` — the receiver parameter.
-    SelfParam { ty: Option<NodeId> },
 
     // ===< Namespaces / impls / imports >===
-    /// `namespace { items }`
-    NamespaceExpr { items: Vec<NodeId> },
+    /// `[directives] namespace { items }` — directives select repr (e.g. `#c`).
+    NamespaceExpr {
+        directives: Vec<NodeId>,
+        items: Vec<NodeId>,
+    },
     /// `impl [<g>] Type [for Target] { items }`
     ImplBlock {
         generics: Vec<NodeId>,
@@ -535,35 +554,45 @@ impl NodeKind {
     pub fn collect_children(&self, out: &mut Vec<NodeId>) {
         use NodeKind::*;
         match self {
-            Continue | Lit(_) | Path { .. } | SelfValue | SelfType | TypeHole
-            | Import { .. } | WildcardPat | GlobPat | BindingPat { .. }
-            | LitPat(_) | Error => {}
+            Continue
+            | Lit(_)
+            | Path { .. }
+            | TypeHole
+            | Import { .. }
+            | WildcardPat
+            | GlobPat
+            | BindingPat { .. }
+            | LitPat(_)
+            | Error => {}
 
             AssocType { bounds } => out.extend_from_slice(bounds),
 
             File { items: elems }
             | Tuple { elems }
             | TupleType { elems }
-            | NamespaceExpr { items: elems }
             | TuplePat { elems }
             | SlicePat { elems, .. }
-            | OrPat { alternatives: elems }
+            | OrPat {
+                alternatives: elems,
+            }
             | InterpolatedStr { parts: elems }
             | Bounds { bounds: elems } => out.extend_from_slice(elems),
 
-            Attribute { args, .. } => out.extend_from_slice(args),
-            Directive { args, nested, .. } => {
-                out.extend_from_slice(args);
-                out.extend_from_slice(nested);
-            }
+            Attribute { args, .. } | Directive { args, .. } => out.extend_from_slice(args),
 
-            Decl { attrs, directive, item } => {
+            Decl {
+                attrs,
+                directives,
+                item,
+            } => {
                 out.extend_from_slice(attrs);
-                push_opt(out, directive);
+                out.extend_from_slice(directives);
                 out.push(*item);
             }
             ConstBind { pattern, rhs } => out.extend_from_slice(&[*pattern, *rhs]),
-            LocalDecl { pattern, ty, value, .. } => {
+            LocalDecl {
+                pattern, ty, value, ..
+            } => {
                 out.push(*pattern);
                 push_opt(out, ty);
                 out.push(*value);
@@ -573,7 +602,11 @@ impl NodeKind {
             Defer { body } | Loop { body } => out.push(*body),
             Return { value } | Break { value } => push_opt(out, value),
             While { cond, body } => out.extend_from_slice(&[*cond, *body]),
-            For { pattern, iter, body } => out.extend_from_slice(&[*pattern, *iter, *body]),
+            For {
+                pattern,
+                iter,
+                body,
+            } => out.extend_from_slice(&[*pattern, *iter, *body]),
 
             Block { stmts, tail } => {
                 out.extend_from_slice(stmts);
@@ -600,7 +633,9 @@ impl NodeKind {
                 out.extend_from_slice(arms);
             }
             Arg { value, .. } | FieldInit { value, .. } => out.push(*value),
-            IntrinsicCall { generic_args, args, .. } => {
+            IntrinsicCall {
+                generic_args, args, ..
+            } => {
                 out.extend_from_slice(generic_args);
                 out.extend_from_slice(args);
             }
@@ -608,20 +643,25 @@ impl NodeKind {
                 push_opt(out, ty);
                 body.collect_children(out);
             }
-            TupleStructLit { ty, args } => {
-                out.push(*ty);
-                out.extend_from_slice(args);
-            }
             VariantLit { args, .. } => args.collect_children(out),
             If { cond, then, els } => {
                 out.extend_from_slice(&[*cond, *then]);
                 push_opt(out, els);
             }
-            IfMatch { pattern, value, then, els } => {
+            IfMatch {
+                pattern,
+                value,
+                then,
+                els,
+            } => {
                 out.extend_from_slice(&[*pattern, *value, *then]);
                 push_opt(out, els);
             }
-            MatchArm { pattern, guard, body } => {
+            MatchArm {
+                pattern,
+                guard,
+                body,
+            } => {
                 out.push(*pattern);
                 push_opt(out, guard);
                 out.push(*body);
@@ -635,28 +675,50 @@ impl NodeKind {
                 out.push(*path);
                 out.extend_from_slice(generic_args);
             }
-            PtrType { inner, .. }
-            | SliceType { inner, .. }
-            | DynType { inner }
-            | DistinctType { inner } => out.push(*inner),
-            ArrayType { directives, len, inner, .. } => {
+            AssocBinding { ty, .. } => out.push(*ty),
+            PtrType { inner, .. } | DynType { inner } | DistinctType { inner } => out.push(*inner),
+            SliceType {
+                directives, inner, ..
+            } => {
+                out.extend_from_slice(directives);
+                out.push(*inner);
+            }
+            ArrayType {
+                directives,
+                len,
+                inner,
+                ..
+            } => {
                 out.extend_from_slice(directives);
                 out.extend_from_slice(&[*len, *inner]);
             }
-            FuncType { generics, params, ret } => {
+            FuncType {
+                generics,
+                params,
+                ret,
+            } => {
                 out.extend_from_slice(generics);
                 out.extend_from_slice(params);
                 push_opt(out, ret);
             }
-            StructType { directives, kind } => {
+            StructType {
+                directives,
+                generics,
+                kind,
+            } => {
                 out.extend_from_slice(directives);
+                out.extend_from_slice(generics);
                 kind.collect_children(out);
             }
             Field { attrs, ty, .. } => {
                 out.extend_from_slice(attrs);
                 out.push(*ty);
             }
-            EnumType { directives, generics, variants } => {
+            EnumType {
+                directives,
+                generics,
+                variants,
+            } => {
                 out.extend_from_slice(directives);
                 out.extend_from_slice(generics);
                 out.extend_from_slice(variants);
@@ -665,12 +727,24 @@ impl NodeKind {
                 out.extend_from_slice(attrs);
                 payload.collect_children(out);
             }
-            TraitType { directives, members } => {
+            TraitType {
+                directives,
+                generics,
+                members,
+            } => {
                 out.extend_from_slice(directives);
+                out.extend_from_slice(generics);
                 out.extend_from_slice(members);
             }
 
-            FuncExpr { directives, generics, params, ret, body, .. } => {
+            FuncExpr {
+                directives,
+                generics,
+                params,
+                ret,
+                body,
+                ..
+            } => {
                 out.extend_from_slice(directives);
                 out.extend_from_slice(generics);
                 out.extend_from_slice(params);
@@ -679,9 +753,18 @@ impl NodeKind {
             }
             GenericTypeParam { constraint, .. } => push_opt(out, constraint),
             GenericConstParam { ty, .. } => out.push(*ty),
-            Param { ty, .. } | SelfParam { ty } => push_opt(out, ty),
+            Param { ty, .. } => push_opt(out, ty),
 
-            ImplBlock { generics, ty, for_ty, items } => {
+            NamespaceExpr { directives, items } => {
+                out.extend_from_slice(directives);
+                out.extend_from_slice(items);
+            }
+            ImplBlock {
+                generics,
+                ty,
+                for_ty,
+                items,
+            } => {
                 out.extend_from_slice(generics);
                 out.push(*ty);
                 push_opt(out, for_ty);
@@ -764,9 +847,41 @@ fn push_opt(out: &mut Vec<NodeId>, id: &Option<NodeId>) {
     }
 }
 
+// ===< Side-table metadata >===
+
+/// A type-indexed side table mapping [`NodeId`] to at most one value **per Rust
+/// type**. Later passes (name resolution, type checking, …) stash their own
+/// results here — e.g. a `Resolution` for name resolution, a `Type` for the
+/// checker — without the AST node ever having to know those types exist.
+///
+/// Access goes through the arena: [`Ast::set_meta`], [`Ast::meta`],
+/// [`Ast::with_meta`], [`Ast::has_meta`], [`Ast::take_meta`]. The store lives
+/// behind interior mutability so a shared `&Ast` can annotate during a walk,
+/// mirroring the per-node [`RefCell`] design.
+///
+/// Metadata is **derived state**: it is skipped by `serde` and dropped on
+/// `clone` (a cloned arena starts with an empty table). Re-run the pass that
+/// produced it if you need it on the copy.
+#[derive(Default)]
+struct MetaStore(RefCell<HashMap<TypeId, HashMap<NodeId, Box<dyn Any>>>>);
+
+impl Clone for MetaStore {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl fmt::Debug for MetaStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let count: usize = self.0.borrow().values().map(HashMap::len).sum();
+        write!(f, "MetaStore({count} entries)")
+    }
+}
+
 // ===< Arena >===
 
-/// The AST arena: a flat table of nodes plus an optional root.
+/// The AST arena: a flat table of nodes, an optional root, and a type-indexed
+/// [`MetaStore`] of per-node metadata for later passes.
 ///
 /// Slots are [`RefCell`]-wrapped so a [`MutVisitor`](super::visitor::MutVisitor)
 /// can rewrite nodes through a shared `&Ast`. Allocate with [`Ast::alloc`],
@@ -775,6 +890,8 @@ fn push_opt(out: &mut Vec<NodeId>, id: &Option<NodeId>) {
 pub struct Ast {
     nodes: Vec<RefCell<Node>>,
     root: Option<NodeId>,
+    #[serde(skip)]
+    meta: MetaStore,
 }
 
 impl Ast {
@@ -843,6 +960,63 @@ impl Ast {
     pub fn ids(&self) -> impl Iterator<Item = NodeId> {
         (0..self.nodes.len()).map(NodeId)
     }
+
+    // ===< Metadata side table >===
+
+    /// Attach a metadata value of type `T` to `id`, replacing any previous `T`
+    /// for that node. Values are keyed by `(NodeId, TypeId::of::<T>())`, so
+    /// different `T`s coexist on the same node. Returns the displaced value, if
+    /// any.
+    ///
+    /// ```ignore
+    /// ast.set_meta(node, Resolution::Local(binding));   // in name resolution
+    /// ast.set_meta(node, ty);                           // in the type checker
+    /// ```
+    pub fn set_meta<T: Any>(&self, id: NodeId, value: T) -> Option<T> {
+        self.meta
+            .0
+            .borrow_mut()
+            .entry(TypeId::of::<T>())
+            .or_default()
+            .insert(id, Box::new(value))
+            .and_then(|old| old.downcast::<T>().ok().map(|b| *b))
+    }
+
+    /// Clone out the `T` metadata attached to `id`, if present. Convenient for
+    /// small `Copy`/`Clone` payloads; use [`Ast::with_meta`] to avoid a clone.
+    pub fn meta<T: Any + Clone>(&self, id: NodeId) -> Option<T> {
+        self.with_meta::<T, _>(id, T::clone)
+    }
+
+    /// Borrow the `T` metadata attached to `id` and run `f` on it, returning
+    /// `f`'s result (or `None` when no `T` is attached). The borrow of the store
+    /// is released before `f`'s result is returned.
+    pub fn with_meta<T: Any, R>(&self, id: NodeId, f: impl FnOnce(&T) -> R) -> Option<R> {
+        let store = self.meta.0.borrow();
+        let value = store.get(&TypeId::of::<T>())?.get(&id)?;
+        Some(f(value
+            .downcast_ref::<T>()
+            .expect("TypeId keys the value type")))
+    }
+
+    /// Whether any `T` metadata is attached to `id`.
+    pub fn has_meta<T: Any>(&self, id: NodeId) -> bool {
+        self.meta
+            .0
+            .borrow()
+            .get(&TypeId::of::<T>())
+            .is_some_and(|m| m.contains_key(&id))
+    }
+
+    /// Remove and return the `T` metadata attached to `id`, if present.
+    pub fn take_meta<T: Any>(&self, id: NodeId) -> Option<T> {
+        self.meta
+            .0
+            .borrow_mut()
+            .get_mut(&TypeId::of::<T>())?
+            .remove(&id)
+            .and_then(|b| b.downcast::<T>().ok().map(|b| *b))
+    }
 }
 
 #[cfg(test)]
@@ -893,10 +1067,44 @@ mod tests {
         // MutVisitor relies on.
         let ast_ref = &ast;
         ast_ref.node_mut(n).kind = NodeKind::Lit(Lit::Int(99));
-        assert!(matches!(
-            ast.node(n).kind,
-            NodeKind::Lit(Lit::Int(99))
-        ));
+        assert!(matches!(ast.node(n).kind, NodeKind::Lit(Lit::Int(99))));
+    }
+
+    #[test]
+    fn metadata_is_keyed_by_node_and_type() {
+        // Two distinct Rust types coexist on one node; each round-trips.
+        #[derive(Debug, Clone, PartialEq)]
+        struct Ty(u32);
+        #[derive(Debug, Clone, PartialEq)]
+        struct Res(&'static str);
+
+        let mut ast = Ast::new();
+        let n = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1)));
+
+        assert!(!ast.has_meta::<Ty>(n));
+        assert_eq!(ast.set_meta(n, Ty(7)), None);
+        ast.set_meta(n, Res("local"));
+
+        assert!(ast.has_meta::<Ty>(n));
+        assert_eq!(ast.meta::<Ty>(n), Some(Ty(7)));
+        assert_eq!(ast.meta::<Res>(n), Some(Res("local")));
+
+        // Overwrite returns the old value; different node has nothing.
+        assert_eq!(ast.set_meta(n, Ty(9)), Some(Ty(7)));
+        assert_eq!(ast.with_meta::<Ty, _>(n, |t| t.0), Some(9));
+        assert_eq!(ast.take_meta::<Ty>(n), Some(Ty(9)));
+        assert!(!ast.has_meta::<Ty>(n));
+        assert_eq!(ast.meta::<Res>(n), Some(Res("local")));
+    }
+
+    #[test]
+    fn metadata_dropped_on_clone_and_serde() {
+        let mut ast = Ast::new();
+        let n = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1)));
+        ast.set_meta(n, 42u32);
+        // Derived state: not carried by clone.
+        assert_eq!(ast.clone().meta::<u32>(n), None);
+        assert_eq!(ast.meta::<u32>(n), Some(42)); // original untouched
     }
 
     #[test]

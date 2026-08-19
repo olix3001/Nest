@@ -1,0 +1,29 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nSERVER_PORT :: 8080\nSERVER_ADDR :: \\\"127.0.0.1\\\"\nAlias :: OtherType\nCatId :: distinct string\nSlice :: []mut int32\nHandle :: *mut Buffer\n\")"
+---
+File
+  ConstBind ::
+    BindingPat SERVER_PORT
+    Lit Int(8080)
+  ConstBind ::
+    BindingPat SERVER_ADDR
+    Lit Str("127.0.0.1")
+  ConstBind ::
+    BindingPat Alias
+    Path `OtherType`
+  ConstBind ::
+    BindingPat CatId
+    DistinctType distinct
+      TypePath
+        Path `string`
+  ConstBind ::
+    BindingPat Slice
+    SliceType []mut
+      TypePath
+        Path `int32`
+  ConstBind ::
+    BindingPat Handle
+    PtrType *mut
+      TypePath
+        Path `Buffer`

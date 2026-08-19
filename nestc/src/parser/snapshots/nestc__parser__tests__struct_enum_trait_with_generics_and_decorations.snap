@@ -1,0 +1,66 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\n@public(all)\nCatImage :: #packed #align(4) struct {\n  id: CatId,\n  @private cache: Option.<string>,\n}\n\nStorage :: struct <T> { items: []mut T }\n\nResponse :: enum {\n  ok(string),\n  rect { w: f64, h: f64 },\n  not_found,\n}\n\nInto :: trait <T> {\n  into :: func (self: Self) -> T\n  Item :: type: Iterator + Clone\n}\n\")"
+---
+File
+  Decl
+    Attribute @public
+      Arg
+        Path `all`
+    ConstBind ::
+      BindingPat CatImage
+      StructType (record)
+        Directive #packed
+        Directive #align
+          Arg
+            Lit Int(4)
+        Field id:
+          TypePath
+            Path `CatId`
+        Field cache:
+          Attribute @private
+          TypePath
+            Path `Option`
+            TypePath
+              Path `string`
+  ConstBind ::
+    BindingPat Storage
+    StructType (record)
+      GenericTypeParam T
+      Field items:
+        SliceType []mut
+          TypePath
+            Path `T`
+  ConstBind ::
+    BindingPat Response
+    EnumType
+      Variant ok (tuple)
+        TypePath
+          Path `string`
+      Variant rect (record)
+        Field w:
+          TypePath
+            Path `f64`
+        Field h:
+          TypePath
+            Path `f64`
+      Variant not_found
+  ConstBind ::
+    BindingPat Into
+    TraitType
+      GenericTypeParam T
+      ConstBind ::
+        BindingPat into
+        FuncExpr (bodyless)
+          Param self:
+            TypePath
+              Path `Self`
+          TypePath
+            Path `T`
+      ConstBind ::
+        BindingPat Item
+        AssocType type
+          TypePath
+            Path `Iterator`
+          TypePath
+            Path `Clone`

@@ -1,0 +1,21 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nmain :: func () {\n  const x := a +\n             b\n  const y := foo()\n    .bar()\n    .baz\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat main
+    FuncExpr
+      Block
+        LocalDecl const
+          BindingPat x
+          Binary Add
+            Path `a`
+            Path `b`
+        LocalDecl const
+          BindingPat y
+          FieldAccess .baz
+            Call
+              FieldAccess .bar
+                Call
+                  Path `foo`
