@@ -28,7 +28,7 @@ extern_block = 'extern' '(' string ')' '{' { declaration } '}'
 declaration = { attribute } [ directive ] ( const_bind | local_decl )
 
 attribute   = '@' identifier [ '(' [ attr_arg { ',' attr_arg } ] ')' ]
-directive   = '#' identifier [ '(' [ arg { ',' arg } ] ')' ] { directive }
+directive   = '#' ( identifier | 'const' ) [ '(' [ arg { ',' arg } ] ')' ] { directive }
 comptime_item = intrinsic_call                     // e.g. $assert(...)  (returns void)
 
 const_bind  = pattern '::' const_rhs
@@ -39,6 +39,12 @@ const_rhs   = expr
             | namespace_expr
             | import_expr
 ```
+
+A `directive` name is drawn from the compiler's fixed set (`packed`, `align`,
+`soa`, `inline`, `const`, `static`, `raw`, `unsafe`, `lang`, …); `#lang(string)`
+tags a core-library item as a language item (see
+[09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3 and
+[06-expressions-and-operators.md](06-expressions-and-operators.md) §6.13).
 
 `const_bind` is the single `::` binding form; the RHS category (value, type,
 func, trait, namespace, import) determines what is bound. A `field_item` inside a
@@ -77,7 +83,7 @@ field         = { attribute } identifier ':' type ','
 enum_type     = { directive } 'enum' [ generics ] '{' { variant } '}'
 variant       = { attribute } snake_ident [ variant_payload ] ','
 variant_payload = '(' type { ',' type } ')' | '{' { field } '}'
-trait_expr    = { directive } 'trait' '{' { trait_member } '}'
+trait_expr    = { directive } 'trait' [ generics ] '{' { trait_member } '}'
 trait_member  = method_sig | assoc_type
 method_sig    = identifier '::' 'func' [ generics ] '(' [ params ] ')' [ '->' type ]
 assoc_type    = identifier '::' 'type' [ ':' bounds ]  // e.g. Item :: type: Iterator + Clone

@@ -18,6 +18,11 @@ Its design combines:
   (`$cast`, `$new`, `$make`, `$size_of`, `$embed_file`, …); compiler behavior is
   changed by directives (`#packed`, `#align`, `#soa`, `#inline`, `#const`,
   `#raw`, `#unsafe`). Implementations use the `impl` keyword, not a directive.
+- **Operators defined in the core library** — `+`, `-`, `*`, comparison, indexing,
+  and the rest are sugar for trait methods (`Add`, `Sub`, `Ord`, `Index`, …), not
+  compiler built-ins; the compiler reaches those traits — and `Try`, `Iterator`,
+  `Drop`, `Result`/`Option` — through the `#lang("…")` **language-item** directive
+  (see [06](06-expressions-and-operators.md) §6.13, [09](09-directives-and-attributes.md) §9.3).
 - **Strong compile-time reflection** — *planned*; the design reserves the
   attribute/layout machinery it needs (see
   [12-reflection.md](12-reflection.md)).

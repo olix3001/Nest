@@ -1,0 +1,68 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"\\\nAdd :: #lang(\\\"add\\\") trait <Rhs> {\n  Output :: type\n  add :: func (self: Self, rhs: Rhs) -> Self.Output\n}\n\nOrdering :: #lang(\\\"ordering\\\") enum { less, equal, greater }\n\nResult :: #lang(\\\"result\\\") enum <T, E> { ok(T), err(E) }\n\nsum :: #lang(\\\"builtin_add\\\") func (a: int32, b: int32) -> int32 { return a + b }\n\")"
+---
+File
+  ConstBind ::
+    BindingPat Add
+    TraitType
+      Directive #lang
+        Arg
+          Lit Str("add")
+      GenericTypeParam Rhs
+      ConstBind ::
+        BindingPat Output
+        AssocType type
+      ConstBind ::
+        BindingPat add
+        FuncExpr (bodyless)
+          Param self:
+            TypePath
+              Path `Self`
+          Param rhs:
+            TypePath
+              Path `Rhs`
+          TypePath
+            Path `Self.Output`
+  ConstBind ::
+    BindingPat Ordering
+    EnumType
+      Directive #lang
+        Arg
+          Lit Str("ordering")
+      Variant less
+      Variant equal
+      Variant greater
+  ConstBind ::
+    BindingPat Result
+    EnumType
+      Directive #lang
+        Arg
+          Lit Str("result")
+      GenericTypeParam T
+      GenericTypeParam E
+      Variant ok (tuple)
+        TypePath
+          Path `T`
+      Variant err (tuple)
+        TypePath
+          Path `E`
+  ConstBind ::
+    BindingPat sum
+    FuncExpr
+      Directive #lang
+        Arg
+          Lit Str("builtin_add")
+      Param a:
+        TypePath
+          Path `int32`
+      Param b:
+        TypePath
+          Path `int32`
+      TypePath
+        Path `int32`
+      Block
+        Return
+          Binary Add
+            Path `a`
+            Path `b`

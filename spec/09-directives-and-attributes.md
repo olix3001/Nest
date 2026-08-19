@@ -150,6 +150,40 @@ particles: #soa []Particle          // stored column-wise
   shared, unsynchronized state — see
   [02-declarations-and-bindings.md](02-declarations-and-bindings.md) §2.6.
 
+### Language items (`#lang`)
+
+- **`#lang("tag")`** — mark the item it precedes as a **language item**: a
+  core-library declaration the compiler must be able to find by a well-known name
+  in order to wire built-in syntax to it. `#lang` changes dispatch (which trait a
+  desugaring targets), so it is a directive, not an attribute; like every
+  directive it produces no value and only annotates the construct it modifies.
+
+  The `tag` is drawn from a **fixed vocabulary the compiler defines** (unlike
+  user attributes, which accept any name). It marks a `trait`, an `enum`, a
+  `struct`, or a `func` — whatever the compiler needs to reach. Each tag names
+  exactly one item program-wide: a `tag` the compiler does not recognize, a `tag`
+  applied twice, and a `tag` on the wrong kind of item are all errors.
+
+  ```
+  Add :: #lang("add") trait <Rhs> {
+    Output :: type
+    add :: func (self: Self, rhs: Rhs) -> Self.Output
+  }
+
+  Ordering :: #lang("ordering") enum { less, equal, greater }
+  ```
+
+`#lang` is what lets the language define its operators, `.?` / `.!`, and `for`
+in the core library instead of hard-wiring them: the operator `+` lowers to a
+call to whatever trait carries `#lang("add")`, `.?` uses `#lang("try")`, and
+`for` uses `#lang("iterator")`. The full registry and the desugaring rules are in
+[06-expressions-and-operators.md](06-expressions-and-operators.md) §6.13; the
+operator/method mapping lives there so it sits beside the operators it drives.
+
+Ordinary user code never writes `#lang` — the tags belong to the core library the
+compiler is built against. It is listed here because it is a compiler directive,
+but its effect is described where operators are (§6.13).
+
 ### Implementations (not a directive)
 
 Implementations were once the `#impl(...)` directive; they are now the **`impl`

@@ -33,12 +33,12 @@ use crate::common::symbol::Symbol;
 #[serde(transparent)]
 pub struct NodeId(pub usize);
 
-/// Identifies the source file a node originates from. Because `import` splices
-/// members from other files into a namespace, a node's file is tracked
-/// independently of the arena it ends up in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct FileId(pub u32);
+/// Identifies the source file a node originates from. Defined in
+/// [`crate::common::source`] (alongside the [`SourceMap`] that assigns it) and
+/// re-exported here for the parser's convenience.
+///
+/// [`SourceMap`]: crate::common::source::SourceMap
+pub use crate::common::source::FileId;
 
 // ===< Leaf payloads (embedded by value, never allocated as nodes) >===
 

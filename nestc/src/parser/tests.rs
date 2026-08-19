@@ -109,6 +109,27 @@ some_fn :: extern(\"c\") func (m: *Module) -> int32
 }
 
 #[test]
+fn lang_items_and_operator_traits() {
+    // `#lang("...")` tags a core-library item as a language item: the compiler
+    // reaches operator traits, `Try`, and `Result` through these tags. Purely a
+    // directive — it parses like any other `#name(args)`.
+    assert_snapshot!(tree(
+        "\
+Add :: #lang(\"add\") trait <Rhs> {
+  Output :: type
+  add :: func (self: Self, rhs: Rhs) -> Self.Output
+}
+
+Ordering :: #lang(\"ordering\") enum { less, equal, greater }
+
+Result :: #lang(\"result\") enum <T, E> { ok(T), err(E) }
+
+sum :: #lang(\"builtin_add\") func (a: int32, b: int32) -> int32 { return a + b }
+"
+    ));
+}
+
+#[test]
 fn impl_blocks_inherent_and_trait() {
     assert_snapshot!(tree(
         "\

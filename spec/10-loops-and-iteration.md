@@ -33,13 +33,19 @@ in terms of the std `Iterator` trait. Anything implementing `Iterator` is
 iterable.
 
 ```
-Iterator :: trait {
+Iterator :: #lang("iterator") trait {
   Item :: type                                // associated element type
 
   // Advance and produce the next element, or `.none` when exhausted.
   next :: func (self: *mut Self) -> Option.<Self.Item>
 }
 ```
+
+`Iterator` carries `#lang("iterator")` so the `for` desugaring below can name it
+without hard-wiring iteration into the compiler (see
+[09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3); the
+`IntoIterator` convenience is `#lang("into_iterator")`. `for` is defined against
+those lang items, so any type implementing them is iterable.
 
 `next` returns `.some(item)` until the sequence ends, then `.none` forever after.
 The associated type `Item` is what the loop pattern binds.
@@ -81,7 +87,7 @@ for .rect { w, h } in shapes { ... }            // (refutable patterns need a fi
 An `IntoIterator`-style convenience trait lets containers hand out an iterator:
 
 ```
-IntoIterator :: trait {
+IntoIterator :: #lang("into_iterator") trait {
   Iter :: type                                  // must implement Iterator
   iter :: func (self: *Self) -> Self.Iter
 }

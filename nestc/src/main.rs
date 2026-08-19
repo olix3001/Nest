@@ -5,7 +5,9 @@ mod parser;
 
 use std::process::ExitCode;
 
-use parser::ast::FileId;
+use common::diagnostic::simple_error;
+use common::emitter::render;
+use common::source::SourceMap;
 use parser::parse::Parser;
 use parser::pretty::tree_to_string;
 
@@ -26,15 +28,20 @@ fn main() -> ExitCode {
         }
     };
 
-    let (ast, errors) = Parser::parse_file(&source, FileId(0));
+    let mut sources = SourceMap::new();
+    let file = sources.add(path.clone(), source);
+    let src = &sources.file(file).unwrap().src;
+
+    let (ast, errors) = Parser::parse_file(src, file);
     print!("{}", tree_to_string(&ast));
 
     if errors.is_empty() {
         ExitCode::SUCCESS
     } else {
-        eprintln!("\n{} parse error(s) in {path}:", errors.len());
+        eprintln!("\n{} parse error(s) in {path}:\n", errors.len());
         for err in &errors {
-            eprintln!("  {}..{}: {}", err.span.start, err.span.end, err.message);
+            let diag = simple_error(file, err.span, err.message.clone());
+            eprint!("{}", render(&diag, &sources));
         }
         ExitCode::FAILURE
     }

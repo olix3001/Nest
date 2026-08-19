@@ -151,7 +151,9 @@ impl Parser {
     }
 
     /// `{ '#' name [ '(' args ')' ] }` — a run of directives. `#const` is
-    /// accepted even though `const` is a keyword.
+    /// accepted even though `const` is a keyword. The directive name is not
+    /// validated here — the set (`#packed`, `#inline`, `#lang`, …) is a semantic
+    /// concern; `#lang("add")` parses as any other `#name(args)` directive.
     pub(crate) fn parse_directives(&mut self) -> Vec<NodeId> {
         let mut directives = Vec::new();
         loop {

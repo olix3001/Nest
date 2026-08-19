@@ -211,6 +211,12 @@ Comparison operators do not chain: `a < b < c` is a parse error; write
 require integer operands. Mixing signed/unsigned or differing widths requires an
 explicit `$cast`.
 
+Precedence and associativity are **purely syntactic**: they decide how an
+expression parses into a tree, before any meaning is attached. What each operator
+*does* is then defined by a core-library trait (§6.13). The built-in numeric and
+integer types implement those traits in the core library; they are not special-cased
+in the compiler.
+
 ## 6.8 Block and `if` as expressions
 
 ```
@@ -329,3 +335,91 @@ loops; the same syntax is used to slice (`s[lo..<hi]`, `s[lo..]`, `s[..<n]`,
 `s[..]`) and to match numeric ranges (see
 [07-patterns-and-matching.md](07-patterns-and-matching.md)). There is no bare
 `a..b`; write `a..<b` or `a..=b`.
+
+## 6.13 Operators as trait methods
+
+Operators are **not** built into the compiler; each one is sugar for a call to a
+method on a core-library trait. The trait the compiler reaches for is the one
+carrying the matching `#lang(...)` directive (see
+[09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3). A type
+supports an operator by implementing that trait — the same mechanism user code
+uses to overload it. `int + int` and `Vec3 + Vec3` are the same construct: both
+are `Add.add(a, b)`, differing only in which `impl` is selected.
+
+### The registry
+
+| Syntax | `#lang` tag | Trait | Method (illustrative signature) |
+|--------|-------------|-------|----------------------------------|
+| `a + b`   | `"add"`    | `Add`    | `add(self: Self, rhs: Rhs) -> Self.Output` |
+| `a - b`   | `"sub"`    | `Sub`    | `sub(self, rhs) -> Output` |
+| `a * b`   | `"mul"`    | `Mul`    | `mul(self, rhs) -> Output` |
+| `a / b`   | `"div"`    | `Div`    | `div(self, rhs) -> Output` |
+| `a % b`   | `"rem"`    | `Rem`    | `rem(self, rhs) -> Output` |
+| `a & b`   | `"bitand"` | `BitAnd` | `bitand(self, rhs) -> Output` |
+| `a \| b`  | `"bitor"`  | `BitOr`  | `bitor(self, rhs) -> Output` |
+| `a ^ b`   | `"bitxor"` | `BitXor` | `bitxor(self, rhs) -> Output` |
+| `a << b`  | `"shl"`    | `Shl`    | `shl(self, rhs) -> Output` |
+| `a >> b`  | `"shr"`    | `Shr`    | `shr(self, rhs) -> Output` |
+| `-a`      | `"neg"`    | `Neg`    | `neg(self: Self) -> Self.Output` |
+| `~a`      | `"bitnot"` | `BitNot` | `bitnot(self: Self) -> Self.Output` |
+| `a == b`, `a != b` | `"eq"`  | `Eq`  | `eq(self: Self, rhs: Self) -> bool` |
+| `a < b`, `a <= b`, `a > b`, `a >= b` | `"ord"` | `Ord` | `cmp(self: Self, rhs: Self) -> Ordering` |
+| `a[i]` (read)  | `"index"`     | `Index`    | `index(self: *Self, i: Idx) -> *Self.Output` |
+| `a[i] = v` (write) | `"index_mut"` | `IndexMut` | `index_mut(self: *mut Self, i: Idx) -> *mut Self.Output` |
+| `a += b`, `a -= b`, … | `"add_assign"`, `"sub_assign"`, … | `AddAssign`, … | `add_assign(self: *mut Self, rhs: Rhs)` |
+
+Two supporting `#lang` enums round out the set: `Ordering` (`#lang("ordering")`,
+`enum { less, equal, greater }`) is what `Ord.cmp` returns, and `Result` /
+`Option` / `ControlFlow` back the `Try` operators (§6.3, see
+[08-error-handling-and-defer.md](08-error-handling-and-defer.md)).
+
+### Desugaring rules
+
+Applied **after** parsing, to the operator tree §6.7 produced:
+
+- Arithmetic, bitwise, and shift binaries lower directly to the method call:
+  `a + b` ⇒ `Add.add(a, b)`, `a << b` ⇒ `Shl.shl(a, b)`, and so on.
+- Prefix `-a` ⇒ `Neg.neg(a)`; prefix `~a` ⇒ `BitNot.bitnot(a)`.
+- Equality: `a == b` ⇒ `Eq.eq(a, b)`; `a != b` ⇒ the negation of that `bool`.
+- Ordering: all four relations go through one method, `Ord.cmp`, and test its
+  `Ordering` result — `a < b` ⇒ `Ord.cmp(a, b) == .less`, `a >= b` ⇒
+  `Ord.cmp(a, b) != .less`, etc. One `cmp` gives every ordering relation.
+- Indexing: `a[i]` in value position ⇒ `Index.index(&a, i).*`; `a[i]` as the
+  place of an assignment ⇒ `IndexMut.index_mut(&mut a, i).*`.
+- Compound assignment: `a += b` ⇒ `AddAssign.add_assign(&mut a, b)` (and likewise
+  for `-=` `*=` `/=` `%=`). A type may implement `AddAssign` independently of
+  `Add`; where it does not, the core library's blanket impl defines
+  `a += b` as `a = a + b`.
+
+### What is *not* a trait method
+
+These stay built into the compiler and dispatch on nothing:
+
+- `&&` / `and`, `||` / `or` — short-circuiting control flow on `bool` only.
+- `!` / `not` — boolean negation on `bool` (bitwise complement is `~`, which
+  *is* a trait via `BitNot`).
+- `&` / `&mut` (address-of) and postfix `.*` (deref) — the built-in pointer
+  operations; nest pointers are not a library type.
+- `.?` / `.!` — driven by the `Try` **lang item** rather than by an operator
+  trait in this table (§6.3, [08](08-error-handling-and-defer.md) §8.3).
+
+### How a `+` reaches its implementation
+
+Putting it together, when the compiler lowers `a + b`:
+
+1. Parsing yields `Binary { op: Add, a, b }` — precedence/associativity only,
+   no meaning yet.
+2. Lowering rewrites it to a call to the `add` method of the trait tagged
+   `#lang("add")`. The compiler finds that trait by its tag; the core library,
+   not the compiler, decides what `Add` looks like.
+3. Ordinary trait selection (see
+   [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md)
+   §4.8) picks the `impl Add for typeof(a)` — a core-library impl for the numeric
+   primitives, or a user `impl` for a user type. Missing impl ⇒ the same "no such
+   method" error any absent trait method gives; there is no separate "cannot add"
+   rule.
+
+The payoff: operator overloading, the built-in numeric operators, and the core
+library are one uniform system. Adding an operator to a new type is writing an
+`impl`; the compiler needs no change, because the only thing it hard-codes is the
+*tag → trait* lookup, and the tag is attached in the core library with `#lang`.

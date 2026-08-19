@@ -10,11 +10,16 @@ language's syntax.
 `Result` is a prelude enum with **snake_case** variants:
 
 ```
-Result :: enum <T, E> {
+Result :: #lang("result") enum <T, E> {
   ok(T),
   err(E),
 }
 ```
+
+`Result` carries `#lang("result")` so the compiler can name it (for `.?`
+residual conversion and inferred `.ok` / `.err` construction) without hard-wiring
+the enum; `Option` is `#lang("option")` for the same reason (see
+[09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3).
 
 A fallible function declares its success and error types:
 
@@ -58,7 +63,7 @@ Short-circuiting is not hard-wired to `Result`/`Option`; it is a trait, so any
 user type can participate (like Rust's `Try`):
 
 ```
-Try :: trait {
+Try :: #lang("try") trait {
   Output   :: type          // the value produced on success
   Residual :: type          // the "failure" carried out on short-circuit
 
@@ -73,8 +78,12 @@ Try :: trait {
 }
 ```
 
-`Result` and `Option` implement `Try` in the prelude. Two postfix operators
-consume a `Try` value:
+`Try` carries `#lang("try")` so the `.?` / `.!` operators can find it — they are
+defined against "the `Try` lang item", not against `Result` / `Option` by name,
+which is exactly why any user type that implements `Try` participates. The
+`ControlFlow.<B, C>` enum that `branch` returns is likewise
+`#lang("control_flow")`. `Result` and `Option` implement `Try` in the prelude.
+Two postfix operators consume a `Try` value:
 
 | Form | Behavior | On failure |
 |------|----------|-----------|
@@ -126,6 +135,13 @@ Semantics:
   replace `try/finally`.
 - The GC reclaims memory; `defer` releases what the GC does not manage (files,
   sockets, locks).
+
+For types whose cleanup should be automatic rather than hand-written at each use
+site, the `Drop` trait (`#lang("drop")`, see
+[09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3) is the
+one the compiler calls on scope exit — the same LIFO points `defer` runs at.
+`defer` is the explicit, per-site form; `Drop` is the per-type form. Both are
+found through their `#lang` tags, not by name.
 
 ## 8.5 Panics vs. errors
 
