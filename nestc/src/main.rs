@@ -2,14 +2,12 @@
 
 pub(crate) mod common;
 mod parser;
+mod sema;
 
 use std::process::ExitCode;
 
-use common::diagnostic::simple_error;
 use common::emitter::render;
-use common::source::SourceMap;
-use parser::parse::Parser;
-use parser::pretty::tree_to_string;
+use sema::session::Session;
 
 /// Parse the file given as the first CLI argument and print its AST (or the
 /// diagnostics). With no argument, print usage. Exits non-zero if parsing
@@ -28,21 +26,26 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut sources = SourceMap::new();
-    let file = sources.add(path.clone(), source);
-    let src = &sources.file(file).unwrap().src;
-
-    let (ast, errors) = Parser::parse_file(src, file);
-    print!("{}", tree_to_string(&ast));
-
-    if errors.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        eprintln!("\n{} parse error(s) in {path}:\n", errors.len());
-        for err in &errors {
-            let diag = simple_error(file, err.span, err.message.clone());
-            eprint!("{}", render(&diag, &sources));
-        }
-        ExitCode::FAILURE
+    // Analyze the entry file (and everything it imports) through the session.
+    let mut session = Session::new();
+    let file = session.sources.add(path.clone(), source.clone());
+    let (ast, parse_errors) = parser::parse::Parser::parse_file(&source, file);
+    for err in parse_errors {
+        session.error(file, err.span, err.message);
     }
+    session.asts.insert(file, ast);
+    sema::analyze(&mut session, file);
+
+    // The resolved, annotated tree, plus the whole-program def table.
+    print!("{}", sema::pretty::tree_to_string(&session, file));
+    print!("\n{}", sema::pretty::defs_to_string(&session));
+
+    if !session.has_errors() {
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("\n{} diagnostic(s):\n", session.diagnostics.len());
+    for diag in &session.diagnostics {
+        eprint!("{}", render(diag, &session.sources));
+    }
+    ExitCode::FAILURE
 }
