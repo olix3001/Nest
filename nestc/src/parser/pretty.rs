@@ -32,7 +32,9 @@ fn render(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
 }
 
 /// The one-line label for a node: its variant name plus any inline scalars.
-fn summary(ast: &Ast, id: NodeId) -> String {
+/// Public so later passes (e.g. `sema::pretty`) can render the same base line
+/// and append their own metadata annotations.
+pub fn summary(ast: &Ast, id: NodeId) -> String {
     use NodeKind::*;
     let node = ast.node(id);
     match &node.kind {
