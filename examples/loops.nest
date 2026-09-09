@@ -1,7 +1,7 @@
 // loops.nest — ranges, `for`, and `loop`/`break value`. No imports.
 
 @public
-sum_to :: func (n: int) -> int {
+sum_to :: func (n: isize) -> isize {
   let total := 0
   for i in 0..=n {
     total += i
@@ -10,7 +10,7 @@ sum_to :: func (n: int) -> int {
 }
 
 @public
-first_multiple :: func (of: int, above: int) -> int {
+first_multiple :: func (of: isize, above: isize) -> isize {
   let x := above
   return loop {
     if x % of == 0 {

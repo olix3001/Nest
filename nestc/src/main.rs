@@ -1,6 +1,7 @@
 #![feature(box_patterns)]
 
 pub(crate) mod common;
+mod ir;
 mod parser;
 mod sema;
 
@@ -39,6 +40,14 @@ fn main() -> ExitCode {
     // The resolved, annotated tree, plus the whole-program def table.
     print!("{}", sema::pretty::tree_to_string(&session, file));
     print!("\n{}", sema::pretty::defs_to_string(&session));
+
+    // The lowered IR of the entry file.
+    if let Some(program) = session.ir.get(&file) {
+        print!(
+            "\n===< IR >===\n{}",
+            ir::pretty::program_to_string(&session.defs, program)
+        );
+    }
 
     if !session.has_errors() {
         return ExitCode::SUCCESS;

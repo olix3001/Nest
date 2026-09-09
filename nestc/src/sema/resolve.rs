@@ -24,6 +24,7 @@ use super::def::{DefId, DefKind, DefTable, Visibility};
 use super::{DefMeta, PathRes, Resolution};
 
 /// Resolve every name in `file`, whose file namespace is `file_ns`.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_file(
     defs: &mut DefTable,
     diags: &mut Vec<Diagnostic>,
@@ -31,6 +32,7 @@ pub fn resolve_file(
     file: FileId,
     file_ns: DefId,
     prelude_globs: &[DefId],
+    builtins: DefId,
 ) {
     let mut r = Resolver {
         defs,
@@ -38,6 +40,7 @@ pub fn resolve_file(
         ast,
         file,
         prelude_globs,
+        builtins,
         scopes: Vec::new(),
         ns_stack: vec![file_ns],
         self_ty: Vec::new(),
@@ -53,6 +56,9 @@ struct Resolver<'a> {
     ast: &'a Ast,
     file: FileId,
     prelude_globs: &'a [DefId],
+    /// The builtins namespace: fixed primitives plus the width-parameterized
+    /// primitives (`i32`, `u7`, `f64`, …) synthesized lazily on first use.
+    builtins: DefId,
     /// Transient local frames (params, generics, block/pattern bindings).
     scopes: Vec<HashMap<Symbol, DefId>>,
     /// Enclosing namespace chain; the last entry is the current namespace.
@@ -315,8 +321,70 @@ impl Resolver<'_> {
                 .copied()
                 .map(Resolution::Def)
                 .unwrap_or(Resolution::Error),
-            _ => self.lookup_unqualified(name).unwrap_or(Resolution::Error),
+            _ => self
+                .lookup_unqualified(name)
+                .or_else(|| self.synth_primitive(name).map(Resolution::Def))
+                .unwrap_or(Resolution::Error),
         }
+    }
+
+    /// A name that resolved nowhere may still be a width-parameterized primitive
+    /// (`i32`, `u7`, `f64`, …). Parse it; if it is a valid one, intern a
+    /// [`DefKind::Primitive`] into the builtins scope (so later uses — in this
+    /// file and others — find it through the normal prelude glob) and return it.
+    /// `u1` aliases the fixed `bool` primitive (§3.1). Names that merely *look*
+    /// like a primitive but carry an invalid width (`i1`, `f100`, `u70000`)
+    /// return `None`, falling through to the ordinary "cannot resolve" error.
+    fn synth_primitive(&mut self, name: &Symbol) -> Option<DefId> {
+        let s = name.as_str();
+        let (prefix, digits) = if let Some(d) = s.strip_prefix('i') {
+            ('i', d)
+        } else if let Some(d) = s.strip_prefix('u') {
+            ('u', d)
+        } else if let Some(d) = s.strip_prefix('f') {
+            ('f', d)
+        } else {
+            return None;
+        };
+        // No leading zeros, digits only, fits the width range.
+        if digits.is_empty()
+            || (digits.len() > 1 && digits.starts_with('0'))
+            || !digits.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        let width: u32 = digits.parse().ok()?;
+        match prefix {
+            // `bool` is an alias for `u1`, so `u1` resolves to the same def (§3.1).
+            'u' if width == 1 => return self.defs.get(self.builtins).ns.members.get(&Symbol::new("bool")).copied(),
+            // 1-bit signed integers are not a type (§3.1); every other width up to
+            // 65535 is legal.
+            'i' if width == 1 => return None,
+            'i' | 'u' if (1..=65535).contains(&width) => {}
+            'f' if matches!(width, 16 | 32 | 64 | 80 | 128) => {}
+            _ => return None,
+        }
+        // Intern once: a second use of `i32` must resolve to the same def so the
+        // two are the same nominal type.
+        if let Some(&existing) = self.defs.get(self.builtins).ns.members.get(name) {
+            return Some(existing);
+        }
+        let id = self.defs.alloc(
+            name.clone(),
+            DefKind::Primitive,
+            Visibility::Public,
+            Some(self.builtins),
+            None,
+            None,
+            None,
+            vec![name.clone()],
+        );
+        self.defs
+            .get_mut(self.builtins)
+            .ns
+            .members
+            .insert(name.clone(), id);
+        Some(id)
     }
 
     /// A `base.name` hop where `base` is a name path: if `base` resolved to a
@@ -455,8 +523,21 @@ impl Resolver<'_> {
                 }
             }
             NodeKind::VariantPat { args, .. } => {
-                for e in variant_pat_children(&args) {
-                    self.bind_pattern(e);
+                match args {
+                    // Tuple payload: each child is a sub-pattern.
+                    crate::parser::ast::VariantPatArgs::Tuple(elems) => {
+                        for e in elems {
+                            self.bind_pattern(e);
+                        }
+                    }
+                    // Record payload: each child is a `FieldPat` (`{ radius }` /
+                    // `{ radius: p }`), bound like a struct pattern's fields.
+                    crate::parser::ast::VariantPatArgs::Record { fields, .. } => {
+                        for f in fields {
+                            self.bind_field_pat(f);
+                        }
+                    }
+                    crate::parser::ast::VariantPatArgs::None => {}
                 }
             }
             NodeKind::SlicePat { elems, rest } => {
@@ -541,14 +622,5 @@ fn struct_kind_children(kind: &crate::parser::ast::StructKind) -> Vec<NodeId> {
     match kind {
         Record(ids) | Tuple(ids) => ids.clone(),
         Unit => Vec::new(),
-    }
-}
-
-fn variant_pat_children(args: &crate::parser::ast::VariantPatArgs) -> Vec<NodeId> {
-    use crate::parser::ast::VariantPatArgs::*;
-    match args {
-        Tuple(ids) => ids.clone(),
-        Record { fields, .. } => fields.clone(),
-        None => Vec::new(),
     }
 }

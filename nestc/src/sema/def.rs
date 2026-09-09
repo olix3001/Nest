@@ -66,7 +66,7 @@ pub enum DefKind {
     Local,
     /// A name introduced by an `import` binding (see [`Def::alias`]).
     Import,
-    /// A builtin primitive type (`int32`, `string`, ...) with no source.
+    /// A builtin primitive type (`i32`, `string`, ...) with no source.
     Primitive,
     /// A builtin `$`-intrinsic.
     Intrinsic,

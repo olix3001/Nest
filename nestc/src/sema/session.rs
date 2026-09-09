@@ -28,13 +28,18 @@ use super::imports::ImportDecl;
 /// The embedded bootstrap core library source (see `core/prelude.nest`).
 pub const CORE_SRC: &str = include_str!("core/prelude.nest");
 
-/// The primitive type names the prelude makes available without an import
+/// The fixed-name primitive types the prelude makes available without an import
 /// (§4.6). They have no source definition; each becomes a [`DefKind::Primitive`]
 /// def in the builtins scope.
-pub const PRIMITIVES: &[&str] = &[
-    "bool", "char", "string", "int", "uint", "int8", "int16", "int32", "int64", "uint8", "uint16",
-    "uint32", "uint64", "f32", "f64", "usize", "isize", "void",
-];
+///
+/// The width-parameterized primitives are **not** listed here: the signed /
+/// unsigned integers `i<N>` / `u<N>` (arbitrary `N` in `1..=65535`, `i1`
+/// excluded, `u1` an alias of `bool`) and the floats `f16`/`f32`/`f64`/`f80`/
+/// `f128`. There are far too many to pre-register, so the resolver synthesizes
+/// each on first use and interns it into the builtins scope (see
+/// `sema::resolve`). `isize`/`usize` are the only pointer-sized integers; there
+/// is no bare `int`/`uint`.
+pub const PRIMITIVES: &[&str] = &["bool", "char", "string", "isize", "usize", "void"];
 
 /// Resolves `import "spec"` file specifiers to a stable key and source text.
 ///
@@ -133,6 +138,9 @@ pub struct Session {
     pub asts: HashMap<FileId, Ast>,
     /// Per-file analysis metadata, keyed by [`FileId`] (populated at collection).
     pub files: HashMap<FileId, FileMeta>,
+    /// The lowered IR of each file, keyed by [`FileId`] (populated by the lower
+    /// stage after inference).
+    pub ir: HashMap<FileId, crate::ir::Program>,
     /// The synthetic builtins namespace (primitives) that backs the prelude.
     pub builtins: DefId,
     /// Namespaces globbed into every file's outermost scope (the prelude:
@@ -189,6 +197,7 @@ impl Session {
             diagnostics: Vec::new(),
             asts: HashMap::new(),
             files: HashMap::new(),
+            ir: HashMap::new(),
             builtins,
             prelude_globs: vec![builtins],
             packages: HashMap::new(),

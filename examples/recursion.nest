@@ -1,7 +1,7 @@
 // recursion.nest — functions, conditionals, and recursion. No imports.
 
 @public
-fib :: func (n: int) -> int {
+fib :: func (n: isize) -> isize {
   if n < 2 {
     return n
   }
@@ -9,7 +9,7 @@ fib :: func (n: int) -> int {
 }
 
 @public
-gcd :: func (a: int, b: int) -> int {
+gcd :: func (a: isize, b: isize) -> isize {
   let x := a
   let y := b
   while y != 0 {

@@ -16,6 +16,11 @@
 //!    (§4.6).
 //! 4. **desugar** ([`desugar`]) — lower `for` / `.?` / `.!` to their core
 //!    `#lang` forms (§6.13).
+//! 5. **infer** ([`infer`]) — Hindley–Milner type inference per function body,
+//!    annotating every expression node with its resolved [`Ty`](ty::Ty) (§3.7).
+//! 6. **lower** ([`lower`]) — build the typed [`ir`] tree from the resolved,
+//!    desugared, typed AST (structured control flow kept, sugar and auto-deref
+//!    made explicit).
 //!
 //! Results live in the [`Session`], not in the AST nodes: definitions in the
 //! [`DefTable`], per-node facts in the arena's type-indexed metadata side table
@@ -27,9 +32,12 @@ pub mod collect;
 pub mod def;
 pub mod desugar;
 pub mod imports;
+pub mod infer;
+pub mod lower;
 pub mod pretty;
 pub mod resolve;
 pub mod session;
+pub mod ty;
 
 #[cfg(test)]
 mod tests;
@@ -116,6 +124,12 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     }
     for &file in &files {
         desugar_one(session, file);
+    }
+    for &file in &files {
+        infer_one(session, file);
+    }
+    for &file in &files {
+        lower_one(session, file);
     }
 }
 
@@ -226,6 +240,7 @@ fn load_target(
 fn resolve_one(session: &mut Session, file: FileId) {
     let ns = session.files[&file].ns;
     let globs = session.prelude_globs.clone();
+    let builtins = session.builtins;
     let Session {
         asts,
         defs,
@@ -233,7 +248,22 @@ fn resolve_one(session: &mut Session, file: FileId) {
         ..
     } = &mut *session;
     let ast = &asts[&file];
-    resolve::resolve_file(defs, diagnostics, ast, file, ns, &globs);
+    resolve::resolve_file(defs, diagnostics, ast, file, ns, &globs, builtins);
+}
+
+fn infer_one(session: &mut Session, file: FileId) {
+    let Session {
+        asts,
+        defs,
+        diagnostics,
+        ..
+    } = &mut *session;
+    infer::infer_file(defs, asts, diagnostics, file);
+}
+
+fn lower_one(session: &mut Session, file: FileId) {
+    let program = lower::lower_file(&session.defs, &session.asts, file);
+    session.ir.insert(file, program);
 }
 
 fn desugar_one(session: &mut Session, file: FileId) {

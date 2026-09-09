@@ -9,24 +9,29 @@ in `::` constants, and inspected by reflection (planned; see
 ## 3.1 Primitive types
 
 ```
-Signed integers:   int8  int16  int32  int64   int    (int = platform word; arbitrary widths allowed, except int1)
-Unsigned integers: uint8 uint16 uint32 uint64  uint   (uint = platform word; arbitrary widths allowed, including uint1)
-Pointer-sized:     isize usize                        (signed / unsigned integer wide enough to hold any address or index)
-Floating point:    f32   f64
-Boolean:           bool   (an alias for uint1)
+Signed integers:   i8  i16  i32  i64   iN    (arbitrary width N in 2..=65535; i1 is not a type)
+Unsigned integers: u8  u16  u32  u64   uN    (arbitrary width N in 1..=65535; u1 is bool)
+Pointer-sized:     isize usize                (signed / unsigned integer wide enough to hold any address or index)
+Floating point:    f16  f32  f64  f80  f128   (exactly these widths; there is no bare `float`)
+Boolean:           bool   (an alias for u1)
 Text:              char   (Unicode scalar, 32-bit)   string   (UTF-8, immutable)
 Unit:              void   (the empty tuple; a function with no `-> T` returns void)
 ```
 
-`isize` / `usize` are the pointer-sized integers used for addresses, lengths,
-and indices; on a normal target they coincide in width with `int` / `uint`, but
-they are distinct nominal types and are the correct choice for `.len`, indexing,
-and C interop sizes. Arbitrary-width integers such as `uint1`, `int7`, `uint24`
-are legal type expressions.
+Integers are written `i<N>` / `u<N>` for a bit width `N` up to `65535`: the
+common widths `i8`/`i16`/`i32`/`i64` and `u8`/`u16`/`u32`/`u64` are just the
+familiar cases of an arbitrary-width family, so `u7`, `i24`, `u4096` are equally
+legal type expressions. `i1` is **not** a type; `u1` is spelled `bool`. There is
+**no** bare `int`/`uint` — use the pointer-sized `isize`/`usize` for addresses,
+lengths, and indices (`.len`, indexing, C interop sizes), and a fixed width
+otherwise. Floats exist only at the widths `f16`/`f32`/`f64`/`f80`/`f128`.
 
-Integer literals are untyped until context assigns a type (see
-[01-lexical-structure.md](01-lexical-structure.md)). There are **no implicit
-numeric conversions**; widening and narrowing both go through `$cast`.
+Integer literals have type `comptime_int` and float literals `comptime_float`
+until context assigns a concrete type (see
+[01-lexical-structure.md](01-lexical-structure.md)); a `comptime_int` implicitly
+converts to any integer type whose range holds its value. Between concrete
+numeric types there are **no implicit conversions**; widening and narrowing both
+go through `$cast`.
 
 ## 3.2 Pointers (`*T`, `*mut T`, `&x`)
 

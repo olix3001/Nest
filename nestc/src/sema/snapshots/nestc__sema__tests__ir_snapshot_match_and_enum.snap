@@ -1,0 +1,19 @@
+---
+source: src/sema/tests.rs
+expression: ir_text(src)
+---
+func pick(c: Color) -> i32 {
+  match c: Color {
+    .red => 1: i32
+    .green => 2: i32
+    .blue => 3: i32
+  }
+  return <match: i32>
+}
+func maybe(b: bool) -> core.Option.<i32> {
+  if b: bool {
+    return .some(5: isize): core.Option.<i32>
+  }
+  <if: void>
+  return .none(): core.Option.<i32>
+}

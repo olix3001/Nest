@@ -1,0 +1,90 @@
+// inference.nest — a stress test for type inference with (almost) no type
+// annotations on locals. Everything below is deduced from *use*.
+//
+// It exercises, in order:
+//   1. backward flow of a literal's type from a return / call / branch,
+//   2. tuples, pointers, and auto-deref,
+//   3. generic instantiation at each call site,
+//   4. a container whose element type is fixed by a later `.push`, not by its
+//      construction (the classic `let v = Vector.new(); v.push(x)` case),
+//   5. associated-type syntax and a `<Assoc = T>` bound.
+
+// ===< 1-2: scalars, tuples, pointers >===
+
+scale :: func (x: u16) -> u16 {
+  return x * 2
+}
+
+// `a`/`b` are `u16` only because the returned tuple is `(u16, u16)`.
+make_pair :: func () -> (u16, u16) {
+  let a := 3
+  let b := 4
+  return (a, b)
+}
+
+// Auto-deref through the pointer, then tuple-index; both elements are `u16`.
+sum_pair :: func (p: *(u16, u16)) -> u16 {
+  return p.0 + p.1
+}
+
+// A chain: `base` is an untyped literal pushed through `+`, a call, and an
+// `if`/`else` whose arms must agree — every local resolves to `u16`.
+compute :: func (flag: bool) -> u16 {
+  let base := 10
+  let step := base + 5
+  let scaled := scale(step)
+  let picked := if flag { scaled } else { base }
+  return picked
+}
+
+// `n` is `i64` (arms + return unify); `&n` makes `q : *i64` with no annotation.
+first_addr :: func (xs: bool) -> i64 {
+  let n := if xs { 7 } else { 8 }
+  let q := &n
+  return q.*
+}
+
+// ===< 3-4: a generic container; element type inferred from `.push` >===
+
+Vector :: struct <T> {
+  len: usize,
+}
+
+impl <T> Vector.<T> {
+  new :: func () -> Vector.<T> {
+    return Vector.<T> { len: 0 }
+  }
+  push :: func (self: *mut Vector.<T>, value: T) {
+    self.len = self.len + 1
+  }
+}
+
+// `xs` starts life as `Vector.<?>`; the element type is pinned by `push(1)`, a
+// call — not by `Vector.new()`, the construction — so `xs : Vector.<isize>`.
+build_ints :: func () -> usize {
+  let xs := Vector.new()
+  xs.push(1)
+  xs.push(2)
+  return xs.len
+}
+
+// The same machinery deduces `Vector.<string>` from a string `push`.
+build_strings :: func () {
+  let ws := Vector.new()
+  ws.push("hello")
+}
+
+// ===< 5: associated-type syntax and a `<Assoc = T>` bound >===
+//
+// The associated-type declaration and the `Summing.<Total = usize>` bound are
+// resolved end-to-end; the method result flows to the annotated return type.
+// (Full associated-type *projection* inference is a later pass.)
+
+Summing :: trait {
+  Total :: type
+  total :: func (self: *Self) -> Self.Total
+}
+
+sum_len :: func <I: Summing.<Total = usize>> (it: *I) -> usize {
+  return it.total()
+}

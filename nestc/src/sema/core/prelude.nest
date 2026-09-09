@@ -14,7 +14,7 @@
 // ===< Prelude types >===
 
 @public
-Option :: enum <T> {
+Option :: #lang("option") enum <T> {
   some(T),
   none,
 }

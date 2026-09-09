@@ -2,17 +2,17 @@
 // Every exported item is marked @public; private helpers stay hidden.
 
 @public
-add :: func (a: int, b: int) -> int {
+add :: func (a: isize, b: isize) -> isize {
   return a + b
 }
 
 @public
-square :: func (n: int) -> int {
+square :: func (n: isize) -> isize {
   return n * n
 }
 
 @public
-factorial :: func (n: int) -> int {
+factorial :: func (n: isize) -> isize {
   let acc := 1
   let i := 2
   while i <= n {
@@ -23,7 +23,7 @@ factorial :: func (n: int) -> int {
 }
 
 // Private to this file: not visible to importers.
-clamp_low :: func (n: int, low: int) -> int {
+clamp_low :: func (n: isize, low: isize) -> isize {
   if n < low {
     return low
   }

@@ -122,9 +122,10 @@ Note: `module` is **not** a keyword — namespaces subsume it (see
 0b1010       binary
 ```
 
-An integer literal is *untyped* until it is used in a typed context, where it
-adopts the expected integer type. A bare literal defaults to `int` if no context
-constrains it.
+An integer literal has the type `comptime_int` — an arbitrary-precision compile-time
+integer — until it is used in a typed context, where it implicitly converts to
+any integer type whose range holds its value (a value that does not fit is a
+compile error). A literal that no context constrains defaults to `isize`.
 
 ### Floating-point literals
 
@@ -134,7 +135,8 @@ constrains it.
 6.022e23
 ```
 
-Untyped until context assigns `f32` or `f64`; defaults to `f64`.
+Has the type `comptime_float` until context assigns a concrete float type
+(`f16`/`f32`/`f64`/`f80`/`f128`); defaults to `f64`.
 
 ### Boolean literals
 
