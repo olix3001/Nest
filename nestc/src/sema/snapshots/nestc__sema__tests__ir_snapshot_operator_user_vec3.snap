@@ -1,0 +1,10 @@
+---
+source: src/sema/tests.rs
+expression: ir_text(&src)
+---
+func combine(a: Vec3, b: Vec3) -> Vec3 {
+  return (Vec3.add: func(Vec3, Vec3) -> Vec3)(a: Vec3, b: Vec3): Vec3
+}
+func add(self: Vec3, rhs: Vec3) -> Vec3 {
+  return self: Vec3
+}

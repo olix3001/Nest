@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use crate::common::diagnostic::Diagnostic;
-use crate::common::source::FileSpan;
 use crate::common::source::FileId;
+use crate::common::source::FileSpan;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
@@ -84,7 +84,9 @@ impl Resolver<'_> {
                 }
                 self.ns_stack.pop();
             }
-            NodeKind::StructType { generics, kind: sk, .. } => {
+            NodeKind::StructType {
+                generics, kind: sk, ..
+            } => {
                 let ns = self.def_of(id).unwrap_or_else(|| self.current_ns());
                 self.ns_stack.push(ns);
                 self.push_scope();
@@ -147,8 +149,11 @@ impl Resolver<'_> {
                 if let Some(t) = for_ty {
                     self.resolve_node(t);
                 }
-                // `Self` is the impl's target type; resolve its head to a def.
-                let self_def = self.type_head_def(ty);
+                // The self type is the `for` target of a trait impl, else the
+                // head type of an inherent impl. `Self` and the member host
+                // namespace both follow it (never the implemented trait).
+                let self_ty = for_ty.unwrap_or(ty);
+                let self_def = self.type_head_def(self_ty);
                 let host = self_def.unwrap_or_else(|| self.current_ns());
                 if let Some(sd) = self_def {
                     self.self_ty.push(sd);
@@ -356,7 +361,15 @@ impl Resolver<'_> {
         let width: u32 = digits.parse().ok()?;
         match prefix {
             // `bool` is an alias for `u1`, so `u1` resolves to the same def (§3.1).
-            'u' if width == 1 => return self.defs.get(self.builtins).ns.members.get(&Symbol::new("bool")).copied(),
+            'u' if width == 1 => {
+                return self
+                    .defs
+                    .get(self.builtins)
+                    .ns
+                    .members
+                    .get(&Symbol::new("bool"))
+                    .copied();
+            }
             // 1-bit signed integers are not a type (§3.1); every other width up to
             // 65535 is legal.
             'i' if width == 1 => return None,
@@ -393,7 +406,12 @@ impl Resolver<'_> {
         let Some(Resolution::Def(base_def)) = self.ast.meta::<Resolution>(base) else {
             return; // runtime field access on a value — left for the type checker
         };
-        if !self.defs.get(self.defs.resolve_alias(base_def)).kind.is_namespace_like() {
+        if !self
+            .defs
+            .get(self.defs.resolve_alias(base_def))
+            .kind
+            .is_namespace_like()
+        {
             return;
         }
         match self.resolve_member(base_def, name) {
@@ -404,7 +422,8 @@ impl Resolver<'_> {
                 id,
                 format!(
                     "`{name}` is not a public member of `{}`",
-                    self.defs.canonical_string(self.defs.resolve_alias(base_def))
+                    self.defs
+                        .canonical_string(self.defs.resolve_alias(base_def))
                 ),
             ),
         }
@@ -460,7 +479,9 @@ impl Resolver<'_> {
 
     fn public_member(&self, base: DefId, name: &Symbol) -> Option<DefId> {
         let base = self.defs.resolve_alias(base);
-        let d = self.defs.resolve_alias(*self.defs.get(base).ns.members.get(name)?);
+        let d = self
+            .defs
+            .resolve_alias(*self.defs.get(base).ns.members.get(name)?);
         self.defs.get(d).vis.is_public().then_some(d)
     }
 
@@ -498,11 +519,17 @@ impl Resolver<'_> {
             NodeKind::BindingPat { name, .. } => {
                 self.introduce(name, DefKind::Local, pattern);
             }
-            NodeKind::AtPat { name, pattern: inner } => {
+            NodeKind::AtPat {
+                name,
+                pattern: inner,
+            } => {
                 self.introduce(name, DefKind::Local, pattern);
                 self.bind_pattern(inner);
             }
-            NodeKind::TuplePat { elems } | NodeKind::OrPat { alternatives: elems } => {
+            NodeKind::TuplePat { elems }
+            | NodeKind::OrPat {
+                alternatives: elems,
+            } => {
                 for e in elems {
                     self.bind_pattern(e);
                 }
@@ -609,9 +636,8 @@ impl Resolver<'_> {
 
     fn report(&mut self, node: NodeId, message: impl Into<String>) {
         let span = self.ast.node(node).span;
-        self.diags.push(
-            Diagnostic::error(message).with_primary(FileSpan::new(self.file, span), ""),
-        );
+        self.diags
+            .push(Diagnostic::error(message).with_primary(FileSpan::new(self.file, span), ""));
     }
 }
 

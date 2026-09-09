@@ -5,8 +5,8 @@ use std::fmt::Write;
 
 use crate::parser::ast::Lit;
 
-use crate::sema::def::DefTable;
 use super::{Arm, Block, Expr, Function, Pattern, Program, Stmt};
+use crate::sema::def::DefTable;
 
 /// Render a whole [`Program`].
 pub fn program_to_string(defs: &DefTable, program: &Program) -> String {
@@ -101,10 +101,24 @@ impl Printer<'_> {
             Expr::Lit(l, _) => format!("{}: {ty}", lit_str(l)),
             Expr::Local(d, _) => format!("{}: {ty}", self.defs.get(*d).name),
             Expr::Global(d, _) => format!("{}: {ty}", self.defs.canonical_string(*d)),
-            Expr::Call { callee, args, .. } => {
+            Expr::Call {
+                callee,
+                args,
+                builtin,
+                ..
+            } => {
                 let c = self.expr(callee);
-                let a = args.iter().map(|a| self.expr(a)).collect::<Vec<_>>().join(", ");
-                format!("({c})({a}): {ty}")
+                let a = args
+                    .iter()
+                    .map(|a| self.expr(a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // A builtin primitive operator prints its tag so the O(1)
+                // codegen marker is visible in the dump.
+                match builtin {
+                    Some(op) => format!("#builtin({op:?}) ({c})({a}): {ty}"),
+                    None => format!("({c})({a}): {ty}"),
+                }
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let l = self.expr(lhs);
@@ -137,7 +151,11 @@ impl Printer<'_> {
                 format!("({b}[{i}]): {ty}")
             }
             Expr::Tuple { elems, .. } => {
-                let es = elems.iter().map(|e| self.expr(e)).collect::<Vec<_>>().join(", ");
+                let es = elems
+                    .iter()
+                    .map(|e| self.expr(e))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("({es}): {ty}")
             }
             Expr::Construct { def, fields, .. } => {
@@ -149,11 +167,19 @@ impl Printer<'_> {
                 format!("{} {{ {fs} }}: {ty}", self.defs.canonical_string(*def))
             }
             Expr::Variant { name, args, .. } => {
-                let a = args.iter().map(|a| self.expr(a)).collect::<Vec<_>>().join(", ");
+                let a = args
+                    .iter()
+                    .map(|a| self.expr(a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(".{name}({a}): {ty}")
             }
             Expr::Intrinsic { name, args, .. } => {
-                let a = args.iter().map(|a| self.expr(a)).collect::<Vec<_>>().join(", ");
+                let a = args
+                    .iter()
+                    .map(|a| self.expr(a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("${name}({a}): {ty}")
             }
             Expr::Block(b) => {
@@ -164,7 +190,9 @@ impl Printer<'_> {
                 self.line("}");
                 format!("<block: {ty}>")
             }
-            Expr::If { cond, then, els, .. } => {
+            Expr::If {
+                cond, then, els, ..
+            } => {
                 let c = self.expr(cond);
                 self.line(&format!("if {c} {{"));
                 self.indent += 1;
@@ -179,7 +207,9 @@ impl Printer<'_> {
                 self.line("}");
                 format!("<if: {ty}>")
             }
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 let s = self.expr(scrutinee);
                 self.line(&format!("match {s} {{"));
                 self.indent += 1;
@@ -243,4 +273,3 @@ fn lit_str(l: &Lit) -> String {
         Lit::Bool(b) => b.to_string(),
     }
 }
-

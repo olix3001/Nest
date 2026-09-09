@@ -33,6 +33,8 @@ use crate::parser::ast::{BinOp, Lit, UnOp};
 use crate::sema::def::DefId;
 use crate::sema::ty::Ty;
 
+pub use crate::sema::builtins::BuiltinOp;
+
 pub mod pretty;
 
 /// A whole lowered program: every function that had a body.
@@ -130,9 +132,21 @@ pub enum Expr {
     /// A reference to a top-level item (function / const / type used as a value).
     Global(DefId, Ty),
     /// `callee(args...)`.
+    ///
+    /// Operators lower to a `Call` too (§6: "int+int and Vec3+Vec3 are the same
+    /// construct"), so both a primitive `i32 + i32` and a user `impl Add for
+    /// Vec3` reach codegen as a call to the trait method they resolved to. The
+    /// [`builtin`](Expr::Call::builtin) tag lets codegen recognize a primitive
+    /// intrinsic op in **O(1)** — when it is `Some`, the call *is* the machine
+    /// instruction and needs no function lookup; when `None`, it is an ordinary
+    /// user call.
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        /// `Some` iff this call is a builtin primitive operator (see
+        /// [`crate::sema::builtins`]); codegen emits it inline. `None` for a
+        /// normal function/method call.
+        builtin: Option<BuiltinOp>,
         ty: Ty,
     },
     /// A primitive binary operation (numeric / boolean core). Operator-trait
@@ -166,11 +180,7 @@ pub enum Expr {
         ty: Ty,
     },
     /// `base.N` — tuple element access.
-    TupleIndex {
-        base: Box<Expr>,
-        index: u64,
-        ty: Ty,
-    },
+    TupleIndex { base: Box<Expr>, index: u64, ty: Ty },
     /// `base[index]`.
     Index {
         base: Box<Expr>,
@@ -303,10 +313,7 @@ pub fn walk_stmt<V: Visitor>(v: &mut V, stmt: &Stmt) {
 
 pub fn walk_expr<V: Visitor>(v: &mut V, expr: &Expr) {
     match expr {
-        Expr::Lit(..)
-        | Expr::Local(..)
-        | Expr::Global(..)
-        | Expr::Error(_) => {}
+        Expr::Lit(..) | Expr::Local(..) | Expr::Global(..) | Expr::Error(_) => {}
         Expr::Call { callee, args, .. } => {
             v.visit_expr(callee);
             for a in args {
@@ -319,9 +326,9 @@ pub fn walk_expr<V: Visitor>(v: &mut V, expr: &Expr) {
         }
         Expr::Unary { operand, .. } => v.visit_expr(operand),
         Expr::Ref { place, .. } => v.visit_expr(place),
-        Expr::Deref { base, .. }
-        | Expr::Field { base, .. }
-        | Expr::TupleIndex { base, .. } => v.visit_expr(base),
+        Expr::Deref { base, .. } | Expr::Field { base, .. } | Expr::TupleIndex { base, .. } => {
+            v.visit_expr(base)
+        }
         Expr::Index { base, index, .. } => {
             v.visit_expr(base);
             v.visit_expr(index);
@@ -332,14 +339,18 @@ pub fn walk_expr<V: Visitor>(v: &mut V, expr: &Expr) {
             }
         }
         Expr::Block(b) => v.visit_block(b),
-        Expr::If { cond, then, els, .. } => {
+        Expr::If {
+            cond, then, els, ..
+        } => {
             v.visit_expr(cond);
             v.visit_block(then);
             if let Some(e) = els {
                 v.visit_block(e);
             }
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             v.visit_expr(scrutinee);
             for a in arms {
                 v.visit_arm(a);
@@ -444,14 +455,18 @@ pub fn walk_expr_mut<V: VisitorMut>(v: &mut V, expr: &mut Expr) {
             }
         }
         Expr::Block(b) => v.visit_block(b),
-        Expr::If { cond, then, els, .. } => {
+        Expr::If {
+            cond, then, els, ..
+        } => {
             v.visit_expr(cond);
             v.visit_block(then);
             if let Some(e) = els {
                 v.visit_block(e);
             }
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             v.visit_expr(scrutinee);
             for a in arms {
                 v.visit_arm(a);

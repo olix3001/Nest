@@ -78,10 +78,7 @@ fn gutter_width(diag: &Diagnostic, sources: &SourceMap) -> usize {
 }
 
 /// Resolve a span's file name and start position, if the file is known.
-fn locate(
-    span: FileSpan,
-    sources: &SourceMap,
-) -> Option<(&str, super::source::LineCol)> {
+fn locate(span: FileSpan, sources: &SourceMap) -> Option<(&str, super::source::LineCol)> {
     let file = sources.file(span.file)?;
     Some((&file.name, file.line_col(span.span.start)))
 }
@@ -138,7 +135,10 @@ mod tests {
         // caret under the `;` at column 9 (0-based byte 8)
         let diag = Diagnostic::error("expected an expression")
             .with_code("E0001")
-            .with_primary(FileSpan::new(file, Span::new(8, 9)), "expected an expression")
+            .with_primary(
+                FileSpan::new(file, Span::new(8, 9)),
+                "expected an expression",
+            )
             .with_note("statements end at a newline");
 
         let rendered = render(&diag, &sources);
@@ -153,8 +153,7 @@ mod tests {
     fn caret_offset_matches_column() {
         let mut sources = SourceMap::new();
         let file = sources.add("t.nest", "  bad\n");
-        let diag = Diagnostic::error("x")
-            .with_primary(FileSpan::new(file, Span::new(2, 5)), "");
+        let diag = Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(2, 5)), "");
         let rendered = render(&diag, &sources);
         // two leading spaces before the caret run of length 3
         assert!(rendered.contains("\n  |   ^^^\n"), "got:\n{rendered}");
@@ -175,8 +174,10 @@ mod tests {
     #[test]
     fn unknown_file_degrades_to_header() {
         let sources = SourceMap::new();
-        let diag = Diagnostic::error("boom")
-            .with_primary(FileSpan::new(crate::common::source::FileId(7), Span::new(0, 1)), "");
+        let diag = Diagnostic::error("boom").with_primary(
+            FileSpan::new(crate::common::source::FileId(7), Span::new(0, 1)),
+            "",
+        );
         let rendered = render(&diag, &sources);
         assert_eq!(rendered, "error: boom\n");
     }

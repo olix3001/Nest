@@ -21,35 +21,58 @@
 //!   substitution. Closures are typed by their signature; captures are not
 //!   threaded into the enclosing body's variables.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
-use crate::parser::ast::{Ast, BinOp, Lit, NodeId, NodeKind, UnOp};
+use crate::common::symbol::Symbol;
+use crate::parser::ast::{Ast, BinOp, Lit, NodeId, NodeKind, UnOp, VariantArgs, VariantPatArgs};
 
-use super::def::{DefKind, DefTable};
-use super::ty::{primitive_ty, InferCtxt, Ty, TyVarKind};
+use super::builtins::{self, Applies, BuiltinOp, BuiltinRow};
+use super::def::{DefId, DefKind, DefTable, LangItems};
+use super::impls::{ImplInfo, ImplTable};
+use super::ty::{InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
 use super::{DefMeta, Resolution};
+
+/// How an operator (or other trait-dispatched) node resolved, stamped onto the
+/// operator's AST node by the trait solver so [`super::lower`] can emit a
+/// **uniform** [`crate::ir::Expr::Call`] whether the operand was a primitive or
+/// a user type.
+///
+/// [`builtin`](OpResolution::builtin) is `Some` iff the resolved impl was a
+/// builtin primitive op (see [`super::builtins`]); codegen keys on it to emit
+/// the machine instruction in O(1) rather than a real call.
+#[derive(Debug, Clone, Copy)]
+pub struct OpResolution {
+    /// The trait method the operator dispatches to (the `#lang` trait's method
+    /// for a builtin, the impl's method for a user type).
+    pub method: DefId,
+    /// The builtin-op tag, or `None` for a user impl.
+    pub builtin: Option<BuiltinOp>,
+}
 
 /// Infer types for every function body in `file`, annotating each expression
 /// node with its resolved [`Ty`]. `asts` is the whole parsed program (read-only)
 /// so a field access can reach a struct declared in another file.
+#[allow(clippy::too_many_arguments)]
 pub fn infer_file(
     defs: &DefTable,
     asts: &HashMap<FileId, Ast>,
     diags: &mut Vec<Diagnostic>,
+    lang: &LangItems,
+    impls: &ImplTable,
+    prelude_globs: &[DefId],
+    file_ns: DefId,
     file: FileId,
 ) {
     let ast = &asts[&file];
+    // The set of trait defs a use site in this file may select impls of: only
+    // in-scope traits are candidates (§ trait selection, Rust-style).
+    let in_scope_traits = in_scope_traits(defs, prelude_globs, file_ns);
     // Every `func` with a body is its own inference problem.
     let fns: Vec<NodeId> = ast
         .ids()
-        .filter(|&id| {
-            matches!(
-                &ast.node(id).kind,
-                NodeKind::FuncExpr { body: Some(_), .. }
-            )
-        })
+        .filter(|&id| matches!(&ast.node(id).kind, NodeKind::FuncExpr { body: Some(_), .. }))
         .collect();
     for func in fns {
         let mut cx = Inferer {
@@ -57,16 +80,64 @@ pub fn infer_file(
             asts,
             ast,
             diags,
+            lang,
+            impls,
+            in_scope_traits: &in_scope_traits,
             file,
             cx: InferCtxt::new(),
             env: HashMap::new(),
             types: HashMap::new(),
             ret: Ty::Void,
             breaks: Vec::new(),
+            alias_stack: Vec::new(),
         };
         cx.infer_func(func);
         cx.finish();
     }
+}
+
+/// Gather every trait [`DefId`] nameable from `file_ns` — its own members and
+/// imports, each enclosing namespace's, the globs pulled into any of them, and
+/// the prelude (builtins + `core`). Mirrors the resolver's unqualified lookup,
+/// restricted to traits: this is the candidate filter for impl selection.
+pub(crate) fn in_scope_traits(
+    defs: &DefTable,
+    prelude_globs: &[DefId],
+    file_ns: DefId,
+) -> HashSet<DefId> {
+    let mut set = HashSet::new();
+    let add_public = |set: &mut HashSet<DefId>, ns: DefId| {
+        for &m in defs.get(ns).ns.members.values() {
+            let m = defs.resolve_alias(m);
+            if defs.get(m).kind == DefKind::Trait && defs.get(m).vis.is_public() {
+                set.insert(m);
+            }
+        }
+    };
+    for &g in prelude_globs {
+        add_public(&mut set, g);
+    }
+    let mut cur = Some(file_ns);
+    while let Some(n) = cur {
+        for &m in defs
+            .get(n)
+            .ns
+            .members
+            .values()
+            .chain(defs.get(n).ns.imported.values())
+        {
+            let m = defs.resolve_alias(m);
+            if defs.get(m).kind == DefKind::Trait {
+                set.insert(m);
+            }
+        }
+        let globs = defs.get(n).ns.globs.clone();
+        for g in globs {
+            add_public(&mut set, g);
+        }
+        cur = defs.get(n).parent;
+    }
+    set
 }
 
 struct Inferer<'a> {
@@ -74,6 +145,12 @@ struct Inferer<'a> {
     asts: &'a HashMap<FileId, Ast>,
     ast: &'a Ast,
     diags: &'a mut Vec<Diagnostic>,
+    /// The `#lang` registry, for mapping an operator to its trait.
+    lang: &'a LangItems,
+    /// The whole-program impl index the solver selects over.
+    impls: &'a ImplTable,
+    /// Traits selectable at this file's use sites (see [`in_scope_traits`]).
+    in_scope_traits: &'a HashSet<DefId>,
     file: FileId,
     cx: InferCtxt,
     /// Type of each in-scope value def (params, locals) by [`DefId`].
@@ -84,6 +161,9 @@ struct Inferer<'a> {
     ret: Ty,
     /// The break-value type of each enclosing `loop`, innermost last.
     breaks: Vec<Ty>,
+    /// Type-alias / associated-type defs currently being expanded, to break
+    /// cycles in [`Inferer::expand_alias`].
+    alias_stack: Vec<DefId>,
 }
 
 impl Inferer<'_> {
@@ -120,19 +200,30 @@ impl Inferer<'_> {
         }
     }
 
-    /// Finalize every recorded node type (defaulting numeric literals, flagging
-    /// ambiguities) and stamp it onto the arena.
+    /// Discharge the queued trait/projection obligations to a fixpoint, then
+    /// finalize every recorded node type (defaulting numeric literals, flagging
+    /// genuine ambiguities) and stamp it onto the arena.
     fn finish(&mut self) {
+        // Selection is a *search* interleaved with unification: solving one
+        // obligation can concretize a variable that lets the next one commit, so
+        // run to a fixpoint before finalizing.
+        self.solve_to_fixpoint();
+        // Any obligation still queued is stuck; report the genuinely
+        // unsatisfiable ones (a concrete self with no matching impl).
+        let leftover = self.cx.take_obligations();
+        for ob in leftover {
+            self.report_unsolved(&ob);
+        }
         let entries: Vec<(NodeId, Ty)> = self.types.drain().collect();
         for (node, ty) in entries {
-            // Inference is intentionally partial in the bootstrap: trait
-            // associated-type and method-return resolution do not exist yet, so a
-            // leftover unsolved variable means "not yet knowable", not "user must
-            // annotate". Resolve it silently to `Error` (which absorbs on further
-            // unification) rather than emitting a false "annotations needed". The
-            // hard error is reintroduced once inference is complete enough to
-            // trust — see `InferCtxt::finalize`'s `on_ambiguous` hook.
-            let resolved = self.cx.finalize(&ty, &mut || {});
+            // Inference is now complete enough to trust: a leftover **general**
+            // variable is a real "type annotations needed" error (numeric ones
+            // still default). One diagnostic per ambiguous node.
+            let mut ambiguous = false;
+            let resolved = self.cx.finalize(&ty, &mut || ambiguous = true);
+            if ambiguous {
+                self.report(node, "type annotations needed");
+            }
             self.ast.set_meta(node, resolved);
         }
     }
@@ -170,7 +261,7 @@ impl Inferer<'_> {
             }
             NodeKind::Path { .. } => self.path_ty(node),
             NodeKind::Unary { op, operand } => self.infer_unary(op, operand),
-            NodeKind::Binary { op, lhs, rhs } => self.infer_binary(op, lhs, rhs),
+            NodeKind::Binary { op, lhs, rhs } => self.infer_binary(node, op, lhs, rhs),
             NodeKind::Tuple { elems } => {
                 if elems.is_empty() {
                     Ty::Void
@@ -186,13 +277,16 @@ impl Inferer<'_> {
                     return self.def_ty(def);
                 }
                 let bty = self.infer_expr(base);
-                self.field_ty(&bty, name.as_str()).unwrap_or_else(|| self.cx.fresh())
+                // A field we cannot type (an unresolved base) is `Error`, not a
+                // fresh variable — a dangling variable would now be a false
+                // "type annotations needed" (see `finish`).
+                self.field_ty(&bty, name.as_str()).unwrap_or(Ty::Error)
             }
             NodeKind::TupleIndex { base, index } => {
                 let bty = self.infer_expr(base);
                 match self.autoderef(&bty) {
                     Ty::Tuple(elems) => elems.get(index as usize).cloned().unwrap_or(Ty::Error),
-                    _ => self.cx.fresh(),
+                    _ => Ty::Error,
                 }
             }
             NodeKind::Call { callee, args } => self.infer_call(callee, &args),
@@ -209,7 +303,7 @@ impl Inferer<'_> {
                 self.infer_expr(index);
                 match self.autoderef(&bty) {
                     Ty::Slice { inner, .. } | Ty::Array { inner, .. } => *inner,
-                    _ => self.cx.fresh(),
+                    _ => Ty::Error,
                 }
             }
             NodeKind::Slice { base, range } => {
@@ -218,16 +312,20 @@ impl Inferer<'_> {
                 // A sub-slice of anything sliceable is a read-only slice of its
                 // element type.
                 match self.autoderef(&bty) {
-                    Ty::Slice { inner, .. } | Ty::Array { inner, .. } => {
-                        Ty::Slice { mutable: false, inner }
-                    }
-                    _ => self.cx.fresh(),
+                    Ty::Slice { inner, .. } | Ty::Array { inner, .. } => Ty::Slice {
+                        mutable: false,
+                        inner,
+                    },
+                    _ => Ty::Error,
                 }
             }
             NodeKind::Deref { base } => {
                 let bty = self.infer_expr(base);
                 let inner = self.cx.fresh();
-                let ptr = Ty::Ptr { mutable: false, inner: Box::new(inner.clone()) };
+                let ptr = Ty::Ptr {
+                    mutable: false,
+                    inner: Box::new(inner.clone()),
+                };
                 self.expect(base, &bty, &ptr);
                 inner
             }
@@ -235,8 +333,11 @@ impl Inferer<'_> {
                 let sty = self.infer_expr(scrutinee);
                 let result = self.cx.fresh();
                 for arm in arms {
-                    if let NodeKind::MatchArm { pattern, guard, body } =
-                        self.ast.node(arm).kind.clone()
+                    if let NodeKind::MatchArm {
+                        pattern,
+                        guard,
+                        body,
+                    } = self.ast.node(arm).kind.clone()
                     {
                         self.bind_pattern(pattern, &sty);
                         if let Some(g) = guard {
@@ -266,7 +367,12 @@ impl Inferer<'_> {
                     }
                 }
             }
-            NodeKind::IfMatch { pattern, value, then, els } => {
+            NodeKind::IfMatch {
+                pattern,
+                value,
+                then,
+                els,
+            } => {
                 let vty = self.infer_expr(value);
                 self.bind_pattern(pattern, &vty);
                 let then_ty = self.infer_expr(then);
@@ -293,7 +399,9 @@ impl Inferer<'_> {
                 self.infer_expr(body);
                 Ty::Void
             }
-            NodeKind::IntrinsicCall { generic_args, args, .. } => {
+            NodeKind::IntrinsicCall {
+                generic_args, args, ..
+            } => {
                 for a in &args {
                     self.infer_expr(*a);
                 }
@@ -313,26 +421,45 @@ impl Inferer<'_> {
                 self.infer_composite_body(&cty, &body);
                 cty
             }
-            NodeKind::VariantLit { args, .. } => {
-                for c in variant_arg_values(&self.ast.node(node).kind) {
-                    self.infer_expr(c);
+            NodeKind::VariantLit { name, args } => {
+                // The enum is only known from context (the expected type), so the
+                // result is a fresh variable and each payload argument is tied to
+                // the variant's declared payload type by a deferred obligation,
+                // discharged once that variable is solved to a `Nominal` enum.
+                let arg_tys = self.variant_lit_arg_tys(&args);
+                let recv = self.cx.fresh();
+                if !arg_tys.is_empty() {
+                    self.cx.register(Obligation::VariantPayload {
+                        recv: recv.clone(),
+                        variant: name,
+                        args: arg_tys,
+                        origin: node,
+                    });
                 }
-                let _ = args;
-                // The enum type is inferred from context; leave a variable to be
-                // unified against the expected type.
-                self.cx.fresh()
+                recv
             }
             NodeKind::Arg { value, .. } | NodeKind::FieldInit { value, .. } => {
                 self.infer_expr(value)
             }
             NodeKind::Range { start, end, .. } => {
+                // A range is a `Range.<T>` over its (unified) endpoint type — a
+                // real nominal, so `for x in a..<b` resolves `IntoIterator` on it.
+                let elem = self.cx.fresh();
                 if let Some(s) = start {
-                    self.infer_expr(s);
+                    let t = self.infer_expr(s);
+                    self.expect(s, &t, &elem);
                 }
                 if let Some(e) = end {
-                    self.infer_expr(e);
+                    let t = self.infer_expr(e);
+                    self.expect(e, &t, &elem);
                 }
-                self.cx.fresh()
+                match self.lang.get("range") {
+                    Some(def) => Ty::Nominal {
+                        def: self.defs.resolve_alias(def),
+                        args: vec![elem],
+                    },
+                    None => Ty::Error,
+                }
             }
             // A closure / nested function used as a value: its type is its
             // signature; its body is inferred independently by the file walker.
@@ -381,7 +508,9 @@ impl Inferer<'_> {
 
     fn infer_stmt(&mut self, node: NodeId) {
         match self.ast.node(node).kind.clone() {
-            NodeKind::LocalDecl { pattern, ty, value, .. } => {
+            NodeKind::LocalDecl {
+                pattern, ty, value, ..
+            } => {
                 let vty = self.infer_expr(value);
                 let bound = match ty {
                     Some(t) => {
@@ -392,6 +521,13 @@ impl Inferer<'_> {
                     None => vty,
                 };
                 self.bind_pattern(pattern, &bound);
+            }
+            // A `::` binding in statement position (a block-local const, or a
+            // synthetic `__it` / `__try` the desugarer introduced): type its RHS
+            // and bind the pattern, exactly like an un-annotated `let`.
+            NodeKind::ConstBind { pattern, rhs } => {
+                let vty = self.infer_expr(rhs);
+                self.bind_pattern(pattern, &vty);
             }
             NodeKind::Assign { place, value, .. } => {
                 let pty = self.infer_expr(place);
@@ -433,8 +569,14 @@ impl Inferer<'_> {
     fn infer_unary(&mut self, op: UnOp, operand: NodeId) -> Ty {
         let oty = self.infer_expr(operand);
         match op {
-            UnOp::Ref => Ty::Ptr { mutable: false, inner: Box::new(oty) },
-            UnOp::RefMut => Ty::Ptr { mutable: true, inner: Box::new(oty) },
+            UnOp::Ref => Ty::Ptr {
+                mutable: false,
+                inner: Box::new(oty),
+            },
+            UnOp::RefMut => Ty::Ptr {
+                mutable: true,
+                inner: Box::new(oty),
+            },
             UnOp::Neg | UnOp::BitNot => oty,
             UnOp::Not => {
                 self.expect(operand, &oty, &Ty::Bool);
@@ -443,7 +585,7 @@ impl Inferer<'_> {
         }
     }
 
-    fn infer_binary(&mut self, op: BinOp, lhs: NodeId, rhs: NodeId) -> Ty {
+    fn infer_binary(&mut self, node: NodeId, op: BinOp, lhs: NodeId, rhs: NodeId) -> Ty {
         let lty = self.infer_expr(lhs);
         let rty = self.infer_expr(rhs);
         match op {
@@ -454,15 +596,446 @@ impl Inferer<'_> {
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.expect(rhs, &rty, &lty);
+                // Comparing a *user* type requires it to implement `Eq` (`==`
+                // `!=`) or `Ord` (`<` `<=` `>` `>=`): register a trait bound the
+                // solver must witness. Primitives compare directly (no builtin
+                // `Eq`/`Ord` impl exists — they are the language's own).
+                self.check_cmp_bound(node, op, &lty);
                 Ty::Bool
             }
-            // Arithmetic / bitwise / shift: operands share a type; result is it.
-            // (Operator-trait overloading for user types is a later pass.)
+            // Arithmetic `+ - * / %` dispatch through the operator trait: the
+            // result is the projected `Output` of the selected impl, chosen
+            // uniformly for primitives (builtin) and user types (§6). Bitwise /
+            // shift stay a primitive `Binary` in the bootstrap.
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                self.infer_arith_op(node, op, lty, rty)
+            }
             _ => {
                 self.expect(rhs, &rty, &lty);
                 lty
             }
         }
+    }
+
+    /// For a comparison whose operands are a concrete nominal type, require the
+    /// corresponding equality/ordering trait via a [`Obligation::Trait`] bound.
+    /// A primitive or still-unknown operand is left alone (primitives are the
+    /// language's own comparison).
+    fn check_cmp_bound(&mut self, node: NodeId, op: BinOp, lty: &Ty) {
+        if !matches!(self.cx.shallow(lty), Ty::Nominal { .. }) {
+            return;
+        }
+        let lang = match op {
+            BinOp::Eq | BinOp::Ne => "eq",
+            _ => "ord",
+        };
+        let Some(trait_def) = self.lang.get(lang) else {
+            return;
+        };
+        self.cx.register(Obligation::Trait {
+            self_ty: lty.clone(),
+            trait_def: self.defs.resolve_alias(trait_def),
+            args: Vec::new(),
+            origin: node,
+        });
+    }
+
+    /// Type an arithmetic operator via its `#lang` operator trait: register a
+    /// projection obligation for `Self.Output` and return the (fresh) result
+    /// variable, solved once the impl is selected. Operands are assumed
+    /// homogeneous (the numeric core and bootstrap operator overloading both
+    /// have `Rhs = Self`), matching the pre-trait numeric behavior.
+    fn infer_arith_op(&mut self, node: NodeId, op: BinOp, lty: Ty, rty: Ty) -> Ty {
+        self.expect(node, &rty, &lty);
+        let Some(trait_def) = self.lang.get(binop_lang(op)) else {
+            // No operator trait registered: fall back to primitive typing.
+            return lty;
+        };
+        let trait_def = self.defs.resolve_alias(trait_def);
+        let out = self.cx.fresh();
+        // Numeric-core threading: for a primitive or still-unknown operand the
+        // result *is* the operand type (`Output = Self`), so link them eagerly.
+        // This keeps the pre-trait behavior — a literal's type flows through a
+        // chain of `+`s and back from the return — even while the projection is
+        // still deferred. A concrete *nominal* operand is left to the impl,
+        // whose `Output` may legitimately differ from `Self`.
+        if !matches!(self.cx.shallow(&lty), Ty::Nominal { .. }) {
+            let _ = self.cx.unify(&out, &lty);
+        }
+        self.cx.register(Obligation::Projection {
+            self_ty: lty,
+            trait_def,
+            args: vec![rty],
+            assoc: Symbol::new("Output"),
+            out: out.clone(),
+            origin: node,
+            op: Some(op),
+        });
+        out
+    }
+
+    // ===< trait solver: selection, projection, fulfillment >===
+
+    /// Discharge queued obligations, retrying until a full sweep makes no
+    /// progress. Solving one obligation can solve a variable that unblocks
+    /// another, so a single pass is not enough; a pass that decides nothing new
+    /// means the rest are stuck (reported by [`Inferer::report_unsolved`]).
+    fn solve_to_fixpoint(&mut self) {
+        while self.cx.has_obligations() {
+            let obligations = self.cx.take_obligations();
+            let mut progressed = false;
+            let mut deferred = Vec::new();
+            for ob in obligations {
+                match self.try_solve(&ob) {
+                    Outcome::Solved | Outcome::Failed => progressed = true,
+                    Outcome::Deferred => deferred.push(ob),
+                }
+            }
+            for ob in deferred {
+                self.cx.register(ob);
+            }
+            if !progressed {
+                break;
+            }
+        }
+    }
+
+    /// Attempt to discharge one obligation: select its impl, and for a
+    /// projection also compute and unify the associated type. Returns whether it
+    /// was solved, is still blocked on an unsolved variable, or failed (a
+    /// diagnostic was reported).
+    fn try_solve(&mut self, ob: &Obligation) -> Outcome {
+        match ob {
+            Obligation::Trait {
+                self_ty,
+                trait_def,
+                args,
+                origin,
+            } => match self.select(self_ty, *trait_def, args) {
+                Select::Ok(Choice::User(i)) => {
+                    self.commit_impl(i, self_ty, args);
+                    Outcome::Solved
+                }
+                Select::Ok(Choice::Builtin(_)) | Select::Error => Outcome::Solved,
+                Select::Defer => Outcome::Deferred,
+                Select::NoImpl => {
+                    self.report_no_impl(*origin, self_ty, *trait_def);
+                    Outcome::Failed
+                }
+                Select::Ambiguous => {
+                    self.report_ambiguous(*origin, self_ty, *trait_def);
+                    Outcome::Failed
+                }
+            },
+            Obligation::Projection {
+                self_ty,
+                trait_def,
+                args,
+                assoc,
+                out,
+                origin,
+                op,
+            } => match self.select(self_ty, *trait_def, args) {
+                Select::Ok(choice) => {
+                    let assoc_ty = match choice {
+                        Choice::Builtin(row) => self.builtin_output(row, self_ty),
+                        Choice::User(i) => {
+                            let map = self.commit_impl(i, self_ty, args);
+                            self.user_assoc(i, *origin, assoc, &map)
+                        }
+                    };
+                    self.expect(*origin, &assoc_ty, out);
+                    if let Some(binop) = op {
+                        self.stamp_op(*origin, choice, *trait_def, *binop);
+                    }
+                    Outcome::Solved
+                }
+                Select::Error => {
+                    let _ = self.cx.unify(out, &Ty::Error);
+                    Outcome::Solved
+                }
+                Select::Defer => Outcome::Deferred,
+                Select::NoImpl => {
+                    self.report_no_impl(*origin, self_ty, *trait_def);
+                    let _ = self.cx.unify(out, &Ty::Error);
+                    Outcome::Failed
+                }
+                Select::Ambiguous => {
+                    self.report_ambiguous(*origin, self_ty, *trait_def);
+                    let _ = self.cx.unify(out, &Ty::Error);
+                    Outcome::Failed
+                }
+            },
+            Obligation::VariantPayload { recv, variant, args, origin } => {
+                match self.cx.shallow(recv) {
+                    // Enum still unknown: retry once it is solved.
+                    Ty::Var(_) => Outcome::Deferred,
+                    // Not an enum (or an error): nothing to constrain.
+                    base if !matches!(base, Ty::Nominal { .. }) => Outcome::Solved,
+                    base => {
+                        if let Some(payload) = self.variant_payload(&base, variant.as_str()) {
+                            for (i, (arg_name, arg_ty)) in args.iter().enumerate() {
+                                let target = match arg_name {
+                                    Some(n) => payload
+                                        .iter()
+                                        .find(|(pn, _)| pn.as_ref() == Some(n))
+                                        .map(|(_, t)| t.clone()),
+                                    None => payload.get(i).map(|(_, t)| t.clone()),
+                                };
+                                if let Some(t) = target {
+                                    self.expect(*origin, arg_ty, &t);
+                                }
+                            }
+                        }
+                        Outcome::Solved
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pick the impl of `trait_def` that applies to `self_ty` (with trait
+    /// arguments `args`). Builtins and user impls are considered uniformly. A
+    /// concrete impl beats a generic (blanket) one; two equally specific matches
+    /// are an ambiguity error. An unknown self type defers; a known one with no
+    /// candidate is a "does not implement" error. Only [`in_scope`] traits are
+    /// candidates.
+    ///
+    /// [`in_scope`]: Inferer::in_scope_traits
+    fn select(&mut self, self_ty: &Ty, trait_def: DefId, args: &[Ty]) -> Select {
+        let s = self.cx.shallow(self_ty);
+        if matches!(s, Ty::Error) {
+            return Select::Error;
+        }
+        if !self.in_scope_traits.contains(&trait_def) {
+            return if is_var(&s) {
+                Select::Defer
+            } else {
+                Select::NoImpl
+            };
+        }
+
+        // Track the best (highest specificity) match, flagging a tie as
+        // ambiguous. Concrete impls (and builtins) score 2; a blanket impl for
+        // one of its own generics scores 1.
+        let mut best: Option<(u8, Choice)> = None;
+        let mut ambiguous = false;
+        let consider =
+            |score: u8, choice: Choice, best: &mut Option<(u8, Choice)>, ambiguous: &mut bool| {
+                match best {
+                    Some((bs, _)) if *bs > score => {}
+                    Some((bs, _)) if *bs == score => *ambiguous = true,
+                    _ => {
+                        *best = Some((score, choice));
+                        *ambiguous = false;
+                    }
+                }
+            };
+
+        if let Some(row) = self
+            .builtin_row_for_trait(trait_def)
+            .filter(|r| self.builtin_matches(r, &s))
+        {
+            consider(2, Choice::Builtin(row), &mut best, &mut ambiguous);
+        }
+        let candidates: Vec<usize> = (0..self.impls.impls.len())
+            .filter(|&i| self.impls.impls[i].trait_def == Some(trait_def))
+            .collect();
+        for i in candidates {
+            let generic = self.impls.impls[i].self_is_generic();
+            if self.trial_impl(i, &s, args) {
+                let score = if generic { 1 } else { 2 };
+                consider(score, Choice::User(i), &mut best, &mut ambiguous);
+            }
+        }
+
+        match best {
+            Some(_) if ambiguous => Select::Ambiguous,
+            Some((_, choice)) => Select::Ok(choice),
+            None if is_var(&s) => Select::Defer,
+            None => Select::NoImpl,
+        }
+    }
+
+    /// Speculatively unify a candidate impl's self type (and trait args) with
+    /// the obligation, rolling back afterwards; returns whether it fit.
+    fn trial_impl(&mut self, i: usize, s: &Ty, args: &[Ty]) -> bool {
+        let imp = self.impls.impls[i].clone();
+        let snap = self.cx.snapshot();
+        let map = self.fresh_impl_map(&imp.generics);
+        let impl_self = self.impl_self_ty(&imp, &map);
+        let mut ok = !matches!(impl_self, Ty::Error) && self.cx.unify(s, &impl_self).is_ok();
+        if ok && !imp.trait_args.is_empty() && imp.trait_args.len() == args.len() {
+            for (&node, a) in imp.trait_args.iter().zip(args) {
+                let t = self.ty_from_node_in(imp.file, node);
+                let t = self.subst_type_params(&t, &map);
+                if self.cx.unify(&t, a).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        self.cx.rollback(snap);
+        ok
+    }
+
+    /// Commit the chosen impl for real (no rollback), binding its generics; the
+    /// returned map (impl generic → solved type) drives associated-type
+    /// projection.
+    fn commit_impl(&mut self, i: usize, self_ty: &Ty, args: &[Ty]) -> HashMap<DefId, Ty> {
+        let imp = self.impls.impls[i].clone();
+        let map = self.fresh_impl_map(&imp.generics);
+        let impl_self = self.impl_self_ty(&imp, &map);
+        let _ = self.cx.unify(self_ty, &impl_self);
+        if !imp.trait_args.is_empty() && imp.trait_args.len() == args.len() {
+            for (&node, a) in imp.trait_args.iter().zip(args) {
+                let t = self.ty_from_node_in(imp.file, node);
+                let t = self.subst_type_params(&t, &map);
+                let _ = self.cx.unify(&t, a);
+            }
+        }
+        map
+    }
+
+    /// Build the impl's self [`Ty`] with its generics substituted by `map`.
+    fn impl_self_ty(&mut self, imp: &ImplInfo, map: &HashMap<DefId, Ty>) -> Ty {
+        let raw = self.ty_from_node_in(imp.file, imp.self_node);
+        self.subst_type_params(&raw, map)
+    }
+
+    /// A fresh inference variable per impl generic parameter.
+    fn fresh_impl_map(&mut self, generics: &[DefId]) -> HashMap<DefId, Ty> {
+        generics.iter().map(|&g| (g, self.cx.fresh())).collect()
+    }
+
+    /// The associated type `assoc` a user impl binds, with the impl's generics
+    /// substituted. Reports if the impl fails to bind it.
+    fn user_assoc(
+        &mut self,
+        i: usize,
+        origin: NodeId,
+        assoc: &Symbol,
+        map: &HashMap<DefId, Ty>,
+    ) -> Ty {
+        let imp = self.impls.impls[i].clone();
+        match imp.assoc.get(assoc) {
+            Some(&node) => {
+                let t = self.ty_from_node_in(imp.file, node);
+                self.subst_type_params(&t, map)
+            }
+            None => {
+                self.report(
+                    origin,
+                    format!("impl does not define associated type `{assoc}`"),
+                );
+                Ty::Error
+            }
+        }
+    }
+
+    /// Stamp how an operator resolved onto its node, so lowering emits a uniform
+    /// call (builtin-tagged for primitives).
+    fn stamp_op(&mut self, origin: NodeId, choice: Choice, trait_def: DefId, op: BinOp) {
+        let (method, builtin) = match choice {
+            Choice::Builtin(row) => (
+                self.defs
+                    .get(trait_def)
+                    .ns
+                    .members
+                    .get(&Symbol::new(row.method))
+                    .copied(),
+                Some(row.op),
+            ),
+            Choice::User(i) => (
+                self.impls.impls[i]
+                    .members
+                    .get(&Symbol::new(binop_method(op)))
+                    .copied(),
+                None,
+            ),
+        };
+        if let Some(method) = method {
+            self.ast.set_meta(origin, OpResolution { method, builtin });
+        }
+    }
+
+    /// The associated `Output` a builtin row produces for `self_ty`.
+    fn builtin_output(&self, row: &BuiltinRow, self_ty: &Ty) -> Ty {
+        match row.output {
+            builtins::OutputRule::SameAsSelf => self.cx.shallow(self_ty),
+        }
+    }
+
+    /// The builtin operator row a trait carries via its `#lang` tag, if any.
+    fn builtin_row_for_trait(&self, trait_def: DefId) -> Option<&'static BuiltinRow> {
+        let lang = self.defs.get(trait_def).lang.as_ref()?;
+        builtins::row_for_lang(lang.as_str())
+    }
+
+    /// Whether a builtin row applies to a (shallow) self type — a concrete
+    /// primitive of the right family, or a numeric literal variable of that
+    /// family (still un-defaulted, but already known to become one).
+    fn builtin_matches(&self, row: &BuiltinRow, self_shallow: &Ty) -> bool {
+        if row.applies.matches(self_shallow) {
+            return true;
+        }
+        match self.cx.var_kind(self_shallow) {
+            Some(TyVarKind::Int) => matches!(row.applies, Applies::Int | Applies::Numeric),
+            Some(TyVarKind::Float) => matches!(row.applies, Applies::Float | Applies::Numeric),
+            _ => false,
+        }
+    }
+
+    /// Report the obligations still stuck after the fixpoint. A concrete self
+    /// with no impl is a real error; a self still unknown is suppressed here (its
+    /// operand surfaces as "type annotations needed"), and the projection result
+    /// is pinned to `Error` so it does not cascade.
+    fn report_unsolved(&mut self, ob: &Obligation) {
+        let (self_ty, trait_def, origin, out) = match ob {
+            Obligation::Trait {
+                self_ty,
+                trait_def,
+                origin,
+                ..
+            } => (self_ty.clone(), *trait_def, *origin, None),
+            Obligation::Projection {
+                self_ty,
+                trait_def,
+                origin,
+                out,
+                ..
+            } => (self_ty.clone(), *trait_def, *origin, Some(out.clone())),
+            // A variant literal whose enum was never determined: the result
+            // variable itself surfaces as "type annotations needed" in finalize.
+            Obligation::VariantPayload { .. } => return,
+        };
+        let s = self.cx.shallow(&self_ty);
+        if !is_var(&s) {
+            self.report_no_impl(origin, &self_ty, trait_def);
+        }
+        if let Some(o) = out {
+            let _ = self.cx.unify(&o, &Ty::Error);
+        }
+    }
+
+    fn report_no_impl(&mut self, node: NodeId, self_ty: &Ty, trait_def: DefId) {
+        let s = self.cx.resolve(self_ty);
+        let msg = format!(
+            "`{}` does not implement `{}`",
+            s.display(self.defs),
+            self.defs.canonical_string(trait_def)
+        );
+        self.report(node, msg);
+    }
+
+    fn report_ambiguous(&mut self, node: NodeId, self_ty: &Ty, trait_def: DefId) {
+        let s = self.cx.resolve(self_ty);
+        let msg = format!(
+            "multiple applicable impls of `{}` for `{}`",
+            self.defs.canonical_string(trait_def),
+            s.display(self.defs)
+        );
+        self.report(node, msg);
     }
 
     // ===< calls >===
@@ -483,7 +1056,16 @@ impl Inferer<'_> {
         if let NodeKind::FieldAccess { base, name } = self.ast.node(callee).kind.clone() {
             if self.resolved_def(callee).is_none() {
                 let recv = self.infer_expr(base);
+                // Inherent (or trait-impl) method already collected into the
+                // receiver type's namespace: the fast path.
                 if let Some(m) = self.method_def(&recv, name.as_str()) {
+                    return self.infer_method_call(callee, &recv, m, args);
+                }
+                // Otherwise search in-scope trait impls whose self type unifies
+                // with the receiver — the only way to reach a method on a
+                // structural receiver (`[]T`, a range), whose impl parks its
+                // members outside any nominal namespace.
+                if let Some(m) = self.trait_method_def(&recv, name.as_str()) {
                     return self.infer_method_call(callee, &recv, m, args);
                 }
             }
@@ -525,8 +1107,8 @@ impl Inferer<'_> {
                 }
                 *ret
             }
-            // Unknown callee type: don't cascade.
-            _ => self.cx.fresh(),
+            // Unknown callee type: don't cascade (and don't dangle a variable).
+            _ => Ty::Error,
         }
     }
 
@@ -535,8 +1117,56 @@ impl Inferer<'_> {
         let Ty::Nominal { def, .. } = self.autoderef(recv) else {
             return None;
         };
-        let m = *self.defs.get(def).ns.members.get(&crate::common::symbol::Symbol::new(name))?;
+        let m = *self
+            .defs
+            .get(def)
+            .ns
+            .members
+            .get(&crate::common::symbol::Symbol::new(name))?;
         (self.defs.get(m).kind == DefKind::Func).then_some(m)
+    }
+
+    /// Resolve a method `name` by searching in-scope trait impls whose self type
+    /// unifies with the receiver. Used when the method is not an inherent /
+    /// namespace member — notably for structural receivers (`[]T`, a range),
+    /// whose impls have no host namespace. Concrete impls beat generic; a tie is
+    /// treated as unresolved (no dispatch).
+    fn trait_method_def(&mut self, recv: &Ty, name: &str) -> Option<DefId> {
+        let s = self.cx.shallow(recv);
+        let s = self.autoderef(&s);
+        if matches!(s, Ty::Error) || is_var(&s) {
+            return None;
+        }
+        let sym = crate::common::symbol::Symbol::new(name);
+        let mut best: Option<(u8, DefId)> = None;
+        let mut ambiguous = false;
+        for i in 0..self.impls.impls.len() {
+            let imp = self.impls.impls[i].clone();
+            let Some(td) = imp.trait_def else { continue };
+            if !self.in_scope_traits.contains(&td) {
+                continue;
+            }
+            let Some(&method) = imp.members.get(&sym) else { continue };
+            if self.defs.get(method).kind != DefKind::Func {
+                continue;
+            }
+            if self.trial_impl(i, &s, &[]) {
+                let score = if imp.self_is_generic() { 1 } else { 2 };
+                match best {
+                    Some((bs, _)) if bs > score => {}
+                    Some((bs, _)) if bs == score => ambiguous = true,
+                    _ => {
+                        best = Some((score, method));
+                        ambiguous = false;
+                    }
+                }
+            }
+        }
+        if ambiguous {
+            None
+        } else {
+            best.map(|(_, m)| m)
+        }
     }
 
     /// Type a `recv.method(args)` call: instantiate the method signature, unify
@@ -553,7 +1183,7 @@ impl Inferer<'_> {
         let inst = self.instantiate(&sig);
         self.types.insert(callee, inst.clone());
         let Ty::Func { params, ret } = self.cx.shallow(&inst) else {
-            return self.cx.fresh();
+            return Ty::Error;
         };
         // Unify the `self` parameter with the receiver (through a pointer if the
         // method takes `*Self` / `*mut Self`).
@@ -637,7 +1267,10 @@ impl Inferer<'_> {
             }
             Ty::Nominal { def, args } => Ty::Nominal {
                 def: *def,
-                args: args.iter().map(|a| self.subst_type_params(a, map)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| self.subst_type_params(a, map))
+                    .collect(),
             },
             Ty::Ptr { mutable, inner } => Ty::Ptr {
                 mutable: *mutable,
@@ -647,16 +1280,26 @@ impl Inferer<'_> {
                 mutable: *mutable,
                 inner: Box::new(self.subst_type_params(inner, map)),
             },
-            Ty::Array { len, mutable, inner } => Ty::Array {
+            Ty::Array {
+                len,
+                mutable,
+                inner,
+            } => Ty::Array {
                 len: *len,
                 mutable: *mutable,
                 inner: Box::new(self.subst_type_params(inner, map)),
             },
-            Ty::Tuple(elems) => {
-                Ty::Tuple(elems.iter().map(|e| self.subst_type_params(e, map)).collect())
-            }
+            Ty::Tuple(elems) => Ty::Tuple(
+                elems
+                    .iter()
+                    .map(|e| self.subst_type_params(e, map))
+                    .collect(),
+            ),
             Ty::Func { params, ret } => Ty::Func {
-                params: params.iter().map(|p| self.subst_type_params(p, map)).collect(),
+                params: params
+                    .iter()
+                    .map(|p| self.subst_type_params(p, map))
+                    .collect(),
                 ret: Box::new(self.subst_type_params(ret, map)),
             },
             other => other.clone(),
@@ -735,7 +1378,10 @@ impl Inferer<'_> {
         let ret = ret
             .map(|t| self.ty_from_node_in(file, t))
             .unwrap_or(Ty::Void);
-        Ty::Func { params, ret: Box::new(ret) }
+        Ty::Func {
+            params,
+            ret: Box::new(ret),
+        }
     }
 
     /// A nominal type for `def`, its type arguments left as fresh variables to be
@@ -765,26 +1411,168 @@ impl Inferer<'_> {
         }
     }
 
+    /// Infer each variant-literal payload argument, tagging record entries with
+    /// their field name (tuple entries get `None`).
+    fn variant_lit_arg_tys(
+        &mut self,
+        args: &VariantArgs,
+    ) -> Vec<(Option<crate::common::symbol::Symbol>, Ty)> {
+        match args {
+            VariantArgs::None => Vec::new(),
+            VariantArgs::Tuple(ids) => ids.iter().map(|&a| (None, self.infer_expr(a))).collect(),
+            VariantArgs::Record(ids) => ids
+                .iter()
+                .map(|&f| match self.ast.node(f).kind.clone() {
+                    NodeKind::FieldInit { name, value } => (Some(name), self.infer_expr(value)),
+                    _ => (None, self.infer_expr(f)),
+                })
+                .collect(),
+        }
+    }
+
+    // ===< generic substitution over members >===
+
+    /// The generic type-parameter [`DefId`]s a type def declares, in order.
+    fn type_param_defs(&self, def: DefId) -> Vec<DefId> {
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Vec::new();
+        };
+        let ast = &self.asts[&file];
+        let rhs = match &ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let generics = match &ast.node(rhs).kind {
+            NodeKind::StructType { generics, .. }
+            | NodeKind::EnumType { generics, .. }
+            | NodeKind::TraitType { generics, .. } => generics.clone(),
+            _ => return Vec::new(),
+        };
+        generics
+            .iter()
+            .filter_map(|&g| self.def_meta_in(file, g))
+            .collect()
+    }
+
+    /// The substitution `{ generic-param → type-arg }` for a nominal use
+    /// `Type.<args>` — how a `T`-typed field / variant payload becomes concrete.
+    fn nominal_subst(&self, def: DefId, args: &[Ty]) -> HashMap<DefId, Ty> {
+        self.type_param_defs(def)
+            .into_iter()
+            .zip(args.iter().cloned())
+            .collect()
+    }
+
+    fn def_meta_in(&self, file: FileId, node: NodeId) -> Option<DefId> {
+        self.asts[&file].meta::<DefMeta>(node).map(|m| m.0)
+    }
+
     // ===< field access >===
 
-    /// The declared type of field `name` on a nominal struct type, if reachable.
-    /// Auto-derefs through a pointer first (§3.2).
+    /// The declared type of field `name` on a nominal struct type, if reachable,
+    /// with the struct's generics substituted by the use-site's type arguments
+    /// (so `Wrap.<i32>`'s `T` field reads back as `i32`). Auto-derefs through a
+    /// pointer first (§3.2).
     fn field_ty(&mut self, base: &Ty, name: &str) -> Option<Ty> {
         let base = self.autoderef(base);
-        let Ty::Nominal { def, .. } = base else {
+        let Ty::Nominal { def, args } = base else {
             return None;
         };
-        let field = *self.defs.get(def).ns.members.get(&crate::common::symbol::Symbol::new(name))?;
+        let field = *self
+            .defs
+            .get(def)
+            .ns
+            .members
+            .get(&crate::common::symbol::Symbol::new(name))?;
         if self.defs.get(field).kind != DefKind::Field {
             return None;
         }
         let d = self.defs.get(field);
         let (file, node) = (d.file?, d.node?);
-        let ast = &self.asts[&file];
-        match ast.node(node).kind.clone() {
-            NodeKind::Field { ty, .. } => Some(self.ty_from_node_in(file, ty)),
+        match self.asts[&file].node(node).kind.clone() {
+            NodeKind::Field { ty, .. } => {
+                let map = self.nominal_subst(def, &args);
+                let t = self.ty_from_node_in(file, ty);
+                Some(self.subst_type_params(&t, &map))
+            }
             _ => None,
         }
+    }
+
+    /// The declared payload types of enum variant `name` on `base`, in order,
+    /// each paired with its field name (for record variants) and with the enum's
+    /// generics substituted. `None` if `base` is not an enum with that variant.
+    fn variant_payload(&mut self, base: &Ty, name: &str) -> Option<Vec<(Option<crate::common::symbol::Symbol>, Ty)>> {
+        use crate::parser::ast::VariantPayload;
+        let base = self.autoderef(base);
+        let Ty::Nominal { def, args } = base else {
+            return None;
+        };
+        let variant = *self
+            .defs
+            .get(def)
+            .ns
+            .members
+            .get(&crate::common::symbol::Symbol::new(name))?;
+        if self.defs.get(variant).kind != DefKind::Variant {
+            return None;
+        }
+        let vd = self.defs.get(variant);
+        let (file, node) = (vd.file?, vd.node?);
+        let payload = match &self.asts[&file].node(node).kind {
+            NodeKind::Variant { payload, .. } => payload.clone(),
+            _ => return None,
+        };
+        let map = self.nominal_subst(def, &args);
+        let mut out = Vec::new();
+        match payload {
+            VariantPayload::None => {}
+            VariantPayload::Tuple(tys) => {
+                for t in tys {
+                    let ty = self.ty_from_node_in(file, t);
+                    out.push((None, self.subst_type_params(&ty, &map)));
+                }
+            }
+            VariantPayload::Record(fields) => {
+                for f in fields {
+                    if let NodeKind::Field { name, ty, .. } = self.asts[&file].node(f).kind.clone() {
+                        let ty = self.ty_from_node_in(file, ty);
+                        out.push((Some(name), self.subst_type_params(&ty, &map)));
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// The positional field types of a tuple struct `Type(A, B, …)`, with
+    /// generics substituted. `None` if `base` is not a tuple struct.
+    fn tuple_struct_tys(&mut self, base: &Ty) -> Option<Vec<Ty>> {
+        use crate::parser::ast::StructKind;
+        let base = self.autoderef(base);
+        let Ty::Nominal { def, args } = base else {
+            return None;
+        };
+        let d = self.defs.get(def);
+        let (file, node) = (d.file?, d.node?);
+        let rhs = match &self.asts[&file].node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let tys = match &self.asts[&file].node(rhs).kind {
+            NodeKind::StructType { kind: StructKind::Tuple(tys), .. } => tys.clone(),
+            _ => return None,
+        };
+        let map = self.nominal_subst(def, &args);
+        Some(
+            tys.iter()
+                .map(|&t| {
+                    let ty = self.ty_from_node_in(file, t);
+                    self.subst_type_params(&ty, &map)
+                })
+                .collect(),
+        )
     }
 
     /// Peel pointers off a (shallow-resolved) type for member/field access.
@@ -822,7 +1610,10 @@ impl Inferer<'_> {
             }
             NodeKind::RefPat { pattern } => {
                 let inner = self.cx.fresh();
-                let ptr = Ty::Ptr { mutable: false, inner: Box::new(inner.clone()) };
+                let ptr = Ty::Ptr {
+                    mutable: false,
+                    inner: Box::new(inner.clone()),
+                };
                 let _ = self.cx.unify(ty, &ptr);
                 self.bind_pattern(pattern, &inner);
             }
@@ -831,40 +1622,57 @@ impl Inferer<'_> {
                     self.bind_pattern(a, ty);
                 }
             }
-            // Variant / struct / slice patterns bind their sub-patterns to fresh
-            // types in the bootstrap (payload typing arrives with enum generics).
-            NodeKind::VariantPat { .. } | NodeKind::FieldPat { .. } => {
-                // Payload element types are not yet threaded from the enum's
-                // generics, so each sub-binding gets a fresh variable.
-                for c in self.ast.node(pat).kind.children() {
-                    let v = self.cx.fresh();
-                    self.bind_pattern(c, &v);
-                }
-                // A shorthand record field (`{ radius }`) binds the field name
-                // itself rather than a sub-pattern.
-                if let NodeKind::FieldPat { pattern: None, .. } = self.ast.node(pat).kind {
-                    if let Some(def) = self.def_of(pat) {
-                        let v = self.cx.fresh();
-                        self.env.insert(def, v);
+            // A variant pattern binds each payload sub-pattern to the variant's
+            // declared payload type (generics substituted from the scrutinee).
+            NodeKind::VariantPat { name, args } => match args {
+                VariantPatArgs::None => {}
+                VariantPatArgs::Tuple(elems) => {
+                    let payload = self.variant_payload(ty, name.as_str());
+                    for (i, e) in elems.iter().enumerate() {
+                        let pty = payload
+                            .as_ref()
+                            .and_then(|p| p.get(i))
+                            .map(|(_, t)| t.clone())
+                            .unwrap_or_else(|| self.cx.fresh());
+                        self.bind_pattern(*e, &pty);
                     }
                 }
-            }
+                VariantPatArgs::Record { fields, .. } => {
+                    let payload = self.variant_payload(ty, name.as_str());
+                    for f in fields {
+                        self.bind_record_field(f, payload.as_deref());
+                    }
+                }
+            },
+            // A `FieldPat` reached on its own (defensive: normally handled by its
+            // enclosing struct/variant record).
+            NodeKind::FieldPat { .. } => self.bind_record_field(pat, None),
             NodeKind::StructPat { fields, .. } => {
                 for f in fields {
-                    if let NodeKind::FieldPat { pattern: Some(p), .. } =
-                        self.ast.node(f).kind.clone()
-                    {
-                        let v = self.cx.fresh();
-                        self.bind_pattern(p, &v);
-                    } else if let Some(def) = self.def_of(f) {
-                        self.env.insert(def, self.cx.fresh());
+                    let NodeKind::FieldPat { name, pattern, .. } = self.ast.node(f).kind.clone()
+                    else {
+                        continue;
+                    };
+                    let fty = self.field_ty(ty, name.as_str()).unwrap_or_else(|| self.cx.fresh());
+                    match pattern {
+                        Some(p) => self.bind_pattern(p, &fty),
+                        None => {
+                            if let Some(def) = self.def_of(f) {
+                                self.env.insert(def, fty);
+                            }
+                        }
                     }
                 }
             }
             NodeKind::TupleStructPat { elems, .. } => {
-                for e in elems {
-                    let v = self.cx.fresh();
-                    self.bind_pattern(e, &v);
+                let tys = self.tuple_struct_tys(ty);
+                for (i, e) in elems.iter().enumerate() {
+                    let pty = tys
+                        .as_ref()
+                        .and_then(|t| t.get(i))
+                        .cloned()
+                        .unwrap_or_else(|| self.cx.fresh());
+                    self.bind_pattern(*e, &pty);
                 }
             }
             NodeKind::SlicePat { elems, rest } => {
@@ -874,13 +1682,41 @@ impl Inferer<'_> {
                 }
                 if let Some(Some(_)) = rest {
                     if let Some(def) = self.def_of(pat) {
-                        self.env
-                            .insert(def, Ty::Slice { mutable: false, inner: Box::new(elem) });
+                        self.env.insert(
+                            def,
+                            Ty::Slice {
+                                mutable: false,
+                                inner: Box::new(elem),
+                            },
+                        );
                     }
                 }
             }
             // Wildcards, literals, ranges bind nothing.
             _ => {}
+        }
+    }
+
+    /// Bind one record `FieldPat` (`{ radius }` shorthand or `{ radius: p }`),
+    /// typed from `payload` (the enclosing variant's field types) by name.
+    fn bind_record_field(
+        &mut self,
+        f: NodeId,
+        payload: Option<&[(Option<crate::common::symbol::Symbol>, Ty)]>,
+    ) {
+        let NodeKind::FieldPat { name, pattern, .. } = self.ast.node(f).kind.clone() else {
+            return;
+        };
+        let fty = payload
+            .and_then(|p| p.iter().find(|(n, _)| n.as_ref() == Some(&name)).map(|(_, t)| t.clone()))
+            .unwrap_or_else(|| self.cx.fresh());
+        match pattern {
+            Some(p) => self.bind_pattern(p, &fty),
+            None => {
+                if let Some(def) = self.def_of(f) {
+                    self.env.insert(def, fty);
+                }
+            }
         }
     }
 
@@ -904,7 +1740,12 @@ impl Inferer<'_> {
                 mutable,
                 inner: Box::new(self.ty_from_node_in(file, inner)),
             },
-            NodeKind::ArrayType { len, mutable, inner, .. } => {
+            NodeKind::ArrayType {
+                len,
+                mutable,
+                inner,
+                ..
+            } => {
                 let len = self.const_len_in(file, len);
                 Ty::Array {
                     len,
@@ -916,21 +1757,30 @@ impl Inferer<'_> {
                 if elems.is_empty() {
                     Ty::Void
                 } else {
-                    Ty::Tuple(elems.iter().map(|e| self.ty_from_node_in(file, *e)).collect())
+                    Ty::Tuple(
+                        elems
+                            .iter()
+                            .map(|e| self.ty_from_node_in(file, *e))
+                            .collect(),
+                    )
                 }
             }
             NodeKind::FuncType { params, ret, .. } => Ty::Func {
-                params: params.iter().map(|p| self.ty_from_node_in(file, *p)).collect(),
-                ret: Box::new(ret.map(|t| self.ty_from_node_in(file, t)).unwrap_or(Ty::Void)),
+                params: params
+                    .iter()
+                    .map(|p| self.ty_from_node_in(file, *p))
+                    .collect(),
+                ret: Box::new(
+                    ret.map(|t| self.ty_from_node_in(file, t))
+                        .unwrap_or(Ty::Void),
+                ),
             },
             NodeKind::DynType { inner } => match self.type_head_def_in(file, inner) {
                 Some(def) => Ty::Dyn(def),
                 None => Ty::Error,
             },
             NodeKind::DistinctType { inner } => self.ty_from_node_in(file, inner),
-            NodeKind::TypePath { generic_args, .. } => {
-                self.typepath_ty(file, node, &generic_args)
-            }
+            NodeKind::TypePath { generic_args, .. } => self.typepath_ty(file, node, &generic_args),
             // `Type.<args>` in expression position (e.g. a composite-literal head)
             // parses as a postfix generic application; resolve it like a typepath
             // whose head is the base.
@@ -951,7 +1801,7 @@ impl Inferer<'_> {
             DefKind::Primitive => {
                 primitive_ty(self.defs.get(def).name.as_str()).unwrap_or(Ty::Error)
             }
-            DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias => {
+            DefKind::Struct | DefKind::Enum | DefKind::Trait => {
                 let args = generic_args
                     .iter()
                     .filter(|&&a| {
@@ -965,10 +1815,43 @@ impl Inferer<'_> {
                 }
                 Ty::Nominal { def, args }
             }
+            // A type alias (a `distinct`/plain alias, or an impl's associated-type
+            // binding `Output :: Vec3`) expands to its right-hand side. This is
+            // what turns `Self.Output` on a concrete type into the impl's chosen
+            // type (§ associated-type projection).
+            DefKind::TypeAlias => self.expand_alias(def),
             // A generic type parameter is a rigid opaque type of its own def.
             DefKind::TypeParam => Ty::Nominal { def, args: vec![] },
             _ => Ty::Error,
         }
+    }
+
+    /// Expand a type-alias / associated-type binding to the type it names.
+    ///
+    /// For an impl's `Output :: Vec3` this is `Vec3`; for a `distinct`/plain
+    /// alias it is the aliased type. An **abstract** associated type (a trait's
+    /// `Output :: type`, reached when the self type is still generic) has no
+    /// concrete value, so it becomes a fresh variable to be pinned by context
+    /// (e.g. the enclosing return type). Cycles fall back to an opaque nominal.
+    fn expand_alias(&mut self, def: DefId) -> Ty {
+        if self.alias_stack.contains(&def) {
+            return Ty::Nominal { def, args: Vec::new() };
+        }
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Ty::Nominal { def, args: Vec::new() };
+        };
+        let rhs = match &self.asts[&file].node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        if matches!(self.asts[&file].node(rhs).kind, NodeKind::AssocType { .. }) {
+            return self.cx.fresh();
+        }
+        self.alias_stack.push(def);
+        let ty = self.ty_from_node_in(file, rhs);
+        self.alias_stack.pop();
+        ty
     }
 
     /// Read a literal array length if the length expression is an int literal.
@@ -1044,13 +1927,60 @@ impl Inferer<'_> {
 
     fn report(&mut self, node: NodeId, message: impl Into<String>) {
         let span = self.ast.node(node).span;
-        self.diags.push(
-            Diagnostic::error(message).with_primary(FileSpan::new(self.file, span), ""),
-        );
+        self.diags
+            .push(Diagnostic::error(message).with_primary(FileSpan::new(self.file, span), ""));
     }
 }
 
-/// The value nodes carried by a `VariantLit`'s payload.
-fn variant_arg_values(kind: &NodeKind) -> Vec<NodeId> {
-    kind.children()
+/// The outcome of attempting one [`Obligation`].
+enum Outcome {
+    /// Discharged.
+    Solved,
+    /// Blocked on an unsolved variable; retry after more inference.
+    Deferred,
+    /// Unsatisfiable; a diagnostic was reported.
+    Failed,
+}
+
+/// The result of impl selection for an obligation.
+enum Select {
+    /// A unique best impl was found.
+    Ok(Choice),
+    /// The self type is not yet known; try again later.
+    Defer,
+    /// No candidate impl applies to a known self type.
+    NoImpl,
+    /// Two or more equally specific impls apply.
+    Ambiguous,
+    /// The self type is already `Error`; absorb without further diagnostics.
+    Error,
+}
+
+/// The selected impl: a builtin primitive op, or a user impl (by table index).
+#[derive(Clone, Copy)]
+enum Choice {
+    Builtin(&'static BuiltinRow),
+    User(usize),
+}
+
+fn is_var(ty: &Ty) -> bool {
+    matches!(ty, Ty::Var(_))
+}
+
+/// The `#lang` tag of the operator trait an arithmetic [`BinOp`] dispatches to.
+fn binop_lang(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "add",
+        BinOp::Sub => "sub",
+        BinOp::Mul => "mul",
+        BinOp::Div => "div",
+        BinOp::Rem => "rem",
+        _ => "",
+    }
+}
+
+/// The trait method name an arithmetic [`BinOp`] calls.
+fn binop_method(op: BinOp) -> &'static str {
+    // For the arithmetic operators the method name equals the `#lang` tag.
+    binop_lang(op)
 }

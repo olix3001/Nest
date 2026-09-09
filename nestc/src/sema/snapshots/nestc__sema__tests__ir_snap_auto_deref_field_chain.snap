@@ -1,0 +1,7 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"Q :: struct { v: i32 }\\nP :: struct { inner: Q }\\nchain :: func (p: *P) -> i32 { return p.inner.v }\\n\")"
+---
+func chain(p: *P) -> i32 {
+  return (((p: *P.*): P.inner): Q.v): i32
+}

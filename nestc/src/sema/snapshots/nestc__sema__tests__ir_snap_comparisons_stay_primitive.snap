@@ -1,0 +1,13 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"cmp :: func (a: i32, b: i32) -> bool {\\n  let e := a == b\\n  let ne := a != b\\n  let lt := a < b\\n  let le := a <= b\\n  let gt := a > b\\n  let ge := a >= b\\n  return e\\n}\\n\")"
+---
+func cmp(a: i32, b: i32) -> bool {
+  let e: bool = (a: i32 Eq b: i32): bool
+  let ne: bool = (a: i32 Ne b: i32): bool
+  let lt: bool = (a: i32 Lt b: i32): bool
+  let le: bool = (a: i32 Le b: i32): bool
+  let gt: bool = (a: i32 Gt b: i32): bool
+  let ge: bool = (a: i32 Ge b: i32): bool
+  return e: bool
+}

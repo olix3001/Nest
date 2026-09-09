@@ -188,7 +188,10 @@ impl Session {
                 None,
                 vec![Symbol::new(prim)],
             );
-            defs.get_mut(builtins).ns.members.insert(Symbol::new(prim), id);
+            defs.get_mut(builtins)
+                .ns
+                .members
+                .insert(Symbol::new(prim), id);
         }
         let mut session = Self {
             sources: SourceMap::new(),
@@ -236,7 +239,9 @@ impl Session {
         for err in errors {
             self.diagnostics
                 .push(crate::common::diagnostic::simple_error(
-                    file, err.span, err.message,
+                    file,
+                    err.span,
+                    err.message,
                 ));
         }
         self.asts.insert(file, ast);

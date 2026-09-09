@@ -1,0 +1,13 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"ml :: func (n: i32) -> i32 {\\n  return n.match {\\n    0 => 10,\\n    1 | 2 => 20,\\n    x if x > 5 => 30,\\n    _ => 0,\\n  }\\n}\\n\")"
+---
+func ml(n: i32) -> i32 {
+  match n: i32 {
+    0 => 10: i32
+    1 | 2 => 20: i32
+    x => if (x: i32 Gt 5: i32): bool 30: i32
+    _ => 0: i32
+  }
+  return <match: i32>
+}

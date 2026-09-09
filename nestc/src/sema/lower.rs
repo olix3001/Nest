@@ -23,14 +23,13 @@ use std::collections::HashMap;
 
 use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
-use crate::parser::ast::{
-    Ast, CompositeBody, NodeId, NodeKind, UnOp, VariantArgs, VariantPatArgs,
-};
+use crate::parser::ast::{Ast, CompositeBody, NodeId, NodeKind, UnOp, VariantArgs, VariantPatArgs};
 
 use super::def::{DefId, DefKind, DefTable};
-use crate::ir::{Arm, Block, Expr, Function, Param, Pattern, Program, Stmt};
+use super::infer::OpResolution;
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
+use crate::ir::{Arm, Block, Expr, Function, Param, Pattern, Program, Stmt};
 
 /// Lower every function body in `file` to IR.
 pub fn lower_file(defs: &DefTable, asts: &HashMap<FileId, Ast>, file: FileId) -> Program {
@@ -75,10 +74,7 @@ impl Lowerer<'_> {
         };
         let name = self.defs.get(def).name.clone();
         let ret = self.ty(func);
-        let params = params
-            .iter()
-            .filter_map(|&p| self.lower_param(p))
-            .collect();
+        let params = params.iter().filter_map(|&p| self.lower_param(p)).collect();
         let body = self.lower_block(body?);
         Some(Function {
             def,
@@ -128,22 +124,31 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Lower a pattern-binding statement (`let` / `const` / synthetic `::`) to
+    /// an IR `Let`, or — for a destructuring pattern that binds no single def —
+    /// keep the initializer for effect.
+    fn lower_binding(&mut self, pattern: NodeId, value: NodeId, out: &mut Vec<Stmt>) {
+        let init = self.lower_expr(value);
+        match self.def_of(pattern) {
+            Some(def) => out.push(Stmt::Let {
+                def,
+                name: self.defs.get(def).name.clone(),
+                ty: init.ty().clone(),
+                init,
+            }),
+            // A destructuring binding: keep the initializer for effect
+            // (pattern-binding lowering is a later refinement).
+            None => out.push(Stmt::Expr(init)),
+        }
+    }
+
     fn lower_stmt(&mut self, node: NodeId, out: &mut Vec<Stmt>) {
         match self.ast.node(node).kind.clone() {
-            NodeKind::LocalDecl { pattern, value, .. } => {
-                let init = self.lower_expr(value);
-                match self.def_of(pattern) {
-                    Some(def) => out.push(Stmt::Let {
-                        def,
-                        name: self.defs.get(def).name.clone(),
-                        ty: init.ty().clone(),
-                        init,
-                    }),
-                    // A destructuring binding: keep the initializer for effect
-                    // (pattern-binding lowering is a later refinement).
-                    None => out.push(Stmt::Expr(init)),
-                }
-            }
+            // A `let`/`const` local, or a `::` binding the desugarer introduced
+            // in statement position (`__it`, `__try`): both bind a pattern to an
+            // initializer and lower to an IR `Let`.
+            NodeKind::LocalDecl { pattern, value, .. } => self.lower_binding(pattern, value, out),
+            NodeKind::ConstBind { pattern, rhs } => self.lower_binding(pattern, rhs, out),
             NodeKind::Assign { place, value, op } => {
                 let place = self.lower_expr(place);
                 let value = self.lower_expr(value);
@@ -234,14 +239,26 @@ impl Lowerer<'_> {
             NodeKind::Call { callee, args } => {
                 let callee = Box::new(self.lower_expr(callee));
                 let args = args.iter().map(|&a| self.lower_arg(a)).collect();
-                Expr::Call { callee, args, ty }
+                Expr::Call {
+                    callee,
+                    args,
+                    builtin: None,
+                    ty,
+                }
             }
             NodeKind::GenericApply { base, .. } => self.lower_expr(base),
-            NodeKind::Binary { op, lhs, rhs } => Expr::Binary {
-                op,
-                lhs: Box::new(self.lower_expr(lhs)),
-                rhs: Box::new(self.lower_expr(rhs)),
-                ty,
+            // An arithmetic operator that resolved through an operator trait
+            // lowers to a **uniform** call to the chosen method — the same shape
+            // for a primitive `i32 + i32` and a user `Vec3 + Vec3` (§6). The
+            // `builtin` tag lets codegen recognize the primitive case in O(1).
+            NodeKind::Binary { op, lhs, rhs } => match self.ast.meta::<OpResolution>(node) {
+                Some(res) => self.lower_op_call(res, lhs, rhs, ty),
+                None => Expr::Binary {
+                    op,
+                    lhs: Box::new(self.lower_expr(lhs)),
+                    rhs: Box::new(self.lower_expr(rhs)),
+                    ty,
+                },
             },
             NodeKind::Unary { op, operand } => match op {
                 UnOp::Ref | UnOp::RefMut => Expr::Ref {
@@ -296,7 +313,12 @@ impl Lowerer<'_> {
                 els: els.map(|e| self.lower_block(e)),
                 ty,
             },
-            NodeKind::IfMatch { pattern, value, then, els } => {
+            NodeKind::IfMatch {
+                pattern,
+                value,
+                then,
+                els,
+            } => {
                 // `if match p := v { then } else { els }` -> a two-arm match.
                 let scrutinee = Box::new(self.lower_expr(value));
                 let then_block = self.lower_block(then);
@@ -308,7 +330,10 @@ impl Lowerer<'_> {
                 }];
                 let else_body = match els {
                     Some(e) => Expr::Block(self.lower_block(e)),
-                    None => Expr::Tuple { elems: vec![], ty: Ty::Void },
+                    None => Expr::Tuple {
+                        elems: vec![],
+                        ty: Ty::Void,
+                    },
                 };
                 arms.push(Arm {
                     pattern: Pattern::Wildcard,
@@ -324,7 +349,10 @@ impl Lowerer<'_> {
             }
             NodeKind::MatchExpr { scrutinee, arms } => Expr::Match {
                 scrutinee: Box::new(self.lower_expr(scrutinee)),
-                arms: arms.iter().filter_map(|&a| self.lower_match_arm(a)).collect(),
+                arms: arms
+                    .iter()
+                    .filter_map(|&a| self.lower_match_arm(a))
+                    .collect(),
                 ty,
             },
             NodeKind::Loop { body } => Expr::Loop {
@@ -337,7 +365,9 @@ impl Lowerer<'_> {
                 args: self.lower_variant_args(&args),
                 ty,
             },
-            NodeKind::CompositeLit { ty: ty_node, body } => self.lower_composite(ty_node, &body, ty),
+            NodeKind::CompositeLit { ty: ty_node, body } => {
+                self.lower_composite(ty_node, &body, ty)
+            }
             NodeKind::IntrinsicCall { name, args, .. } => Expr::Intrinsic {
                 name,
                 args: args.iter().map(|&a| self.lower_expr(a)).collect(),
@@ -346,6 +376,27 @@ impl Lowerer<'_> {
             NodeKind::Arg { value, .. } => self.lower_expr(value),
             // Closures / nested-function values are not lowered in the bootstrap.
             _ => Expr::Error(ty),
+        }
+    }
+
+    /// Lower an arithmetic operator to a uniform call to its resolved method.
+    /// The callee is the trait/impl method as a global; its function type is
+    /// reconstructed from the operand and result types so the IR stays fully
+    /// typed. `builtin` carries through the primitive-op tag for codegen.
+    fn lower_op_call(&mut self, res: OpResolution, lhs: NodeId, rhs: NodeId, ty: Ty) -> Expr {
+        let lty = self.ty(lhs);
+        let rty = self.ty(rhs);
+        let callee_ty = Ty::Func {
+            params: vec![lty, rty],
+            ret: Box::new(ty.clone()),
+        };
+        let callee = Box::new(Expr::Global(res.method, callee_ty));
+        let args = vec![self.lower_expr(lhs), self.lower_expr(rhs)];
+        Expr::Call {
+            callee,
+            args,
+            builtin: res.builtin,
+            ty,
         }
     }
 
@@ -440,7 +491,12 @@ impl Lowerer<'_> {
     // ===< match arms / patterns >===
 
     fn lower_match_arm(&mut self, node: NodeId) -> Option<Arm> {
-        let NodeKind::MatchArm { pattern, guard, body } = self.ast.node(node).kind.clone() else {
+        let NodeKind::MatchArm {
+            pattern,
+            guard,
+            body,
+        } = self.ast.node(node).kind.clone()
+        else {
             return None;
         };
         Some(Arm {
@@ -465,9 +521,12 @@ impl Lowerer<'_> {
             NodeKind::TuplePat { elems } => {
                 Pattern::Tuple(elems.iter().map(|&e| self.lower_pattern(e)).collect())
             }
-            NodeKind::OrPat { alternatives } => {
-                Pattern::Or(alternatives.iter().map(|&a| self.lower_pattern(a)).collect())
-            }
+            NodeKind::OrPat { alternatives } => Pattern::Or(
+                alternatives
+                    .iter()
+                    .map(|&a| self.lower_pattern(a))
+                    .collect(),
+            ),
             NodeKind::AtPat { name, pattern } => match self.def_of(node) {
                 // Keep the binding; the sub-pattern's tests are dropped in the
                 // bootstrap (a decision-tree pass reintroduces them).
@@ -490,8 +549,14 @@ impl Lowerer<'_> {
             VariantPatArgs::Record { fields, .. } => fields
                 .iter()
                 .map(|&f| match self.ast.node(f).kind.clone() {
-                    NodeKind::FieldPat { pattern: Some(p), .. } => self.lower_pattern(p),
-                    NodeKind::FieldPat { name, pattern: None, .. } => match self.def_of(f) {
+                    NodeKind::FieldPat {
+                        pattern: Some(p), ..
+                    } => self.lower_pattern(p),
+                    NodeKind::FieldPat {
+                        name,
+                        pattern: None,
+                        ..
+                    } => match self.def_of(f) {
                         Some(def) => Pattern::Binding { def, name },
                         None => Pattern::Wildcard,
                     },

@@ -1,0 +1,22 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text_lenient(\"fallible :: func () -> Result.<i32, i32> { return .ok(1) }\\nta :: func () -> i32 {\\n  const x := fallible().!\\n  return x\\n}\\n\")"
+---
+func fallible() -> core.Result.<i32, i32> {
+  return .ok(1: i32): core.Result.<i32, i32>
+}
+func ta() -> i32 {
+  block: void {
+    let __try1: <error> = (((fallible: func() -> core.Result.<i32, i32>)(): core.Result.<i32, i32>.branch): <error>)(): <error>
+    match __try1: <error> {
+      .ok(__v2) => __v2: void
+      block: void {
+        $abort(__r3: <error>): <error>
+      }
+      .err(__r3) => <block: void>
+    }
+    tail <match: void>
+  }
+  let x: void = <block: void>
+  return x: void
+}

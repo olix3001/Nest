@@ -26,7 +26,9 @@ use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
-use crate::parser::ast::{Ast, NodeId, NodeKind, TryKind, VariantArgs, VariantPatArgs};
+use crate::parser::ast::{
+    AssignOp, Ast, BinOp, NodeId, NodeKind, TryKind, VariantArgs, VariantPatArgs,
+};
 
 use super::def::{DefId, DefKind, DefTable, LangItems, Visibility};
 use super::{DefMeta, Resolution};
@@ -79,8 +81,39 @@ impl Desugar<'_> {
                 body,
             } => self.lower_for(id, pattern, iter, body),
             NodeKind::Try { base, kind } => self.lower_try(id, base, kind),
+            // `a op= b` → `a = a op b`, so the resulting `op` lowers through the
+            // operator trait like any other binary. `a` is shared between the
+            // place and the operator's left operand (both already resolved).
+            NodeKind::Assign { op, place, value } if op != AssignOp::Assign => {
+                self.lower_compound_assign(id, op, place, value)
+            }
             _ => {}
         }
+    }
+
+    // ===< compound assignment >===
+
+    fn lower_compound_assign(&mut self, id: NodeId, op: AssignOp, place: NodeId, value: NodeId) {
+        let Some(bin_op) = compound_binop(op) else {
+            return;
+        };
+        let span = self.ast.node(id).span;
+        let binary = self.alloc(
+            span,
+            NodeKind::Binary {
+                op: bin_op,
+                lhs: place,
+                rhs: value,
+            },
+        );
+        self.replace(
+            id,
+            NodeKind::Assign {
+                op: AssignOp::Assign,
+                place,
+                value: binary,
+            },
+        );
     }
 
     // ===< for >===
@@ -96,7 +129,13 @@ impl Desugar<'_> {
         // __it :: (iter).into_iter()
         let into = self.method_call(span, iter, "into_iter", vec![]);
         let (it_pat, it_local) = self.binding_pat(span, &it_name);
-        let it_bind = self.alloc(span, NodeKind::ConstBind { pattern: it_pat, rhs: into });
+        let it_bind = self.alloc(
+            span,
+            NodeKind::ConstBind {
+                pattern: it_pat,
+                rhs: into,
+            },
+        );
 
         // if match .some(pat) := __it.next() then body else { break }
         let it_ref = self.local_ref(span, &it_name, it_local);
@@ -145,7 +184,13 @@ impl Desugar<'_> {
         // __try :: Try.branch(base)
         let branch = self.method_call(span, base, "branch", vec![]);
         let (tmp_pat, tmp_local) = self.binding_pat(span, &tmp);
-        let tmp_bind = self.alloc(span, NodeKind::ConstBind { pattern: tmp_pat, rhs: branch });
+        let tmp_bind = self.alloc(
+            span,
+            NodeKind::ConstBind {
+                pattern: tmp_pat,
+                rhs: branch,
+            },
+        );
 
         // .ok(v) => v
         let (v_pat, v_local) = self.binding_pat(span, &v);
@@ -160,7 +205,12 @@ impl Desugar<'_> {
         let fail = match kind {
             TryKind::Propagate => {
                 let err_val = self.variant_lit(span, "err", r_ref);
-                self.alloc(span, NodeKind::Return { value: Some(err_val) })
+                self.alloc(
+                    span,
+                    NodeKind::Return {
+                        value: Some(err_val),
+                    },
+                )
             }
             TryKind::Abort => self.alloc(
                 span,
@@ -291,8 +341,19 @@ impl Desugar<'_> {
 
     fn report(&mut self, node: NodeId, message: impl Into<String>) {
         let span = self.ast.node(node).span;
-        self.diags.push(
-            Diagnostic::error(message).with_primary(FileSpan::new(self.file, span), ""),
-        );
+        self.diags
+            .push(Diagnostic::error(message).with_primary(FileSpan::new(self.file, span), ""));
+    }
+}
+
+/// The binary operator a compound assignment (`+=`, `*=`, …) expands to.
+fn compound_binop(op: AssignOp) -> Option<BinOp> {
+    match op {
+        AssignOp::Add => Some(BinOp::Add),
+        AssignOp::Sub => Some(BinOp::Sub),
+        AssignOp::Mul => Some(BinOp::Mul),
+        AssignOp::Div => Some(BinOp::Div),
+        AssignOp::Rem => Some(BinOp::Rem),
+        AssignOp::Assign => None,
     }
 }

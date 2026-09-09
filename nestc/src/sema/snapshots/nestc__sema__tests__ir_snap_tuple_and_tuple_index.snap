@@ -1,0 +1,8 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"tup :: func () -> isize {\\n  let t := (1, 2, 3)\\n  return t.0 + t.1 + t.2\\n}\\n\")"
+---
+func tup() -> isize {
+  let t: (isize, isize, isize) = (1: isize, 2: isize, 3: isize): (isize, isize, isize)
+  return #builtin(Add) (core.Add.add: func(isize, isize) -> isize)(#builtin(Add) (core.Add.add: func(isize, isize) -> isize)((t: (isize, isize, isize).0): isize, (t: (isize, isize, isize).1): isize): isize, (t: (isize, isize, isize).2): isize): isize
+}

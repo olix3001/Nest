@@ -1,0 +1,8 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"ix :: func (a: []i32) -> i32 {\\n  let b := a[1..<3]\\n  return a[0]\\n}\\n\")"
+---
+func ix(a: []i32) -> i32 {
+  let b: []i32 = $slice(a: []i32, $range(1: isize, 3: isize): <error>): []i32
+  return (a: []i32[0: isize]): i32
+}

@@ -1,0 +1,12 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"arith :: func (a: i32, b: i32) -> i32 {\\n  let s := a + b\\n  let d := a - b\\n  let m := a * b\\n  let q := a / b\\n  let r := a % b\\n  return s\\n}\\n\")"
+---
+func arith(a: i32, b: i32) -> i32 {
+  let s: i32 = #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  let d: i32 = #builtin(Sub) (core.Sub.sub: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  let m: i32 = #builtin(Mul) (core.Mul.mul: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  let q: i32 = #builtin(Div) (core.Div.div: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  let r: i32 = #builtin(Rem) (core.Rem.rem: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  return s: i32
+}

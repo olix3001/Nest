@@ -1,0 +1,26 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text_lenient(\"consume :: func (x: i32) {}\\nfr :: func (xs: []i32) {\\n  for x in xs { consume(x) }\\n}\\n\")"
+---
+func consume(x: i32) -> void {
+}
+func fr(xs: []i32) -> void {
+  block: void {
+    let __it1: <error> = ((xs: []i32.into_iter): <error>)(): <error>
+    loop {
+      match ((__it1: <error>.next): <error>)(): <error> {
+        block: void {
+          tail (consume: func(i32) -> void)(x: i32): void
+        }
+        .some(x) => <block: void>
+        block: void {
+          break 
+        }
+        _ => <block: void>
+      }
+      tail <match: void>
+    }
+    tail <loop: void>
+  }
+  tail <block: void>
+}

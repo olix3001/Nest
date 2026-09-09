@@ -130,3 +130,54 @@ Ordering :: #lang("ordering") enum {
   Residual :: type
   branch :: func (self: Self) -> Result.<Self.Output, Self.Residual>
 }
+
+// ===< Builtin lang-item impls >===
+//
+// The compiler resolves `for`, `.?`, `a[i]`, and the operators against the impl
+// in scope; these are the ones the core library provides. Bodies are minimal —
+// there is no codegen yet (the whole file's signatures are illustrative), but
+// the impls carry the types every stage above lowering needs. Swapping the core
+// package swaps these out (they are reached only via their `#lang` traits).
+
+// The half-open / inclusive integer range `a..<b` / `a..=b`. It is its own
+// iterator: `into_iter` hands the range back, `next` walks it.
+@public Range :: #lang("range") struct <T> {
+  start: T,
+  end: T,
+}
+
+impl <T> IntoIterator for Range.<T> {
+  Iter :: Range.<T>
+  into_iter :: func (self: Range.<T>) -> Range.<T> { return self }
+}
+
+impl <T> Iterator for Range.<T> {
+  Item :: T
+  next :: func (self: *mut Range.<T>) -> Option.<T> { return .none }
+}
+
+// Iterating a slice hands out a cursor `SliceIter` over its elements.
+@public SliceIter :: struct <T> {
+  data: []T,
+  pos: usize,
+}
+
+impl <T> IntoIterator for []T {
+  Iter :: SliceIter.<T>
+  into_iter :: func (self: []T) -> SliceIter.<T> {
+    return SliceIter.<T> { data: self, pos: 0 }
+  }
+}
+
+impl <T> Iterator for SliceIter.<T> {
+  Item :: T
+  next :: func (self: *mut SliceIter.<T>) -> Option.<T> { return .none }
+}
+
+// `result.?` / `result.!` branch on a `Result`: `ok` is the success output,
+// `err` the residual `.?` propagates.
+impl <T, E> Try for Result.<T, E> {
+  Output :: T
+  Residual :: E
+  branch :: func (self: Result.<T, E>) -> Result.<T, E> { return self }
+}

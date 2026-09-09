@@ -15,5 +15,5 @@ func new() -> Vector.<T> {
   return Vector { len: 0: usize }: Vector.<T>
 }
 func push(self: *mut Vector.<T>, value: T) -> void {
-  ((self: *mut Vector.<T>.*): Vector.<T>.len): usize = (((self: *mut Vector.<T>.*): Vector.<T>.len): usize Add 1: usize): usize
+  ((self: *mut Vector.<T>.*): Vector.<T>.len): usize = #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(((self: *mut Vector.<T>.*): Vector.<T>.len): usize, 1: usize): usize
 }

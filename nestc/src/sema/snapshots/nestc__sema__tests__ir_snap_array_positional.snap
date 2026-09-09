@@ -1,0 +1,7 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"arr :: func () {\\n  let a: []i32 := .{ 1, 2, 3 }\\n}\\n\")"
+---
+func arr() -> void {
+  let a: []i32 = $array(1: isize, 2: isize, 3: isize): []i32
+}

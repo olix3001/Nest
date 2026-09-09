@@ -1,0 +1,19 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"cleanup :: func () {}\\ndm :: func (c: bool) -> i32 {\\n  defer cleanup()\\n  defer cleanup()\\n  if c { return 1 }\\n  return 2\\n}\\n\")"
+---
+func cleanup() -> void {
+}
+func dm(c: bool) -> i32 {
+  if c: bool {
+    (cleanup: func() -> void)(): void
+    (cleanup: func() -> void)(): void
+    return 1: i32
+  }
+  <if: void>
+  (cleanup: func() -> void)(): void
+  (cleanup: func() -> void)(): void
+  return 2: i32
+  (cleanup: func() -> void)(): void
+  (cleanup: func() -> void)(): void
+}

@@ -13,14 +13,14 @@
 //! shadowing matter.
 
 use crate::common::diagnostic::Diagnostic;
-use crate::common::source::FileSpan;
 use crate::common::source::FileId;
+use crate::common::source::FileSpan;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, ImportPath, NodeId, NodeKind, StructKind};
 
+use super::DefMeta;
 use super::def::{DefId, DefKind, DefTable, LangItems, Visibility};
 use super::imports::{RawImport, RawTarget};
-use super::DefMeta;
 
 /// Collect every namespace-level definition of `file` into `file_ns`, returning
 /// the file's (unloaded) import bindings.
@@ -223,15 +223,21 @@ impl Collector<'_> {
         }
     }
 
-    /// `impl [<g>] Ty [for Trait] { items }` — attach items to `Ty`'s namespace
-    /// when `Ty` names a type collected in `scope`; otherwise park them under a
-    /// fresh anonymous impl namespace so their names still exist.
+    /// `impl [<g>] Type [for Target] { items }` — attach items to the self
+    /// type's namespace when it names a type collected in `scope`; otherwise
+    /// park them under a fresh anonymous impl namespace so their names still
+    /// exist. The self type is the `for` target of a trait impl (`impl Trait for
+    /// Self`), or the head type of an inherent impl (`impl Self`).
     fn collect_impl(&mut self, node: NodeId, scope: DefId) {
-        let NodeKind::ImplBlock { ty, items, .. } = self.ast.node(node).kind.clone() else {
+        let NodeKind::ImplBlock {
+            ty, for_ty, items, ..
+        } = self.ast.node(node).kind.clone()
+        else {
             return;
         };
+        let self_ty = for_ty.unwrap_or(ty);
         let target = self
-            .type_head_name(ty)
+            .type_head_name(self_ty)
             .and_then(|name| self.defs.get(scope).ns.members.get(&name).copied())
             .filter(|&d| self.defs.get(d).kind.is_namespace_like());
         let host = target.unwrap_or_else(|| {
@@ -292,7 +298,8 @@ impl Collector<'_> {
         // Duplicate-member check (§4.3): impl namespaces are exempt but those go
         // through their own host, so a plain clash here is an error.
         if let Some(&prev) = self.defs.get(scope).ns.members.get(&name) {
-            if !matches!(kind, DefKind::Func) || !matches!(self.defs.get(prev).kind, DefKind::Func) {
+            if !matches!(kind, DefKind::Func) || !matches!(self.defs.get(prev).kind, DefKind::Func)
+            {
                 self.report(
                     node,
                     format!("`{name}` is already defined in this namespace"),
@@ -397,9 +404,8 @@ impl Collector<'_> {
 
     fn report(&mut self, node: NodeId, message: impl Into<String>) {
         let span = self.ast.node(node).span;
-        self.diags.push(
-            Diagnostic::error(message).with_primary(FileSpan::new(self.file, span), ""),
-        );
+        self.diags
+            .push(Diagnostic::error(message).with_primary(FileSpan::new(self.file, span), ""));
     }
 }
 

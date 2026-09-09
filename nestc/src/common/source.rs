@@ -77,9 +77,7 @@ pub struct SourceFile {
 impl SourceFile {
     fn new(id: FileId, name: String, src: String) -> Self {
         let mut line_starts = vec![0];
-        line_starts.extend(
-            src.match_indices('\n').map(|(i, _)| i + 1),
-        );
+        line_starts.extend(src.match_indices('\n').map(|(i, _)| i + 1));
         Self {
             id,
             name,
@@ -149,7 +147,8 @@ impl SourceMap {
     /// Load a file and return its fresh [`FileId`].
     pub fn add(&mut self, name: impl Into<String>, src: impl Into<String>) -> FileId {
         let id = FileId(self.files.len() as u32);
-        self.files.push(SourceFile::new(id, name.into(), src.into()));
+        self.files
+            .push(SourceFile::new(id, name.into(), src.into()));
         id
     }
 

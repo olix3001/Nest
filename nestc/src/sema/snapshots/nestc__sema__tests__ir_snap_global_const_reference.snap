@@ -1,0 +1,7 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"G :: 42\\ngref :: func () -> isize { return G }\\n\")"
+---
+func gref() -> isize {
+  return G: isize
+}

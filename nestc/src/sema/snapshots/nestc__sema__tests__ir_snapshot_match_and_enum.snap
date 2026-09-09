@@ -12,7 +12,7 @@ func pick(c: Color) -> i32 {
 }
 func maybe(b: bool) -> core.Option.<i32> {
   if b: bool {
-    return .some(5: isize): core.Option.<i32>
+    return .some(5: i32): core.Option.<i32>
   }
   <if: void>
   return .none(): core.Option.<i32>

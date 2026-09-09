@@ -28,9 +28,11 @@
 //! — the `nestc` binary, a language server, and the tests all drive the same
 //! [`Session`].
 
+pub mod builtins;
 pub mod collect;
 pub mod def;
 pub mod desugar;
+pub mod impls;
 pub mod imports;
 pub mod infer;
 pub mod lower;
@@ -92,7 +94,9 @@ pub fn analyze_source(name: &str, src: &str, packages: &[(&str, &str)]) -> Sessi
         session
             .diagnostics
             .push(crate::common::diagnostic::simple_error(
-                file, err.span, err.message,
+                file,
+                err.span,
+                err.message,
             ));
     }
     session.asts.insert(file, ast);
@@ -125,8 +129,11 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     for &file in &files {
         desugar_one(session, file);
     }
+    // Index every impl once the whole program is resolved; inference selects
+    // over this table (operators, trait methods) per function body.
+    let impls = impls::build(&session.defs, &session.asts, &files);
     for &file in &files {
-        infer_one(session, file);
+        infer_one(session, &impls, file);
     }
     for &file in &files {
         lower_one(session, file);
@@ -251,14 +258,26 @@ fn resolve_one(session: &mut Session, file: FileId) {
     resolve::resolve_file(defs, diagnostics, ast, file, ns, &globs, builtins);
 }
 
-fn infer_one(session: &mut Session, file: FileId) {
+fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
+    let file_ns = session.files[&file].ns;
+    let globs = session.prelude_globs.clone();
     let Session {
         asts,
         defs,
         diagnostics,
+        lang_items,
         ..
     } = &mut *session;
-    infer::infer_file(defs, asts, diagnostics, file);
+    infer::infer_file(
+        defs,
+        asts,
+        diagnostics,
+        lang_items,
+        impls,
+        &globs,
+        file_ns,
+        file,
+    );
 }
 
 fn lower_one(session: &mut Session, file: FileId) {

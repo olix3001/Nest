@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use crate::common::symbol::Symbol;
+use crate::parser::ast::{BinOp, NodeId};
 
 use super::def::DefId;
 
@@ -62,7 +63,10 @@ pub enum Ty {
     /// An unsolved inference variable.
     Var(TyVar),
     /// A signed / unsigned integer of the given width.
-    Int { signed: bool, width: IntWidth },
+    Int {
+        signed: bool,
+        width: IntWidth,
+    },
     /// A floating-point number.
     Float(FloatWidth),
     Bool,
@@ -76,11 +80,20 @@ pub enum Ty {
     Never,
     /// A named `struct` / `enum` / `trait` / `distinct` type plus its type
     /// arguments (§3.8 nominal identity: equal iff `def` and `args` match).
-    Nominal { def: DefId, args: Vec<Ty> },
+    Nominal {
+        def: DefId,
+        args: Vec<Ty>,
+    },
     /// `*T` / `*mut T`.
-    Ptr { mutable: bool, inner: Box<Ty> },
+    Ptr {
+        mutable: bool,
+        inner: Box<Ty>,
+    },
     /// `[]T` / `[]mut T`.
-    Slice { mutable: bool, inner: Box<Ty> },
+    Slice {
+        mutable: bool,
+        inner: Box<Ty>,
+    },
     /// `[N]T` — `len` is `None` when the length expression is not a literal the
     /// checker could evaluate yet.
     Array {
@@ -91,7 +104,10 @@ pub enum Ty {
     /// `(A, B, ...)` — a tuple. The empty tuple is spelled [`Ty::Void`].
     Tuple(Vec<Ty>),
     /// `func(params) -> ret`.
-    Func { params: Vec<Ty>, ret: Box<Ty> },
+    Func {
+        params: Vec<Ty>,
+        ret: Box<Ty>,
+    },
     /// `dyn Trait` — a trait object (the trait's [`DefId`]).
     Dyn(DefId),
     /// A type that could not be determined; a diagnostic was already reported.
@@ -102,12 +118,18 @@ pub enum Ty {
 impl Ty {
     /// `isize` — the default for an unconstrained integer literal.
     pub fn isize() -> Ty {
-        Ty::Int { signed: true, width: IntWidth::Ptr }
+        Ty::Int {
+            signed: true,
+            width: IntWidth::Ptr,
+        }
     }
 
     /// `usize`.
     pub fn usize() -> Ty {
-        Ty::Int { signed: false, width: IntWidth::Ptr }
+        Ty::Int {
+            signed: false,
+            width: IntWidth::Ptr,
+        }
     }
 
     /// Whether this (already-resolved) type is an integer.
@@ -158,14 +180,30 @@ impl Ty {
                 }
             }
             Ty::Ptr { mutable, inner } => {
-                format!("*{}{}", if *mutable { "mut " } else { "" }, inner.display(defs))
+                format!(
+                    "*{}{}",
+                    if *mutable { "mut " } else { "" },
+                    inner.display(defs)
+                )
             }
             Ty::Slice { mutable, inner } => {
-                format!("[]{}{}", if *mutable { "mut " } else { "" }, inner.display(defs))
+                format!(
+                    "[]{}{}",
+                    if *mutable { "mut " } else { "" },
+                    inner.display(defs)
+                )
             }
-            Ty::Array { len, mutable, inner } => {
+            Ty::Array {
+                len,
+                mutable,
+                inner,
+            } => {
                 let l = len.map(|n| n.to_string()).unwrap_or_else(|| "_".into());
-                format!("[{l}]{}{}", if *mutable { "mut " } else { "" }, inner.display(defs))
+                format!(
+                    "[{l}]{}{}",
+                    if *mutable { "mut " } else { "" },
+                    inner.display(defs)
+                )
             }
             Ty::Tuple(elems) => {
                 let inner = elems
@@ -192,6 +230,62 @@ impl Ty {
 /// The result of a unification attempt.
 pub type UnifyResult = Result<(), (Ty, Ty)>;
 
+/// A pending type-class fact the plain union-find cannot decide on its own — it
+/// needs a **search** (which `impl` satisfies this?), possibly deferred until a
+/// variable is solved. The solver ([`super::infer`]) drains these to a fixpoint
+/// after each function body (§ trait selection).
+///
+/// This is the piece pure unification is missing: re-running [`InferCtxt::unify`]
+/// finds no new equalities, but selecting an impl and projecting its associated
+/// types can both solve variables *and* unblock further obligations.
+#[derive(Debug, Clone)]
+pub enum Obligation {
+    /// `self_ty : Trait.<args>` must hold — some in-scope `impl` (or builtin)
+    /// selects. Used for operator/method traits without a projected result
+    /// (e.g. `Eq`, `Ord`).
+    Trait {
+        self_ty: Ty,
+        trait_def: DefId,
+        args: Vec<Ty>,
+        /// The AST node that raised the obligation (for diagnostics).
+        origin: NodeId,
+    },
+    /// `<self_ty as Trait.<args>>.assoc == out` — the projected associated type.
+    /// Solving it selects the impl (proving the `Trait` bound too), substitutes
+    /// the impl's solved generics into its `assoc` binding, and unifies with
+    /// `out`.
+    Projection {
+        self_ty: Ty,
+        trait_def: DefId,
+        args: Vec<Ty>,
+        assoc: Symbol,
+        out: Ty,
+        origin: NodeId,
+        /// `Some` when this projection is an operator's `Output`; fulfillment
+        /// stamps the resolved call onto `origin` so lowering emits a uniform
+        /// [`crate::ir::Expr::Call`].
+        op: Option<BinOp>,
+    },
+    /// A variant literal (`.some(x)`) whose enum is only known from context:
+    /// once `recv` resolves to a `Nominal` enum, unify each payload argument
+    /// with the variant's (generic-substituted) declared payload type. `args`
+    /// entries carry a field name for record variants, `None` for tuple ones.
+    VariantPayload {
+        recv: Ty,
+        variant: Symbol,
+        args: Vec<(Option<Symbol>, Ty)>,
+        origin: NodeId,
+    },
+}
+
+/// A restorable checkpoint of the union-find, so the solver can trial-unify a
+/// candidate impl and roll back if it does not fit.
+#[derive(Debug)]
+pub struct Snapshot {
+    subst: Vec<Option<Ty>>,
+    kinds_len: usize,
+}
+
 /// The union-find substitution and variable bookkeeping for one inference run
 /// (one function body, in practice — see [`super::infer`]).
 #[derive(Debug, Default)]
@@ -204,6 +298,9 @@ pub struct InferCtxt {
     /// `<Assoc = T>` turbofish arguments. Keyed by the associated item name; a
     /// pragmatic flat map sufficient for the bootstrap.
     pub assoc: HashMap<Symbol, Ty>,
+    /// Pending trait/projection [`Obligation`]s, drained to a fixpoint by the
+    /// solver after each function body.
+    obligations: Vec<Obligation>,
 }
 
 impl InferCtxt {
@@ -227,6 +324,50 @@ impl InferCtxt {
 
     fn kind(&self, v: TyVar) -> TyVarKind {
         self.kinds[v.0 as usize]
+    }
+
+    /// The kind of a type that shallow-resolves to a variable, else `None`.
+    pub fn var_kind(&self, ty: &Ty) -> Option<TyVarKind> {
+        match self.shallow(ty) {
+            Ty::Var(v) => Some(self.kind(v)),
+            _ => None,
+        }
+    }
+
+    // ===< obligations >===
+
+    /// Queue an [`Obligation`] for the solver to discharge later. Unification is
+    /// left untouched — this is the separate search layer (§ trait selection).
+    pub fn register(&mut self, obligation: Obligation) {
+        self.obligations.push(obligation);
+    }
+
+    /// Take the pending obligations, leaving the queue empty. The solver
+    /// re-registers any it could not yet decide.
+    pub fn take_obligations(&mut self) -> Vec<Obligation> {
+        std::mem::take(&mut self.obligations)
+    }
+
+    /// Whether any obligation is still queued.
+    pub fn has_obligations(&self) -> bool {
+        !self.obligations.is_empty()
+    }
+
+    // ===< trial checkpoints >===
+
+    /// Capture the union-find state so a speculative unification can be undone.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            subst: self.subst.clone(),
+            kinds_len: self.kinds.len(),
+        }
+    }
+
+    /// Restore a [`Snapshot`], discarding every binding and fresh variable made
+    /// since it was taken.
+    pub fn rollback(&mut self, snap: Snapshot) {
+        self.subst = snap.subst;
+        self.kinds.truncate(snap.kinds_len);
     }
 
     /// Follow bound variables to the current representative (one level of the
@@ -255,7 +396,11 @@ impl InferCtxt {
                 mutable,
                 inner: Box::new(self.resolve(&inner)),
             },
-            Ty::Array { len, mutable, inner } => Ty::Array {
+            Ty::Array {
+                len,
+                mutable,
+                inner,
+            } => Ty::Array {
                 len,
                 mutable,
                 inner: Box::new(self.resolve(&inner)),
@@ -288,7 +433,16 @@ impl InferCtxt {
             (Ty::Var(v), _) => self.bind(*v, &b),
             (_, Ty::Var(v)) => self.bind(*v, &a),
 
-            (Ty::Int { signed: s1, width: w1 }, Ty::Int { signed: s2, width: w2 }) => {
+            (
+                Ty::Int {
+                    signed: s1,
+                    width: w1,
+                },
+                Ty::Int {
+                    signed: s2,
+                    width: w2,
+                },
+            ) => {
                 if s1 == s2 && w1 == w2 {
                     Ok(())
                 } else {
@@ -301,7 +455,16 @@ impl InferCtxt {
             | (Ty::Str, Ty::Str)
             | (Ty::Void, Ty::Void) => Ok(()),
 
-            (Ty::Ptr { mutable: m1, inner: i1 }, Ty::Ptr { mutable: m2, inner: i2 }) => {
+            (
+                Ty::Ptr {
+                    mutable: m1,
+                    inner: i1,
+                },
+                Ty::Ptr {
+                    mutable: m2,
+                    inner: i2,
+                },
+            ) => {
                 // `*mut T` coerces to `*T` (§3.8): allow when the target is not
                 // asking for more permission than the source has.
                 if *m1 == *m2 || (*m1 && !*m2) {
@@ -310,7 +473,16 @@ impl InferCtxt {
                     Err((a.clone(), b.clone()))
                 }
             }
-            (Ty::Slice { mutable: m1, inner: i1 }, Ty::Slice { mutable: m2, inner: i2 }) => {
+            (
+                Ty::Slice {
+                    mutable: m1,
+                    inner: i1,
+                },
+                Ty::Slice {
+                    mutable: m2,
+                    inner: i2,
+                },
+            ) => {
                 if *m1 == *m2 || (*m1 && !*m2) {
                     self.unify(i1, i2)
                 } else {
@@ -318,8 +490,16 @@ impl InferCtxt {
                 }
             }
             (
-                Ty::Array { len: l1, mutable: m1, inner: i1 },
-                Ty::Array { len: l2, mutable: m2, inner: i2 },
+                Ty::Array {
+                    len: l1,
+                    mutable: m1,
+                    inner: i1,
+                },
+                Ty::Array {
+                    len: l2,
+                    mutable: m2,
+                    inner: i2,
+                },
             ) => {
                 let len_ok = l1.is_none() || l2.is_none() || l1 == l2;
                 if len_ok && m1 == m2 {
@@ -334,9 +514,16 @@ impl InferCtxt {
                 }
                 Ok(())
             }
-            (Ty::Func { params: p1, ret: r1 }, Ty::Func { params: p2, ret: r2 })
-                if p1.len() == p2.len() =>
-            {
+            (
+                Ty::Func {
+                    params: p1,
+                    ret: r1,
+                },
+                Ty::Func {
+                    params: p2,
+                    ret: r2,
+                },
+            ) if p1.len() == p2.len() => {
                 for (x, y) in p1.iter().zip(p2) {
                     self.unify(x, y)?;
                 }
@@ -447,21 +634,34 @@ impl InferCtxt {
                 mutable,
                 inner: Box::new(self.finalize(&inner, on_ambiguous)),
             },
-            Ty::Array { len, mutable, inner } => Ty::Array {
+            Ty::Array {
+                len,
+                mutable,
+                inner,
+            } => Ty::Array {
                 len,
                 mutable,
                 inner: Box::new(self.finalize(&inner, on_ambiguous)),
             },
-            Ty::Tuple(elems) => {
-                Ty::Tuple(elems.iter().map(|e| self.finalize(e, on_ambiguous)).collect())
-            }
+            Ty::Tuple(elems) => Ty::Tuple(
+                elems
+                    .iter()
+                    .map(|e| self.finalize(e, on_ambiguous))
+                    .collect(),
+            ),
             Ty::Func { params, ret } => Ty::Func {
-                params: params.iter().map(|p| self.finalize(p, on_ambiguous)).collect(),
+                params: params
+                    .iter()
+                    .map(|p| self.finalize(p, on_ambiguous))
+                    .collect(),
                 ret: Box::new(self.finalize(&ret, on_ambiguous)),
             },
             Ty::Nominal { def, args } => Ty::Nominal {
                 def,
-                args: args.iter().map(|a| self.finalize(a, on_ambiguous)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| self.finalize(a, on_ambiguous))
+                    .collect(),
             },
             other => other,
         }
@@ -502,7 +702,10 @@ pub fn primitive_ty(name: &str) -> Option<Ty> {
                 return None;
             }
             if (1..=65535).contains(&width) {
-                Some(Ty::Int { signed, width: IntWidth::Fixed(width as u16) })
+                Some(Ty::Int {
+                    signed,
+                    width: IntWidth::Fixed(width as u16),
+                })
             } else {
                 None
             }
@@ -524,8 +727,20 @@ mod tests {
 
     #[test]
     fn primitive_parsing() {
-        assert_eq!(primitive_ty("i32"), Some(Ty::Int { signed: true, width: IntWidth::Fixed(32) }));
-        assert_eq!(primitive_ty("u7"), Some(Ty::Int { signed: false, width: IntWidth::Fixed(7) }));
+        assert_eq!(
+            primitive_ty("i32"),
+            Some(Ty::Int {
+                signed: true,
+                width: IntWidth::Fixed(32)
+            })
+        );
+        assert_eq!(
+            primitive_ty("u7"),
+            Some(Ty::Int {
+                signed: false,
+                width: IntWidth::Fixed(7)
+            })
+        );
         assert_eq!(primitive_ty("usize"), Some(Ty::usize()));
         assert_eq!(primitive_ty("f80"), Some(Ty::Float(FloatWidth::F80)));
         assert_eq!(primitive_ty("u1"), Some(Ty::Bool));
@@ -556,7 +771,10 @@ mod tests {
     fn int_literal_unifies_with_concrete_then_no_default() {
         let mut cx = InferCtxt::new();
         let lit = cx.fresh_of(TyVarKind::Int);
-        let i32 = Ty::Int { signed: true, width: IntWidth::Fixed(32) };
+        let i32 = Ty::Int {
+            signed: true,
+            width: IntWidth::Fixed(32),
+        };
         assert!(cx.unify(&lit, &i32).is_ok());
         assert_eq!(cx.resolve(&lit), i32);
     }
@@ -590,15 +808,24 @@ mod tests {
     fn occurs_check_blocks_infinite_type() {
         let mut cx = InferCtxt::new();
         let v = cx.fresh();
-        let ptr = Ty::Ptr { mutable: false, inner: Box::new(v.clone()) };
+        let ptr = Ty::Ptr {
+            mutable: false,
+            inner: Box::new(v.clone()),
+        };
         assert!(cx.unify(&v, &ptr).is_err());
     }
 
     #[test]
     fn mut_ptr_coerces_to_const_ptr() {
         let mut cx = InferCtxt::new();
-        let m = Ty::Ptr { mutable: true, inner: Box::new(Ty::Bool) };
-        let c = Ty::Ptr { mutable: false, inner: Box::new(Ty::Bool) };
+        let m = Ty::Ptr {
+            mutable: true,
+            inner: Box::new(Ty::Bool),
+        };
+        let c = Ty::Ptr {
+            mutable: false,
+            inner: Box::new(Ty::Bool),
+        };
         assert!(cx.unify(&m, &c).is_ok());
     }
 }

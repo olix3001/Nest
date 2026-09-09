@@ -1,0 +1,7 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"P :: struct { x: i32 }\\nmk :: func () -> P { return .{ x: 9 } }\\n\")"
+---
+func mk() -> P {
+  return $aggregate(9: isize): P
+}
