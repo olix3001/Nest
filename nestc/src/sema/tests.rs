@@ -323,8 +323,41 @@ fn literal_takes_annotated_type() {
 }
 
 #[test]
-fn float_literal_defaults_to_f128() {
+fn float_literal_defaults_to_f64() {
+    // A float literal is a `comptime_float` (an `f128`), but with nothing to pin
+    // its width it collapses to `f64`.
     let session = analyze_mem(&[("main", "f :: func () { const x := 1.5 }")], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let ty = node_ty(&session, file, |k| {
+        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Float(_)))
+    });
+    assert_eq!(ty, Ty::Float(FloatWidth::F64));
+}
+
+#[test]
+fn float_literal_too_precise_for_the_default_f64_is_an_error() {
+    let session = analyze_mem(
+        &[("main", "f :: func () { const x := 1.00000000000000000001 }")],
+        "main",
+    );
+    let msg = format!("{:#?}", session.diagnostics);
+    assert!(
+        msg.contains("too large or too precise"),
+        "expected a width diagnostic, got {msg}"
+    );
+}
+
+#[test]
+fn float_literal_too_precise_is_accepted_at_an_explicit_wide_width() {
+    // The collapse to `f64` is what loses the value; an `f128` annotation keeps it.
+    let session = analyze_mem(
+        &[(
+            "main",
+            "f :: func () { const x: f128 := 1.00000000000000000001 }",
+        )],
+        "main",
+    );
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     let file = entry_file(&session);
     let ty = node_ty(&session, file, |k| {
@@ -407,11 +440,12 @@ f :: func (n: i32) {
 }
 
 #[test]
-fn defer_runs_before_return() {
+fn defer_is_recorded_on_its_block_not_copied_to_exits() {
     let src = "\
 cleanup :: func () {}
 f :: func () -> i32 {
   defer cleanup()
+  if true { return 0 }
   return 1
 }
 ";
@@ -424,17 +458,21 @@ f :: func () -> i32 {
         .iter()
         .find(|f| f.name.as_str() == "f")
         .expect("func f");
-    // The deferred call is spliced in immediately before the `return`.
-    let idx = func
-        .body
-        .stmts
-        .iter()
-        .position(|s| matches!(s, Stmt::Return(_)))
-        .expect("a return");
-    assert!(idx >= 1, "no statement precedes the return");
+    // The deferred body is recorded once on the block that owns it...
+    assert_eq!(func.body.defers.len(), 1, "{:#?}", func.body);
     assert!(
-        matches!(&func.body.stmts[idx - 1], Stmt::Expr(Expr::Call { .. })),
-        "deferred call not emitted before return: {:#?}",
+        matches!(&func.body.defers[0], Expr::Call { .. }),
+        "defer body is not the call: {:#?}",
+        func.body.defers
+    );
+    // ...and is not copied ahead of either `return`, even though there are two.
+    assert!(
+        !func
+            .body
+            .stmts
+            .iter()
+            .any(|s| matches!(s, Stmt::Expr(Expr::Call { .. }))),
+        "deferred call was duplicated into the statement list: {:#?}",
         func.body.stmts
     );
 }
@@ -686,6 +724,111 @@ fn ir_snap_match_variant_binding() {
 }
 
 #[test]
+fn try_abort_in_a_value_position_does_not_force_void() {
+    // `$abort` diverges, so the `.err` arm it sits in contributes no type: the
+    // `match` takes the `.ok` arm's, and `.!` is usable where a value is wanted.
+    let session = analyze_mem(
+        &[(
+            "main",
+            "f :: func () -> Result.<i32, i32> { return .ok(1) }\ng :: func () -> i32 { return f().! }\n",
+        )],
+        "main",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn bounded_type_param_resolves_its_methods_through_the_bound() {
+    let src = "\
+Weigh :: trait { weight :: func (self: *Self) -> i32 }
+heavy :: func <T: Weigh> (t: *T) -> i32 { return t.weight() }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    // The call resolves, and `Self` in the trait's signature became `T`.
+    let program = &session.ir[&file];
+    let text = crate::ir::pretty::program_to_string(&session.defs, program);
+    assert!(text.contains("func(*T) -> i32"), "{text}");
+    assert!(!text.contains("<error>"), "{text}");
+}
+
+#[test]
+fn ir_snap_dyn_coercion_and_dispatch() {
+    // `*T` unsizes to `*dyn Trait` when `T: Trait` (§3.2). The IR keeps the
+    // erased pointee on the cast so a later stage can pick the vtable, and a
+    // method call on the object resolves to the trait's own declaration.
+    let src = "\
+ToJson :: trait { render :: func (self: *Self) -> i32 }
+Cat :: struct { age: i32 }
+impl ToJson for Cat {
+  render :: func (self: *Cat) -> i32 { return self.age }
+}
+go :: func (c: *Cat) -> i32 {
+  let j: *dyn ToJson := c
+  return j.render()
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn ir_snap_using_field_upcasts() {
+    // `@using` gives the outer struct an implicit upcast to the field's type
+    // (§3.10). Lowering makes it explicit: a value copies the sub-object
+    // (`e.t`), a pointer takes its address (`&e.t`).
+    let src = "\
+Transform :: struct { x: i32, y: i32 }
+Entity :: struct {
+  @using t: Transform,
+  hp: i32,
+}
+take :: func (t: Transform) -> i32 { return t.x }
+nudge :: func (t: *mut Transform) {}
+impl Transform {
+  mag :: func (self: Transform) -> i32 { return self.x }
+}
+up :: func (e: Entity, p: *mut Entity) -> i32 {
+  nudge(p)
+  let m := e.mag()
+  return take(e)
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn ir_snap_patterns_keep_their_structure() {
+    // Struct / slice / range / `@` / `&` patterns are retained in the IR rather
+    // than collapsing to a wildcard: a later decision-tree pass needs the
+    // fields, the `..` position, and the `..<` / `..=` distinction.
+    let src = "\
+Point :: struct { x: i32, y: i32 }
+ps :: func (p: Point, xs: []i32, n: i32, r: *i32) -> i32 {
+  let a := p.match {
+    { x: 0, y } => y,
+    { x, .. } => x,
+  }
+  let c := xs.match {
+    [first, .. rest, last] => first,
+    [] => 0,
+  }
+  let d := n.match {
+    0..<10 => 1,
+    10..=20 => 2,
+    big @ 21 => big,
+    _ => 0,
+  }
+  let e := r.match {
+    &v => v,
+  }
+  return a
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
 fn ir_snap_match_guard_or_and_literal() {
     insta::assert_snapshot!(ir_text(
         "ml :: func (n: i32) -> i32 {\n  return n.match {\n    0 => 10,\n    1 | 2 => 20,\n    x if x > 5 => 30,\n    _ => 0,\n  }\n}\n"
@@ -693,7 +836,7 @@ fn ir_snap_match_guard_or_and_literal() {
 }
 
 #[test]
-fn ir_snap_defer_multiple_before_return() {
+fn ir_snap_defer_multiple_recorded_once() {
     insta::assert_snapshot!(ir_text(
         "cleanup :: func () {}\ndm :: func (c: bool) -> i32 {\n  defer cleanup()\n  defer cleanup()\n  if c { return 1 }\n  return 2\n}\n"
     ));
@@ -724,6 +867,15 @@ fn ir_snap_intrinsic_call() {
 fn ir_snap_index_and_slice() {
     insta::assert_snapshot!(ir_text(
         "ix :: func (a: []i32) -> i32 {\n  let b := a[1..<3]\n  return a[0]\n}\n"
+    ));
+}
+
+#[test]
+fn ir_snap_range_forms_pick_variants() {
+    // Every surface range form keeps its bound count and its `..<` / `..=`
+    // distinction as a distinct `#lang("range")` enum variant.
+    insta::assert_snapshot!(ir_text(
+        "rs :: func (a: []i32) {\n  let e := a[1..<3]\n  let i := a[1..=3]\n  let f := a[1..]\n  let t := a[..<3]\n  let ti := a[..=3]\n  let u := a[..]\n}\n"
     ));
 }
 
@@ -1203,3 +1355,6 @@ build_strings :: func () {
 ";
     insta::assert_snapshot!(ir_text(src));
 }
+
+
+

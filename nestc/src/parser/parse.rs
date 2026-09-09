@@ -92,6 +92,11 @@ impl Parser {
         self.ast.alloc(span, self.file, kind)
     }
 
+    /// Attach metadata to an already-allocated node.
+    pub(crate) fn set_meta<T: std::any::Any>(&mut self, id: NodeId, value: T) {
+        self.ast.set_meta(id, value);
+    }
+
     /// The span of an already-allocated node.
     pub(crate) fn node_span(&self, id: NodeId) -> Span {
         self.ast.node(id).span

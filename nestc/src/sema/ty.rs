@@ -12,9 +12,12 @@
 //! [`InferCtxt`] union-find. Untyped numeric literals get a *numeric* variable
 //! (kind [`TyVarKind::Int`] / [`TyVarKind::Float`]) that unifies only with a
 //! compatible concrete type; one left unconstrained at the end **defaults** —
-//! `isize` for integers, `f128` for floats (the compile-time `comptime_int` /
-//! `comptime_float` collapse of §1). A general variable that is never solved is
-//! a "type annotations needed" error.
+//! `isize` for integers, `f64` for floats (the compile-time `comptime_int` /
+//! `comptime_float` collapse of §1: a float literal *is* a `comptime_float`,
+//! i.e. `f128`, but collapses to `f64` when nothing pins its width — a literal
+//! too big or too precise to survive that collapse is an error unless its use
+//! really is an `f80` / `f128`). A general variable that is never solved is a
+//! "type annotations needed" error.
 
 use std::collections::HashMap;
 
@@ -53,7 +56,8 @@ pub enum TyVarKind {
     General,
     /// An integer literal: unifies only with an integer type; defaults `isize`.
     Int,
-    /// A float literal: unifies only with a float type; defaults `f128`.
+    /// A float literal (`comptime_float`, conceptually `f128`): unifies only
+    /// with a float type, and collapses to `f64` when left unconstrained.
     Float,
 }
 
@@ -603,7 +607,7 @@ impl InferCtxt {
     }
 
     /// Resolve `ty`, then default any still-unsolved numeric variable to its
-    /// fallback (`isize` / `f128`). A remaining **general** variable is reported
+    /// fallback (`isize` / `f64`). A remaining **general** variable is reported
     /// through `on_ambiguous` and rendered as [`Ty::Error`]. Used at the end of a
     /// function body to finalize every node's type.
     pub fn finalize(&mut self, ty: &Ty, on_ambiguous: &mut dyn FnMut()) -> Ty {
@@ -612,7 +616,7 @@ impl InferCtxt {
             Ty::Var(v) => {
                 let default = match self.kind(v) {
                     TyVarKind::Int => Some(Ty::isize()),
-                    TyVarKind::Float => Some(Ty::Float(FloatWidth::F128)),
+                    TyVarKind::Float => Some(Ty::Float(FloatWidth::F64)),
                     TyVarKind::General => None,
                 };
                 match default {
@@ -787,11 +791,11 @@ mod tests {
     }
 
     #[test]
-    fn float_literal_defaults_to_f128() {
+    fn float_literal_defaults_to_f64() {
         let mut cx = InferCtxt::new();
         let lit = cx.fresh_of(TyVarKind::Float);
         let out = cx.finalize(&lit, &mut || {});
-        assert_eq!(out, Ty::Float(FloatWidth::F128));
+        assert_eq!(out, Ty::Float(FloatWidth::F64));
     }
 
     #[test]

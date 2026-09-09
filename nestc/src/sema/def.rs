@@ -159,12 +159,29 @@ pub struct Def {
     /// For an [`DefKind::Import`] binding: the def it aliases (a namespace or a
     /// selected member). Following `alias` reaches the real target.
     pub alias: Option<DefId>,
+    /// For a [`DefKind::Field`]: the field carries `@using`, so its struct
+    /// implicitly upcasts to the field's type (§3.10). At most one field per
+    /// struct may set this.
+    pub using: bool,
 }
 
 impl Def {
     /// The def an [`DefKind::Import`] alias ultimately points at (or itself).
     pub fn target(&self) -> DefId {
         self.alias.unwrap_or(self.id)
+    }
+}
+
+impl DefTable {
+    /// The `@using` field of a struct, if it declares one — the field an
+    /// implicit upcast of that struct goes through (§3.10).
+    pub fn using_field(&self, nominal: DefId) -> Option<DefId> {
+        self.get(nominal)
+            .ns
+            .members
+            .values()
+            .copied()
+            .find(|&m| self.get(m).using)
     }
 }
 
@@ -207,6 +224,7 @@ impl DefTable {
             lang: None,
             ns: Namespace::default(),
             alias: None,
+            using: false,
         });
         id
     }

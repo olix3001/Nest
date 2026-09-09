@@ -15,5 +15,5 @@ func maybe(b: bool) -> core.Option.<i32> {
     return .some(5: i32): core.Option.<i32>
   }
   <if: void>
-  return .none(): core.Option.<i32>
+  return .none: core.Option.<i32>
 }

@@ -1,0 +1,17 @@
+---
+source: src/sema/tests.rs
+expression: ir_text(src)
+---
+func take(t: Transform) -> i32 {
+  return (t: Transform.x): i32
+}
+func nudge(t: *mut Transform) -> void {
+}
+func up(e: Entity, p: *mut Entity) -> i32 {
+  (nudge: func(*mut Transform) -> void)((&mut ((p: *mut Entity.*): Entity.t): Transform): *mut Transform): void
+  let m: i32 = (((e: Entity.t): Transform.mag): func(Transform) -> i32)(): i32
+  return (take: func(Transform) -> i32)((e: Entity.t): Transform): i32
+}
+func mag(self: Transform) -> i32 {
+  return (self: Transform.x): i32
+}

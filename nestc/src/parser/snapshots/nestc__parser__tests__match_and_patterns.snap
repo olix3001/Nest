@@ -51,7 +51,7 @@ File
                 FieldPat h
               Lit Str("rect")
             MatchArm
-              SlicePat (.. rest)
+              SlicePat (@1 .. rest)
                 BindingPat first
               Lit Str("slice")
             MatchArm

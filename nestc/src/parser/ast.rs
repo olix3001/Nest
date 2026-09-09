@@ -43,6 +43,23 @@ pub use crate::common::source::FileId;
 // ===< Leaf payloads (embedded by value, never allocated as nodes) >===
 
 /// A scalar literal value.
+/// The `..` segment of a slice pattern: how many element patterns precede it
+/// (the rest are the suffix), and the name it binds, if any.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SliceRest {
+    /// Index into `elems` the `..` sits at: `elems[..at]` is the prefix and
+    /// `elems[at..]` the suffix.
+    pub at: usize,
+    /// `.. name` binds the skipped middle; a bare `..` discards it.
+    pub name: Option<Symbol>,
+}
+
+/// Marks a float-literal node whose source text needs more than an `f64`: the
+/// `comptime_float` → `f64` collapse would lose it, so it types only as an
+/// explicit `f80` / `f128`. Attached by the parser, enforced by inference.
+#[derive(Debug, Clone, Copy)]
+pub struct WideFloat;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Lit {
     Int(i128),
@@ -525,11 +542,12 @@ pub enum NodeKind {
     },
     /// `(p, q, ...)` — tuple pattern.
     TuplePat { elems: Vec<NodeId> },
-    /// `[a, b, .. [rest]]` — slice pattern. `rest` is `Some(name?)` when a `..`
-    /// segment is present, carrying its optional binding.
+    /// `[a, b, .. [rest], c]` — slice pattern. `elems` holds the element patterns
+    /// on both sides of the `..`; `rest` says where that `..` sits and what (if
+    /// anything) it binds.
     SlicePat {
         elems: Vec<NodeId>,
-        rest: Option<Option<Symbol>>,
+        rest: Option<SliceRest>,
     },
     /// `&pattern` — dereference pattern.
     RefPat { pattern: NodeId },

@@ -139,11 +139,22 @@ Ordering :: #lang("ordering") enum {
 // the impls carry the types every stage above lowering needs. Swapping the core
 // package swaps these out (they are reached only via their `#lang` traits).
 
-// The half-open / inclusive integer range `a..<b` / `a..=b`. It is its own
+// Every surface range form, one variant each, so lowering keeps the bound
+// count and the `..<` / `..=` distinction the syntax carried. It is its own
 // iterator: `into_iter` hands the range back, `next` walks it.
-@public Range :: #lang("range") struct <T> {
-  start: T,
-  end: T,
+@public Range :: #lang("range") enum <T> {
+  // `..`
+  full,
+  // `a..`
+  from(T),
+  // `..<b`
+  to(T),
+  // `..=b`
+  to_inclusive(T),
+  // `a..<b`
+  exclusive(T, T),
+  // `a..=b`
+  inclusive(T, T),
 }
 
 impl <T> IntoIterator for Range.<T> {

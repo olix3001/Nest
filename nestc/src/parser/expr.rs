@@ -319,7 +319,13 @@ impl Parser {
             Some(TokenKind::Float(x)) => {
                 let x = *x;
                 self.bump();
-                self.alloc(span, NodeKind::Lit(Lit::Float(x)))
+                let node = self.alloc(span, NodeKind::Lit(Lit::Float(x.value)));
+                // Remember that this literal outruns `f64`, so inference can
+                // reject the default collapse at the use site.
+                if x.wide {
+                    self.set_meta(node, crate::parser::ast::WideFloat);
+                }
+                node
             }
             Some(TokenKind::Str(s)) => {
                 let s = s.clone();

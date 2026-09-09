@@ -18,7 +18,7 @@ use crate::common::diagnostic::Diagnostic;
 use crate::common::source::FileId;
 use crate::common::source::FileSpan;
 use crate::common::symbol::Symbol;
-use crate::parser::ast::{Ast, NodeId, NodeKind};
+use crate::parser::ast::{Ast, NodeId, NodeKind, SliceRest};
 
 use super::def::{DefId, DefKind, DefTable, Visibility};
 use super::{DefMeta, PathRes, Resolution};
@@ -571,7 +571,7 @@ impl Resolver<'_> {
                 for e in elems {
                     self.bind_pattern(e);
                 }
-                if let Some(Some(name)) = rest {
+                if let Some(SliceRest { name: Some(name), .. }) = rest {
                     self.introduce(name, DefKind::Local, pattern);
                 }
             }

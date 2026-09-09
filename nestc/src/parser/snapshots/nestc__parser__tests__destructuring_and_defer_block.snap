@@ -18,7 +18,7 @@ File
             BindingPat b
           Path `pair`
         LocalDecl let
-          SlicePat (.. tail)
+          SlicePat (@1 .. tail)
             BindingPat head
           Path `xs`
         Defer

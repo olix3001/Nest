@@ -15,13 +15,19 @@
 //! - Every node carries its [`Ty`] (see [`Expr::ty`]); nothing is left to infer.
 //! - Auto-deref is **explicit**: a field/index access through a pointer gets an
 //!   [`Expr::Deref`] inserted.
-//! - `defer` is **explicit**: its body is copied to each point control leaves the
-//!   defining block (block end and every enclosed `return`), innermost-last.
+//! - `defer` is **scoped, not duplicated**: each block records its defer bodies
+//!   once in [`Block::defers`]; every exit from that block runs them in reverse,
+//!   which the CFG stage emits as one epilogue per scope.
+//!
+//! - implicit coercions are **explicit**: an `@using` upcast is the field access
+//!   it stands for, and a `*T` → `*dyn Trait` unsizing is an [`Expr::DynCast`]
+//!   carrying the erased pointee.
 //!
 //! What is deliberately *not* lowered yet (each a documented next layer, see
-//! [`super::lower`]): operator-trait selection (arithmetic stays a primitive
-//! [`Expr::Binary`]), generic monomorphization, `match` exhaustiveness / decision
-//! trees (arms stay structured), and `@using` upcasts.
+//! [`crate::sema::lower`]): bitwise / shift operators (they stay a primitive
+//! [`Expr::Binary`]), generic monomorphization, and `match` exhaustiveness /
+//! decision trees — arms stay structured, though [`Pattern`] keeps every form's
+//! full shape for the pass that builds them.
 //!
 //! Traversal is via the [`Visitor`] / [`VisitorMut`] traits, whose default
 //! methods walk every child so an implementation overrides only the nodes it
@@ -69,6 +75,12 @@ pub struct Block {
     pub stmts: Vec<Stmt>,
     pub tail: Option<Box<Expr>>,
     pub ty: Ty,
+    /// The block's `defer` bodies, in the order they were written. Every exit
+    /// from this block — the tail, a `return`, a `break`, a `continue` — runs
+    /// them **in reverse**; they are recorded once here rather than copied to
+    /// each exit, so a later CFG stage can emit a single epilogue per scope.
+    /// A `return` runs the defers of every enclosing block too, innermost first.
+    pub defers: Vec<Expr>,
 }
 
 /// A statement: an effect with no value contribution to its block.
@@ -86,8 +98,9 @@ pub enum Stmt {
     Assign { place: Expr, value: Expr },
     /// An expression evaluated for effect.
     Expr(Expr),
-    /// `return [value]`. Any `defer`s in scope have already been spliced in
-    /// before this by lowering.
+    /// `return [value]`. Running the [`defers`](Block::defers) of this block and
+    /// every enclosing one (innermost first) is the CFG stage's job — they are
+    /// not spliced in here.
     Return(Option<Expr>),
     /// `break [value]` out of the enclosing `loop`.
     Break(Option<Expr>),
@@ -107,7 +120,7 @@ pub struct Arm {
 /// what remains is enough for a later decision-tree pass and for binding.
 #[derive(Debug, Clone)]
 pub enum Pattern {
-    /// `_` and any pattern the bootstrap does not model bind nothing.
+    /// `_`, and any pattern that binds and tests nothing.
     Wildcard,
     /// A name binding.
     Binding { def: DefId, name: Symbol },
@@ -119,6 +132,49 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
     /// `a | b | ...`.
     Or(Vec<Pattern>),
+    /// `[Type] { field: p, ... [, ..] }` — a struct pattern. `def` is the named
+    /// struct, or `None` for the inferred `.{ ... }` form. `rest` records a
+    /// trailing `..`, so the untested fields stay distinguishable from an
+    /// exhaustive listing.
+    Struct {
+        def: Option<DefId>,
+        fields: Vec<(Symbol, Pattern)>,
+        rest: bool,
+    },
+    /// `Type(p, q [, ..])` — a tuple-struct pattern.
+    TupleStruct {
+        def: Option<DefId>,
+        elems: Vec<Pattern>,
+        rest: bool,
+    },
+    /// `[a, b, .. [name], y, z]` — a slice pattern. The `..` splits the tested
+    /// elements into a `prefix` matched from the front and a `suffix` matched
+    /// from the back; without one, everything is `prefix` and `rest` is `None`.
+    Slice {
+        prefix: Vec<Pattern>,
+        /// The `..` segment: present when the pattern has one, carrying the
+        /// binding for the skipped middle if it named one.
+        rest: Option<Option<Binding>>,
+        suffix: Vec<Pattern>,
+    },
+    /// `a..<b` / `..=b` — a literal range pattern. `inclusive` distinguishes
+    /// `..=` from `..<`; an absent bound is unbounded on that side.
+    Range {
+        start: Option<Lit>,
+        end: Option<Lit>,
+        inclusive: bool,
+    },
+    /// `name @ pattern` — bind the whole value *and* keep testing it.
+    At { binding: Binding, pattern: Box<Pattern> },
+    /// `&pattern` — match through a reference.
+    Deref(Box<Pattern>),
+}
+
+/// A name a pattern binds, and the definition it introduces.
+#[derive(Debug, Clone)]
+pub struct Binding {
+    pub def: DefId,
+    pub name: Symbol,
 }
 
 /// A typed expression. Every variant ends in its [`Ty`]; read it via
@@ -224,6 +280,15 @@ pub enum Expr {
         args: Vec<Expr>,
         ty: Ty,
     },
+    /// `*T` unsized to `*dyn Trait` — a fat pointer pairing `value` with `T`'s
+    /// vtable for the trait `ty` names. `concrete` is the erased pointee, kept
+    /// because picking the vtable is exactly what the coerced type can no longer
+    /// say.
+    DynCast {
+        value: Box<Expr>,
+        concrete: Ty,
+        ty: Ty,
+    },
     /// A placeholder for an expression that could not be lowered (an error was
     /// already reported); carries its (usually error) type.
     Error(Ty),
@@ -251,6 +316,7 @@ impl Expr {
             | Expr::Construct { ty, .. }
             | Expr::Variant { ty, .. }
             | Expr::Intrinsic { ty, .. }
+            | Expr::DynCast { ty, .. }
             | Expr::Error(ty) => ty,
             Expr::Block(b) => &b.ty,
         }
@@ -291,6 +357,9 @@ pub fn walk_block<V: Visitor>(v: &mut V, block: &Block) {
     }
     if let Some(t) = &block.tail {
         v.visit_expr(t);
+    }
+    for d in &block.defers {
+        v.visit_expr(d);
     }
 }
 
@@ -367,6 +436,7 @@ pub fn walk_expr<V: Visitor>(v: &mut V, expr: &Expr) {
                 v.visit_expr(a);
             }
         }
+        Expr::DynCast { value, .. } => v.visit_expr(value),
     }
 }
 
@@ -407,6 +477,9 @@ pub fn walk_block_mut<V: VisitorMut>(v: &mut V, block: &mut Block) {
     }
     if let Some(t) = &mut block.tail {
         v.visit_expr(t);
+    }
+    for d in &mut block.defers {
+        v.visit_expr(d);
     }
 }
 
@@ -483,6 +556,7 @@ pub fn walk_expr_mut<V: VisitorMut>(v: &mut V, expr: &mut Expr) {
                 v.visit_expr(a);
             }
         }
+        Expr::DynCast { value, .. } => v.visit_expr(value),
     }
 }
 

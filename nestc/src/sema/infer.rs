@@ -26,13 +26,20 @@ use std::collections::{HashMap, HashSet};
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
-use crate::parser::ast::{Ast, BinOp, Lit, NodeId, NodeKind, UnOp, VariantArgs, VariantPatArgs};
+use crate::parser::ast::{
+    Ast, BinOp, Lit, NodeId, NodeKind, SliceRest, UnOp, VariantArgs, VariantPatArgs, WideFloat,
+};
 
 use super::builtins::{self, Applies, BuiltinOp, BuiltinRow};
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::impls::{ImplInfo, ImplTable};
-use super::ty::{InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
+use super::ty::{FloatWidth, InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
 use super::{DefMeta, Resolution};
+
+/// Intrinsics that never return, so a call to one types as [`Ty::Never`] rather
+/// than a value: it absorbs into whatever position it appears in instead of
+/// leaving an unsolvable variable behind.
+const DIVERGING_INTRINSICS: &[&str] = &["abort"];
 
 /// How an operator (or other trait-dispatched) node resolved, stamped onto the
 /// operator's AST node by the trait solver so [`super::lower`] can emit a
@@ -49,6 +56,37 @@ pub struct OpResolution {
     pub method: DefId,
     /// The builtin-op tag, or `None` for a user impl.
     pub builtin: Option<BuiltinOp>,
+}
+
+/// Records that a `*T` was unsized to a `*dyn Trait` at this node (§3.2): the
+/// value becomes a fat pointer pairing the data pointer with `T`'s vtable for
+/// the trait.
+///
+/// The concrete pointee is kept so a later stage can pick the right vtable —
+/// that choice is exactly what the coercion erases from the type.
+#[derive(Debug, Clone)]
+pub struct DynCoerce {
+    /// The trait the object is typed as.
+    pub trait_def: DefId,
+    /// The pointee type being erased.
+    pub concrete: Ty,
+}
+
+/// Records that an expression reaches its expected type through an `@using`
+/// field's implicit upcast (§3.10), attached to the coerced node so
+/// [`super::lower`] can make the "take `e.field`" explicit.
+///
+/// A value upcast copies the sub-object; a pointer upcast takes its address, so
+/// [`through_ptr`](Upcast::through_ptr) picks which of the two lowering emits.
+#[derive(Debug, Clone)]
+pub struct Upcast {
+    /// The `@using` field the coercion goes through.
+    pub field: DefId,
+    /// The receiver is a pointer, so the result is `&base.field`, not `base.field`.
+    pub through_ptr: bool,
+    /// The type the coercion produces — the field's type, or a pointer to it.
+    /// The node's own recorded type stays the *source* type.
+    pub target: Ty,
 }
 
 /// Infer types for every function body in `file`, annotating each expression
@@ -224,8 +262,45 @@ impl Inferer<'_> {
             if ambiguous {
                 self.report(node, "type annotations needed");
             }
+            self.check_float_width(node, &resolved);
             self.ast.set_meta(node, resolved);
         }
+        self.finalize_upcasts();
+    }
+
+    /// Resolve the target type recorded on each `@using` coercion, which was
+    /// captured mid-inference and may still hold unsolved variables.
+    fn finalize_upcasts(&mut self) {
+        for node in self.ast.ids() {
+            let Some(up) = self.ast.meta::<Upcast>(node) else {
+                continue;
+            };
+            let target = self.cx.finalize(&up.target, &mut || {});
+            self.ast.set_meta(node, Upcast { target, ..up });
+        }
+    }
+
+    /// Reject a float literal whose text the parser flagged as outrunning `f64`
+    /// ([`WideFloat`]) but whose settled type is `f64` or narrower.
+    ///
+    /// A float literal is a `comptime_float` — an `f128` — and collapses to
+    /// `f64` when nothing pins its width. That collapse is silent and lossless
+    /// for ordinary literals; for these it is neither, so the use site has to
+    /// ask for an `f80` / `f128` explicitly.
+    fn check_float_width(&mut self, node: NodeId, resolved: &Ty) {
+        if self.ast.meta::<WideFloat>(node).is_none() {
+            return;
+        }
+        let Ty::Float(w) = resolved else { return };
+        if matches!(w, FloatWidth::F80 | FloatWidth::F128) {
+            return;
+        }
+        let msg = format!(
+            "float literal is too large or too precise for `{}`; \
+             annotate it as `f80` or `f128`",
+            resolved.display(self.defs)
+        );
+        self.report(node, msg);
     }
 
     // ===< expressions >===
@@ -308,7 +383,15 @@ impl Inferer<'_> {
             }
             NodeKind::Slice { base, range } => {
                 let bty = self.infer_expr(base);
-                self.infer_expr(range);
+                let rty = self.infer_expr(range);
+                // Slice bounds are indices: pin the range's element type to
+                // `usize` so an unbounded `a[..]` still has a solved type.
+                if let Ty::Nominal { args, .. } = self.cx.shallow(&rty) {
+                    if let Some(elem) = args.first() {
+                        let elem = elem.clone();
+                        self.expect(range, &elem, &Ty::usize());
+                    }
+                }
                 // A sub-slice of anything sliceable is a read-only slice of its
                 // element type.
                 match self.autoderef(&bty) {
@@ -400,10 +483,17 @@ impl Inferer<'_> {
                 Ty::Void
             }
             NodeKind::IntrinsicCall {
-                generic_args, args, ..
+                name,
+                generic_args,
+                args,
             } => {
                 for a in &args {
                     self.infer_expr(*a);
+                }
+                // A diverging intrinsic never yields a value, so it types as
+                // `never` and unifies with whatever position it appears in.
+                if DIVERGING_INTRINSICS.contains(&name.as_str()) {
+                    return Ty::Never;
                 }
                 // `$cast.<T>(x)` / `$make.<T>()` etc.: the first type argument, if
                 // any, is the result; otherwise it is context-inferred.
@@ -1068,6 +1158,24 @@ impl Inferer<'_> {
                 if let Some(m) = self.trait_method_def(&recv, name.as_str()) {
                     return self.infer_method_call(callee, &recv, m, args);
                 }
+                // A method on a bounded type parameter resolves in the bound:
+                // `<I: Summing>` makes `it.total()` mean `Summing.total`, with
+                // the concrete impl picked once `I` is instantiated.
+                if let Some(m) = self.bound_method_def(&recv, name.as_str()) {
+                    return self.infer_method_call(callee, &recv, m, args);
+                }
+                // A method on a trait object resolves in the trait itself; which
+                // impl runs is a vtable lookup a later stage performs.
+                if let Some(m) = self.dyn_method_def(&recv, name.as_str()) {
+                    return self.infer_method_call(callee, &recv, m, args);
+                }
+                // Last, the one ergonomic exception `@using` grants (§3.10): a
+                // method the outer struct does not have resolves on the upcast
+                // target, with the receiver bound to the embedded sub-object.
+                if let Some((m, up)) = self.using_method_def(&recv, name.as_str()) {
+                    self.ast.set_meta(base, up.clone());
+                    return self.infer_method_call(callee, &up.target, m, args);
+                }
             }
         }
         // A direct function call: build the signature and **instantiate** its
@@ -1169,6 +1277,132 @@ impl Inferer<'_> {
         }
     }
 
+    /// Resolve `name` through the trait bounds of a generic type parameter
+    /// receiver (`<I: Summing>` → `it.total()` is `Summing.total`).
+    fn bound_method_def(&mut self, recv: &Ty, name: &str) -> Option<DefId> {
+        let s = self.autoderef(&self.cx.shallow(recv));
+        let Ty::Nominal { def, .. } = s else {
+            return None;
+        };
+        let d = self.defs.get(def);
+        if d.kind != DefKind::TypeParam {
+            return None;
+        }
+        let (file, node) = (d.file?, d.node?);
+        let NodeKind::GenericTypeParam { constraint, .. } = self.asts[&file].node(node).kind.clone()
+        else {
+            return None;
+        };
+        let sym = crate::common::symbol::Symbol::new(name);
+        for bound in self.bound_nodes(file, constraint?) {
+            let Some(t) = self.type_head_def_in(file, bound) else {
+                continue;
+            };
+            if self.defs.get(t).kind != DefKind::Trait || !self.in_scope_traits.contains(&t) {
+                continue;
+            }
+            if let Some(&m) = self.defs.get(t).ns.members.get(&sym) {
+                if self.defs.get(m).kind == DefKind::Func {
+                    return Some(m);
+                }
+            }
+        }
+        None
+    }
+
+    /// The individual trait nodes of a generic parameter's constraint, which is
+    /// either a `+`-separated [`NodeKind::Bounds`] list or a single trait.
+    fn bound_nodes(&self, file: FileId, constraint: NodeId) -> Vec<NodeId> {
+        match self.asts[&file].node(constraint).kind.clone() {
+            NodeKind::Bounds { bounds } => bounds,
+            _ => vec![constraint],
+        }
+    }
+
+    /// Rewrite a trait *declaration*'s `Self` to what the receiver actually is.
+    ///
+    /// Only calls that land on a trait's own declaration need this — dispatch
+    /// through a trait object (`*dyn Summing`) or through a type parameter's
+    /// bound (`<I: Summing>`). A call that selected a concrete impl already has
+    /// the impl's signature and is left alone.
+    fn subst_trait_self(&mut self, sig: &Ty, method: DefId, recv: &Ty) -> Ty {
+        let Some(parent) = self.defs.get(method).parent else {
+            return sig.clone();
+        };
+        if self.defs.get(parent).kind != DefKind::Trait {
+            return sig.clone();
+        }
+        // Look through the receiver's pointer: `*dyn T` and `*I` both stand for
+        // a `Self` of `dyn T` / `I`.
+        let head = match self.cx.shallow(recv) {
+            Ty::Ptr { inner, .. } => self.cx.shallow(&inner),
+            other => other,
+        };
+        if matches!(head, Ty::Error) || is_var(&head) {
+            return sig.clone();
+        }
+        let map = HashMap::from([(parent, head)]);
+        self.subst_type_params(sig, &map)
+    }
+
+    /// Resolve `name` on a trait-object receiver (`dyn Trait` or `*dyn Trait`) to
+    /// the trait's own method declaration.
+    fn dyn_method_def(&mut self, recv: &Ty, name: &str) -> Option<DefId> {
+        let s = self.cx.shallow(recv);
+        let trait_def = match &s {
+            Ty::Dyn(d) => *d,
+            Ty::Ptr { inner, .. } => match self.cx.shallow(inner) {
+                Ty::Dyn(d) => d,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let m = *self
+            .defs
+            .get(trait_def)
+            .ns
+            .members
+            .get(&crate::common::symbol::Symbol::new(name))?;
+        (self.defs.get(m).kind == DefKind::Func).then_some(m)
+    }
+
+    /// Resolve `name` on the `@using` field's type when the receiver's own type
+    /// does not have it, returning the method and the coercion that reaches it.
+    ///
+    /// Only one hop, and only when the outer struct has no such member itself —
+    /// `@using` promotes nothing else onto the outer type (§3.10).
+    fn using_method_def(&mut self, recv: &Ty, name: &str) -> Option<(DefId, Upcast)> {
+        let s = self.cx.shallow(recv);
+        let head = match &s {
+            Ty::Nominal { def, .. } => *def,
+            Ty::Ptr { inner, .. } => match self.cx.shallow(inner) {
+                Ty::Nominal { def, .. } => def,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let field = self.defs.using_field(head)?;
+        // The outer type keeps priority: `@using` only fills in what it lacks.
+        if self.method_def(&s, name).is_some() {
+            return None;
+        }
+        let target = self.field_ty(&s, self.defs.get(field).name.as_str())?;
+        let method = self
+            .method_def(&target, name)
+            .or_else(|| self.trait_method_def(&target, name))?;
+        // The receiver lowers to the sub-object itself (`e.t` / `p.*.t`); the
+        // method's own `*Self` parameter re-addresses it as usual, so this is
+        // never the pointer form of the coercion.
+        Some((
+            method,
+            Upcast {
+                field,
+                through_ptr: false,
+                target,
+            },
+        ))
+    }
+
     /// Type a `recv.method(args)` call: instantiate the method signature, unify
     /// its `self` parameter with the receiver (linking the receiver's type
     /// arguments to the method's), then unify the rest against the arguments.
@@ -1181,6 +1415,11 @@ impl Inferer<'_> {
     ) -> Ty {
         let sig = self.func_def_ty(method);
         let inst = self.instantiate(&sig);
+        // Dispatching through a trait object or a bound reaches the trait's
+        // *declaration*, whose `Self` is the trait's own nominal. For this call
+        // `Self` is the receiver, so say so rather than leaving the signature
+        // claiming a bare `Trait`.
+        let inst = self.subst_trait_self(&inst, method, recv);
         self.types.insert(callee, inst.clone());
         let Ty::Func { params, ret } = self.cx.shallow(&inst) else {
             return Ty::Error;
@@ -1676,11 +1915,15 @@ impl Inferer<'_> {
                 }
             }
             NodeKind::SlicePat { elems, rest } => {
-                let elem = self.cx.fresh();
+                // Every element pattern matches the scrutinee's element type.
+                let elem = match self.autoderef(ty) {
+                    Ty::Slice { inner, .. } | Ty::Array { inner, .. } => *inner,
+                    _ => self.cx.fresh(),
+                };
                 for e in elems {
                     self.bind_pattern(e, &elem);
                 }
-                if let Some(Some(_)) = rest {
+                if let Some(SliceRest { name: Some(_), .. }) = rest {
                     if let Some(def) = self.def_of(pat) {
                         self.env.insert(
                             def,
@@ -1887,8 +2130,18 @@ impl Inferer<'_> {
     }
 
     /// Unify `actual` with `expected`, reporting a mismatch anchored at `node`.
+    ///
+    /// A plain mismatch gets one more chance: a struct with an `@using` field
+    /// implicitly upcasts to that field's type (§3.10), so try the coercion
+    /// before reporting.
     fn expect(&mut self, node: NodeId, actual: &Ty, expected: &Ty) {
+        let snapshot = self.cx.snapshot();
         if let Err((a, b)) = self.cx.unify(actual, expected) {
+            self.cx.rollback(snapshot);
+            if self.try_dyn_coerce(node, actual, expected) || self.try_upcast(node, actual, expected)
+            {
+                return;
+            }
             let msg = format!(
                 "type mismatch: expected `{}`, found `{}`",
                 b.display(self.defs),
@@ -1898,12 +2151,99 @@ impl Inferer<'_> {
         }
     }
 
+    /// Try to reach `expected` from `actual` by unsizing a concrete pointer to a
+    /// trait object: `*T` coerces to `*dyn Trait` when `T: Trait` (§3.2),
+    /// recording a [`DynCoerce`] on `node` so lowering builds the fat pointer.
+    fn try_dyn_coerce(&mut self, node: NodeId, actual: &Ty, expected: &Ty) -> bool {
+        // Only pointers unsize; the pointee must be a real type on the left and
+        // the trait object on the right, with mutability the usual `*mut` → `*`.
+        let (Ty::Ptr { mutable, inner }, Ty::Ptr { mutable: em, inner: ei }) =
+            (self.cx.shallow(actual), self.cx.shallow(expected))
+        else {
+            return false;
+        };
+        if em && !mutable {
+            return false;
+        }
+        let Ty::Dyn(trait_def) = self.cx.shallow(&ei) else {
+            return false;
+        };
+        let concrete = self.cx.shallow(&inner);
+        if is_var(&concrete) || matches!(concrete, Ty::Error) {
+            return false;
+        }
+        // The coercion is only sound when the concrete type really implements
+        // the trait; an unsatisfied bound stays a plain type mismatch.
+        if !matches!(self.select(&concrete, trait_def, &[]), Select::Ok(_)) {
+            return false;
+        }
+        self.ast.set_meta(
+            node,
+            DynCoerce {
+                trait_def,
+                concrete,
+            },
+        );
+        true
+    }
+
+    /// Try to reach `expected` from `actual` through an `@using` field's implicit
+    /// upcast, recording an [`Upcast`] on `node` when it works.
+    ///
+    /// `Entity` coerces to `Transform` by copying the field; `*Entity` coerces to
+    /// `*Transform` by taking the sub-object's address. Only one hop is tried: a
+    /// chain of upcasts is deliberately not implicit.
+    fn try_upcast(&mut self, node: NodeId, actual: &Ty, expected: &Ty) -> bool {
+        let (head, through_ptr) = match self.cx.shallow(actual) {
+            Ty::Nominal { def, .. } => (def, false),
+            Ty::Ptr { inner, .. } => match self.cx.shallow(&inner) {
+                Ty::Nominal { def, .. } => (def, true),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let Some(field) = self.defs.using_field(head) else {
+            return false;
+        };
+        let Some(fty) = self.field_ty(actual, self.defs.get(field).name.as_str()) else {
+            return false;
+        };
+        // The upcast of a pointer yields a pointer to the sub-object, keeping the
+        // receiver's mutability.
+        let target = match (through_ptr, self.cx.shallow(actual)) {
+            (true, Ty::Ptr { mutable, .. }) => Ty::Ptr {
+                mutable,
+                inner: Box::new(fty),
+            },
+            _ => fty,
+        };
+        let snapshot = self.cx.snapshot();
+        if self.cx.unify(&target, expected).is_err() {
+            self.cx.rollback(snapshot);
+            return false;
+        }
+        self.ast.set_meta(
+            node,
+            Upcast {
+                field,
+                through_ptr,
+                target,
+            },
+        );
+        true
+    }
+
     /// Whether a statement unconditionally transfers control out of its block.
     fn diverges(&self, node: NodeId) -> bool {
-        matches!(
-            self.ast.node(node).kind,
-            NodeKind::Return { .. } | NodeKind::Break { .. } | NodeKind::Continue
-        )
+        match &self.ast.node(node).kind {
+            NodeKind::Return { .. } | NodeKind::Break { .. } | NodeKind::Continue => true,
+            // A diverging intrinsic in statement position ends the block just as
+            // a `return` does — `.!` leans on this to type its abort arm.
+            NodeKind::IntrinsicCall { name, .. } => {
+                DIVERGING_INTRINSICS.contains(&name.as_str())
+            }
+            _ => false,
+        }
     }
 
     fn def_of(&self, node: NodeId) -> Option<super::def::DefId> {

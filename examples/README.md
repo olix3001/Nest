@@ -12,6 +12,10 @@ exist.
 | `shapes.nest` | `struct`, `enum` with record variants, `impl`, `.match` |
 | `math.nest` | a small library of `@public` functions, imported by the next file |
 | `use_math.nest` | imports `math.nest` (a sibling file) and calls into it |
+| `operators.nest` | operator traits (`Add`, `Mul`, …) and their impls |
+| `inference.nest` | generics, trait bounds, associated types, projection |
+| `errors.nest` | `.?` propagation, `.!` abort, `for` over a slice |
+| `dispatch.nest` | `@using` upcasts, `dyn` trait objects, bound-directed calls |
 
 `use_math.nest` is the cross-file example: `math :: import "math.nest"` binds the
 sibling file's namespace, and its `@public` functions are reached as

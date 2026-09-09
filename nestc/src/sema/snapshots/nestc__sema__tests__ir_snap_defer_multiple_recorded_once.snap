@@ -5,15 +5,11 @@ expression: "ir_text(\"cleanup :: func () {}\\ndm :: func (c: bool) -> i32 {\\n 
 func cleanup() -> void {
 }
 func dm(c: bool) -> i32 {
+  defer (cleanup: func() -> void)(): void
+  defer (cleanup: func() -> void)(): void
   if c: bool {
-    (cleanup: func() -> void)(): void
-    (cleanup: func() -> void)(): void
     return 1: i32
   }
   <if: void>
-  (cleanup: func() -> void)(): void
-  (cleanup: func() -> void)(): void
   return 2: i32
-  (cleanup: func() -> void)(): void
-  (cleanup: func() -> void)(): void
 }

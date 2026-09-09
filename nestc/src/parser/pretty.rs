@@ -216,8 +216,10 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         }
         TuplePat { .. } => "TuplePat".into(),
         SlicePat { rest, .. } => match rest {
-            Some(Some(name)) => format!("SlicePat (.. {name})"),
-            Some(None) => "SlicePat (has ..)".into(),
+            Some(r) => match &r.name {
+                Some(name) => format!("SlicePat (@{} .. {name})", r.at),
+                None => format!("SlicePat (@{} ..)", r.at),
+            },
             None => "SlicePat".into(),
         },
         RefPat { .. } => "RefPat &".into(),

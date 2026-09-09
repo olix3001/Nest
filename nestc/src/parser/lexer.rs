@@ -41,7 +41,7 @@ pub enum TokenKind {
 
     #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9_]+)?", lex_float)]
     #[regex(r"[0-9][0-9_]*[eE][+-]?[0-9_]+", lex_float)]
-    Float(f64),
+    Float(FloatLit),
 
     #[token("\"", lex_string)]
     Str(String),
@@ -363,13 +363,58 @@ fn lex_int(lex: &mut logos::Lexer<TokenKind>) -> Result<i128, LexErrorKind> {
     i128::from_str_radix(&cleaned, radix).map_err(|_| LexErrorKind::InvalidNumber)
 }
 
-/// Parse a floating-point literal, ignoring `_` digit separators.
-fn lex_float(lex: &mut logos::Lexer<TokenKind>) -> Result<f64, LexErrorKind> {
-    let cleaned: String = lex.slice().chars().filter(|&c| c != '_').collect();
-    cleaned
-        .parse::<f64>()
-        .map_err(|_| LexErrorKind::InvalidNumber)
+/// A lexed float literal: its `f64` value plus whether the source text asked for
+/// more than an `f64` can hold.
+///
+/// A float literal is `comptime_float` — conceptually `f128` — and collapses to
+/// `f64` when nothing in its use pins a width. [`wide`](FloatLit::wide) marks the
+/// literals for which that collapse would lose the value, so inference can
+/// reject them unless the use site really is an `f80` / `f128`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FloatLit {
+    /// The value as an `f64` — infinite when the text overflows the format.
+    pub value: f64,
+    /// The text does not survive the `comptime_float` → `f64` collapse.
+    pub wide: bool,
 }
+
+/// Parse a floating-point literal, ignoring `_` digit separators.
+fn lex_float(lex: &mut logos::Lexer<TokenKind>) -> Result<FloatLit, LexErrorKind> {
+    let cleaned: String = lex.slice().chars().filter(|&c| c != '_').collect();
+    let value = cleaned
+        .parse::<f64>()
+        .map_err(|_| LexErrorKind::InvalidNumber)?;
+    Ok(FloatLit {
+        value,
+        wide: exceeds_f64(&cleaned, value),
+    })
+}
+
+/// Whether a float literal's text carries more than an `f64` can represent: it
+/// overflows to infinity, flushes a nonzero value to zero, or names more
+/// significant decimal digits than `f64`'s 17-digit round-trip budget.
+///
+/// `text` has already had its `_` separators removed.
+fn exceeds_f64(text: &str, value: f64) -> bool {
+    if !value.is_finite() {
+        return true;
+    }
+    // Only the mantissa's digits matter; the exponent is already accounted for
+    // by the overflow / flush-to-zero checks above and below.
+    let mantissa = text.split(['e', 'E']).next().unwrap_or(text);
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    // Leading zeros are placeholders, and trailing zeros in the text add no
+    // information the value does not already have.
+    let significant = digits.trim_start_matches('0').trim_end_matches('0').len();
+    if value == 0.0 {
+        return significant != 0;
+    }
+    significant > F64_ROUND_TRIP_DIGITS
+}
+
+/// The decimal digits an `f64` round-trips (`f64::DIGITS` is the *guaranteed*
+/// 15; 17 is the number that always recovers the same bit pattern).
+const F64_ROUND_TRIP_DIGITS: usize = 17;
 
 /// Decode the body of a `"..."` string, resolving escapes. Called with the
 /// cursor positioned just past the opening quote.
@@ -513,11 +558,34 @@ mod tests {
                 TokenKind::Int(255),
                 TokenKind::Int(0o17),
                 TokenKind::Int(0b1010),
-                TokenKind::Float(3.14),
-                TokenKind::Float(1.0e-9),
-                TokenKind::Float(6.022e23),
+                TokenKind::Float(narrow(3.14)),
+                TokenKind::Float(narrow(1.0e-9)),
+                TokenKind::Float(narrow(6.022e23)),
             ]
         );
+    }
+
+    /// A float literal that fits `f64` (the common case).
+    fn narrow(value: f64) -> FloatLit {
+        FloatLit { value, wide: false }
+    }
+
+    #[test]
+    fn float_literals_are_flagged_when_they_outrun_f64() {
+        let wide = |src: &str| match &kinds(src)[0] {
+            TokenKind::Float(f) => f.wide,
+            other => panic!("not a float: {other:?}"),
+        };
+        // Ordinary literals collapse to `f64` losslessly.
+        assert!(!wide("3.14"));
+        assert!(!wide("1.0e-9"));
+        // Trailing and leading zeros carry no information.
+        assert!(!wide("0.1000000000000000000000"));
+        assert!(!wide("0.000000000000000000001"));
+        // More significant digits than `f64` round-trips.
+        assert!(wide("1.00000000000000000001"));
+        // Beyond `f64`'s range entirely.
+        assert!(wide("1.0e400"));
     }
 
     #[test]

@@ -193,6 +193,9 @@ impl Collector<'_> {
             // Tuple/unit structs have positional/no named members.
             StructKind::Tuple(_) | StructKind::Unit => return,
         };
+        // At most one field per struct may be `@using` (§3.10); the first one
+        // wins and any further one is an error.
+        let mut upcast_seen = false;
         for f in fields {
             if let NodeKind::Field { attrs, name, .. } = self.ast.node(f).kind.clone() {
                 let hidden = attrs.iter().any(|&a| self.is_attr(a, "private"));
@@ -201,7 +204,15 @@ impl Collector<'_> {
                 } else {
                     Visibility::Private
                 };
-                self.define(name, DefKind::Field, member_vis, ty, f, None);
+                let def = self.define(name, DefKind::Field, member_vis, ty, f, None);
+                if attrs.iter().any(|&a| self.is_attr(a, "using")) {
+                    if upcast_seen {
+                        self.report(f, "a struct may have at most one `@using` field");
+                    } else {
+                        upcast_seen = true;
+                        self.defs.get_mut(def).using = true;
+                    }
+                }
             }
         }
     }

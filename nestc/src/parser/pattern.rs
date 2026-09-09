@@ -9,7 +9,7 @@
 
 use crate::common::span::Span;
 
-use super::ast::{Lit, NodeId, NodeKind, RangeKind, VariantPatArgs};
+use super::ast::{Lit, NodeId, NodeKind, RangeKind, SliceRest, VariantPatArgs};
 use super::lexer::TokenKind;
 use super::parse::Parser;
 
@@ -370,9 +370,13 @@ impl Parser {
                 break;
             }
             if self.eat(&TokenKind::DotDot) {
-                // Optional binding for the rest: `.. name`.
+                // Optional binding for the rest: `.. name`. Its position splits
+                // `elems` into the prefix already parsed and the suffix to come.
                 let name = self.eat_ident();
-                rest = Some(name);
+                rest = Some(SliceRest {
+                    at: elems.len(),
+                    name,
+                });
                 self.skip_newlines();
                 self.eat(&TokenKind::Comma);
                 continue;
@@ -410,7 +414,7 @@ impl Parser {
     fn parse_literal_value(&mut self) -> Lit {
         match self.bump().kind {
             TokenKind::Int(n) => Lit::Int(n),
-            TokenKind::Float(x) => Lit::Float(x),
+            TokenKind::Float(x) => Lit::Float(x.value),
             TokenKind::Str(s) => Lit::Str(s),
             TokenKind::Char(c) => Lit::Char(c),
             TokenKind::TrueKw => Lit::Bool(true),

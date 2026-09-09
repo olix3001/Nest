@@ -56,6 +56,12 @@ impl Printer<'_> {
     }
 
     fn block(&mut self, b: &Block) {
+        // The block's defers print first, before its statements: they are a
+        // property of the scope, not a step in its sequence.
+        for d in &b.defers {
+            let e = self.expr(d);
+            self.line(&format!("defer {e}"));
+        }
         for s in &b.stmts {
             self.stmt(s);
         }
@@ -166,6 +172,7 @@ impl Printer<'_> {
                     .join(", ");
                 format!("{} {{ {fs} }}: {ty}", self.defs.canonical_string(*def))
             }
+            Expr::Variant { name, args, .. } if args.is_empty() => format!(".{name}: {ty}"),
             Expr::Variant { name, args, .. } => {
                 let a = args
                     .iter()
@@ -173,6 +180,12 @@ impl Printer<'_> {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(".{name}({a}): {ty}")
+            }
+            Expr::DynCast {
+                value, concrete, ..
+            } => {
+                let v = self.expr(value);
+                format!("({v} as {ty} from {})", concrete.display(self.defs))
             }
             Expr::Intrinsic { name, args, .. } => {
                 let a = args
@@ -261,6 +274,54 @@ fn pattern_str(p: &Pattern) -> String {
             format!("({s})")
         }
         Pattern::Or(ps) => ps.iter().map(pattern_str).collect::<Vec<_>>().join(" | "),
+        Pattern::Struct { def, fields, rest } => {
+            let mut parts: Vec<String> = fields
+                .iter()
+                .map(|(n, p)| format!("{n}: {}", pattern_str(p)))
+                .collect();
+            if *rest {
+                parts.push("..".into());
+            }
+            let head = def.map_or_else(|| ".".to_string(), |d| format!("#{} ", d.0));
+            format!("{head}{{ {} }}", parts.join(", "))
+        }
+        Pattern::TupleStruct { def, elems, rest } => {
+            let mut parts: Vec<String> = elems.iter().map(pattern_str).collect();
+            if *rest {
+                parts.push("..".into());
+            }
+            let head = def.map_or_else(String::new, |d| format!("#{}", d.0));
+            format!("{head}({})", parts.join(", "))
+        }
+        Pattern::Slice {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            let mut parts: Vec<String> = prefix.iter().map(pattern_str).collect();
+            if let Some(binding) = rest {
+                parts.push(match binding {
+                    Some(b) => format!(".. {}", b.name),
+                    None => "..".into(),
+                });
+            }
+            parts.extend(suffix.iter().map(pattern_str));
+            format!("[{}]", parts.join(", "))
+        }
+        Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            let op = if *inclusive { "..=" } else { "..<" };
+            let s = start.as_ref().map(lit_str).unwrap_or_default();
+            let e = end.as_ref().map(lit_str).unwrap_or_default();
+            format!("{s}{op}{e}")
+        }
+        Pattern::At { binding, pattern } => {
+            format!("{} @ {}", binding.name, pattern_str(pattern))
+        }
+        Pattern::Deref(p) => format!("&{}", pattern_str(p)),
     }
 }
 
