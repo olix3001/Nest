@@ -51,6 +51,15 @@ use super::{DefMeta, Resolution};
 /// leaving an unsolvable variable behind.
 const DIVERGING_INTRINSICS: &[&str] = &["abort", "panic"];
 
+/// One enclosing `loop` / `while` while its body is being inferred.
+struct LoopFrame {
+    /// The type its `break`s agree on.
+    ty: Ty,
+    /// Whether any `break` targeted it. A `loop` with none never finishes, so it
+    /// types as [`Ty::Never`] rather than as an unsolved variable.
+    broke: bool,
+}
+
 /// What an intrinsic's result type is made of.
 ///
 /// Most `$`-intrinsics are generic in one type argument, but only some of them
@@ -485,8 +494,8 @@ struct Inferer<'a> {
     types: HashMap<NodeId, Ty>,
     /// Return type of the function currently being inferred.
     ret: Ty,
-    /// The break-value type of each enclosing `loop`, innermost last.
-    breaks: Vec<Ty>,
+    /// One frame per enclosing `loop` / `while`, innermost last.
+    breaks: Vec<LoopFrame>,
     /// Type-alias / associated-type defs currently being expanded, to break
     /// cycles in [`Inferer::expand_alias`].
     alias_stack: Vec<DefId>,
@@ -556,7 +565,7 @@ impl Inferer<'_> {
         if let Some(b) = body {
             let bty = self.infer_expr(b);
             // The body's tail value is the function's result.
-            self.expect(b, &bty, &ret);
+            self.expect_return(b, &bty, &ret);
         }
     }
 
@@ -816,9 +825,19 @@ impl Inferer<'_> {
                 let then_ty = self.infer_expr(then);
                 match els {
                     Some(e) => {
+                        // Both branches contribute to one result, through a
+                        // fresh variable rather than by making the `then`
+                        // branch's type the answer. That is what lets `never` be
+                        // the identity of the join: a diverging branch absorbs
+                        // into the variable and leaves the other to decide it.
+                        // Checking the `else` against the `then` instead gave
+                        // `if c { panic() } else { 1 }` the type `never`, which
+                        // is plainly wrong — it yields `1` half the time.
+                        let result = self.cx.fresh();
+                        self.expect(then, &then_ty, &result);
                         let else_ty = self.infer_expr(e);
-                        self.expect(e, &else_ty, &then_ty);
-                        then_ty
+                        self.expect(e, &else_ty, &result);
+                        result
                     }
                     // An `if` without `else` yields `void`; the `then` block must too.
                     None => {
@@ -838,9 +857,12 @@ impl Inferer<'_> {
                 let then_ty = self.infer_expr(then);
                 match els {
                     Some(e) => {
+                        // One result variable per join; see `NodeKind::If`.
+                        let result = self.cx.fresh();
+                        self.expect(then, &then_ty, &result);
                         let else_ty = self.infer_expr(e);
-                        self.expect(e, &else_ty, &then_ty);
-                        then_ty
+                        self.expect(e, &else_ty, &result);
+                        result
                     }
                     None => {
                         self.expect(then, &then_ty, &Ty::Void);
@@ -849,16 +871,29 @@ impl Inferer<'_> {
                 }
             }
             NodeKind::Loop { body } => {
-                self.breaks.push(self.cx.fresh());
+                let ty = self.cx.fresh();
+                self.breaks.push(LoopFrame { ty, broke: false });
                 self.infer_expr(body);
-                self.breaks.pop().unwrap_or(Ty::Void)
+                match self.breaks.pop() {
+                    // A `loop` with no `break` never finishes. It has no value
+                    // because control never leaves it, which is exactly `never`
+                    // (§3.1) — and it is what lets `func () -> never { loop {} }`
+                    // be written. Leaving the fresh variable unsolved instead
+                    // reported "type annotations needed" for complete code.
+                    Some(f) if !f.broke => Ty::Never,
+                    Some(f) => f.ty,
+                    None => Ty::Void,
+                }
             }
             NodeKind::While { cond, body } => {
                 let cty = self.infer_expr(cond);
                 self.expect(cond, &cty, &Ty::Bool);
                 // A `while` is a loop for `break` / `continue`, but it never
                 // yields a value, so its breaks must be valueless.
-                self.breaks.push(Ty::Void);
+                self.breaks.push(LoopFrame {
+                    ty: Ty::Void,
+                    broke: false,
+                });
                 self.infer_expr(body);
                 self.breaks.pop();
                 Ty::Void
@@ -1059,15 +1094,19 @@ impl Inferer<'_> {
                 };
                 let ret = self.ret.clone();
                 let anchor = value.unwrap_or(node);
-                self.expect(anchor, &vty, &ret);
+                self.expect_return(anchor, &vty, &ret);
             }
             NodeKind::Break { value } => {
                 let vty = match value {
                     Some(v) => self.infer_expr(v),
                     None => Ty::Void,
                 };
-                match self.breaks.last().cloned() {
-                    Some(expected) => {
+                match self.breaks.last_mut() {
+                    Some(frame) => {
+                        // Record that this loop *can* be left, which is what
+                        // decides whether it types as `never`.
+                        frame.broke = true;
+                        let expected = frame.ty.clone();
                         let anchor = value.unwrap_or(node);
                         self.expect(anchor, &vty, &expected);
                     }
@@ -4144,6 +4183,23 @@ impl Inferer<'_> {
     /// A plain mismatch gets one more chance: a struct with an `@using` field
     /// implicitly upcasts to that field's type (§3.10), so try the coercion
     /// before reporting.
+    /// Check a value against the function's declared **return** type.
+    ///
+    /// Identical to [`Inferer::expect`] except that a declared `-> never` is not
+    /// treated as an impossible demand. It is a real and useful signature, and
+    /// whether the body honours it — no reachable `return`, no reachable fall
+    /// off the end — is a *reachability* question that the IR divergence pass
+    /// answers (§3.1). Reporting it here as a type mismatch would give
+    /// `func () -> never { loop {} }`, which is correct code, an error, and give
+    /// `func () -> never { }` the wrong explanation.
+    fn expect_return(&mut self, node: NodeId, actual: &Ty, expected: &Ty) {
+        if matches!(self.cx.resolve(expected), Ty::Never) {
+            let _ = self.cx.unify(actual, expected);
+            return;
+        }
+        self.expect(node, actual, expected);
+    }
+
     fn expect(&mut self, node: NodeId, actual: &Ty, expected: &Ty) {
         // `never` is one-way. It converts *to* every type, which is what lets a
         // diverging call sit in any expression position; nothing converts *to*

@@ -942,10 +942,6 @@ fn never_does_not_run_backwards() {
             "f :: func (x: never) -> i32 { return 0 }\ng :: func () -> i32 { return f(1) }\n",
             "`never` is uninhabited",
         ),
-        (
-            "f :: func () -> never { return 1 }\n",
-            "`never` is uninhabited",
-        ),
     ] {
         let session = analyze_mem(&[("main", src)], "main");
         assert_eq!(
@@ -994,6 +990,179 @@ fn string_is_not_a_primitive() {
             .any(|d| d.message.contains("cannot resolve name `string`")),
         "{:#?}",
         session.diagnostics
+    );
+}
+
+// ===< The divergence check >===
+
+/// Analyze `src` and return the messages of every diagnostic it produced.
+fn messages(src: &str) -> Vec<String> {
+    let session = analyze_mem(&[("main", src)], "main");
+    session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+#[test]
+fn a_never_function_that_really_diverges_is_accepted() {
+    // The three shapes the rule names, plus the recursive form — `return f()`
+    // where `f` is itself `-> never` never actually returns, and is how such a
+    // function is most obviously written.
+    for src in [
+        "f :: func () -> never { loop { } }\n",
+        "sink :: func () -> never { loop { } }\nf :: func () -> never { sink() }\n",
+        "f :: func () -> never { return f() }\n",
+        "sink :: func () -> never { loop { } }\n\
+         f :: func (n: i32) -> never { n.match { 0 => sink(), _ => sink() } }\n",
+        "sink :: func () -> never { loop { } }\n\
+         f :: func (c: bool) -> never { if c { sink() } else { sink() } }\n",
+        "sink :: func () -> never { loop { } }\n\
+         f :: func () -> never { let x := 1\n  sink() }\n",
+        // A `loop` whose only exit is a `return` that itself diverges.
+        "sink :: func () -> never { loop { } }\n\
+         f :: func (c: bool) -> never { loop { if c { sink() } } }\n",
+    ] {
+        assert!(
+            messages(src).is_empty(),
+            "rejected a diverging body: {src:?} -> {:#?}",
+            messages(src)
+        );
+    }
+}
+
+#[test]
+fn a_never_function_that_can_return_is_rejected() {
+    // Exactly one diagnostic each: a body with a reachable `return` usually has
+    // a reachable end too, and reporting both would describe one wrong signature
+    // twice.
+    for (src, needle) in [
+        // Falls off the end.
+        (
+            "f :: func () -> never { }\n",
+            "can reach the end of its body",
+        ),
+        // A bare `return`.
+        (
+            "f :: func () -> never { return }\n",
+            "this `return` can be reached",
+        ),
+        // A `return` with a value that does not itself diverge.
+        (
+            "f :: func () -> never { return f }\n",
+            "this `return` can be reached",
+        ),
+        // An `if` with no `else`: the false path completes.
+        (
+            "sink :: func () -> never { loop { } }\n\
+             f :: func (c: bool) -> never { if c { sink() } }\n",
+            "can reach the end of its body",
+        ),
+        // A `loop` that can be left.
+        (
+            "f :: func () -> never { loop { break } }\n",
+            "can reach the end of its body",
+        ),
+        // Only one arm of the `match` diverges.
+        (
+            "sink :: func () -> never { loop { } }\n\
+             f :: func (n: i32) -> never { n.match { 0 => sink(), _ => { } } }\n",
+            "can reach the end of its body",
+        ),
+    ] {
+        let msgs = messages(src);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected exactly one diagnostic for {src:?}: {msgs:#?}"
+        );
+        assert!(
+            msgs[0].contains(needle),
+            "wrong diagnostic for {src:?}: {}",
+            msgs[0]
+        );
+    }
+}
+
+#[test]
+fn an_unreachable_return_does_not_count() {
+    // Statements after a diverging one are not reachable, so a `return` behind
+    // an infinite loop is not a way for the function to return.
+    let src = "f :: func () -> never {\n  loop { }\n  return\n}\n";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+#[test]
+fn a_declaration_without_a_body_is_not_checked() {
+    // `extern("c") func abort() -> never` is a promise about code this compiler
+    // does not own; there is nothing here to walk.
+    let src = "abort_c :: extern(\"c\") func () -> never\n";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+#[test]
+fn the_divergence_diagnostic_points_at_the_offending_return() {
+    // The spans come from the IR side table, which is the whole reason lowering
+    // records one for every node it builds.
+    let src = "f :: func () -> never {\n  return\n}\n";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert_eq!(session.diagnostics.len(), 1, "{:#?}", session.diagnostics);
+    let label = session.diagnostics[0]
+        .primary_label()
+        .expect("a primary label");
+    let file = session.sources.file(label.span.file).expect("a real file");
+    assert_eq!(
+        &file.src[label.span.span.start..label.span.span.end],
+        "return"
+    );
+}
+
+#[test]
+fn a_diverging_branch_does_not_infect_the_join() {
+    // `if c { panic() } else { 1 }` yields `1` half the time, so it is an `i32`.
+    // The branches join through a fresh variable precisely so a diverging one
+    // absorbs and leaves the other to decide; checking the `else` against the
+    // `then` instead made the whole expression a `never`.
+    let src = "\
+sink :: func () -> never { loop { } }
+f :: func (c: bool) -> i32 { return if c { sink() } else { 1 } }
+g :: func (n: i32) -> i32 { return n.match { 0 => sink(), _ => 7 } }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
+    assert!(
+        text.contains("<if: i32>"),
+        "the `if` is not an i32:\n{text}"
+    );
+    assert!(
+        text.contains("<match: i32>"),
+        "the `match` is not an i32:\n{text}"
+    );
+}
+
+#[test]
+fn a_join_of_only_diverging_arms_is_never() {
+    // The other side of that: when *nothing* constrains the join, `never` is the
+    // answer rather than "type annotations needed". A `match` all of whose arms
+    // diverge does diverge.
+    let src = "\
+sink :: func () -> never { loop { } }
+f :: func (n: i32) {
+  let x := n.match { 0 => sink(), _ => sink() }
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
+    assert!(
+        text.contains("<match: never>"),
+        "the all-diverging match is not `never`:\n{text}"
     );
 }
 
@@ -1142,6 +1311,13 @@ maybe :: func (b: bool) -> Option.<i32> {
 #[test]
 fn ir_snapshot_if_match_lowers_to_match() {
     // `if match .some(v) := o { v } else { 0 }` becomes a two-arm `match`.
+    //
+    // Both arms `return`, so the `match` produces no value on any path. It is
+    // typed `i32` — what the position demands — rather than `never`: the two
+    // branches join through a fresh variable, and with neither of them
+    // constraining it, the enclosing return-type check does. The divergence
+    // check does not read this type; it decides structurally that every arm
+    // diverges.
     let src = "\
 choose :: func (o: Option.<i32>) -> i32 {
   if match .some(v) := o {

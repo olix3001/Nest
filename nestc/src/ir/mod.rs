@@ -81,6 +81,7 @@ use crate::sema::ty::Ty;
 
 pub use crate::sema::builtins::BuiltinOp;
 
+pub mod check;
 pub mod link;
 pub mod meta;
 pub mod pretty;

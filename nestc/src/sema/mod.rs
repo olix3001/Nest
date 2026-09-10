@@ -31,6 +31,8 @@
 //! 9. **link** ([`crate::ir::link`]) — merge the per-file programs into one
 //!    whole-program [`Linked`](crate::ir::Linked). Every pass after lowering is
 //!    whole-program, and this is the value they read.
+//! 10. **check** ([`crate::ir::check`]) — the validation passes deferred out of
+//!    inference, run over the linked IR.
 //!
 //! Results live in the [`Session`], not in the AST nodes: definitions in the
 //! [`DefTable`], per-node facts in the arena's type-indexed metadata side table
@@ -170,6 +172,12 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // monomorphization collects instantiations across files. Merge the per-file
     // programs into the one view those passes read (see [`crate::ir::link`]).
     session.linked = crate::ir::link(&session.ir);
+
+    // The validation passes deliberately deferred out of inference. They run on
+    // the linked IR, where all surface sugar is already resolved, and they only
+    // report — see [`crate::ir::check`].
+    let diags = crate::ir::check::run(&session.defs, &session.ir_meta, &session.linked);
+    session.diagnostics.extend(diags);
 }
 
 /// Drain a worklist of files, parsing (already done by the loader), creating each

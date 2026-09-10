@@ -383,6 +383,15 @@ pub struct InferCtxt {
     subst: Vec<Option<Ty>>,
     /// The kind of each variable, parallel to `subst`.
     kinds: Vec<TyVarKind>,
+    /// Variables that have been joined with [`Ty::Never`] and nothing else yet.
+    ///
+    /// `never` absorbs rather than binds (see `unify`), so a variable it meets
+    /// stays free for the *other* contributors to a join to solve. When there
+    /// are none — every arm of a `match` diverges, both branches of an `if` do —
+    /// the variable would otherwise finalize as "type annotations needed" for
+    /// code that is complete and correct. It finalizes as `never` instead, which
+    /// is the right answer: a join of nothing but diverging paths diverges.
+    saw_never: std::collections::HashSet<TyVar>,
     /// The same union-find, one level down, for the compile-time *values* that
     /// appear in types: `const_subst[c]` is `Some(k)` once const variable `c` is
     /// solved. Kept separate from `subst` because a [`Const`] and a [`Ty`] never
@@ -598,6 +607,16 @@ impl InferCtxt {
             // a direction would be meaningless. The one-way rule belongs where a
             // direction exists, which is `Inferer::expect`; see the guard there.
             (Ty::Error, _) | (_, Ty::Error) => Ok(()),
+
+            // A join against a still-free variable: absorb, but *remember*. The
+            // variable must stay free so a later contributor can solve it —
+            // binding it to `never` here would make `if c { diverge() } else { 1 }`
+            // a `never` — while a variable that meets nothing else has no answer
+            // but `never`. See `saw_never`.
+            (Ty::Never, Ty::Var(v)) | (Ty::Var(v), Ty::Never) => {
+                self.saw_never.insert(*v);
+                Ok(())
+            }
             (Ty::Never, _) | (_, Ty::Never) => Ok(()),
 
             (Ty::Var(x), Ty::Var(y)) if x == y => Ok(()),
@@ -805,6 +824,8 @@ impl InferCtxt {
                 let default = match self.kind(v) {
                     TyVarKind::Int => Some(Ty::isize()),
                     TyVarKind::Float => Some(Ty::Float(FloatWidth::F64)),
+                    // A general variable whose only constraint was `never`.
+                    TyVarKind::General if self.saw_never.contains(&v) => Some(Ty::Never),
                     TyVarKind::General => None,
                 };
                 match default {

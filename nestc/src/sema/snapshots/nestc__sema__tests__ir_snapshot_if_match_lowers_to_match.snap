@@ -13,5 +13,5 @@ func choose(o: core.Option.<i32>) -> i32 {
     }
     _ => <block: void>
   }
-  tail <match: never>
+  tail <match: i32>
 }
