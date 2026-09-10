@@ -1,0 +1,22 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"fallible :: func () -> Result.<i32, i32> { return .ok(1) }\\ntp :: func () -> Result.<i32, i32> {\\n  const x := fallible().?\\n  return .ok(x)\\n}\\n\")"
+---
+func fallible() -> core.Result.<i32, i32> {
+  return .ok($cast(1: comptime_int): i32): core.Result.<i32, i32>
+}
+func tp() -> core.Result.<i32, i32> {
+  block: i32 {
+    let __try1: core.ControlFlow.<i32, i32> = (((fallible: func() -> core.Result.<i32, i32>)(): core.Result.<i32, i32>.branch): func(core.Result.<i32, i32>) -> core.ControlFlow.<i32, i32>)(): core.ControlFlow.<i32, i32>
+    match __try1: core.ControlFlow.<i32, i32> {
+      .proceed(__v2) => __v2: i32
+      block: void {
+        return (core.Result.from_residual: func(i32) -> core.Result.<i32, i32>)(__r3: i32): core.Result.<i32, i32>
+      }
+      .stop(__r3) => <block: void>
+    }
+    tail <match: i32>
+  }
+  let x: i32 = <block: i32>
+  return .ok(x: i32): core.Result.<i32, i32>
+}

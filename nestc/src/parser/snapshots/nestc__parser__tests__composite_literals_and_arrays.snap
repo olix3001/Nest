@@ -45,7 +45,7 @@ File
           BindingPat f
           CompositeLit (typed, positional)
             ArrayType [N]
-              Path `_`
+              TypeHole _
               TypePath
                 Path `int32`
             Lit Int(1)

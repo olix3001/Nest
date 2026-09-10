@@ -80,7 +80,17 @@ impl Parser {
                 },
             );
         }
-        let len = self.allowing_struct_lit(Parser::parse_expr);
+        // `[_]T` — the length is left to inference, filled in by the composite
+        // literal that builds the array (§3.2).
+        let len = if matches!(self.peek(), Some(TokenKind::Ident(sym)) if sym.as_str() == "_")
+            && matches!(self.peek_nth(1), Some(TokenKind::RBracket))
+        {
+            let span = self.cur_span();
+            self.bump();
+            self.alloc(span, NodeKind::TypeHole)
+        } else {
+            self.allowing_struct_lit(Parser::parse_expr)
+        };
         self.expect(&TokenKind::RBracket);
         let mutable = self.eat(&TokenKind::MutKw);
         let inner = self.parse_type();
@@ -168,8 +178,17 @@ impl Parser {
     }
 
     /// One turbofish argument: a `name = type` associated-type binding, a `_`
-    /// hole, or a type.
+    /// hole, an integer literal filling a `const` parameter, or a type.
     fn parse_generic_arg(&mut self) -> NodeId {
+        // `zeros.<4>()` — a value argument for a `<const N: usize>` parameter
+        // (§5). Only a literal is accepted here; a named constant reaches a
+        // `const` slot as an ordinary path, handled by the type branch below.
+        if let Some(TokenKind::Int(n)) = self.peek() {
+            let n = n.clone();
+            let span = self.cur_span();
+            self.bump();
+            return self.alloc(span, NodeKind::Lit(crate::parser::ast::Lit::Int(n)));
+        }
         // `Item = type` — an associated-type constraint. A plain type is never
         // followed by `=` inside `.<...>`, so `ident '='` is unambiguous.
         if matches!(self.peek(), Some(TokenKind::Ident(_)))

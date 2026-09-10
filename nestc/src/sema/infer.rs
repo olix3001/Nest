@@ -33,7 +33,7 @@ use crate::parser::ast::{
 use super::builtins::{self, Applies, BuiltinOp, BuiltinRow};
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::impls::{ImplInfo, ImplTable};
-use super::ty::{FloatWidth, InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
+use super::ty::{Const, FloatWidth, InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
 use super::{DefMeta, Resolution};
 
 /// Intrinsics that never return, so a call to one types as [`Ty::Never`] rather
@@ -70,6 +70,7 @@ const INTRINSIC_RESULTS: &[(&str, IntrinsicResult)] = &[
     ("transmute", IntrinsicResult::Arg),
     ("new", IntrinsicResult::PtrToArg),
     ("make", IntrinsicResult::MutableArg),
+    ("len", IntrinsicResult::Usize),
     ("size_of", IntrinsicResult::Usize),
     ("align_of", IntrinsicResult::Usize),
     ("name", IntrinsicResult::Str),
@@ -104,6 +105,21 @@ pub struct OpResolution {
 pub struct Coercion {
     /// The type the value is converted to.
     pub to: Ty,
+}
+
+/// Records that a `[N]T` was unsized to a `[]T` at this node (§3.2).
+///
+/// This is not a cast: taking a slice of a whole array is exactly `a[..]`, so
+/// lowering emits the `$slice` that spells, with the `.full` range. Keeping it
+/// distinct from [`Coercion`] is what stops a `(ptr, len)` view from looking
+/// like a reinterpretation of the array's bits.
+#[derive(Debug, Clone)]
+pub struct SliceCoerce {
+    /// The `[]T` produced.
+    pub to: Ty,
+    /// The `Range.<usize>` the `.full` bound has — the same value an explicit
+    /// `a[..]` would build.
+    pub range: Ty,
 }
 
 /// Records that a `*T` was unsized to a `*dyn Trait` at this node (§3.2): the
@@ -426,6 +442,12 @@ impl Inferer<'_> {
                 if let Some(ft) = self.field_ty(&bty, name.as_str()) {
                     return ft;
                 }
+                // `s.len` is the one field arrays and slices have (§3.2). It is
+                // not a declared `DefKind::Field`, so it is answered here and
+                // lowered to its own IR node rather than to a struct access.
+                if self.is_len_access(&bty, name.as_str()) {
+                    return Ty::usize();
+                }
                 // A field we cannot type is `Error`, not a fresh variable — a
                 // dangling variable would be a false "type annotations needed"
                 // (see `finish`). Say why, unless the base is already broken.
@@ -573,13 +595,23 @@ impl Inferer<'_> {
                 generic_args,
                 args,
             } => {
-                for a in &args {
-                    self.infer_expr(*a);
-                }
+                let arg_tys: Vec<Ty> = args.iter().map(|&a| self.infer_expr(a)).collect();
                 // A diverging intrinsic never yields a value, so it types as
                 // `never` and unifies with whatever position it appears in.
                 if DIVERGING_INTRINSICS.contains(&name.as_str()) {
                     return Ty::Never;
+                }
+                // `$len(a)` is the primitive behind the `a.len` sugar, and is
+                // callable directly (§3.2); it takes one array or slice.
+                if name.as_str() == "len" {
+                    self.check_len_intrinsic(node, &args, &arg_tys);
+                    return Ty::usize();
+                }
+                // `$from_residual(r)` is the compiler-internal half of `.?`
+                // (§8.3): rebuild the enclosing function's return type from a
+                // propagated residual.
+                if name.as_str() == "from_residual" {
+                    return self.infer_from_residual(node, &args, &arg_tys);
                 }
                 let arg = generic_args
                     .first()
@@ -862,6 +894,7 @@ impl Inferer<'_> {
             trait_def: self.defs.resolve_alias(trait_def),
             args: Vec::new(),
             origin: node,
+            stamp: None,
         });
     }
 
@@ -936,19 +969,40 @@ impl Inferer<'_> {
                 trait_def,
                 args,
                 origin,
+                stamp,
             } => match self.select(self_ty, *trait_def, args) {
                 Select::Ok(Choice::User(i)) => {
                     self.commit_impl(i, self_ty, args);
+                    // Record which member the impl supplies, so lowering emits
+                    // a call to it (a static trait call has no receiver for
+                    // lowering to dispatch on).
+                    if let Some(name) = stamp {
+                        match self.impls.impls[i].members.get(name).copied() {
+                            Some(method) => {
+                                self.ast.set_meta(
+                                    *origin,
+                                    OpResolution {
+                                        method,
+                                        builtin: None,
+                                    },
+                                );
+                            }
+                            None => {
+                                let msg = format!("impl does not define `{name}`");
+                                self.report(*origin, msg);
+                            }
+                        }
+                    }
                     Outcome::Solved
                 }
                 Select::Ok(Choice::Builtin(_)) | Select::Error => Outcome::Solved,
                 Select::Defer => Outcome::Deferred,
                 Select::NoImpl => {
-                    self.report_no_impl(*origin, self_ty, *trait_def);
+                    self.report_no_impl(*origin, self_ty, *trait_def, args);
                     Outcome::Failed
                 }
                 Select::Ambiguous => {
-                    self.report_ambiguous(*origin, self_ty, *trait_def);
+                    self.report_ambiguous(*origin, self_ty, *trait_def, args);
                     Outcome::Failed
                 }
             },
@@ -981,12 +1035,12 @@ impl Inferer<'_> {
                 }
                 Select::Defer => Outcome::Deferred,
                 Select::NoImpl => {
-                    self.report_no_impl(*origin, self_ty, *trait_def);
+                    self.report_no_impl(*origin, self_ty, *trait_def, args);
                     let _ = self.cx.unify(out, &Ty::Error);
                     Outcome::Failed
                 }
                 Select::Ambiguous => {
-                    self.report_ambiguous(*origin, self_ty, *trait_def);
+                    self.report_ambiguous(*origin, self_ty, *trait_def, args);
                     let _ = self.cx.unify(out, &Ty::Error);
                     Outcome::Failed
                 }
@@ -1073,7 +1127,22 @@ impl Inferer<'_> {
             CompositeBody::Positional(elems) => self.check_positional_body(node, target, &elems),
             CompositeBody::Repeat { value, count } => {
                 match self.autoderef(target) {
-                    Ty::Array { inner, .. } | Ty::Slice { inner, .. } => {
+                    Ty::Array { len, inner, .. } => {
+                        let vty = self.node_ty(value);
+                        self.expect(value, &vty, &inner);
+                        // The count *is* the array's length, so it must be a
+                        // compile-time value, and it must be the declared one.
+                        let k = self.const_len_in(self.file, count);
+                        if !matches!(k, Const::Error) && self.cx.unify_const(&len, &k).is_err() {
+                            let msg = format!(
+                                "this literal repeats {} time(s) but the array is `[{}]`",
+                                k.display(self.defs),
+                                self.cx.shallow_const(&len).display(self.defs)
+                            );
+                            self.report(node, msg);
+                        }
+                    }
+                    Ty::Slice { inner, .. } => {
                         let vty = self.node_ty(value);
                         self.expect(value, &vty, &inner);
                     }
@@ -1145,8 +1214,25 @@ impl Inferer<'_> {
     fn check_positional_body(&mut self, node: NodeId, target: &Ty, elems: &[NodeId]) {
         let members: Option<Vec<Ty>> = match self.autoderef(target) {
             // A sized array wants exactly its length; a slice takes any count.
+            // A sized array wants exactly its length; an unsolved length (a
+            // `[_]T`, or a variable flowing in) is *decided* by this literal.
             Ty::Array { len, inner, .. } => {
-                let n = len.map_or(elems.len(), |l| l as usize);
+                let n = match self.cx.shallow_const(&len) {
+                    Const::Value(l) => l as usize,
+                    Const::Error => elems.len(),
+                    other => {
+                        let count = Const::Value(elems.len() as u64);
+                        if self.cx.unify_const(&other, &count).is_err() {
+                            let msg = format!(
+                                "this literal has {} element(s) but the array is `[{}]`",
+                                elems.len(),
+                                other.display(self.defs)
+                            );
+                            self.report(node, msg);
+                        }
+                        elems.len()
+                    }
+                };
                 Some(vec![(*inner).clone(); n])
             }
             Ty::Slice { inner, .. } => Some(vec![(*inner).clone(); elems.len()]),
@@ -1266,6 +1352,10 @@ impl Inferer<'_> {
         }
 
         match best {
+            // Several impls fit only because the self type is still unknown:
+            // that is a question inference has not answered yet, not a genuine
+            // ambiguity. Retry once something pins it down.
+            Some(_) if ambiguous && is_var(&s) => Select::Defer,
             Some(_) if ambiguous => Select::Ambiguous,
             Some((_, choice)) => Select::Ok(choice),
             None if is_var(&s) => Select::Defer,
@@ -1298,7 +1388,7 @@ impl Inferer<'_> {
     /// Commit the chosen impl for real (no rollback), binding its generics; the
     /// returned map (impl generic → solved type) drives associated-type
     /// projection.
-    fn commit_impl(&mut self, i: usize, self_ty: &Ty, args: &[Ty]) -> HashMap<DefId, Ty> {
+    fn commit_impl(&mut self, i: usize, self_ty: &Ty, args: &[Ty]) -> Subst {
         let imp = self.impls.impls[i].clone();
         let map = self.fresh_impl_map(&imp.generics);
         let impl_self = self.impl_self_ty(&imp, &map);
@@ -1314,14 +1404,25 @@ impl Inferer<'_> {
     }
 
     /// Build the impl's self [`Ty`] with its generics substituted by `map`.
-    fn impl_self_ty(&mut self, imp: &ImplInfo, map: &HashMap<DefId, Ty>) -> Ty {
+    fn impl_self_ty(&mut self, imp: &ImplInfo, map: &Subst) -> Ty {
         let raw = self.ty_from_node_in(imp.file, imp.self_node);
         self.subst_type_params(&raw, map)
     }
 
-    /// A fresh inference variable per impl generic parameter.
-    fn fresh_impl_map(&mut self, generics: &[DefId]) -> HashMap<DefId, Ty> {
-        generics.iter().map(|&g| (g, self.cx.fresh())).collect()
+    /// A fresh inference variable per impl generic parameter — a type variable
+    /// for a `<T>`, a const variable for a `<const N>`.
+    fn fresh_impl_map(&mut self, generics: &[DefId]) -> Subst {
+        let mut map = Subst::default();
+        for &g in generics {
+            if self.defs.get(g).kind == DefKind::ConstParam {
+                let k = self.cx.fresh_const();
+                map.consts.insert(g, k);
+            } else {
+                let t = self.cx.fresh();
+                map.tys.insert(g, t);
+            }
+        }
+        map
     }
 
     /// The associated type `assoc` a user impl binds, with the impl's generics
@@ -1331,7 +1432,7 @@ impl Inferer<'_> {
         i: usize,
         origin: NodeId,
         assoc: &Symbol,
-        map: &HashMap<DefId, Ty>,
+        map: &Subst,
     ) -> Ty {
         let imp = self.impls.impls[i].clone();
         match imp.assoc.get(assoc) {
@@ -1407,20 +1508,28 @@ impl Inferer<'_> {
     /// operand surfaces as "type annotations needed"), and the projection result
     /// is pinned to `Error` so it does not cascade.
     fn report_unsolved(&mut self, ob: &Obligation) {
-        let (self_ty, trait_def, origin, out) = match ob {
+        let (self_ty, trait_def, args, origin, out) = match ob {
             Obligation::Trait {
                 self_ty,
                 trait_def,
+                args,
                 origin,
                 ..
-            } => (self_ty.clone(), *trait_def, *origin, None),
+            } => (self_ty.clone(), *trait_def, args.clone(), *origin, None),
             Obligation::Projection {
                 self_ty,
                 trait_def,
+                args,
                 origin,
                 out,
                 ..
-            } => (self_ty.clone(), *trait_def, *origin, Some(out.clone())),
+            } => (
+                self_ty.clone(),
+                *trait_def,
+                args.clone(),
+                *origin,
+                Some(out.clone()),
+            ),
             // A variant or composite literal whose type was never determined:
             // the result variable itself surfaces as "type annotations needed"
             // in finalize, so there is nothing extra to say here.
@@ -1428,31 +1537,47 @@ impl Inferer<'_> {
         };
         let s = self.cx.shallow(&self_ty);
         if !is_var(&s) {
-            self.report_no_impl(origin, &self_ty, trait_def);
+            self.report_no_impl(origin, &self_ty, trait_def, &args);
         }
         if let Some(o) = out {
             let _ = self.cx.unify(&o, &Ty::Error);
         }
     }
 
-    fn report_no_impl(&mut self, node: NodeId, self_ty: &Ty, trait_def: DefId) {
+    fn report_no_impl(&mut self, node: NodeId, self_ty: &Ty, trait_def: DefId, args: &[Ty]) {
         let s = self.cx.resolve(self_ty);
         let msg = format!(
             "`{}` does not implement `{}`",
             s.display(self.defs),
-            self.defs.canonical_string(trait_def)
+            self.trait_string(trait_def, args)
         );
         self.report(node, msg);
     }
 
-    fn report_ambiguous(&mut self, node: NodeId, self_ty: &Ty, trait_def: DefId) {
+    fn report_ambiguous(&mut self, node: NodeId, self_ty: &Ty, trait_def: DefId, args: &[Ty]) {
         let s = self.cx.resolve(self_ty);
         let msg = format!(
             "multiple applicable impls of `{}` for `{}`",
-            self.defs.canonical_string(trait_def),
+            self.trait_string(trait_def, args),
             s.display(self.defs)
         );
         self.report(node, msg);
+    }
+
+    /// A trait with its arguments, as a use site writes it — the arguments are
+    /// often the whole point of the diagnostic (`FromResidual.<IoError>` says
+    /// *which* residual has no conversion).
+    fn trait_string(&self, trait_def: DefId, args: &[Ty]) -> String {
+        let name = self.defs.canonical_string(trait_def);
+        if args.is_empty() {
+            return name;
+        }
+        let inner = args
+            .iter()
+            .map(|a| self.cx.resolve(a).display(self.defs))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{name}.<{inner}>")
     }
 
     // ===< calls >===
@@ -1533,7 +1658,11 @@ impl Inferer<'_> {
         if let Some(def) = self.resolved_def(callee) {
             if self.defs.get(def).kind == DefKind::Func {
                 let sig = self.func_def_ty(def);
-                let inst = self.instantiate_with(&sig, def, &targs);
+                let (inst, map) = self.instantiate_parts(&sig, def, &targs);
+                // `Trait.member(args)` — a trait method named through the trait
+                // rather than called on a value. Nothing here says what `Self`
+                // is, so it becomes a variable the context solves.
+                let inst = self.open_trait_self(callee, def, &inst, &map);
                 self.types.insert(callee, inst.clone());
                 return self.apply_call(callee, &inst, args);
             }
@@ -1704,6 +1833,56 @@ impl Inferer<'_> {
         }
     }
 
+    /// Open up a **static trait call** — `Trait.member(args)`, a trait method
+    /// named through its trait instead of called on a value (`Make.make(3)`,
+    /// and the `FromResidual.from_residual` that `.?` desugars to).
+    ///
+    /// There is no receiver to dispatch on, so `Self` cannot be read off an
+    /// argument: it is decided by the *context* the call sits in. `Self` becomes
+    /// a fresh variable, and a [`Obligation::Trait`] holds the choice of impl
+    /// open until something — a `return`, an annotation, a later argument —
+    /// solves it. Selecting the impl then stamps the member it resolved to, so
+    /// lowering emits a call to the real implementation rather than to the
+    /// trait's bodyless declaration.
+    ///
+    /// A call that already has a receiver never reaches here: those resolve in
+    /// [`Inferer::infer_call`]'s method branch and keep their own `Self`.
+    fn open_trait_self(&mut self, callee: NodeId, method: DefId, sig: &Ty, map: &Subst) -> Ty {
+        let Some(trait_def) = self.defs.get(method).parent else {
+            return sig.clone();
+        };
+        if self.defs.get(trait_def).kind != DefKind::Trait {
+            return sig.clone();
+        }
+        // `Self` in the declaration is the trait's own nominal; swap it for a
+        // variable so each call site gets its own.
+        let self_ty = self.cx.fresh();
+        let opened = self.subst_type_params(
+            sig,
+            &Subst::of_types(HashMap::from([(trait_def, self_ty.clone())])),
+        );
+        // The trait's generic arguments, as this instantiation freshened them:
+        // `FromResidual.<R>`'s `R` is what the residual argument will solve.
+        let args: Vec<Ty> = self
+            .type_param_defs(trait_def)
+            .into_iter()
+            .map(|p| {
+                map.tys
+                    .get(&p)
+                    .cloned()
+                    .unwrap_or_else(|| Ty::Nominal { def: p, args: Vec::new() })
+            })
+            .collect();
+        self.cx.register(Obligation::Trait {
+            self_ty,
+            trait_def,
+            args,
+            origin: callee,
+            stamp: Some(self.defs.get(method).name.clone()),
+        });
+        opened
+    }
+
     /// Rewrite a trait *declaration*'s `Self` to what the receiver actually is.
     ///
     /// Only calls that land on a trait's own declaration need this — dispatch
@@ -1726,7 +1905,7 @@ impl Inferer<'_> {
         if matches!(head, Ty::Error) || is_var(&head) {
             return sig.clone();
         }
-        let map = HashMap::from([(parent, head)]);
+        let map = Subst::of_types(HashMap::from([(parent, head)]));
         self.subst_type_params(sig, &map)
     }
 
@@ -1862,7 +2041,17 @@ impl Inferer<'_> {
     /// parameter to inference, so `id.<i32>(x)` and `id(x)` differ only in how
     /// much was pinned up front. Too many arguments is an error.
     fn instantiate_with(&mut self, sig: &Ty, def: DefId, targs: &[NodeId]) -> Ty {
-        let params = self.func_type_param_defs(def);
+        self.instantiate_parts(sig, def, targs).0
+    }
+
+    /// [`Inferer::instantiate_with`], also returning the substitution it built,
+    /// for callers that need to talk about a parameter it freshened (a static
+    /// trait call needs the trait's own arguments — see
+    /// [`Inferer::open_trait_self`]).
+    fn instantiate_parts(&mut self, sig: &Ty, def: DefId, targs: &[NodeId]) -> (Ty, Subst) {
+        // Type and const parameters share one positional list (§5): in
+        // `func <const N: usize, T>`, `.<4, i32>` pins `N` then `T`.
+        let params = self.func_generic_param_defs(def);
         let explicit: Vec<NodeId> = targs
             .iter()
             .copied()
@@ -1870,7 +2059,7 @@ impl Inferer<'_> {
             .collect();
         if explicit.len() > params.len() {
             let msg = format!(
-                "`{}` takes {} type argument(s) but {} were supplied",
+                "`{}` takes {} generic argument(s) but {} were supplied",
                 self.defs.canonical_string(def),
                 params.len(),
                 explicit.len()
@@ -1882,30 +2071,75 @@ impl Inferer<'_> {
         for &a in targs {
             self.record_generic_arg(a);
         }
-        let mut map = HashMap::new();
-        for (i, p) in params.iter().enumerate() {
-            let arg = explicit.get(i).copied().filter(|&a| {
-                !matches!(self.ast.node(a).kind, NodeKind::TypeHole)
-            });
-            let t = match arg {
-                Some(a) => self.ty_from_node(a),
-                None => self.cx.fresh(),
-            };
-            map.insert(*p, t);
+        let mut map = Subst::default();
+        for (i, &p) in params.iter().enumerate() {
+            let arg = explicit
+                .get(i)
+                .copied()
+                .filter(|&a| !matches!(self.ast.node(a).kind, NodeKind::TypeHole));
+            if self.defs.get(p).kind == DefKind::ConstParam {
+                let k = match arg {
+                    Some(a) => self.const_arg(p, a),
+                    None => self.cx.fresh_const(),
+                };
+                map.consts.insert(p, k);
+            } else {
+                let t = match arg {
+                    Some(a) => self.ty_from_node(a),
+                    None => self.cx.fresh(),
+                };
+                map.tys.insert(p, t);
+            }
         }
         // A parameter the signature mentions but the declaration did not list
         // (defensive) still needs a variable.
-        let mut rest = Vec::new();
-        self.collect_type_params(sig, &mut rest);
+        let (mut rest, mut rest_consts) = (Vec::new(), Vec::new());
+        self.collect_generic_params(sig, &mut rest, &mut rest_consts);
         for d in rest {
-            map.entry(d).or_insert_with(|| self.cx.fresh());
+            map.tys.entry(d).or_insert_with(|| self.cx.fresh());
         }
-        self.subst_type_params(sig, &map)
+        for d in rest_consts {
+            if let std::collections::hash_map::Entry::Vacant(e) = map.consts.entry(d) {
+                e.insert(self.cx.fresh_const());
+            }
+        }
+        let inst = self.subst_type_params(sig, &map);
+        (inst, map)
     }
 
-    /// A function's declared generic **type** parameters, in order (const value
-    /// parameters are not type arguments and are skipped).
-    fn func_type_param_defs(&self, def: DefId) -> Vec<DefId> {
+    /// Read one explicit `.<...>` argument in a `const` parameter's slot, and
+    /// check it against the parameter's declared type.
+    fn const_arg(&mut self, param: DefId, arg: NodeId) -> Const {
+        let k = self.const_len_in(self.file, arg);
+        // The argument is a value, so it must fit the parameter's type — the
+        // only place a `const` parameter's `: usize` is enforced.
+        let declared = self.const_param_ty(param);
+        if !matches!(declared, Ty::Error) && !declared.is_int() {
+            let msg = format!(
+                "a `const` generic parameter must have an integer type, not `{}`",
+                declared.display(self.defs)
+            );
+            self.report(arg, msg);
+        }
+        k
+    }
+
+    /// The declared type of a `<const N: T>` parameter — what `N` is worth as a
+    /// value in the body, and what an explicit argument must satisfy.
+    fn const_param_ty(&mut self, param: DefId) -> Ty {
+        let d = self.defs.get(param);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Ty::Error;
+        };
+        let NodeKind::GenericConstParam { ty, .. } = self.asts[&file].node(node).kind.clone() else {
+            return Ty::Error;
+        };
+        self.ty_from_node_in(file, ty)
+    }
+
+    /// A function's declared generic parameters — types **and** `const` values —
+    /// in source order, which is the order `.<...>` arguments bind to.
+    fn func_generic_param_defs(&self, def: DefId) -> Vec<DefId> {
         let d = self.defs.get(def);
         let (Some(file), Some(node)) = (d.file, d.node) else {
             return Vec::new();
@@ -1920,12 +2154,28 @@ impl Inferer<'_> {
         };
         generics
             .iter()
-            .filter(|&&g| matches!(ast.node(g).kind, NodeKind::GenericTypeParam { .. }))
+            .filter(|&&g| {
+                matches!(
+                    ast.node(g).kind,
+                    NodeKind::GenericTypeParam { .. } | NodeKind::GenericConstParam { .. }
+                )
+            })
             .filter_map(|&g| self.def_meta_in(file, g))
             .collect()
     }
 
     fn collect_type_params(&self, ty: &Ty, out: &mut Vec<super::def::DefId>) {
+        self.collect_generic_params(ty, out, &mut Vec::new());
+    }
+
+    /// Every generic parameter `ty` mentions, split by kind and in first-seen
+    /// order.
+    fn collect_generic_params(
+        &self,
+        ty: &Ty,
+        out: &mut Vec<super::def::DefId>,
+        consts: &mut Vec<super::def::DefId>,
+    ) {
         match ty {
             Ty::Nominal { def, args } => {
                 if args.is_empty() && self.defs.get(*def).kind == DefKind::TypeParam {
@@ -1934,31 +2184,44 @@ impl Inferer<'_> {
                     }
                 }
                 for a in args {
-                    self.collect_type_params(a, out);
+                    self.collect_generic_params(a, out, consts);
                 }
             }
-            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Array { inner, .. } => {
-                self.collect_type_params(inner, out)
+            Ty::Array { len, inner, .. } => {
+                if let Const::Param(d) = len {
+                    if !consts.contains(d) {
+                        consts.push(*d);
+                    }
+                }
+                self.collect_generic_params(inner, out, consts)
+            }
+            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } => {
+                self.collect_generic_params(inner, out, consts)
             }
             Ty::Tuple(elems) => {
                 for e in elems {
-                    self.collect_type_params(e, out);
+                    self.collect_generic_params(e, out, consts);
                 }
             }
             Ty::Func { params, ret } => {
                 for p in params {
-                    self.collect_type_params(p, out);
+                    self.collect_generic_params(p, out, consts);
                 }
-                self.collect_type_params(ret, out);
+                self.collect_generic_params(ret, out, consts);
             }
             _ => {}
         }
     }
 
-    fn subst_type_params(&self, ty: &Ty, map: &HashMap<super::def::DefId, Ty>) -> Ty {
+    fn subst_type_params(&self, ty: &Ty, map: &Subst) -> Ty {
         match ty {
+            // Keyed by def, not by shape: the map holds generic type parameters
+            // (which never carry arguments) and, for a trait call, the trait
+            // whose `Self` is being replaced — and that one *can* carry them
+            // (`FromResidual.<R>`'s `Self` is still just `Self`).
+            Ty::Nominal { def, .. } if map.tys.contains_key(def) => map.tys[def].clone(),
             Ty::Nominal { def, args } if args.is_empty() => {
-                map.get(def).cloned().unwrap_or_else(|| ty.clone())
+                map.tys.get(def).cloned().unwrap_or_else(|| ty.clone())
             }
             Ty::Nominal { def, args } => Ty::Nominal {
                 def: *def,
@@ -1980,7 +2243,12 @@ impl Inferer<'_> {
                 mutable,
                 inner,
             } => Ty::Array {
-                len: *len,
+                // `[N]T` with `N` a `const` parameter: the instantiation says
+                // what `N` is here.
+                len: match len {
+                    Const::Param(d) => map.consts.get(d).copied().unwrap_or(*len),
+                    other => *other,
+                },
                 mutable: *mutable,
                 inner: Box::new(self.subst_type_params(inner, map)),
             },
@@ -2032,6 +2300,9 @@ impl Inferer<'_> {
             DefKind::Func => self.func_def_ty(def),
             DefKind::Struct | DefKind::Enum => self.nominal_of(def),
             DefKind::Const => self.const_def_ty(def),
+            // `<const N: usize>` names a value in the body, of the type it was
+            // declared with (§5).
+            DefKind::ConstParam => self.const_param_ty(def),
             _ => self.cx.fresh(),
         }
     }
@@ -2262,11 +2533,19 @@ impl Inferer<'_> {
 
     /// The substitution `{ generic-param → type-arg }` for a nominal use
     /// `Type.<args>` — how a `T`-typed field / variant payload becomes concrete.
-    fn nominal_subst(&self, def: DefId, args: &[Ty]) -> HashMap<DefId, Ty> {
-        self.type_param_defs(def)
-            .into_iter()
-            .zip(args.iter().cloned())
-            .collect()
+    ///
+    /// Nominal types carry type arguments only: a `const` parameter on a
+    /// `struct` / `enum` / `trait` is rejected at collection time (see
+    /// [`super::collect`]), because [`Ty::Nominal`] has nowhere to put the
+    /// value. `const` parameters live on functions and `impl` blocks, where the
+    /// signature is structural and a [`Const`] has a place to sit.
+    fn nominal_subst(&self, def: DefId, args: &[Ty]) -> Subst {
+        Subst::of_types(
+            self.type_param_defs(def)
+                .into_iter()
+                .zip(args.iter().cloned())
+                .collect(),
+        )
     }
 
     fn def_meta_in(&self, file: FileId, node: NodeId) -> Option<DefId> {
@@ -2274,6 +2553,64 @@ impl Inferer<'_> {
     }
 
     // ===< field access >===
+
+    /// Type `$from_residual(r)`, the intrinsic `.?` desugars its failure arm to.
+    ///
+    /// The result is the **enclosing function's** return type — the one thing
+    /// only the checker can supply, and the reason `.?` cannot desugar to an
+    /// ordinary call. Requiring `Ret : FromResidual.<typeof r>` is what decides
+    /// whether the propagation is legal: the identity impl each `Try` type
+    /// provides for its own residual covers `Result.?` in a `Result` function
+    /// and `Option.?` in an `Option` one, and a user impl is what lets a
+    /// residual cross error types (§8.3). Selecting the impl also stamps the
+    /// `from_residual` it resolved to, so lowering emits a real call.
+    fn infer_from_residual(&mut self, node: NodeId, args: &[NodeId], arg_tys: &[Ty]) -> Ty {
+        let [_] = args else {
+            self.report(node, "`$from_residual` takes exactly one argument");
+            return Ty::Error;
+        };
+        let Some(trait_def) = self.lang.get("from_residual") else {
+            self.report(
+                node,
+                "`.?` requires the `#lang(\"from_residual\")` item",
+            );
+            return Ty::Error;
+        };
+        let ret = self.ret.clone();
+        self.cx.register(Obligation::Trait {
+            self_ty: ret.clone(),
+            trait_def: self.defs.resolve_alias(trait_def),
+            args: vec![arg_tys[0].clone()],
+            origin: node,
+            stamp: Some(Symbol::new("from_residual")),
+        });
+        ret
+    }
+
+    /// `$len` takes exactly one array or slice; anything else has no length to
+    /// report.
+    fn check_len_intrinsic(&mut self, node: NodeId, args: &[NodeId], arg_tys: &[Ty]) {
+        let [arg] = args else {
+            self.report(node, "`$len` takes exactly one argument");
+            return;
+        };
+        let ty = self.autoderef(&arg_tys[0]);
+        // An unsolved receiver is not yet wrong; a `[N]T` / `[]T` is right.
+        if is_len_field(&ty, "len") || matches!(ty, Ty::Error) || is_var(&ty) {
+            return;
+        }
+        let msg = format!(
+            "`$len` needs an array or a slice, not `{}`",
+            self.cx.resolve(&ty).display(self.defs)
+        );
+        self.report(*arg, msg);
+    }
+
+    /// Whether `base.name` is the built-in `len` of an array or a slice,
+    /// reading through a pointer the way any field access does.
+    fn is_len_access(&mut self, base: &Ty, name: &str) -> bool {
+        is_len_field(&self.autoderef(base), name)
+    }
 
     /// The declared type of field `name` on a nominal struct type, if reachable,
     /// with the struct's generics substituted by the use-site's type arguments
@@ -2639,6 +2976,16 @@ impl Inferer<'_> {
             DefKind::TypeAlias => self.expand_alias(def),
             // A generic type parameter is a rigid opaque type of its own def.
             DefKind::TypeParam => Ty::Nominal { def, args: vec![] },
+            // `<const N: usize>` is a *value*; writing `N` where a type belongs
+            // is the one confusion the two-kind generic list exists to prevent.
+            DefKind::ConstParam => {
+                let msg = format!(
+                    "`{}` is a `const` generic parameter — a value, not a type",
+                    self.defs.get(def).name
+                );
+                self.report_in(file, node, msg);
+                Ty::Error
+            }
             _ => Ty::Error,
         }
     }
@@ -2679,11 +3026,77 @@ impl Inferer<'_> {
         ty
     }
 
-    /// Read a literal array length if the length expression is an int literal.
-    fn const_len_in(&self, file: FileId, node: NodeId) -> Option<u64> {
-        match &self.asts[&file].node(node).kind {
-            NodeKind::Lit(Lit::Int(n)) => u64::try_from(n).ok(),
-            _ => None,
+    /// Evaluate the length of a `[len]T` to the [`Const`] the type carries.
+    ///
+    /// Three things can stand there (§3.2, §5): a literal, a `const` generic
+    /// parameter — which stays symbolic until monomorphization — and the hole
+    /// `[_]T`, whose length a composite literal fills in. A named constant is
+    /// followed one hop to its right-hand side, so `SIZE :: 4` makes `[SIZE]T`
+    /// a `[4]T`. Anything else (an arithmetic expression, say) has no
+    /// const-evaluator behind it yet and is a diagnostic.
+    fn const_len_in(&mut self, file: FileId, node: NodeId) -> Const {
+        self.const_len_depth(file, node, 0)
+    }
+
+    fn const_len_depth(&mut self, file: FileId, node: NodeId, depth: u32) -> Const {
+        // A constant that names itself would otherwise loop forever.
+        if depth > 8 {
+            self.report_in(file, node, "array length refers to itself");
+            return Const::Error;
+        }
+        match self.asts[&file].node(node).kind.clone() {
+            NodeKind::Lit(Lit::Int(n)) => match u64::try_from(&n) {
+                Ok(v) => Const::Value(v),
+                Err(_) => {
+                    self.report_in(file, node, "array length does not fit in a `usize`");
+                    Const::Error
+                }
+            },
+            // `[_]T` — the length is whatever the value supplies.
+            NodeKind::TypeHole => self.cx.fresh_const(),
+            NodeKind::Path { .. } | NodeKind::TypePath { .. } => {
+                match self.resolved_def_in(file, node) {
+                    Some(def) => self.const_len_of_def(file, node, def, depth),
+                    // Unresolved: name resolution already complained.
+                    None => Const::Error,
+                }
+            }
+            _ => {
+                self.report_in(
+                    file,
+                    node,
+                    "an array length must be an integer literal, a constant, or a `const` generic parameter",
+                );
+                Const::Error
+            }
+        }
+    }
+
+    /// The length a definition standing in a `[len]T` denotes.
+    fn const_len_of_def(&mut self, file: FileId, node: NodeId, def: DefId, depth: u32) -> Const {
+        let def = self.defs.resolve_alias(def);
+        let d = self.defs.get(def);
+        match d.kind {
+            DefKind::ConstParam => Const::Param(def),
+            DefKind::Const => {
+                let (Some(cfile), Some(cnode)) = (d.file, d.node) else {
+                    return Const::Error;
+                };
+                let NodeKind::ConstBind { rhs, .. } = self.asts[&cfile].node(cnode).kind.clone()
+                else {
+                    return Const::Error;
+                };
+                self.const_len_depth(cfile, rhs, depth + 1)
+            }
+            _ => {
+                let msg = format!(
+                    "`{}` is a {} — an array length must be a constant value",
+                    self.defs.canonical_string(def),
+                    d.kind.label()
+                );
+                self.report_in(file, node, msg);
+                Const::Error
+            }
         }
     }
 
@@ -2720,10 +3133,17 @@ impl Inferer<'_> {
         let snapshot = self.cx.snapshot();
         if let Err((a, b)) = self.cx.unify(actual, expected) {
             self.cx.rollback(snapshot);
-            if self.try_dyn_coerce(node, actual, expected) || self.try_upcast(node, actual, expected)
+            if self.try_array_to_slice(node, actual, expected)
+                || self.try_dyn_coerce(node, actual, expected)
+                || self.try_upcast(node, actual, expected)
             {
                 return;
             }
+            // Render what is *known* about each side: the clash is reported
+            // against the pre-attempt substitution (the rollback above), so a
+            // nested variable an earlier step already solved prints as itself
+            // rather than as `?3` / `?c0`.
+            let (a, b) = (self.cx.resolve(&a), self.cx.resolve(&b));
             let msg = format!(
                 "type mismatch: expected `{}`, found `{}`",
                 b.display(self.defs),
@@ -2731,6 +3151,38 @@ impl Inferer<'_> {
             );
             self.report(node, msg);
         }
+    }
+
+    /// Try to reach `expected` from `actual` by unsizing a fixed array to a
+    /// read-only slice: `[N]T` coerces to `[]T` (§3.2), which is what lets one
+    /// `func (s: []T)` serve every array length.
+    ///
+    /// Never to `[]mut T`: handing out a mutable view is a permission the
+    /// coercion has no business granting silently. What the coercion *is* is
+    /// taking the whole sub-slice — `a[..]` — so it is recorded as a
+    /// [`SliceCoerce`] and lowers to that, not to a `$cast`.
+    fn try_array_to_slice(&mut self, node: NodeId, actual: &Ty, expected: &Ty) -> bool {
+        let (Ty::Array { inner, .. }, Ty::Slice { mutable: false, inner: want }) =
+            (self.cx.shallow(actual), self.cx.shallow(expected))
+        else {
+            return false;
+        };
+        // Without the range lang item there is no `a[..]` to lower to.
+        let Some(range) = self.lang.get("range") else {
+            return false;
+        };
+        let snapshot = self.cx.snapshot();
+        if self.cx.unify(&inner, &want).is_err() {
+            self.cx.rollback(snapshot);
+            return false;
+        }
+        let to = self.cx.resolve(expected);
+        let range = Ty::Nominal {
+            def: self.defs.resolve_alias(range),
+            args: vec![Ty::usize()],
+        };
+        self.ast.set_meta(node, SliceCoerce { to, range });
+        true
     }
 
     /// Try to reach `expected` from `actual` by unsizing a concrete pointer to a
@@ -2848,10 +3300,48 @@ impl Inferer<'_> {
     }
 
     fn report(&mut self, node: NodeId, message: impl Into<String>) {
-        let span = self.ast.node(node).span;
-        self.diags
-            .push(Diagnostic::error(message).with_primary(FileSpan::new(self.file, span), ""));
+        self.report_in(self.file, node, message);
     }
+
+    /// Report against a node in another file's arena — a signature or a
+    /// constant reached from the body currently being checked.
+    fn report_in(&mut self, file: FileId, node: NodeId, message: impl Into<String>) {
+        let span = self.asts[&file].node(node).span;
+        self.diags
+            .push(Diagnostic::error(message).with_primary(FileSpan::new(file, span), ""));
+    }
+}
+
+/// One instantiation's answer for a set of generic parameters.
+///
+/// Generics come in two kinds (§5) — types (`<T>`) and compile-time values
+/// (`<const N: usize>`) — and they substitute into different parts of a [`Ty`]:
+/// a type parameter replaces a whole [`Ty::Nominal`] node, a const parameter
+/// only the `len` of a [`Ty::Array`]. They travel together because one
+/// signature can mention both (`func <const N: usize, T> (a: [N]T)`).
+#[derive(Debug, Default, Clone)]
+struct Subst {
+    tys: HashMap<DefId, Ty>,
+    consts: HashMap<DefId, Const>,
+}
+
+impl Subst {
+    /// A substitution that only maps types — the common case.
+    fn of_types(tys: HashMap<DefId, Ty>) -> Self {
+        Subst {
+            tys,
+            consts: HashMap::new(),
+        }
+    }
+}
+
+/// Whether a field access names the built-in `len` of an array or a slice
+/// (§3.2). Arrays and slices have no declared fields, so `len` is answered by
+/// the checker itself; this predicate is the single place inference (which
+/// types it `usize`) and lowering (which emits [`crate::ir::Expr::Len`], or the
+/// literal count when `[N]T`'s `N` is known) agree on when it applies.
+pub fn is_len_field(base: &Ty, name: &str) -> bool {
+    name == "len" && matches!(base, Ty::Array { .. } | Ty::Slice { .. })
 }
 
 /// The outcome of attempting one [`Obligation`].

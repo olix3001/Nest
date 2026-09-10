@@ -132,6 +132,8 @@ Slices, like pointers, are **immutable by default**: `s[i] = x` is legal only
 when `s : []mut T`. Indexing is `s[i]`, length is `s.len`, sub-slicing is
 `s[lo..<hi]` (see the range operators in
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.12).
+`s.len` is sugar for the `$len(s)` intrinsic (§6.4), which may also be called
+directly; on a `[N]T` whose `N` is known it is a compile-time constant.
 Out-of-bounds indexing traps at run time (unless in an `#unsafe`
 scope, §9). A slice-of-structs may be laid out struct-of-arrays with the `#soa`
 directive (§9). Growable sequences are the std `Vector` (§3.9).
@@ -141,7 +143,13 @@ Array **values** are written with composite literals — `.{ 1, 2, 3 }` (inferre
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.2.
 Brackets themselves never introduce a value; they build the type. A fixed array
 `[N]T` **implicitly coerces to a read-only `[]T`** where a slice is expected, but
-never to `[]mut T`.
+never to `[]mut T`. The coercion *is* taking the whole sub-slice: it means
+exactly what writing `a[..]` means, and compiles to the same thing.
+
+The length is **part of the type**: `[3]int32` and `[4]int32` are different
+types and do not convert. `N` may be an integer literal, a constant, or a
+`const` generic parameter (§5); `[_]T { ... }` leaves it to be inferred from the
+literal that fills it.
 
 ### Enums (sum types)
 

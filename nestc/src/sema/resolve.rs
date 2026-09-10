@@ -448,17 +448,32 @@ impl Resolver<'_> {
             return Some(Resolution::Def(d));
         }
         // Enclosing namespaces, innermost outward.
-        let mut ns = Some(self.current_ns());
-        while let Some(n) = ns {
-            if let Some(d) = self.defs.get(n).ns.get_direct(name) {
-                return Some(Resolution::Def(self.defs.resolve_alias(d)));
-            }
-            for &g in &self.defs.get(n).ns.globs {
-                if let Some(d) = self.public_member(g, name) {
-                    return Some(Resolution::Def(d));
+        //
+        // Every frame on the stack is searched, not just the innermost, because
+        // an `impl` block pushes the *host type's* namespace — which for an impl
+        // on a foreign type (`impl Trait for core.Result.<T, MyError>`) is not a
+        // descendant of the file at all. Walking only its parent chain would
+        // reach `core` and stop, losing every name the impl is lexically written
+        // among. Each frame contributes its own parent chain, innermost first,
+        // and a namespace already searched is not searched again.
+        let mut seen: Vec<DefId> = Vec::new();
+        for &frame in self.ns_stack.iter().rev() {
+            let mut ns = Some(frame);
+            while let Some(n) = ns {
+                if seen.contains(&n) {
+                    break;
                 }
+                seen.push(n);
+                if let Some(d) = self.defs.get(n).ns.get_direct(name) {
+                    return Some(Resolution::Def(self.defs.resolve_alias(d)));
+                }
+                for &g in &self.defs.get(n).ns.globs {
+                    if let Some(d) = self.public_member(g, name) {
+                        return Some(Resolution::Def(d));
+                    }
+                }
+                ns = self.defs.get(n).parent;
             }
-            ns = self.defs.get(n).parent;
         }
         // Prelude (builtins + core globs).
         for &g in self.prelude_globs {
@@ -502,12 +517,15 @@ impl Resolver<'_> {
 
     fn bind_generics(&mut self, generics: &[NodeId]) {
         for &g in generics {
-            let name = match &self.ast.node(g).kind {
-                NodeKind::GenericTypeParam { name, .. }
-                | NodeKind::GenericConstParam { name, .. } => name.clone(),
+            // A `<const N: T>` parameter is a compile-time *value*, not a
+            // type, so it gets its own kind: `N` may be used where a value is
+            // expected and as the length in `[N]T`, but never as a type.
+            let (name, kind) = match &self.ast.node(g).kind {
+                NodeKind::GenericTypeParam { name, .. } => (name.clone(), DefKind::TypeParam),
+                NodeKind::GenericConstParam { name, .. } => (name.clone(), DefKind::ConstParam),
                 _ => continue,
             };
-            self.introduce(name, DefKind::TypeParam, g);
+            self.introduce(name, kind, g);
         }
     }
 

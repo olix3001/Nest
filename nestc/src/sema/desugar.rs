@@ -7,9 +7,10 @@
 //! - `for pat in it { body }` → a `loop` over `IntoIterator.into_iter` /
 //!   `Iterator.next`, using an `if match` to bind each element and `break` when
 //!   the iterator is exhausted.
-//! - `base.?` (propagate) / `base.!` (abort) → a `match` on `Try.branch(base)`
-//!   that yields the success value and, on failure, either `return`s the residual
-//!   (`.?`) or `$abort`s (`.!`).
+//! - `base.?` (propagate) → a `match` on `Try.branch(base)` that yields the
+//!   success value and, on failure, `return`s the residual rebuilt as the
+//!   enclosing function's type via a static `FromResidual.from_residual` call.
+//! - `base.!` (abort) → `Try.unwrap(base)`.
 //!
 //! Operators (`+`, `<`, `a[i]`, `a += b`, …) are **not** touched here: they stay
 //! as their parsed [`Binary`](NodeKind::Binary) / [`Index`](NodeKind::Index) /
@@ -176,6 +177,48 @@ impl Desugar<'_> {
             self.report(id, "`.?` / `.!` require the `#lang(\"try\")` item");
             return;
         }
+        match kind {
+            TryKind::Abort => self.lower_try_abort(id, base),
+            TryKind::Propagate => self.lower_try_propagate(id, base),
+        }
+    }
+
+    /// `base.!` → `Try.unwrap(base)` (§8.3). The abort on failure lives in the
+    /// `unwrap` body the selected impl provides, so this is a plain method call.
+    fn lower_try_abort(&mut self, id: NodeId, base: NodeId) {
+        let span = self.ast.node(id).span;
+        let call = self.method_call(span, base, "unwrap", vec![]);
+        let kind = self.ast.node(call).kind.clone();
+        self.replace(id, kind);
+    }
+
+    /// `base.?` → branch on the value and either continue with its output or
+    /// return the residual, rebuilt as the *enclosing function's* type:
+    ///
+    /// ```text
+    /// {
+    ///   __try :: base.branch()
+    ///   __try.match {
+    ///     .proceed(__v) => __v,
+    ///     .stop(__r)    => { return FromResidual.from_residual(__r) },
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// `FromResidual.from_residual` is an ordinary **static trait call**: it has
+    /// no receiver, so `Self` is whatever the context wants — here the enclosing
+    /// function's return type, which the `return` supplies. That is what makes
+    /// this work for *any* `Try` type, and what lets a residual cross error
+    /// types when a conversion impl exists (§8.3). Nothing here names `Result`
+    /// or `Option`.
+    fn lower_try_propagate(&mut self, id: NodeId, base: NodeId) {
+        let Some(rebuild) = self.trait_member("from_residual", "from_residual") else {
+            self.report(
+                id,
+                "`.?` requires the `#lang(\"from_residual\")` item, with a `from_residual` member",
+            );
+            return;
+        };
         let span = self.ast.node(id).span;
         let tmp = self.fresh("try");
         let v = self.fresh("v");
@@ -192,44 +235,32 @@ impl Desugar<'_> {
             },
         );
 
-        // .ok(v) => v
+        // .proceed(__v) => __v
         let (v_pat, v_local) = self.binding_pat(span, &v);
-        let ok_pat = self.variant_pat(span, "ok", vec![v_pat]);
+        let ok_pat = self.variant_pat(span, "proceed", vec![v_pat]);
         let v_ref = self.local_ref(span, &v, v_local);
         let ok_arm = self.match_arm(span, ok_pat, v_ref);
 
-        // .err(r) => <return .err(r)> | <$abort(r)>
+        // .stop(__r) => { return $from_residual(__r) }
         let (r_pat, r_local) = self.binding_pat(span, &r);
-        let err_pat = self.variant_pat(span, "err", vec![r_pat]);
+        let stop_pat = self.variant_pat(span, "stop", vec![r_pat]);
         let r_ref = self.local_ref(span, &r, r_local);
-        let fail = match kind {
-            TryKind::Propagate => {
-                let err_val = self.variant_lit(span, "err", r_ref);
-                self.alloc(
-                    span,
-                    NodeKind::Return {
-                        value: Some(err_val),
-                    },
-                )
-            }
-            TryKind::Abort => self.alloc(
-                span,
-                NodeKind::IntrinsicCall {
-                    name: Symbol::new("abort"),
-                    generic_args: vec![],
-                    args: vec![r_ref],
-                },
-            ),
-        };
-        let fail_block = self.block(span, vec![fail], None);
-        let err_arm = self.match_arm(span, err_pat, fail_block);
+        let rebuilt = self.static_call(span, rebuild, vec![r_ref]);
+        let ret = self.alloc(
+            span,
+            NodeKind::Return {
+                value: Some(rebuilt),
+            },
+        );
+        let fail_block = self.block(span, vec![ret], None);
+        let stop_arm = self.match_arm(span, stop_pat, fail_block);
 
         let tmp_ref = self.local_ref(span, &tmp, tmp_local);
         let match_expr = self.alloc(
             span,
             NodeKind::MatchExpr {
                 scrutinee: tmp_ref,
-                arms: vec![ok_arm, err_arm],
+                arms: vec![ok_arm, stop_arm],
             },
         );
         self.replace(
@@ -320,6 +351,29 @@ impl Desugar<'_> {
         );
         self.ast.set_meta(pat, DefMeta(def));
         (pat, def)
+    }
+
+    /// The member `name` of the trait carrying `#lang(tag)`.
+    fn trait_member(&self, tag: &str, name: &str) -> Option<DefId> {
+        let trait_def = self.defs.resolve_alias(self.lang.get(tag)?);
+        let d = self.defs.get(trait_def);
+        (d.kind == DefKind::Trait)
+            .then(|| d.ns.members.get(&Symbol::new(name)).copied())
+            .flatten()
+    }
+
+    /// A call to a trait member with **no receiver** — `Trait.member(args)`.
+    ///
+    /// `Self` is not any argument here; the type checker solves it from the
+    /// context the call sits in and then selects the impl (see
+    /// `infer::open_trait_self`). That is what lets `.?` name
+    /// `FromResidual.from_residual` without knowing which type the enclosing
+    /// function returns.
+    fn static_call(&mut self, span: Span, member: DefId, args: Vec<NodeId>) -> NodeId {
+        let name = self.defs.get(member).name.clone();
+        let callee = self.alloc(span, NodeKind::Path { segments: vec![name] });
+        self.ast.set_meta(callee, Resolution::Def(member));
+        self.alloc(span, NodeKind::Call { callee, args })
     }
 
     /// A `Path` referencing a synthetic local, pre-resolved to `def`.

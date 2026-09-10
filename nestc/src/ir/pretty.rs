@@ -107,6 +107,7 @@ impl Printer<'_> {
             Expr::Lit(l, _) => format!("{}: {ty}", lit_str(l)),
             Expr::Local(d, _) => format!("{}: {ty}", self.defs.get(*d).name),
             Expr::Global(d, _) => format!("{}: {ty}", self.defs.canonical_string(*d)),
+            Expr::ConstParam(d, _) => format!("const {}: {ty}", self.defs.get(*d).name),
             Expr::Call {
                 callee,
                 args,

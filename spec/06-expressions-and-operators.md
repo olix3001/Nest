@@ -138,6 +138,7 @@ Core intrinsics (extensible; not a closed list):
 | `$new.<T>()` | allocate one zeroed, GC-managed `T`; yields `*mut T` (§6.9) |
 | `$make.<[]T>(len[, cap])` | allocate a zeroed, GC-managed slice (§6.9) |
 | `$size_of.<T>()` / `$align_of.<T>()` | layout queries (`usize`), `#const` |
+| `$len(x)` | element count of an array or slice (`usize`); `x.len` is sugar for it |
 | `$assert(cond[, msg])` | compile-time assertion (§6.10) |
 | `$panic(msg)` | abort the program with a message |
 | `$embed_file("path")` | splice a file's bytes as a compile-time `[]uint8` |

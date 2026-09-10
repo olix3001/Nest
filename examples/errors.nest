@@ -45,3 +45,22 @@ main :: func () {
   const n := must_check(7)
   const s := summarize(.{ 1, 2, 3 })
 }
+
+// `.?` is not tied to `Result`: `Option` implements `Try` too, short-circuiting
+// with a residual that carries nothing. `Option.from_residual` rebuilds `.none`.
+@public
+first_positive :: func (xs: []i32) -> Option.<i32> {
+  const head := head_of(xs).?
+  if head <= 0 {
+    return .none
+  }
+  return .some(head)
+}
+
+@public
+head_of :: func (xs: []i32) -> Option.<i32> {
+  if xs.len == 0 {
+    return .none
+  }
+  return .some(xs[0])
+}

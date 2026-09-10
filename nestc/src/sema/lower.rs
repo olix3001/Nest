@@ -34,7 +34,7 @@ use crate::parser::ast::{
 };
 
 use super::def::{DefId, DefKind, DefTable};
-use super::infer::{Coercion, DynCoerce, Upcast};
+use super::infer::{Coercion, DynCoerce, SliceCoerce, Upcast};
 use super::infer::OpResolution;
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
@@ -206,6 +206,21 @@ impl Lowerer<'_> {
                 ty: c.to,
             };
         }
+        // A `[N]T` reaching a `[]T`: the view is the whole sub-slice, so emit
+        // exactly what `a[..]` emits.
+        if let Some(sc) = self.ast.meta::<SliceCoerce>(node) {
+            let value = self.lower_expr_inner(node);
+            let full = Expr::Variant {
+                name: Symbol::new("full"),
+                args: Vec::new(),
+                ty: sc.range,
+            };
+            return Expr::Intrinsic {
+                name: Symbol::new("slice"),
+                args: vec![value, full],
+                ty: sc.to,
+            };
+        }
         // Likewise a `*T` → `*dyn Trait` unsizing: the fat pointer is built here,
         // not written anywhere in the source.
         if let Some(dc) = self.ast.meta::<DynCoerce>(node) {
@@ -272,9 +287,16 @@ impl Lowerer<'_> {
                 let def = self.resolved_def(node);
                 match def.map(|d| self.defs.get(d).kind) {
                     Some(DefKind::Field) | None => {}
-                    Some(_) => return self.global_or_local(def.unwrap(), ty),
+                    Some(_) => return self.lower_name(node, ty),
                 }
                 let base = autoderef(self.lower_expr(base));
+                // `a.len` / `s.len` is not a struct projection (§3.2): it is
+                // sugar for the `$len` intrinsic, and lowers to exactly what a
+                // hand-written `$len(a)` does, so there is one node shape for
+                // the two spellings.
+                if super::infer::is_len_field(base.ty(), name.as_str()) {
+                    return len_expr(base, ty);
+                }
                 Expr::Field {
                     base: Box::new(base),
                     name,
@@ -429,11 +451,20 @@ impl Lowerer<'_> {
                 ty,
             },
             NodeKind::CompositeLit { body, .. } => self.lower_composite(&body, ty),
-            NodeKind::IntrinsicCall { name, args, .. } => Expr::Intrinsic {
-                name,
-                args: args.iter().map(|&a| self.lower_expr(a)).collect(),
-                ty,
-            },
+            NodeKind::IntrinsicCall { name, args, .. } => {
+                let mut lowered: Vec<Expr> =
+                    args.iter().map(|&a| self.lower_expr(a)).collect();
+                // `$len(a)` folds on a fixed array exactly like the `.len` sugar
+                // that lowers to it.
+                if name.as_str() == "len" && lowered.len() == 1 {
+                    return len_expr(autoderef(lowered.remove(0)), ty);
+                }
+                Expr::Intrinsic {
+                    name,
+                    args: lowered,
+                    ty,
+                }
+            }
             NodeKind::Arg { value, .. } => self.lower_expr(value),
             // Closures / nested-function values are not lowered in the bootstrap.
             _ => Expr::Error(ty),
@@ -706,15 +737,22 @@ impl Lowerer<'_> {
     // ===< names / helpers >===
 
     fn lower_name(&mut self, node: NodeId, ty: Ty) -> Expr {
-        match self.resolved_def(node) {
-            Some(def) => self.global_or_local(def, ty),
-            None => Expr::Error(ty),
+        // A static trait call (`Trait.member(args)`) resolves by name to the
+        // trait's bodyless *declaration*; the solver stamped which impl won, so
+        // point at that impl's member instead (see `infer::open_trait_self`).
+        match (self.ast.meta::<OpResolution>(node), self.resolved_def(node)) {
+            (Some(res), _) => self.global_or_local(res.method, ty),
+            (None, Some(def)) => self.global_or_local(def, ty),
+            (None, None) => Expr::Error(ty),
         }
     }
 
     fn global_or_local(&self, def: DefId, ty: Ty) -> Expr {
         match self.defs.get(def).kind {
             DefKind::Local | DefKind::Param => Expr::Local(def, ty),
+            // A `<const N>` parameter has no storage to load from; it stands for
+            // whatever value monomorphization substitutes.
+            DefKind::ConstParam => Expr::ConstParam(def, ty),
             _ => Expr::Global(def, ty),
         }
     }
@@ -733,6 +771,27 @@ impl Lowerer<'_> {
             Resolution::Def(d) => Some(self.defs.resolve_alias(d)),
             _ => None,
         }
+    }
+}
+
+/// The element count of an array or slice, however it was spelled (`a.len` or
+/// `$len(a)`).
+///
+/// A fixed `[N]T` whose `N` is already known folds to the literal right here —
+/// the length is part of the type, so there is nothing to compute. Everything
+/// else keeps the `$len` intrinsic for a later stage to read (a slice header's
+/// length) or substitute (`[N]T` still generic in `N`, resolved at
+/// monomorphization).
+fn len_expr(base: Expr, ty: Ty) -> Expr {
+    if let Ty::Array { len, .. } = base.ty()
+        && let Some(n) = len.value()
+    {
+        return Expr::Lit(Lit::Int(n.into()), ty);
+    }
+    Expr::Intrinsic {
+        name: Symbol::new("len"),
+        args: vec![base],
+        ty,
     }
 }
 

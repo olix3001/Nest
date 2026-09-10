@@ -60,8 +60,12 @@ pub enum DefKind {
     Variant,
     /// A function parameter.
     Param,
-    /// A generic type or const parameter.
+    /// A generic **type** parameter (`<T>`, `<T: Trait>`).
     TypeParam,
+    /// A generic **value** parameter (`<const N: usize>`) — a compile-time
+    /// constant, not a type (§5). It names a value in the body and a length in
+    /// a type such as `[N]T`.
+    ConstParam,
     /// A block-local `let` / `const` / `::` binding, or a pattern binding.
     Local,
     /// A name introduced by an `import` binding (see [`Def::alias`]).
@@ -102,6 +106,7 @@ impl DefKind {
             DefKind::Variant => "variant",
             DefKind::Param => "param",
             DefKind::TypeParam => "typeparam",
+            DefKind::ConstParam => "constparam",
             DefKind::Local => "local",
             DefKind::Import => "import",
             DefKind::Primitive => "primitive",

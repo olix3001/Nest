@@ -123,12 +123,35 @@ Ordering :: #lang("ordering") enum {
   into_iter :: func (self: Self) -> Self.Iter
 }
 
+// What `Try.branch` answers: keep going with the success value, or stop and
+// carry the residual out. It is its own type (not `Result`) because "this
+// short-circuits" and "this failed" are different questions — an `Option` stops
+// with no error value at all.
+@public ControlFlow :: #lang("control_flow") enum <B, C> {
+  // Short-circuit, carrying the residual. Named `stop` rather than `break`
+  // because `break` is a keyword.
+  stop(B),
+  // Keep going, carrying the output.
+  proceed(C),
+}
+
 // `.?` / `.!` lower through `Try`: `branch` splits a value into its success
-// output or the residual that `.?` propagates / `.!` aborts on.
+// output or the residual that `.?` propagates, and `unwrap` is `.!` itself.
 @public Try :: #lang("try") trait {
   Output :: type
   Residual :: type
-  branch :: func (self: Self) -> Result.<Self.Output, Self.Residual>
+  branch :: func (self: Self) -> ControlFlow.<Self.Residual, Self.Output>
+  unwrap :: func (self: Self) -> Self.Output
+}
+
+// Rebuilding the *enclosing function's* type from a propagated residual. This
+// is a trait of its own, generic in the residual it accepts, so that `.?` can
+// cross error types: a function returning `Result.<T, ConfigError>` accepts an
+// `IoError` residual exactly when an
+// `impl <T> FromResidual.<IoError> for Result.<T, ConfigError>` is in scope.
+// The identity case is the impl each `Try` type provides for its own residual.
+@public FromResidual :: #lang("from_residual") trait <R> {
+  from_residual :: func (r: R) -> Self
 }
 
 // ===< Builtin lang-item impls >===
@@ -190,5 +213,45 @@ impl <T> Iterator for SliceIter.<T> {
 impl <T, E> Try for Result.<T, E> {
   Output :: T
   Residual :: E
-  branch :: func (self: Result.<T, E>) -> Result.<T, E> { return self }
+  branch :: func (self: Result.<T, E>) -> ControlFlow.<E, T> {
+    return self.match {
+      .ok(v)  => .proceed(v),
+      .err(e) => .stop(e),
+    }
+  }
+  unwrap :: func (self: Result.<T, E>) -> T {
+    return self.match {
+      .ok(v)  => v,
+      .err(e) => $abort(e),
+    }
+  }
+}
+
+impl <T, E> FromResidual.<E> for Result.<T, E> {
+  from_residual :: func (r: E) -> Result.<T, E> { return .err(r) }
+}
+
+// `Option` short-circuits with nothing to carry, so its residual is `void` and
+// rebuilding from it is `.none`. That is also what stops a `Result`'s residual
+// from propagating out of an `Option`-returning function: the two residual
+// types do not agree, and no conversion impl says how they would.
+impl <T> Try for Option.<T> {
+  Output :: T
+  Residual :: void
+  branch :: func (self: Option.<T>) -> ControlFlow.<void, T> {
+    return self.match {
+      .some(v) => .proceed(v),
+      .none    => .stop(()),
+    }
+  }
+  unwrap :: func (self: Option.<T>) -> T {
+    return self.match {
+      .some(v) => v,
+      .none    => $abort(),
+    }
+  }
+}
+
+impl <T> FromResidual.<void> for Option.<T> {
+  from_residual :: func (r: void) -> Option.<T> { return .none }
 }

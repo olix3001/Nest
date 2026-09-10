@@ -73,6 +73,53 @@ pub enum TyVarKind {
     Float,
 }
 
+/// A **const-generic** inference variable: an index into
+/// [`InferCtxt::const_subst`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConstVar(pub u32);
+
+/// A compile-time *value* appearing inside a type — today only an array length
+/// (§3.2 `[N]T`, §5 `<const N: usize>`).
+///
+/// Lengths take part in type identity: `[3]i32` and `[4]i32` are different
+/// types, so they need their own tiny unification lattice alongside [`Ty`]'s.
+/// A [`Const::Param`] is the symbolic stand-in for a `const` generic parameter
+/// that survives all the way to monomorphization; a [`Const::Var`] is the
+/// inference variable a call site instantiates it to, or the hole `[_]T` leaves
+/// for a literal to fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Const {
+    /// A known value.
+    Value(u64),
+    /// An as-yet-uninstantiated `const` generic parameter, by its [`DefId`].
+    Param(DefId),
+    /// An unsolved inference variable.
+    Var(ConstVar),
+    /// A value that could not be determined; a diagnostic was already reported.
+    /// Unifies with anything so one error does not cascade.
+    Error,
+}
+
+impl Const {
+    /// The value, when it is already known.
+    pub fn value(self) -> Option<u64> {
+        match self {
+            Const::Value(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// A short, human-readable rendering (`3`, `N`, `?c1`, `_`).
+    pub fn display(&self, defs: &super::def::DefTable) -> String {
+        match self {
+            Const::Value(n) => n.to_string(),
+            Const::Param(d) => defs.get(*d).name.to_string(),
+            Const::Var(v) => format!("?c{}", v.0),
+            Const::Error => "_".into(),
+        }
+    }
+}
+
 /// A type. Cheap to clone; nested types are boxed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
@@ -117,10 +164,10 @@ pub enum Ty {
         mutable: bool,
         inner: Box<Ty>,
     },
-    /// `[N]T` — `len` is `None` when the length expression is not a literal the
-    /// checker could evaluate yet.
+    /// `[N]T` — `len` is the element count, which may still be a `const`
+    /// generic parameter or an unsolved inference variable (see [`Const`]).
     Array {
-        len: Option<u64>,
+        len: Const,
         mutable: bool,
         inner: Box<Ty>,
     },
@@ -223,7 +270,7 @@ impl Ty {
                 mutable,
                 inner,
             } => {
-                let l = len.map(|n| n.to_string()).unwrap_or_else(|| "_".into());
+                let l = len.display(defs);
                 format!(
                     "[{l}]{}{}",
                     if *mutable { "mut " } else { "" },
@@ -274,6 +321,11 @@ pub enum Obligation {
         args: Vec<Ty>,
         /// The AST node that raised the obligation (for diagnostics).
         origin: NodeId,
+        /// When set, the selected impl's member of this name is stamped onto
+        /// `origin` so lowering can emit the call it resolved to. This is how a
+        /// *static* trait call — one with no receiver to dispatch on, such as
+        /// `$from_residual`'s `FromResidual.from_residual` — reaches the IR.
+        stamp: Option<Symbol>,
     },
     /// `<self_ty as Trait.<args>>.assoc == out` — the projected associated type.
     /// Solving it selects the impl (proving the `Trait` bound too), substitutes
@@ -322,6 +374,7 @@ pub enum Obligation {
 pub struct Snapshot {
     subst: Vec<Option<Ty>>,
     kinds_len: usize,
+    const_subst: Vec<Option<Const>>,
 }
 
 /// The union-find substitution and variable bookkeeping for one inference run
@@ -332,6 +385,11 @@ pub struct InferCtxt {
     subst: Vec<Option<Ty>>,
     /// The kind of each variable, parallel to `subst`.
     kinds: Vec<TyVarKind>,
+    /// The same union-find, one level down, for the compile-time *values* that
+    /// appear in types: `const_subst[c]` is `Some(k)` once const variable `c` is
+    /// solved. Kept separate from `subst` because a [`Const`] and a [`Ty`] never
+    /// unify with each other.
+    const_subst: Vec<Option<Const>>,
     /// Associated-type bindings (`Trait.Assoc` name → chosen type) gathered from
     /// `<Assoc = T>` turbofish arguments. Keyed by the associated item name; a
     /// pragmatic flat map sufficient for the bootstrap.
@@ -358,6 +416,46 @@ impl InferCtxt {
         self.subst.push(None);
         self.kinds.push(kind);
         Ty::Var(v)
+    }
+
+    /// Allocate a fresh const-generic variable — an array length still to be
+    /// decided (a `[_]T` hole, or a `<const N>` parameter at a call site).
+    pub fn fresh_const(&mut self) -> Const {
+        let v = ConstVar(self.const_subst.len() as u32);
+        self.const_subst.push(None);
+        Const::Var(v)
+    }
+
+    /// Follow bound const variables to the current representative.
+    pub fn shallow_const(&self, k: &Const) -> Const {
+        let mut cur = *k;
+        while let Const::Var(v) = cur {
+            match self.const_subst[v.0 as usize] {
+                Some(bound) => cur = bound,
+                None => return Const::Var(v),
+            }
+        }
+        cur
+    }
+
+    /// Unify two compile-time values. Only equal values (or a variable and
+    /// anything) agree — there is no const-expression arithmetic, so a `[N]T`
+    /// and a `[3]T` with `N` still symbolic are simply not the same type.
+    pub fn unify_const(&mut self, a: &Const, b: &Const) -> Result<(), (Const, Const)> {
+        let a = self.shallow_const(a);
+        let b = self.shallow_const(b);
+        match (a, b) {
+            // An errored length absorbs, so one bad `[expr]T` does not cascade.
+            (Const::Error, _) | (_, Const::Error) => Ok(()),
+            (Const::Var(x), Const::Var(y)) if x == y => Ok(()),
+            (Const::Var(v), other) | (other, Const::Var(v)) => {
+                self.const_subst[v.0 as usize] = Some(other);
+                Ok(())
+            }
+            (Const::Value(x), Const::Value(y)) if x == y => Ok(()),
+            (Const::Param(x), Const::Param(y)) if x == y => Ok(()),
+            _ => Err((a, b)),
+        }
     }
 
     fn kind(&self, v: TyVar) -> TyVarKind {
@@ -398,6 +496,7 @@ impl InferCtxt {
         Snapshot {
             subst: self.subst.clone(),
             kinds_len: self.kinds.len(),
+            const_subst: self.const_subst.clone(),
         }
     }
 
@@ -406,6 +505,7 @@ impl InferCtxt {
     pub fn rollback(&mut self, snap: Snapshot) {
         self.subst = snap.subst;
         self.kinds.truncate(snap.kinds_len);
+        self.const_subst = snap.const_subst;
     }
 
     /// Follow bound variables to the current representative (one level of the
@@ -439,7 +539,7 @@ impl InferCtxt {
                 mutable,
                 inner,
             } => Ty::Array {
-                len,
+                len: self.shallow_const(&len),
                 mutable,
                 inner: Box::new(self.resolve(&inner)),
             },
@@ -539,12 +639,12 @@ impl InferCtxt {
                     inner: i2,
                 },
             ) => {
-                let len_ok = l1.is_none() || l2.is_none() || l1 == l2;
-                if len_ok && m1 == m2 {
-                    self.unify(i1, i2)
-                } else {
-                    Err((a.clone(), b.clone()))
+                // The length is part of the type (§3.8): `[3]i32` and `[4]i32`
+                // are different types, and a `[_]T` hole is solved here.
+                if m1 != m2 || self.unify_const(l1, l2).is_err() {
+                    return Err((a.clone(), b.clone()));
                 }
+                self.unify(i1, i2)
             }
             (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => {
                 for (x, y) in xs.iter().zip(ys) {
@@ -640,6 +740,19 @@ impl InferCtxt {
         }
     }
 
+    /// The length counterpart of [`InferCtxt::finalize`]. A const variable left
+    /// unsolved is an ambiguity too — nothing said how long the array is — and
+    /// becomes [`Const::Error`] so it does not cascade.
+    pub fn finalize_const(&mut self, k: &Const, on_ambiguous: &mut dyn FnMut()) -> Const {
+        match self.shallow_const(k) {
+            Const::Var(_) => {
+                on_ambiguous();
+                Const::Error
+            }
+            other => other,
+        }
+    }
+
     /// Resolve `ty`, then default any still-unsolved numeric variable to its
     /// fallback (`isize` / `f64`). A remaining **general** variable is reported
     /// through `on_ambiguous` and rendered as [`Ty::Error`]. Used at the end of a
@@ -677,7 +790,7 @@ impl InferCtxt {
                 mutable,
                 inner,
             } => Ty::Array {
-                len,
+                len: self.finalize_const(&len, on_ambiguous),
                 mutable,
                 inner: Box::new(self.finalize(&inner, on_ambiguous)),
             },

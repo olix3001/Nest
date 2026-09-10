@@ -84,6 +84,22 @@ receiver to `self`; the compiler auto-takes `&router` / `&mut router` as the
 receiver type requires. A function in an `impl` namespace **without** `self` is
 an **associated function**, called on the type: `CatImage.new(id, url, w, h)`.
 
+A trait member may also be named through the **trait** rather than through a
+value or a concrete type — `Make.make(3)`, `FromResidual.from_residual(r)`.
+There is no receiver to dispatch on, so `Self` is whatever the surrounding
+context requires, and the impl is selected once that is known:
+
+```
+Make :: trait { make :: func (n: int32) -> Self }
+impl Make for Widget { make :: func (n: int32) -> Widget { ... } }
+
+const w: Widget := Make.make(3)     // Self = Widget, from the annotation
+func () -> Widget { return Make.make(3) }   // Self = Widget, from the return type
+```
+
+If nothing pins `Self` down, that is a "type annotations needed" error, exactly
+as for an uninferred type parameter.
+
 ## 5.3 Calls and arguments
 
 ```

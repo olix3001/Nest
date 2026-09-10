@@ -187,6 +187,10 @@ pub enum Expr {
     Local(DefId, Ty),
     /// A reference to a top-level item (function / const / type used as a value).
     Global(DefId, Ty),
+    /// A `<const N: usize>` generic parameter used as a value. It has no
+    /// storage: monomorphization replaces it with the literal the instantiation
+    /// chose, which is why it cannot be a [`Expr::Global`].
+    ConstParam(DefId, Ty),
     /// `callee(args...)`.
     ///
     /// Operators lower to a `Call` too (§6: "int+int and Vec3+Vec3 are the same
@@ -304,6 +308,7 @@ impl Expr {
             Expr::Lit(_, ty)
             | Expr::Local(_, ty)
             | Expr::Global(_, ty)
+            | Expr::ConstParam(_, ty)
             | Expr::Call { ty, .. }
             | Expr::Binary { ty, .. }
             | Expr::Unary { ty, .. }
@@ -385,7 +390,11 @@ pub fn walk_stmt<V: Visitor>(v: &mut V, stmt: &Stmt) {
 
 pub fn walk_expr<V: Visitor>(v: &mut V, expr: &Expr) {
     match expr {
-        Expr::Lit(..) | Expr::Local(..) | Expr::Global(..) | Expr::Error(_) => {}
+        Expr::Lit(..)
+        | Expr::Local(..)
+        | Expr::Global(..)
+        | Expr::ConstParam(..)
+        | Expr::Error(_) => {}
         Expr::Call { callee, args, .. } => {
             v.visit_expr(callee);
             for a in args {
@@ -505,7 +514,11 @@ pub fn walk_stmt_mut<V: VisitorMut>(v: &mut V, stmt: &mut Stmt) {
 
 pub fn walk_expr_mut<V: VisitorMut>(v: &mut V, expr: &mut Expr) {
     match expr {
-        Expr::Lit(..) | Expr::Local(..) | Expr::Global(..) | Expr::Error(_) => {}
+        Expr::Lit(..)
+        | Expr::Local(..)
+        | Expr::Global(..)
+        | Expr::ConstParam(..)
+        | Expr::Error(_) => {}
         Expr::Call { callee, args, .. } => {
             v.visit_expr(callee);
             for a in args {

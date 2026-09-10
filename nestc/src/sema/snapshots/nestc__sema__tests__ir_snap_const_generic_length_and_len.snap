@@ -1,0 +1,11 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"count :: func <const N: usize, T> (a: [N]T) -> usize { return a.len }\\nf :: func (s: []i32) -> usize {\\n  const a := [_]i32 { 1, 2, 3 }\\n  return count(a) + a.len + $len(s)\\n}\\n\")"
+---
+func count(a: [N]T) -> usize {
+  return $len(a: [N]T): usize
+}
+func f(s: []i32) -> usize {
+  let a: [3]i32 = $array($cast(1: comptime_int): i32, $cast(2: comptime_int): i32, $cast(3: comptime_int): i32): [3]i32
+  return #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(#builtin(Add) (core.Add.add: func(usize, usize) -> usize)((count: func([3]i32) -> usize)(a: [3]i32): usize, 3: usize): usize, $len(s: []i32): usize): usize
+}

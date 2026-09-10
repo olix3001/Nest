@@ -849,16 +849,51 @@ fn ir_snap_defer_multiple_recorded_once() {
 }
 
 #[test]
-fn ir_snap_try_propagate_desugars_to_match() {
-    insta::assert_snapshot!(ir_text_lenient(
-        "fallible :: func () -> Result.<i32, i32> { return .ok(1) }\ntp :: func () -> i32 {\n  const x := fallible().?\n  return x\n}\n"
+fn ir_snap_try_propagate_branches_on_control_flow() {
+    // `.?` is a `Try.branch` plus a two-arm match on `ControlFlow`; the failure
+    // arm returns `FromResidual.from_residual`, resolved to the impl for the
+    // *enclosing function's* return type.
+    insta::assert_snapshot!(ir_text(
+        "fallible :: func () -> Result.<i32, i32> { return .ok(1) }\ntp :: func () -> Result.<i32, i32> {\n  const x := fallible().?\n  return .ok(x)\n}\n"
     ));
 }
 
 #[test]
-fn ir_snap_try_abort_desugars_to_match() {
-    insta::assert_snapshot!(ir_text_lenient(
+fn ir_snap_try_propagate_on_an_option() {
+    // The same shape for a type whose residual carries nothing: `Option`'s
+    // `from_residual` rebuilds `.none`.
+    insta::assert_snapshot!(ir_text(
+        "head :: func () -> Option.<i32> { return .none }\ntpo :: func () -> Option.<i32> {\n  const x := head().?\n  return .some(x)\n}\n"
+    ));
+}
+
+#[test]
+fn ir_snap_try_abort_lowers_to_unwrap() {
+    insta::assert_snapshot!(ir_text(
         "fallible :: func () -> Result.<i32, i32> { return .ok(1) }\nta :: func () -> i32 {\n  const x := fallible().!\n  return x\n}\n"
+    ));
+}
+
+#[test]
+fn ir_snap_const_generic_length_and_len() {
+    // `N` stays symbolic inside the generic body and is solved per call site;
+    // `.len` folds on a known array and stays `$len` on a slice.
+    insta::assert_snapshot!(ir_text(
+        "count :: func <const N: usize, T> (a: [N]T) -> usize { return a.len }\nf :: func (s: []i32) -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return count(a) + a.len + $len(s)\n}\n"
+    ));
+}
+
+#[test]
+fn ir_snap_array_unsizes_to_a_slice() {
+    insta::assert_snapshot!(ir_text(
+        "take :: func (s: []i32) -> usize { return s.len }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n"
+    ));
+}
+
+#[test]
+fn ir_snap_static_trait_call_targets_the_selected_impl() {
+    insta::assert_snapshot!(ir_text(
+        "Make :: trait { make :: func (n: i32) -> Self }\nW :: struct { v: i32 }\nimpl Make for W { make :: func (n: i32) -> W { return W { v: n } } }\nf :: func () -> W { return Make.make(3) }\n"
     ));
 }
 
@@ -1133,7 +1168,27 @@ f :: func (a: Foo, b: Foo) -> Foo { return a + b }
 
 #[test]
 fn two_equally_specific_impls_are_ambiguous() {
-    // Two concrete impls both match an unconstrained self; the choice is a tie.
+    // A user `impl Add for i32` is exactly as specific as the builtin row for
+    // the integer family, so a concrete `i32 + i32` has no best choice.
+    let src = "\
+impl Add for i32 { Output :: i32  add :: func (self: i32, rhs: i32) -> i32 { return self } }
+f :: func (a: i32, b: i32) -> i32 { return a + b }
+";
+    let s = analyze1(src);
+    assert!(s.has_errors());
+    assert!(
+        diag_contains(&s, "multiple applicable impls"),
+        "{:#?}",
+        s.diagnostics
+    );
+}
+
+#[test]
+fn several_impls_matching_an_unknown_self_defer_rather_than_conflict() {
+    // Two impls both fit only because nothing says what `a` is. That is a
+    // missing annotation, not a tie between impls — reporting an ambiguity here
+    // would also break every obligation whose self type is solved later (a `.?`
+    // learns its `FromResidual` impl from the function's return type).
     let src = "\
 Foo :: struct { n: i32 }
 Bar :: struct { n: i32 }
@@ -1147,7 +1202,12 @@ f :: func (a, b) {
     let s = analyze1(src);
     assert!(s.has_errors());
     assert!(
-        diag_contains(&s, "multiple applicable impls"),
+        diag_contains(&s, "type annotations needed"),
+        "{:#?}",
+        s.diagnostics
+    );
+    assert!(
+        !diag_contains(&s, "multiple applicable impls"),
         "{:#?}",
         s.diagnostics
     );
@@ -1446,7 +1506,7 @@ fn explicit_type_arguments_instantiate_the_callee() {
     assert!(text.contains("let a: i32"), "{text}");
     assert!(
         first_error("id :: func <T> (x: T) -> T { return x }\nf :: func () { const a := id.<i32, i64>(1) }\n")
-            .contains("takes 1 type argument(s) but 2")
+            .contains("takes 1 generic argument(s) but 2")
     );
 }
 
@@ -1575,4 +1635,236 @@ fn field_uses_are_bound_to_their_definitions() {
         })
         .count();
     assert_eq!(bound, 3, "expected both field inits and the access to bind");
+}
+
+// ===< const generics, array lengths, and `.len` >===
+
+#[test]
+fn an_array_length_is_part_of_the_type() {
+    assert!(
+        first_error("f :: func () {\n  const a: [3]i32 := .{ 1, 2, 3 }\n  const b: [4]i32 := a\n}\n")
+            .contains("expected `[4]i32`, found `[3]i32`"),
+    );
+}
+
+#[test]
+fn an_underscore_length_is_inferred_from_the_literal() {
+    analyze_clean("f :: func () {\n  const a := [_]i32 { 1, 2, 3 }\n  const b: [3]i32 := a\n}\n");
+}
+
+#[test]
+fn a_positional_literal_must_match_a_fixed_length() {
+    assert!(
+        first_error("f :: func () {\n  const a: [4]i32 := .{ 1, 2, 3 }\n}\n")
+            .contains("element(s)"),
+    );
+}
+
+#[test]
+fn a_repeat_literals_count_is_the_arrays_length() {
+    assert!(
+        first_error("f :: func () {\n  const a: [3]i32 := .{ 0; 5 }\n}\n")
+            .contains("repeats 5 time(s) but the array is `[3]`"),
+    );
+    // …and it decides the length when nothing else did.
+    let s = analyze_clean("f :: func () {\n  const a := [_]i32 { 0; 4 }\n  const b: [4]i32 := a\n}\n");
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(ir.contains("let a: [4]i32"), "{ir}");
+}
+
+#[test]
+fn a_repeat_literals_count_must_be_a_compile_time_value() {
+    assert!(
+        first_error("f :: func (n: usize) {\n  const a: [3]i32 := .{ 0; n }\n}\n")
+            .contains("array length"),
+    );
+}
+
+#[test]
+fn a_const_generic_parameter_is_inferred_from_an_argument() {
+    // `N` is solved by the call site's array length, and `[N]T` in the signature
+    // instantiates to `[3]i32`.
+    let s = analyze_clean(
+        "count :: func <const N: usize, T> (a: [N]T) -> usize { return N }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return count(a)\n}\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(ir.contains("func([3]i32) -> usize"), "{ir}");
+}
+
+#[test]
+fn a_const_generic_parameter_can_be_pinned_by_turbofish() {
+    analyze_clean(
+        "zeros :: func <const N: usize> () -> [N]u8 { return .{ 0; N } }\nf :: func () -> [4]u8 { return zeros.<4>() }\n",
+    );
+}
+
+#[test]
+fn a_const_generic_parameter_is_a_value_not_a_type() {
+    assert!(
+        first_error("f :: func <const N: usize> () -> N { return 0 }\n")
+            .contains("a value, not a type"),
+    );
+}
+
+#[test]
+fn a_const_generic_parameter_on_a_type_declaration_is_rejected() {
+    // `Ty::Nominal` identity is `(def, type-args)`; there is no slot for a
+    // value, so this is diagnosed rather than silently mistyped.
+    assert!(
+        first_error("Buf :: struct <const N: usize> { n: i32 }\n")
+            .contains("not supported on a type declaration"),
+    );
+}
+
+#[test]
+fn an_array_length_must_be_a_constant() {
+    assert!(
+        first_error("f :: func (n: usize) {\n  const a: [n]i32 := .{ 1 }\n}\n")
+            .contains("array length"),
+    );
+}
+
+#[test]
+fn a_named_constant_is_a_usable_array_length() {
+    analyze_clean(
+        "SIZE :: 3\nf :: func () {\n  const a: [SIZE]i32 := .{ 1, 2, 3 }\n  const b: [3]i32 := a\n}\n",
+    );
+}
+
+#[test]
+fn len_folds_on_a_fixed_array_and_stays_a_call_on_a_slice() {
+    // The length of a `[N]T` with a known `N` is in the type already, so `.len`
+    // is a literal; a slice keeps `$len` for the header read.
+    let s = analyze_clean(
+        "f :: func (s: []i32) {\n  const a := [_]i32 { 1, 2, 3 }\n  const n := a.len\n  const m := s.len\n}\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(ir.contains("let n: usize = 3: usize"), "{ir}");
+    assert!(ir.contains("let m: usize = $len(s: []i32): usize"), "{ir}");
+}
+
+#[test]
+fn the_len_intrinsic_is_callable_directly_and_agrees_with_the_sugar() {
+    let s = analyze_clean(
+        "f :: func (s: []i32) -> usize { return $len(s) }\ng :: func (s: []i32) -> usize { return s.len }\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert_eq!(ir.matches("$len(s: []i32): usize").count(), 2, "{ir}");
+}
+
+#[test]
+fn the_len_intrinsic_rejects_a_type_with_no_length() {
+    assert!(
+        first_error("f :: func (n: i32) -> usize { return $len(n) }\n")
+            .contains("`$len` needs an array or a slice"),
+    );
+}
+
+#[test]
+fn a_fixed_array_unsizes_to_a_read_only_slice() {
+    // One `func (s: []T)` serves every length; the IR shows the full sub-slice
+    // the source left implicit — the same `$slice` an explicit `a[..]` emits.
+    let s = analyze_clean(
+        "take :: func (s: []i32) -> usize { return s.len }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(
+        ir.contains("$slice(a: [3]i32, .full: core.Range.<usize>): []i32"),
+        "{ir}"
+    );
+}
+
+#[test]
+fn a_fixed_array_does_not_unsize_to_a_mutable_slice() {
+    // Handing out a mutable view is a permission the coercion must not grant.
+    assert!(
+        first_error("take :: func (s: []mut i32) -> usize { return s.len }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n")
+            .contains("type mismatch"),
+    );
+}
+
+#[test]
+fn an_unknown_field_on_a_slice_is_still_reported() {
+    assert!(
+        first_error("f :: func (s: []i32) -> usize { return s.size }\n")
+            .contains("no field `size`"),
+    );
+}
+
+// ===< static trait calls >===
+
+#[test]
+fn a_trait_method_named_through_its_trait_takes_self_from_context() {
+    // `Make.make(3)` has no receiver: `Self` is decided by the return type, and
+    // lowering points at the impl that was selected, not the declaration.
+    let s = analyze_clean(
+        "Make :: trait { make :: func (n: i32) -> Self }\nW :: struct { v: i32 }\nimpl Make for W { make :: func (n: i32) -> W { return W { v: n } } }\nf :: func () -> W { return Make.make(3) }\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(ir.contains("W.make"), "{ir}");
+}
+
+#[test]
+fn a_static_trait_call_with_no_impl_for_the_context_type_is_reported() {
+    assert!(
+        first_error(
+            "Make :: trait { make :: func (n: i32) -> Self }\nW :: struct { v: i32 }\nf :: func () -> W { return Make.make(3) }\n"
+        )
+        .contains("does not implement"),
+    );
+}
+
+// ===< `.?` / `.!` through `Try` >===
+
+#[test]
+fn try_propagate_works_on_an_option() {
+    let s = analyze_clean(
+        "head :: func () -> Option.<i32> { return .none }\nf :: func () -> Option.<i32> {\n  const v := head().?\n  return .some(v)\n}\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(ir.contains("core.Option.from_residual"), "{ir}");
+}
+
+#[test]
+fn try_propagate_converts_a_residual_through_a_user_impl() {
+    // The whole point of `FromResidual` being its own trait: an `Io` residual
+    // reaches a `Cfg`-returning function because an impl says how.
+    analyze_clean(
+        "Io :: struct { n: i32 }\nCfg :: struct { n: i32 }\nimpl <T> FromResidual.<Io> for Result.<T, Cfg> {\n  from_residual :: func (r: Io) -> Result.<T, Cfg> { return .err(Cfg { n: r.n }) }\n}\nread :: func () -> Result.<i32, Io> { return .err(Io { n: 1 }) }\nload :: func () -> Result.<i32, Cfg> {\n  const v := read().?\n  return .ok(v)\n}\n",
+    );
+}
+
+#[test]
+fn try_propagate_across_unrelated_residuals_is_reported() {
+    // A `Result`'s residual has no way into an `Option`, and nothing declared
+    // one; the diagnostic names the residual that has no conversion.
+    let msg = first_error(
+        "read :: func () -> Result.<i32, string> { return .ok(1) }\nf :: func () -> Option.<i32> {\n  const v := read().?\n  return .some(v)\n}\n",
+    );
+    assert!(msg.contains("core.FromResidual.<string>"), "{msg}");
+}
+
+#[test]
+fn try_propagate_in_a_function_that_is_not_a_try_type_is_reported() {
+    let msg = first_error(
+        "read :: func () -> Result.<i32, string> { return .ok(1) }\nf :: func () -> i32 {\n  const v := read().?\n  return v\n}\n",
+    );
+    assert!(msg.contains("`i32` does not implement"), "{msg}");
+}
+
+#[test]
+fn try_abort_is_the_try_unwrap_call() {
+    let s = analyze_clean(
+        "head :: func () -> Option.<i32> { return .none }\nf :: func () -> i32 { return head().! }\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(ir.contains("unwrap"), "{ir}");
 }

@@ -1,0 +1,10 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"Make :: trait { make :: func (n: i32) -> Self }\\nW :: struct { v: i32 }\\nimpl Make for W { make :: func (n: i32) -> W { return W { v: n } } }\\nf :: func () -> W { return Make.make(3) }\\n\")"
+---
+func f() -> W {
+  return (W.make: func(i32) -> W)($cast(3: comptime_int): i32): W
+}
+func make(n: i32) -> W {
+  return W { v: n: i32 }: W
+}

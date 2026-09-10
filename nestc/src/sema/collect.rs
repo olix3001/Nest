@@ -185,6 +185,27 @@ impl Collector<'_> {
             self.ast.set_meta(rhs, DefMeta(def));
         }
 
+        // A `const` generic on a *type* has nowhere to live: a nominal type's
+        // identity is `(def, type-args)` (§3.8), with no slot for a value. They
+        // are supported on functions and `impl` blocks, where the signature is
+        // structural and the value can sit in the type it parameterizes.
+        if let NodeKind::StructType { generics, .. }
+        | NodeKind::EnumType { generics, .. }
+        | NodeKind::TraitType { generics, .. } = &rhs_kind
+        {
+            for &g in generics {
+                if matches!(
+                    self.ast.node(g).kind,
+                    NodeKind::GenericConstParam { .. }
+                ) {
+                    self.report(
+                        g,
+                        "a `const` generic parameter is not supported on a type declaration yet —                          put it on the function or `impl` that uses it",
+                    );
+                }
+            }
+        }
+
         // Recurse into members of namespace-like RHS forms.
         match rhs_kind {
             NodeKind::NamespaceExpr { items, .. } => self.collect_items(&items, def),
