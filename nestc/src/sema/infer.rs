@@ -427,6 +427,10 @@ impl Inferer<'_> {
         // middle could never be filled without naming the ones after it — which
         // would make the default reachable only by a call that names arguments.
         let mut defaulted: Option<Symbol> = None;
+        // Collected up front: a default may be written before the parameter it
+        // illegally names (`func (a: i32 := b, b: i32)`), so the check cannot
+        // rely on the loop having reached that parameter yet.
+        let param_defs: HashSet<DefId> = params.iter().filter_map(|p| self.def_of(*p)).collect();
         for p in &params {
             if let NodeKind::Param { name, ty, default } = self.ast.node(*p).kind.clone() {
                 let pty = match ty {
@@ -450,6 +454,7 @@ impl Inferer<'_> {
                 // parameter's own type, so `y: i32 := 0` types the literal as
                 // `i32` exactly as a written argument would.
                 if let Some(d) = default {
+                    self.reject_param_refs_in_default(d, &param_defs);
                     let dty = self.infer_expr(d);
                     self.expect(d, &dty, &pty);
                 }
@@ -2134,6 +2139,36 @@ impl Inferer<'_> {
                 })
                 .collect(),
         )
+    }
+
+    /// Report any reference from a default argument to one of the function's own
+    /// parameters (§5.2).
+    ///
+    /// A default must be constant, and a parameter is the opposite of that: it
+    /// is a runtime value that does not exist yet when the default is evaluated.
+    /// The hole is filled **at the call site**, before the callee's frame
+    /// exists, so `func (a: i32, b: i32 := a)` does not mean "`a` as passed" —
+    /// there is no `a` to read, and lowering would emit a load of whatever local
+    /// happens to be named `a` in the *caller*. Rejecting it here, at the
+    /// declaration, catches it once rather than at each call.
+    fn reject_param_refs_in_default(&mut self, default: NodeId, params: &HashSet<DefId>) {
+        let mut stack = vec![default];
+        while let Some(n) = stack.pop() {
+            if let Some(d) = self.resolved_def(n) {
+                if params.contains(&d) {
+                    let msg = format!(
+                        "a default argument cannot name the parameter `{}`: it is evaluated at \
+                         the call site, where no parameter of this function exists yet",
+                        self.defs.get(d).name
+                    );
+                    self.report(n, msg);
+                    // One diagnostic per default: naming a parameter twice is
+                    // still the one mistake.
+                    return;
+                }
+            }
+            stack.extend(self.ast.children(n));
+        }
     }
 
     /// Which of `def`'s **value** parameters carry a default, in declaration

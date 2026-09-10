@@ -2248,6 +2248,36 @@ f :: func (r: *Router) -> i32 {
 }
 
 #[test]
+fn ir_snap_a_default_may_be_any_constant_form() {
+    // The forms §5.2 admits, each reaching the call site: a path to a `const`
+    // item, a composite literal, a `$cast`, and a `const` generic parameter.
+    //
+    // Two things to read off this snapshot. The composite literal is rebuilt at
+    // the call site rather than shared, which is what keeps a mutable default
+    // from becoming Python's shared-default trap. And the `const` generic stays
+    // *symbolic* (`const N`) — it is the caller's type arguments that give it a
+    // value, which monomorphization substitutes later.
+    let src = "\
+PORT :: 8080
+Cfg :: struct { a: i32, b: i32 }
+
+g :: func (x: i32, p: i32 := PORT, c: Cfg := .{ a: 1, b: 2 }, w: u8 := $cast.<u8>(3)) -> i32 {
+  return x
+}
+
+h :: func <const N: usize> (x: usize, y: usize := N) -> usize { return x + y }
+
+f :: func () -> i32 {
+  const a := g(1)
+  const b := g(1)
+  const c := h.<4>(1)
+  return a + b
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
 fn a_default_argument_is_lowered_in_its_own_file() {
     // The default belongs to the file that *declares* the parameter, and so do
     // the types inference stamped on it — but it is filled in at a call site
@@ -2294,6 +2324,31 @@ fn default_argument_rules_are_enforced() {
         (
             "g :: func (x: i32, y: i32 := 0, z: i32 := 0) -> i32 { return x }\nf :: func () { const a := g(z: 1) }\n",
             "missing argument for parameter `x`",
+        ),
+        // A default is evaluated at the call site, so it cannot name a parameter
+        // of the function it belongs to — there is no such binding yet, and
+        // lowering would otherwise emit a load from the *caller's* frame.
+        (
+            "g :: func (a: i32, b: i32 := a) -> i32 { return a + b }\nf :: func () { const q := g(1) }\n",
+            "a default argument cannot name the parameter `a`",
+        ),
+        // A *later* parameter is not in scope at all where the default is
+        // written, so the resolver rejects it first and this never reaches the
+        // parameter check. Asserted so the two rules stay distinguishable: if
+        // scoping ever changes, the check above is what has to catch this.
+        (
+            "g :: func (a: i32 := b, b: i32 := 0) -> i32 { return a }\nf :: func () { const q := g() }\n",
+            "cannot resolve name `b`",
+        ),
+        // The receiver is a parameter like any other.
+        (
+            "T :: struct { n: i32 }\nimpl T {\n  m :: func (self: *T, x: i32 := self.n) -> i32 { return x }\n}\n",
+            "a default argument cannot name the parameter `self`",
+        ),
+        // Naming a parameter twice in one default is still one mistake.
+        (
+            "g :: func (a: i32, b: i32 := a + a) -> i32 { return b }\nf :: func () { const q := g(1) }\n",
+            "a default argument cannot name the parameter `a`",
         ),
     ] {
         let s = analyze_mem(&[("main", src)], "main");

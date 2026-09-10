@@ -337,3 +337,20 @@ main :: func () {
 "
     ))
 }
+
+#[test]
+fn default_arguments_parse() {
+    // `:=` binds a default to a parameter (§5.2). The parser records what was
+    // written and nothing more — the trailing-order rule, the constant
+    // restriction and the type check all belong to later stages — so a default
+    // here is an ordinary expression subtree hanging off the `Param`.
+    assert_snapshot!(tree(
+        "\
+pad :: func (s: string, width: usize := 8, fill: char := ' ') -> string {
+    s
+}
+mk :: func (c: Cfg := .{ a: 1 }, n: i32 := $cast.<i32>(2)) {
+}
+"
+    ))
+}
