@@ -52,7 +52,7 @@ different and quarantined to `core/c`:
   boundary (the address is passed through; the GC is informed so the pointee is
   not collected for the duration of the call).
 - Going the other way — `c.ptr.<T>` back to a language `*T` — is **explicit and
-  checked**: `$cast.<*T>(p)` traps if `p` is null (or is undefined behavior only
+  checked**: `cast.<*T>(p)` traps if `p` is null (or is undefined behavior only
   inside an `#unsafe` scope, where the null check is dropped). This keeps
   nullability from leaking into the non-null language pointer.
 
@@ -132,7 +132,7 @@ their C counterparts when passed to an `extern("c")` function (and only there):
 | `bool` | `c.bool` |
 
 The reverse direction (C type → language type) is **never** implicit: results
-coming back from C are C types and must be converted with `$cast` (checked) so
+coming back from C are C types and must be converted with `cast` (checked) so
 that null, width, and signedness assumptions are made explicit. Widths that do
 not match the target ABI are a compile error rather than a silent truncation.
 
@@ -159,11 +159,11 @@ here to hand C uninitialized buffers without the zeroing cost.
 C interop is where the language's "not memory-safe like Rust" stance is visible:
 
 - Passing a language pointer to C is safe (GC-aware, non-null).
-- Receiving a `c.ptr` and using it requires a checked `$cast` (null-trapping) or
+- Receiving a `c.ptr` and using it requires a checked `cast` (null-trapping) or
   an explicit `#unsafe` scope to skip the check.
 - Reading a `#raw` / uninitialized buffer that C is expected to fill is only
   legal in `#unsafe` code; the compiler will not vouch for its contents.
 
 The intent is that ordinary code stays checked, and the unchecked, C-shaped
-operations are visibly marked (`c.ptr`, `$cast`, `#unsafe`, `#raw`) rather than
+operations are visibly marked (`c.ptr`, `cast`, `#unsafe`, `#raw`) rather than
 hidden.

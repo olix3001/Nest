@@ -19,7 +19,7 @@ use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan, SourceMap};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
-use crate::common::target::Target;
+use crate::common::options::Options;
 use crate::parser::ast::Ast;
 use crate::parser::parse::Parser;
 
@@ -192,13 +192,13 @@ pub struct Session {
     /// monomorphization, LIR lowering — read; the per-file programs above stay
     /// as the record of what lowering produced for each file on its own.
     pub linked: crate::ir::Linked,
-    /// The machine this compilation targets (§1.5: it decides how wide
-    /// `isize` / `usize` are, and therefore which constants fit them).
+    /// Everything this build decided for the compiler — the target, and the
+    /// run-time behaviours a profile chooses (§ [`Options`]).
     ///
-    /// Public and plainly assignable: when the driver grows a `--target` flag it
-    /// sets this field, and every stage that cares already reads it from here
-    /// rather than assuming a width of its own.
-    pub target: Target,
+    /// Public and plainly assignable: the driver fills it from `-C` pairs, a
+    /// test assigns it directly, and every stage that cares reads it from here
+    /// rather than assuming an answer of its own.
+    pub options: Options,
     /// The synthetic builtins namespace (primitives) that backs the prelude.
     pub builtins: DefId,
     /// Namespaces globbed into every file's outermost scope (the prelude:
@@ -272,7 +272,7 @@ impl Session {
             ir: HashMap::new(),
             ir_meta: crate::ir::Meta::new(),
             linked: crate::ir::Linked::default(),
-            target: Target::default(),
+            options: Options::default(),
             builtins,
             prelude_globs: vec![builtins],
             packages: HashMap::new(),

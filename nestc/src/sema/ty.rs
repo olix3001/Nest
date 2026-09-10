@@ -25,7 +25,7 @@ use num_bigint::BigInt;
 use std::collections::HashMap;
 
 use crate::common::symbol::Symbol;
-use crate::common::target::Target;
+use crate::common::options::Target;
 use crate::parser::ast::NodeId;
 
 use super::def::DefId;

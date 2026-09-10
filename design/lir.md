@@ -401,6 +401,59 @@ The precedence for `symbol`:
 An `extern("c")` function with no `@link_name` mangles to its bare name, because
 that is what C expects.
 
+### Mangling, and why monomorphization owns it
+
+A mangled name has one job: **be injective**. Two instantiations that differ in
+any way a linker could confuse must produce different symbols, and the same
+instantiation reached from two files must produce the same one. Everything else
+— readability, brevity, resemblance to another language's scheme — is secondary
+to that.
+
+Monomorphization is where the name is decided because monomorphization is where
+the *identity* is decided. It walks the call graph from the entry points,
+instantiates each generic function for each distinct set of arguments, and keys
+the result by those arguments; the symbol is the encoding of that key. Deciding
+it later, in codegen, would mean recomputing the key from a type it has already
+been given — and any disagreement between the two computations is a duplicate
+symbol or a missing one.
+
+The scheme, Itanium-flavoured because the length-prefixed form is easy to demangle
+and uses only characters every object format accepts:
+
+```
+_NC 4core 3Vec I i32 E 4push
+│   └─ length-prefixed path components ─┘ │      └ the member
+│                                         └ type arguments, I ... E
+└ prefix: Nest, mangled
+```
+
+| Argument | Encoding | Example |
+|---|---|---|
+| integer primitive | `i`/`u` + width, `is`/`us` for pointer-sized | `i32`, `u8`, `us` |
+| float primitive | `f` + width | `f64` |
+| `bool` / `char` / `void` | `b` / `c` / `v` | |
+| `*T` / `*mut T` | `P` / `Pm` + inner | `Pi32` |
+| `[]T` / `[]mut T` | `S` / `Sm` + inner | `Si32` |
+| `[N]T` | `A` + length + inner | `A3i32` |
+| tuple | `T` + elements + `E` | `Ti32bE` |
+| nominal | length-prefixed canonical path, args in `I ... E` | `4core6OptionIi32E` |
+| `dyn Trait` | `D` + the trait's path | `D4core8ToJsonE` |
+| `const` argument | `K` + the value's type + the value | `Kus3`, `Kb1`, `Ki32n5` |
+
+Two details earn their place:
+
+- **A `const` argument carries its type.** Const generic parameters are not
+  `usize`-only — a parameter may be any primitive — so `K3` would be ambiguous
+  between `3usize` and `3u8`, and those are different instantiations. `n` marks
+  a negative value, because `-` is not safe in every object format.
+- **A primitive mangles as a primitive, even though it is sugar.** `i32` is
+  `int.<32, true>` in the type system, and mangling it that way would make every
+  symbol in every program longer to record something no two types disagree
+  about. The sugar *is* the canonical spelling here.
+
+Nothing outside monomorphization may construct a symbol. A pass that needs one
+asks the instantiation it already holds.
+
 ### Directives that survive to LIR
 
 Directives are *carried* through the whole pipeline (`Def` and `ir::Function`
@@ -438,6 +491,8 @@ codegen all need the contents. What LIR adds is the flattening:
 | `[]T` / `[]mut T` | `struct { ptr: *T, len: usize }` |
 | `enum { a, b(T) }` | `struct { tag: uN, payload: <union of the variants> }` |
 | `dyn Trait` | `struct { data: *void, vtable: *void }` |
+| a vtable | a struct of function pointers, and one constant per impl |
+| `[N]T` | **stays an array** |
 
 The reason to do it here rather than in codegen is that every LIR pass after this
 point asks structural questions — what is at this offset, is this field a
@@ -445,6 +500,47 @@ pointer, how big is this local — and each aggregate that keeps its own shape i
 one more case every one of those passes has to learn. Flattened, a place
 projection is *always* "member `n` of a struct", and the drop, root and layout
 passes each have one rule instead of five.
+
+### Vtables are data, and data is a struct
+
+A vtable is not a language construct at this level; it is a **constant**. Each
+`impl` that a `dyn Trait` may select gets one, whose type is a struct of function
+pointers in the trait's declaration order — the order `ir::TypeDef`'s
+`TypeDefKind::Trait` already fixes, for exactly this reason — and whose value is
+the addresses of that impl's methods. A `dyn` call is then two ordinary
+operations: project the slot, call through the pointer.
+
+Making it a struct rather than a shape of its own is the same argument as the
+rest of the table: a vtable has an address, a layout and a member at an offset,
+and every pass that already handles those handles it for free. The trait
+disappears; the ordering it fixed does not.
+
+### Arrays do not flatten
+
+`[N]T` stays an array in LIR, and this is the one aggregate that keeps its own
+shape. The reason is that an array is not "a struct with N members that happen to
+match":
+
+- **Its index is a value, not a name.** `xs[i]` for a run-time `i` is address
+  arithmetic — `base + i * stride`. A struct projection is a constant offset
+  chosen at compile time. Flattening would either lose the dynamic form or
+  reintroduce it as a special case on structs, which is the case the flattening
+  was meant to remove.
+- **Its length is part of its type, not of its contents.** `[3]i32` and `[4]i32`
+  differ in a number LIR must keep to bounds-check, to compute a stride, and to
+  emit debug info that says "array of 3" rather than "struct of three fields".
+- **A thousand-element array is one entry, not a thousand.** A struct of `N`
+  members costs `N` member records in the type table and in debug info. `[4096]u8`
+  is a normal thing to write.
+- **The GC walks it as a run.** A root map for an array of pointers is "this
+  many, this far apart", which is one entry; as a struct it is one entry per
+  element.
+
+So LIR's aggregates are: **struct, and array**. Everything else — tuple, enum,
+slice, `distinct`, trait object, vtable — is a struct by the time LIR sees it. A
+slice is the interesting near-miss: `[]T` *does* flatten, because a slice is a
+pointer and a length, and neither of those is indexed by a run-time value. The
+indexing happens through the pointer it holds.
 
 The enum row is the one with a real decision in it: the tag's width and whether
 the payload is laid out as an overlapping union or as the widest variant are
@@ -456,14 +552,84 @@ Note this is a change of representation, not of information: the enum's variants
 and their names stay reachable through the type's definition, which is what a
 LIR dump prints and what debug info is emitted from.
 
+## 7c. Debug info is emitted from LIR, so LIR carries what it needs
+
+By the time codegen runs, the AST is gone, generics are gone, and a function's
+source identity is one of `N` instantiations that never appeared in the source at
+all. **Everything a debugger needs therefore has to be reachable from LIR**, and
+carried deliberately rather than reconstructed.
+
+What that means concretely, per function:
+
+| Fact | Where it comes from | Why a debugger needs it |
+|---|---|---|
+| unmangled `name`, with concrete arguments (`core.Vec.<i32>.push`) | monomorphization | what a stack frame is labelled |
+| `symbol` | monomorphization | tying a frame to an address |
+| declaring file, line, column | the def's span | "step into" and breakpoint resolution |
+| per-instruction span | carried on every LIR node | the line table: address → source position |
+| local and parameter **names**, with their scopes | lowering, from the IR's bindings | printing `xs` rather than `%7` |
+| each local's type | LIR types | interpreting the bytes at a slot |
+| type definitions: members, offsets, enum variant names, array lengths | `ir::TypeDef` plus layout | rendering a value as a value |
+
+Three consequences that shape the IR above this level:
+
+- **A local's source name must survive lowering.** LIR renumbers everything into
+  slots, so the name is metadata on the slot, set when the binding is lowered.
+  A temporary that no source name produced simply has none, and a debugger shows
+  it as a slot — that is honest, and better than inventing a name.
+- **Enum variant names and array lengths must survive flattening.** An enum is a
+  struct with a tag at this level (§7b), but a debugger showing `2` instead of
+  `.green` is a worse debugger. The variant names stay on the *type definition*,
+  which the flattening does not touch; the array length stays because arrays do
+  not flatten at all.
+- **`#inline` implies an inlining record.** If codegen inlines a call, the
+  instructions that came from the callee keep the callee's spans, and gain an
+  "inlined at" pointer to the call site. Without it a stack trace names a
+  function the programmer never called from there.
+
+How much of this is emitted is a build setting, not a property of LIR: LIR always
+carries it, and a build that asks for no debug info simply drops it at the end.
+Dropping late is cheap; reconstructing is not possible.
+
+## 7d. What a build's settings change here
+
+A setting (`Options` in `nestc/src/common/options.rs`) is decided before the
+first file is read and reaches LIR unchanged. Two of them change what gets
+*lowered*, not just what gets emitted:
+
+| Setting | What changes at LIR |
+|---|---|
+| `overflow=trap` | an `add` becomes a checked add plus a branch to a panic block |
+| `overflow=wrap` | an `add` is a single wrapping instruction, no extra edge |
+| `pointer-width` | the width of `usize`/`isize`, and therefore every layout |
+| debug level | how much of §7c survives to the object file |
+
+The overflow choice belongs at **LIR lowering**, not codegen, because the trap
+form is not a flag on an instruction — it is a second basic block, an extra edge,
+and a call that diverges. Every pass after lowering (drops, safepoints, liveness)
+has to see that edge to be correct, so it must exist in the graph rather than
+appear underneath it.
+
+Two things this setting does **not** change:
+
+- **Constants.** A `::` binding *is* its value (§2.5), and one that overflows is
+  refused whatever the setting says — there is no running program for the wrapped
+  answer to happen in. A written `$cast` is still how the low bits are asked for.
+- **The wrapping intrinsics.** `wrapping_add` wraps in a `trap` build too. That
+  is the whole point of it: the program said which behaviour it wanted, and a
+  setting that overrode it would make the intrinsic useless.
+
 ## 8. What LIR still carries
 
 - **Types**, and the **definitions** behind them. Every local and every
   instruction is typed; every nominal type's contents are reachable from its
   `DefId`. Codegen needs layout, and the drop/root passes need to know what is a
   pointer.
-- **Spans.** On every instruction, for debug metadata.
+- **Spans.** On every instruction, for debug metadata (§7c).
 - **Def ids.** So a diagnostic raised in a LIR pass can name a source item.
+- **Names**: the symbol each function will have, and the source names of locals.
+- **Arrays**, as arrays (§7b).
+- **The build's settings**, already applied to the shape of the graph (§7d).
 
 ## 9. What LIR no longer has
 
@@ -473,6 +639,12 @@ call is an indirect call through a vtable slot), `defer` as a construct,
 structured control flow, the distinction between a `match`, an `if` and a
 `while`, **`impl` blocks** — a method is just a function with a name — and every
 aggregate shape except the struct (§7b).
+
+**Intrinsics are also gone as calls.** A `#intrinsic` function declared in `core`
+has no body to lower; where the IR has a call to one, LIR has the operation it
+denotes — an instruction, a constant, or nothing at all. `size_of.<T>()` is the
+number layout computed; `wrapping_add(a, b)` is one instruction. What reaches
+codegen is never "a call to a function that does not exist".
 
 `distinct` types are also gone. A `distinct T` has exactly `T`'s representation,
 so the `$cast` the IR emits when a distinct type reaches an inherited method is a

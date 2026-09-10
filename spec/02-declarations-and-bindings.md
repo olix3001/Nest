@@ -26,7 +26,7 @@ right-hand side may be:
 - a **namespace** (`config :: namespace { ... }`),
 - the result of a **compile-time expression**, including `import`, a `#const`
   function call, and intrinsics of constant operands
-  (`SERVER_PORT :: $cast.<HttpPort>(8080)`).
+  (`SERVER_PORT :: cast.<HttpPort>(8080)`).
 
 `::` bindings are always immutable and always have a compile-time-known value.
 They may appear at the top level of a file, inside a namespace, or inside a
@@ -84,7 +84,7 @@ it. A `comptime_int` has no width, so `BIG :: 200 * 2` is `400`; but
 ```
 BIG :: 200 * 2               // 400 — a comptime_int has no width
 P   :: u8 := 200 * 2         // error: `400` does not fit in `u8`
-P   :: u8 := $cast.<u8>(200 * 2)   // 144 — the low bits, asked for in writing
+P   :: u8 := cast.<u8>(200 * 2)   // 144 — the low bits, asked for in writing
 ```
 
 The same holds for a `distinct` numeric, checked against what it stands over
@@ -173,11 +173,11 @@ CatId    :: distinct str
 HttpPort :: distinct u16
 ```
 
-Conversion in either direction is explicit via `$cast`:
+Conversion in either direction is explicit via `cast`:
 
 ```
-const raw_id: str  := $cast(self.id)          // CatId -> str
-const id: CatId    := $cast.<CatId>("abc")    // str -> CatId
+const raw_id: str  := cast(self.id)          // CatId -> str
+const id: CatId    := cast.<CatId>("abc")    // str -> CatId
 ```
 
 `distinct` exists to make units and identifiers type-safe: an `HttpPort` cannot
@@ -248,11 +248,11 @@ becomes the integer itself; likewise `comptime_float`:
 ```
 HttpPort :: distinct u16
 
-const p: HttpPort := 80        // no `$cast` needed
+const p: HttpPort := 80        // no `cast` needed
 q :: func (p: HttpPort) -> HttpPort { return p + 1 }   // `1` is a HttpPort
 ```
 
-Without this every literal reaching a distinct numeric would need a `$cast`,
+Without this every literal reaching a distinct numeric would need a `cast`,
 which is the ceremony the type exists to buy back.
 
 **To inherit nothing**, use a tuple struct instead — it is a new type with a

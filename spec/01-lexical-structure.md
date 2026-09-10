@@ -53,21 +53,17 @@ compile-time constants.
 A leading `_` marks an identifier as intentionally unused; the compiler will not
 warn about an unused binding whose name begins with `_`.
 
-### Intrinsic identifiers (`$name`)
+### Intrinsics are ordinary identifiers
 
-An identifier may begin with `$`, forming a **compiler intrinsic** name:
-
-```
-intrinsic = '$' identifier
-```
-
-`$cast`, `$new`, `$make`, `$size_of`, `$assert`, `$panic`, `$transmute`,
-`$embed_file`, … are lexed as ordinary identifiers (just spelled with a leading
-`$`) and are called, turbofished, and inferred like any function. They are the
-only source of compiler-provided *values*; see
-[06-expressions-and-operators.md](06-expressions-and-operators.md) §6.4. A `$`
-identifier always resolves to a compiler intrinsic and is never a namespace
-member. User code cannot declare `$` names.
+There is **no sigil for compiler-provided functions**. `cast`, `new`, `make`,
+`size_of`, `assert`, `panic`, `transmute`, `embed_file` are ordinary names,
+declared in `core` as bodyless `#intrinsic` functions and called, turbofished and
+inferred like any other — see
+[06-expressions-and-operators.md](06-expressions-and-operators.md) §6.4. Which of
+them are in scope without an import is the prelude's business
+([04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md)
+§4.6), and a program may shadow any of them the way it may shadow any other
+name.
 
 ## 1.4 Keywords
 
@@ -95,8 +91,8 @@ trait/impl/method is a name-resolution error. `impl` introduces a trait/inherent
 attached to a type (`impl T { ... }`, `impl Trait for T { ... }`); `for` doubles
 as the loop keyword and the trait-impl separator (unambiguous by position). `mut`
 marks a mutable reference (`*mut T`, `[]mut T`) or a mutable binding in a pattern;
-`dyn` forms a trait object (`dyn Trait`). Note that `cast` and `assert` are **not** keywords: `$cast` is an
-intrinsic and `assert` is a std function (compile-time assertion is `$assert`).
+`dyn` forms a trait object (`dyn Trait`). Note that `cast` and `assert` are **not** keywords: both are ordinary functions
+declared in `core` (§6.4).
 
 `type` is **not** a reserved word: it is a contextual keyword, recognised only as
 the RHS of an associated-type binding (`Item :: type`). Elsewhere it is an
@@ -127,9 +123,9 @@ integer — until it is used in a typed context, where it implicitly converts to
 any integer type whose range holds its value (a value that does not fit is a
 compile error). A literal that no context constrains defaults to `isize`.
 
-The conversion the compiler inserts must be exact; a `$cast` the program writes
+The conversion the compiler inserts must be exact; a `cast` the program writes
 narrows the way the machine does. `let y: u8 := 300` is an error and
-`$cast.<u8>(300)` is `44` — see §6.5.
+`cast.<u8>(300)` is `44` — see §6.5.
 
 ### Floating-point literals
 
@@ -143,7 +139,7 @@ Has the type `comptime_float` until context assigns a concrete float type
 (`f16`/`f32`/`f64`/`f80`/`f128`); defaults to `f64`. The width it settles on must
 be able to hold it: a literal that would overflow to infinity, or a non-zero one
 that would underflow to zero, is a compile error. Rounding is not — no decimal
-fraction is exactly a binary float — and a written `$cast` may lose either way
+fraction is exactly a binary float — and a written `cast` may lose either way
 (§6.5).
 
 ### Boolean literals

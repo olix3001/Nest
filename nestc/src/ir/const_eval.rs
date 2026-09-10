@@ -61,7 +61,7 @@ use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::symbol::Symbol;
-use crate::common::target::Target;
+use crate::common::options::Target;
 use crate::parser::ast::{BinOp, Lit, UnOp};
 use crate::sema::builtins::BuiltinOp;
 use crate::sema::def::{DefId, DefKind, DefTable};

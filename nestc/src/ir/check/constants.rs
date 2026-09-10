@@ -28,7 +28,7 @@
 //! initialized region — without any of them re-running the interpreter.
 
 use crate::common::diagnostic::Diagnostic;
-use crate::common::target::Target;
+use crate::common::options::Target;
 use crate::sema::def::DefTable;
 use crate::sema::infer::RangeReported;
 use crate::sema::ty::Ty;

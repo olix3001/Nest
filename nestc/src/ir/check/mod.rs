@@ -19,7 +19,7 @@
 //! thing.
 
 use crate::common::diagnostic::Diagnostic;
-use crate::common::target::Target;
+use crate::common::options::Target;
 use crate::sema::def::DefTable;
 
 use super::{Arm, Block, Expr, ExprKind, Linked, Meta, Stmt, StmtKind};

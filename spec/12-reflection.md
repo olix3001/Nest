@@ -32,13 +32,13 @@ support reflection and will not be walked back:
   can read them.
 - **Layout is well-defined**: `#packed`, `#align(N)`, and `#soa` give types a
   known size / alignment / field offset that reflection will report accurately,
-  and the `$size_of` / `$align_of` intrinsics already expose the scalar parts.
+  and the `size_of` / `align_of` intrinsics already expose the scalar parts.
 - **Types are compile-time values**, passable to generics and bindable with `::`,
   which is the substrate a reflection API will build on.
 
 ## 12.3 Open questions (not yet decided)
 
-- The surface API: intrinsics (`$type_of`, `$fields`, …) vs. a std `reflect`
+- The surface API: intrinsics (`type_of`, `fields`, …) vs. a std `reflect`
   namespace vs. methods on a `Type` value — undecided.
 - The exact `Type` / `Field` / `Variant` / `Attribute` data model.
 - How much metadata is reified for run-time use by default, and how it is opted

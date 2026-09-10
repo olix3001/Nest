@@ -40,8 +40,8 @@ const-safe?". This is what lets a call sit on the right-hand side of `::`:
 ```
 #const
 to_port :: func (n: uint16) -> HttpPort {
-  $assert(n > 0, "port must be non-zero")
-  return $cast.<HttpPort>(n)
+  assert(n > 0, "port must be non-zero")
+  return cast.<HttpPort>(n)
 }
 
 SERVER_PORT :: to_port(8080)     // evaluated at compile time
@@ -93,7 +93,7 @@ Rules:
   written — not at each call site.
 - A default must be **compile-time known at the call site** (§5.1): a literal, a
   path to a `const` item or `const` generic parameter, a composite literal whose
-  elements are all constant, a `$cast` of a constant, a location directive
+  elements are all constant, a `cast` of a constant, a location directive
   (`#caller_location`), or a call to a `#const` function. Note that this is not the same as
   "a single fixed value" — `#caller_location` differs at every call site and is
   still admissible, because each site knows its own.
@@ -236,9 +236,21 @@ zeros :: func <const N: uint32> () -> [N]byte { ... }   // value param used in a
 - `T: SomeTrait` — constrains `T` to implementors of `SomeTrait`, enabling that
   trait's methods in the body. Multiple bounds: `T: TraitA + TraitB`.
 - `const N: Ty` — a **compile-time value** parameter: a constant of the concrete
-  type `Ty` (e.g. `uint32`), usable in the body and in types such as `[N]byte`.
-  The `const` keyword is what distinguishes a value parameter from a type
-  parameter, so `<const N: uint32>` is never mistaken for a trait bound.
+  type `Ty`, usable in the body and in types such as `[N]u8`. The `const` keyword
+  is what distinguishes a value parameter from a type parameter, so
+  `<const N: usize>` is never mistaken for a trait bound.
+
+  `Ty` may be **any primitive type** — an integer of any width, `bool`, `char`,
+  `f32`. Restricting it to `usize` would be an arbitrary line: the parameter is a
+  compile-time value, every primitive has compile-time values, and the type
+  system already has to compare and substitute them. It is also load-bearing
+  rather than decorative — the integer family `int.<N, S>` (§3.1) is a `usize`
+  width *and* a `bool` signedness, so without `const S: bool` there is no one
+  family for the integer operations to be written over.
+
+  Aggregates are **not** const parameters: a struct or an array as a generic
+  argument would put structural equality of arbitrary values into type identity,
+  which is a much larger promise than comparing two primitives.
 - Generic parameters are compile-time values; the language **monomorphizes**
   (each instantiation generates specialized code), which enables the LLVM backend
   and reflection over `T`. Runtime polymorphism is opt-in via `dyn Trait` (see
@@ -256,7 +268,7 @@ Type arguments are **usually inferred** and the turbofish omitted:
 ```
 Vector.<int>.new()          // T explicit
 Vector.new()                // T inferred from later push/use
-$cast(self.id)              // target type inferred from context
+cast(self.id)              // target type inferred from context
 ```
 
 When explicit, supply arguments with `.<...>`; use `_` to leave individual
@@ -264,7 +276,7 @@ positions to inference:
 
 ```
 client.get.<[]CatImage>(url)   // explicit
-$make.<[]_>(1024)              // element type inferred
+make.<[]_>(1024)              // element type inferred
 collect.<_, str>(iter)      // first inferred, second fixed
 ```
 

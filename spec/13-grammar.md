@@ -2,7 +2,7 @@
 
 Non-normative EBNF summary of the whole surface syntax. `[x]` optional, `{x}`
 zero-or-more, `x | y` alternation, `'x'` literal terminal. Lexical productions
-(`identifier`, `intrinsic` = `'$' identifier`, `literal`, comments, string/number
+(`identifier`, `literal`, comments, string/number
 forms) are defined in [01-lexical-structure.md](01-lexical-structure.md). Where
 this grammar and the prose chapters disagree, the prose wins.
 
@@ -29,7 +29,7 @@ declaration = { attribute } [ directive ] ( const_bind | local_decl )
 
 attribute   = '@' identifier [ '(' [ attr_arg { ',' attr_arg } ] ')' ]
 directive   = '#' ( identifier | 'const' ) [ '(' [ arg { ',' arg } ] ')' ] { directive }
-comptime_item = intrinsic_call                     // e.g. $assert(...)  (returns void)
+comptime_item = call                               // e.g. assert(...)  (returns void)
 
 const_bind  = pattern '::' const_rhs
 const_rhs   = expr
@@ -41,7 +41,7 @@ const_rhs   = expr
 ```
 
 A `directive` name is drawn from the compiler's fixed set (`packed`, `align`,
-`soa`, `inline`, `const`, `static`, `raw`, `unsafe`, `lang`, …); `#lang(str)`
+`soa`, `inline`, `const`, `static`, `raw`, `unsafe`, `lang`, `intrinsic`, …); `#lang(str)`
 tags a core-library item as a language item (see
 [09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3 and
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.13).
@@ -53,7 +53,7 @@ form is a **typed** binding — a pinned constant (§2.5), an associated constan
 `#static` the RHS is *always* read this way, so `#static s :: [4]u8` declares a
 zeroed region rather than a type alias. A `field_item` inside a
 struct/enum/trait/namespace body may also be a `comptime_item` (e.g.
-`$assert(...)`). A `local_decl` at namespace scope is rejected outright: `let`
+`assert(...)`). A `local_decl` at namespace scope is rejected outright: `let`
 binds a stack slot and there is no call there — use `::`, with `#static` for a
 mutable region. See
 [02-declarations-and-bindings.md](02-declarations-and-bindings.md).
@@ -173,7 +173,7 @@ statement = local_decl
           | return_stmt
           | break_stmt | continue_stmt
           | loop_stmt
-          | expr                                 // includes intrinsic_call, e.g. $assert(...)
+          | expr                                 // includes an intrinsic call, e.g. assert(...)
 
 local_decl  = ( 'let' | 'const' ) pattern [ ':' type ] ':=' expr
 assign_stmt = place assign_op expr               // place must be mutable
@@ -224,7 +224,6 @@ postfix_op   = '.' identifier
 
 primary = literal
         | qualified_name
-        | intrinsic_call                        // '$' identifier [generic_args] '(' [args] ')'
         | 'self' | 'Self'
         | 'true' | 'false'
         | '(' expr ')'
@@ -237,7 +236,6 @@ primary = literal
         | block
         | import_expr                           // '<pkg>' or "file"; see 13.2
 
-intrinsic_call = intrinsic [ generic_args ] '(' [ args ] ')'     // intrinsic = '$' identifier
 
 composite_literal =
     type '{' composite_body '}'                      // typed record OR array (by type)

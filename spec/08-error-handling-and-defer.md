@@ -192,10 +192,10 @@ found through their `#lang` tags, not by name.
 | Channel | Trigger | Recoverable? | Use for |
 |---------|---------|--------------|---------|
 | `Result` + `.?` | explicit `.err`, propagated by `.?` | yes, by the caller | expected, handleable failures |
-| abort / trap | `$panic`, `.!` on failure, failed `assert`, out-of-bounds index, illegal `$cast`, uninitialized read | no (aborts) | programming errors, invariant violations |
+| abort / trap | `panic`, `.!` on failure, failed `assert`, out-of-bounds index, illegal `cast`, uninitialized read | no (aborts) | programming errors, invariant violations |
 
 Use `Result` for anything a caller could respond to. Reserve aborts for bugs. A
-**compile-time** assertion is `$assert(...)` (see
+**compile-time** assertion is `assert(...)` (see
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.10); a
 **run-time** assertion is the std function `assert(cond, msg)`, which aborts on
 failure and may be compiled out in release builds.

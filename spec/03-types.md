@@ -19,13 +19,46 @@ Unit:              void   (the empty tuple; a function with no `-> T` returns vo
 Uninhabited:       never  (the type of an expression that does not return)
 ```
 
-Integers are written `i<N>` / `u<N>` for a bit width `N` up to `65535`: the
-common widths `i8`/`i16`/`i32`/`i64` and `u8`/`u16`/`u32`/`u64` are just the
-familiar cases of an arbitrary-width family, so `u7`, `i24`, `u4096` are equally
-legal type expressions. `i1` is **not** a type; `u1` is spelled `bool`. There is
-**no** bare `int`/`uint` — use the pointer-sized `isize`/`usize` for addresses,
+Integers are one **generic family**, and `i32` and friends are sugar for it:
+
+```
+int.<N, S>          N: usize   the bit width
+                    S: bool    signed
+i32   == int.<32, true>
+u8    == int.<8, false>
+usize == int.<PTR_BITS, false>
+```
+
+`i8`/`i16`/`i32`/`i64` and `u8`/`u16`/`u32`/`u64` are the familiar cases of that
+family, so `u7`, `i24` and `u4096` are equally legal — a width `N` up to `65535`.
+`i1` is **not** a type; `u1` is spelled `bool`. Floats exist only at the widths
+`f16`/`f32`/`f64`/`f80`/`f128`.
+
+The family exists so that the operations on integers can be **written once**.
+`wrapping_add` is not compiler syntax; it is an inherent method in `core`, on an
+`impl` over the whole family, exactly as `.len()` is an inherent method on
+`impl <T> []T`:
+
+```nest
+impl <const N: usize, const S: bool> int.<N, S> {
+  wrapping_add :: #intrinsic func (self: Self, rhs: Self) -> Self
+}
+```
+
+Per-width impls could not do this: `u4096` is a legal type, so there is no finite
+list to write out.
+
+`i32` and `int.<32, true>` are **the same type**, not two types that convert. The
+short spelling is the ordinary one, and the generic form appears where a width has
+to be spoken about — an `impl` header, a bound, a reflection query.
+
+Pointer-sized `isize` / `usize` are members of the family whose width is the
+**target's**, written `PTR_BITS`: a compile-time constant the build supplies
+rather than a number the source picks. It is opaque to type identity, so `usize`
+and `u64` stay different types on a 64-bit target, exactly as `[N]T` and `[3]T`
+are different types inside a generic function. Use `isize`/`usize` for addresses,
 lengths, and indices (`.len()`, indexing, C interop sizes), and a fixed width
-otherwise. Floats exist only at the widths `f16`/`f32`/`f64`/`f80`/`f128`.
+otherwise.
 
 `str` is **not** a compiler primitive. It is declared in `core` as
 `#lang("str") distinct []u8` — a byte slice with a UTF-8 invariant, which is the
@@ -92,7 +125,30 @@ until context assigns a concrete type (see
 [01-lexical-structure.md](01-lexical-structure.md)); a `comptime_int` implicitly
 converts to any integer type whose range holds its value. Between concrete
 numeric types there are **no implicit conversions**; widening and narrowing both
-go through `$cast`.
+go through `cast`.
+
+### Integer overflow
+
+What a **run-time** integer operation does when its result does not fit is a
+property of the **build**, not of the program:
+
+| Setting | Behaviour |
+|---|---|
+| `overflow=trap` (default) | the program panics |
+| `overflow=wrap` | the result wraps, two's complement |
+
+The build tool chooses; the compiler is handed the answer. A program that wants
+one specific behaviour regardless says so in the source, with `wrapping_add`,
+`checked_add`, `saturating_add` — those mean what they say in every build.
+
+**Compile time is not affected by the setting.** A constant *is* its value
+(§2.5), so one whose arithmetic does not fit its type is an error in every build:
+
+```nest
+P :: u8 := 200 * 2                  // error: `400` does not fit in `u8`
+P :: u8 := cast.<u8>(200 * 2)       // 144 — the low bits, asked for in writing
+BIG :: 200 * 2                      // 400 — a comptime_int has no width
+```
 
 String literals are open in the same way: a literal is a `comptime_str` that
 settles on `str`, `[]u8` or `[]char` at its use site and defaults to `str`
@@ -163,7 +219,7 @@ Fields are private to the struct's namespace unless the struct is `@public(all)`
 or the field is individually `@public`. Inside a `@public(all)` struct, an
 individual field may be re-hidden with `@private` (see
 [09-directives-and-attributes.md](09-directives-and-attributes.md)). A record
-body may also contain compile-time items such as `$assert(...)` (see
+body may also contain compile-time items such as `assert(...)` (see
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.10).
 
 Struct layout is affected by the directives `#packed`, `#align(N)`, and `#raw`
@@ -184,7 +240,7 @@ When the context type is a tuple struct, a positional inferred literal builds it
 struct types are *structural* (two with the same fields are the same type). A
 struct bound to a name with `::` is **nominal**: it is its own distinct type even
 if another named or anonymous struct has identical fields, and it never
-implicitly converts to or from them (use `$cast`, or an `@using` field — §3.8,
+implicitly converts to or from them (use `cast`, or an `@using` field — §3.8,
 §3.10). Only named structs can have `impl` methods; anonymous structs are plain
 data.
 
@@ -204,10 +260,10 @@ when `s : []mut T`. Indexing is `s[i]`, length is `s.len()`, sub-slicing is
 
 `.len()` is **not** compiler syntax. It is an ordinary inherent method the core
 library declares on the built-in sequences — `impl <T> []T { len :: ... }` and
-`impl <T, const N: usize> [N]T { len :: ... }` — whose body is the `$len(s)`
+`impl <T, const N: usize> [N]T { len :: ... }` — whose body is the `len(s)`
 intrinsic (§6.4). Writing it that way is what makes `a.len()`, `s.len()`, and the
 std `Vector`'s `.len()` one spelling with one meaning; only `core` can declare it,
-because only the defining package may write an inherent impl (§4.9). `$len` may
+because only the defining package may write an inherent impl (§4.9). `len` may
 also be called directly, and on a `[N]T` whose `N` is known it folds to a
 compile-time constant.
 Out-of-bounds indexing traps at run time (unless in an `#unsafe`
@@ -333,7 +389,7 @@ impl Bounded for Volume {
   variable's type, a field, a parameter, or a slice element is an error; a slice
   *of pointers*, `[]*dyn ToJson`, is fine, because the pointer is what has the
   size. A `*T` coerces to `*dyn Trait` when `T: Trait` (and `*mut T` to
-  `*mut dyn Trait`), or explicitly `$cast.<*dyn ToJson>(&cat)` — the same
+  `*mut dyn Trait`), or explicitly `cast.<*dyn ToJson>(&cat)` — the same
   unsizing, written out. Method calls on it dispatch through the vtable, with
   `Self` resolved to `dyn ToJson`:
 
@@ -407,16 +463,16 @@ A generic type or function is instantiated with the `.<...>` turbofish:
 ```
 Result.<T, models.FetchError>
 client.get.<[]CatImage>(url)
-$cast.<HttpPort>(8080)
+cast.<HttpPort>(8080)
 ```
 
 Type arguments are **usually inferred** from context, so `.<...>` is frequently
-unnecessary (`$cast(self.id)` with the target inferred, `Vector.new()` with `T`
+unnecessary (`cast(self.id)` with the target inferred, `Vector.new()` with `T`
 inferred from later use). When some arguments should be inferred and others
 fixed, the placeholder `_` requests inference of a position:
 
 ```
-$make.<[]_>(1024)          // element type inferred from context
+make.<[]_>(1024)          // element type inferred from context
 collect.<_, str>(iter)  // first type-arg inferred, second fixed
 ```
 
@@ -454,14 +510,14 @@ is filled in by inference is resolved between the AST and IR stages.
 - **No implicit conversions across nominal boundaries.** A named struct does not
   implicitly convert to another named struct, nor from a named struct to its
   anonymous structural twin; nor do numeric types convert, nor a `distinct T` and
-  its underlying `T`. All such conversions are an explicit `$cast` (permitted when
+  its underlying `T`. All such conversions are an explicit `cast` (permitted when
   the layouts are compatible). There are exactly **two** implicit struct→struct
   coercions:
   1. via an `@using` field (§3.10);
   2. **from an anonymous struct value to a matching named struct** — a value whose
      type is an anonymous `struct { … }` implicitly coerces to any named struct
      with the same field name→type set. This is one-way: a *named* struct never
-     implicitly becomes anonymous (that direction needs an explicit `$cast`).
+     implicitly becomes anonymous (that direction needs an explicit `cast`).
 
   Composite literals `.{ ... }` are a further exempt case: they are untyped until
   context assigns them a type — they *become* the expected named or anonymous
@@ -471,7 +527,7 @@ is filled in by inference is resolved between the AST and IR stages.
   P :: struct { x: int, y: int }
   const a := .{ x: 1, y: 2 }       // anonymous struct value
   const p: P := a                  // OK: anonymous -> named P
-  const q: struct{x:int,y:int} := $cast.<struct{x:int,y:int}>(p)  // named -> anon: explicit
+  const q: struct{x:int,y:int} := cast.<struct{x:int,y:int}>(p)  // named -> anon: explicit
   ```
 - The mutability coercions still hold: `*mut T` coerces to `*T` and `[]mut T` to
   `[]T` (dropping write access), never the reverse.
@@ -479,7 +535,7 @@ is filled in by inference is resolved between the AST and IR stages.
 ## 3.9 Dynamic arrays: `Vector`
 
 There is no built-in growable array; it is the std struct `Vector.<T>`, built on
-the `$new` / `$make` allocation intrinsics (see
+the `new` / `make` allocation intrinsics (see
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.9):
 
 ```

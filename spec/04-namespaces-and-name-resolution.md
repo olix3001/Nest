@@ -23,7 +23,7 @@ block, used to group related declarations (including private helper groupings):
 
 ```
 config :: namespace {
-  @public SERVER_PORT :: $cast.<HttpPort>(8080)
+  @public SERVER_PORT :: cast.<HttpPort>(8080)
   @public SERVER_ADDR :: "127.0.0.1"
 }
 
@@ -125,7 +125,7 @@ The **sole exception** is impl namespaces. Any number of `impl` blocks may targe
 the same type, and different trait impls may each define a method of the same name
 (e.g. two traits both requiring `render`). This is sound because a trait's methods
 are only reachable when that trait is in scope (imported) or accessed through an
-explicit `dyn`/`$cast` (see §4.5). Inherent-method conflicts across `impl T`
+explicit `dyn`/`cast` (see §4.5). Inherent-method conflicts across `impl T`
 blocks are still errors.
 
 ## 4.4 Visibility and re-export
@@ -222,9 +222,42 @@ To resolve an unqualified name, the compiler searches in order:
 2. **Enclosing function parameters and generic parameters.**
 3. **Enclosing namespaces** — innermost outward to the file namespace, including
    names brought in by `import` (glob or selective) at each level.
-4. **The prelude** — a small implicit set of always-in-scope names (`Result`,
-   `Option`, `str`, the primitive types, the `$`-intrinsics, reflection
-   helpers, …).
+4. **The prelude** — the `@public` members of `core.prelude`, globbed into every
+   file (see below). The primitive types are not part of it; they are built in
+   and always nameable.
+
+### The prelude is one namespace in `core`, and the rest of `core` is not
+
+`core.prelude` is an ordinary namespace with ordinary members, and the compiler
+globs its `@public` members into every file's outermost scope. **The rest of
+`core` requires an explicit `import`**:
+
+```nest
+// no import needed — the prelude
+let x: Option.<i32> := .none
+let y: u8 := cast(n)
+panic("unreachable")
+
+// everything else in core is imported like any other package
+{ Add } :: import <core/ops>
+impl Add.<Vec3> for Vec3 { ... }
+```
+
+What belongs in it is decided by one question: *does a program that writes no
+imports at all need this name to be readable?* `Option`, `Result`,
+`ControlFlow`, `str`, `cast`, `panic` and `size_of` pass — they appear in
+signatures and bodies everywhere, and `.?` / `.!` desugar to two of them. The
+operator traits do not: `a + b` finds `Add` by its `#lang` tag rather than by
+name, so the name is needed only in order to *write* an impl, which is a
+deliberate act that can afford a line of import.
+
+Globbing all of `core` instead would make every name core ever adds a name that
+can collide with a program's own, in every file, forever — which is why a
+prelude is small in every language that has one.
+
+The prelude is a *namespace*, not a compiler table: it is found by `#lang` tag
+like everything else core provides, its members are declared in the topic files
+and re-exported by it (§4.4), and replacing `core` replaces the prelude with it.
 
 The first match wins; there is no cross-scope overloading. Two glob `import`s at
 one scope that introduce the same name are a conflict the programmer resolves by
@@ -232,8 +265,8 @@ switching one to a selective binding.
 
 A **qualified** name `a.b.c` resolves `a` by the rules above, then `b` as a
 member of `a`, then `c` as a member of `a.b`. Each hop must be visible: crossing
-into another namespace sees only its `@public` members. Intrinsics (`$name`)
-resolve directly and are never namespace members.
+into another namespace sees only its `@public` members. An intrinsic is an
+ordinary `core` member and resolves like one (§6.4).
 
 An `@using` field does **not** contribute promoted members to `a.b` field lookup:
 `@using` grants only an implicit upcast to the field's type, never name promotion.
@@ -258,7 +291,7 @@ resolution is the one place the upcast participates — see below. See
 A trait method is only callable where that trait is in scope; this is what makes
 the merging exception in §4.3 sound. Ambiguity between two in-scope traits
 providing the same method name is resolved by dispatching through the trait
-explicitly, e.g. `$cast.<*dyn ToJson>(&x).render()`.
+explicitly, e.g. `cast.<*dyn ToJson>(&x).render()`.
 
 ## 4.7 `Self`
 

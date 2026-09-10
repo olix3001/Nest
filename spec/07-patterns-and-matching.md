@@ -90,7 +90,7 @@ return result.match {
   .ok(cats) => {
     assert(cats.len() > 0, "Cat array was empty")     // std runtime assert
     let cat := cats[0]
-    const json := $cast.<*dyn ToJson>(&cat).render()
+    const json := cast.<*dyn ToJson>(&cat).render()
     io.println(json)
     return Response.redirect(cat.url)
   },

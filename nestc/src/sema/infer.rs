@@ -36,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
-use crate::common::target::Target;
+use crate::common::options::Target;
 use crate::parser::ast::{
     Ast, BinOp, Lit, NodeId, NodeKind, SliceRest, UnOp, VariantArgs, VariantPatArgs, WideFloat,
 };

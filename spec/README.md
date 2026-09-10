@@ -15,7 +15,7 @@ Its design combines:
   a `Try` trait), never thrown.
 - **`defer`** — scope-exit cleanup that runs in LIFO order.
 - **`$`-intrinsics and `#`-directives** — compiler-provided values are intrinsics
-  (`$cast`, `$new`, `$make`, `$size_of`, `$embed_file`, …); compiler behavior is
+  (`cast`, `new`, `make`, `size_of`, `embed_file`, …); compiler behavior is
   changed by directives (`#packed`, `#align`, `#soa`, `#inline`, `#const`,
   `#raw`, `#unsafe`). Implementations use the `impl` keyword, not a directive.
 - **Operators defined in the core library** — `+`, `-`, `*`, comparison, indexing,
@@ -45,7 +45,7 @@ Its design combines:
 3. **Private by default.** Every item is private to its enclosing namespace
    unless marked `@public`. Visibility is the only access concept.
 
-4. **Explicit over implicit, except where inference is unambiguous.** `$cast`,
+4. **Explicit over implicit, except where inference is unambiguous.** `cast`,
    error propagation (`.?`), and taking a reference (`&` / `&mut`) are always
    visible in source. Types of locals, enum variants, struct literals, and most
    generic arguments may be inferred from context.
@@ -63,7 +63,7 @@ Its design combines:
 | [03-types.md](03-types.md) | Primitives, `*mut`/`[]mut`, structs, enums, traits, `dyn`, `Option`, `Vector` |
 | [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) | Namespaces, `import`, visibility, `impl`, generic impls, merging, lookup rules |
 | [05-functions-and-generics.md](05-functions-and-generics.md) | `func`, `#const`, parameters, named arguments, generics, `.<T>` / `.<_>` |
-| [06-expressions-and-operators.md](06-expressions-and-operators.md) | Literals, calls, `$`-intrinsics, `$cast`, `$new`/`$make`, precedence |
+| [06-expressions-and-operators.md](06-expressions-and-operators.md) | Literals, calls, `$`-intrinsics, `cast`, `new`/`make`, precedence |
 | [07-patterns-and-matching.md](07-patterns-and-matching.md) | Patterns (ranges, deref, slices, or-patterns, guards), `match` |
 | [08-error-handling-and-defer.md](08-error-handling-and-defer.md) | `Result`, the `Try` trait, `.?` / `.!`, `defer` |
 | [09-directives-and-attributes.md](09-directives-and-attributes.md) | `@public`/`@private`, custom attributes, `#packed`/`#align`/`#soa`/`#inline`/`#const`/`#raw`/`#unsafe` |

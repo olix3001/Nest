@@ -11,15 +11,16 @@ Three annotation-like mechanisms exist, and they do not overlap:
 - **Directives** — `#name` / `#name(args)`. **Compiler-defined**; they change how
   the compiler treats the item they modify (layout, inlining, dispatch,
   safety). Directives never produce a value.
-- **Intrinsics** — `$name(...)`. Compiler-provided **values / operations**, called
-  like functions (see
+- **Intrinsics** — ordinary functions declared in `core` with no body, marked
+  `#intrinsic`; the compiler supplies the operation (see
   [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.4).
 
-Rule of thumb: `@` annotates, `#` modifies the construct it precedes, `$`
-produces a value. This split is what resolves the "directive as expression"
-tension: value-producing compile magic (`$embed_file`, `$size_of`, `$cast`) is an
-intrinsic, and a static check inside a struct is the intrinsic statement
-`$assert(...)`, not a directive.
+Rule of thumb: `@` annotates, `#` modifies the construct it precedes, and a
+**value comes from a function** — never from a directive. This is what resolves
+the "directive as expression" tension: value-producing compile magic
+(`embed_file`, `size_of`, `cast`) is a function core declares and the compiler
+fills in, and a static check inside a struct is the statement `assert(...)`, not
+a directive.
 
 ## 9.1 Placement
 
@@ -209,6 +210,38 @@ Ordinary user code never writes `#lang` — the tags belong to the core library 
 compiler is built against. It is listed here because it is a compiler directive,
 but its effect is described where operators are (§6.13).
 
+### Compiler-supplied bodies (`#intrinsic`)
+
+- **`#intrinsic`** — mark a **bodyless** function whose body the compiler
+  supplies: an instruction, a constant, or nothing at all. It is how `core`
+  declares `cast`, `size_of`, `panic`, `wrapping_add` and the rest (§6.4).
+
+  ```nest
+  @public size_of :: #intrinsic func <T> () -> usize
+
+  impl <const N: usize, const S: bool> int.<N, S> {
+    wrapping_add :: #intrinsic func (self: Self, rhs: Self) -> Self
+  }
+  ```
+
+  It is the mirror of `#lang`, and the pair is easiest to keep straight by the
+  **direction** each points:
+
+  | Directive | Direction | Meaning |
+  |---|---|---|
+  | `#lang("add")` | compiler → core | "find the item with this tag and wire syntax to it" |
+  | `#intrinsic` | core → compiler | "this declaration has no body; you supply it" |
+
+  A function marked `#intrinsic` **must** have no body, and the compiler must
+  recognize it — an `#intrinsic` the compiler has never heard of is an error at
+  the declaration, not a link failure later. Conversely a bodyless function that
+  is neither `#intrinsic`, `extern`, nor a trait requirement is an error: those
+  three are the only ways a signature stands without an implementation.
+
+  Ordinary user code never writes `#intrinsic`, for the same reason it never
+  writes `#lang`: the set is the compiler's, and a program that could declare its
+  own would be asking for a body no compiler knows how to fill.
+
 ### Implementations (not a directive)
 
 Implementations were once the `#impl(...)` directive; they are now the **`impl`
@@ -224,7 +257,7 @@ The language is checked-by-default but is **not** memory-safe like Rust; two
 directives trade safety for speed:
 
 - **`#raw`** — on a **type or field**, storage is left **uninitialized** (not
-  zeroed) by `$new` / `$make`, and reads are not init-checked. For FFI structs and
+  zeroed) by `new` / `make`, and reads are not init-checked. For FFI structs and
   performance-critical buffers.
 - **`#unsafe`** — on a **func or block**, disables run-time safety checks in that
   scope: bounds checks, the read-before-write (uninitialized) trap, and null

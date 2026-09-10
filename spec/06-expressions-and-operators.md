@@ -9,7 +9,7 @@ values; statements are expressions used for effect.
 primary =
     literal                     // 42, 3.14, "s", f"...", 'c', true, false
   | identifier
-  | intrinsic_call              // $name(...) or $name.<...>(...)   (see 6.4)
+  | call                        // an intrinsic is an ordinary call (see 6.4)
   | 'self' | 'Self'
   | '(' expr ')'                // grouping
   | '(' expr { ',' expr } ')'   // tuple
@@ -120,41 +120,67 @@ trait.
 result.match { .ok(cats) => ..., .err(e) => ... }
 ```
 
-## 6.4 Intrinsics (`$name`)
+## 6.4 Intrinsics (`#intrinsic`)
 
-Compiler intrinsics are identifiers that begin with `$`. Lexically they are
-ordinary identifiers (see [01-lexical-structure.md](01-lexical-structure.md)),
-so they are called, take turbofish type arguments, and infer like any function —
-they are simply provided by the compiler rather than user code. This is the
-**only** mechanism for compiler-provided values; directives (`#name`) never
-produce values, they only modify items.
+An intrinsic is an **ordinary function declared in `core`, with no body**, marked
+`#intrinsic`. The compiler supplies the body — an instruction, a constant, or
+nothing at all — and everything else about it is ordinary: it has a signature,
+it takes turbofish type arguments, it infers, it can be passed around, and it is
+documented where every other function is documented.
 
-Core intrinsics (extensible; not a closed list):
+```nest
+// core/mem.nest
+@public size_of  :: #intrinsic func <T> () -> usize
+@public align_of :: #intrinsic func <T> () -> usize
+@public cast     :: #intrinsic func <T, U> (x: U) -> T
+```
+
+There is no `$name` form. A separate namespace for compiler-provided functions
+bought nothing: it split the library in two, meant the signatures lived in the
+compiler where no reader of `core` could see them, and made every new intrinsic a
+change to the language's lexer rather than a line in a library. `#intrinsic` says
+the same thing where it belongs, next to the declaration it describes.
+
+The directive marks the **direction**: `#lang("...")` is the compiler *looking
+up* an item core provides; `#intrinsic` is core declaring an item the compiler
+*fills in*. A bodyless function that is neither is a trait requirement (§5); one
+at namespace scope with no `#intrinsic` and no `extern` is an error.
+
+The intrinsics (extensible; not a closed list):
 
 | Intrinsic | Purpose |
 |-----------|---------|
-| `$cast.<T>(x)` / `$cast(x)` | explicit type conversion (§6.5) |
-| `$transmute.<T>(x)` | reinterpret the bits of `x` as `T` (same size) |
-| `$new.<T>()` | allocate one zeroed, GC-managed `T`; yields `*mut T` (§6.9) |
-| `$make.<[]T>(len[, cap])` | allocate a zeroed, GC-managed slice (§6.9) |
-| `$size_of.<T>()` / `$align_of.<T>()` | layout queries (`usize`), `#const` |
-| `$len(x)` | element count of an array or slice (`usize`); the core library's `.len()` method is written in terms of it |
-| `$assert(cond[, msg])` | compile-time assertion (§6.10) |
-| `$panic(msg)` | abort the program with a message |
-| `$embed_file("path")` | splice a file's bytes as a compile-time `[]uint8` |
-| `$gc_collect()` | request a collection now (§6.4.1) |
-| `$gc_keep_alive(x)` | keep `x` reachable up to this point (§6.4.1) |
-| `$gc_pin(x)` | make `x`'s object immortal and immovable (§6.4.1) |
+| `cast.<T>(x)` / `cast(x)` | explicit type conversion (§6.5) |
+| `transmute.<T>(x)` | reinterpret the bits of `x` as `T` (same size) |
+| `new.<T>()` | allocate one zeroed, GC-managed `T`; yields `*mut T` (§6.9) |
+| `make.<[]T>(len[, cap])` | allocate a zeroed, GC-managed slice (§6.9) |
+| `size_of.<T>()` / `align_of.<T>()` | layout queries (`usize`), `#const` |
+| `len(x)` | element count of an array or slice (`usize`); the core library's `.len()` method is written in terms of it |
+| `assert(cond[, msg])` | compile-time assertion (§6.10) |
+| `panic(msg)` | abort the program with a message; `#caller_location` (§5) |
+| `embed_file("path")` | splice a file's bytes as a compile-time `[]u8` |
+| `gc_collect()` | request a collection now (§6.4.1) |
+| `gc_keep_alive(x)` | keep `x` reachable up to this point (§6.4.1) |
+| `gc_pin(x)` | make `x`'s object immortal and immovable (§6.4.1) |
+| `wrapping_add`, `checked_add`, `saturating_add`, … | integer operations with a stated overflow behaviour; inherent methods on `int.<N, S>` (§3.1) |
 
+```nest
+const bits := transmute.<u32>(3.14)
+const p    := new.<CatImage>()
+const n    := size_of.<CatImage>()
+DATA :: embed_file("logo.png")            // []u8 baked into the binary
 ```
-const bits := $transmute.<uint32>(3.14f32)
-const p    := $new.<CatImage>()
-const n    := $size_of.<CatImage>()
-DATA :: $embed_file("logo.png")           // []uint8 baked into the binary
-```
+
+The ones that are **operations on a value** are inherent methods rather than free
+functions, so they read like the rest of the language: `x.wrapping_add(y)`, not
+`wrapping_add(x, y)`. The ones that are questions about a *type* stay free
+functions, because there is no value to hang them off.
+
+Which of these names are in scope unqualified is the prelude's business (§4.6):
+`cast`, `panic` and `size_of` are, the rest are reached through an import.
 
 Many intrinsics are usable at compile time (they behave as `#const`), which is
-why `$cast(8080)` and `$embed_file(...)` may appear on the RHS of `::`.
+why `cast(8080)` and `embed_file(...)` may appear on the RHS of `::`.
 
 ### 6.4.1 Garbage-collector intrinsics
 
@@ -166,61 +192,61 @@ the collector may do next.
 
 | Intrinsic | Meaning |
 |---|---|
-| `$gc_collect()` | Request a collection now. A hint, not a guarantee. |
-| `$gc_keep_alive(x)` | A no-op that **counts as a use**, so `x` stays reachable up to this point. |
-| `$gc_pin(x)` | Make the object immortal and immovable. |
+| `gc_collect()` | Request a collection now. A hint, not a guarantee. |
+| `gc_keep_alive(x)` | A no-op that **counts as a use**, so `x` stays reachable up to this point. |
+| `gc_pin(x)` | Make the object immortal and immovable. |
 
-`$gc_keep_alive` exists for one specific failure. A value's live range ends at
+`gc_keep_alive` exists for one specific failure. A value's live range ends at
 its last **read**, so this is wrong:
 
 ```
-let buf := $make.<[]u8>(1024)
+let buf := make.<[]u8>(1024)
 let p   := &buf[0]
 c_write(p)                 // `buf` is already dead here — nothing reads it again
 ```
 
 The collector may move or free `buf` during the call even though C is using its
-address. `$gc_keep_alive(buf)` **after** the call extends the live range across
+address. `gc_keep_alive(buf)` **after** the call extends the live range across
 it.
 
-`$gc_pin` is for handing a pointer to C for longer than one call — a callback
+`gc_pin` is for handing a pointer to C for longer than one call — a callback
 registration, a buffer the other side keeps. A pinned object is never moved and
 never collected, which is a leak by construction. That is the trade, and it is
 why the intrinsic is explicit rather than something the compiler infers.
 
-## 6.5 `$cast`
+## 6.5 `cast`
 
-`$cast` is the sole explicit conversion intrinsic. Two forms:
-
-```
-$cast.<T>(expr)     // convert expr to the named target type T
-$cast(expr)         // convert expr to the contextually-expected type
-```
+`cast` is the sole explicit conversion intrinsic. Two forms:
 
 ```
-$cast.<HttpPort>(8080)                 // int literal -> distinct uint16
-$cast.<*dyn ToJson>(&cat)              // *CatImage   -> ToJson trait object
-const raw_id: str := $cast(self.id) // CatId       -> str (target from annotation)
+cast.<T>(expr)      // convert expr to the named target type T
+cast(expr)          // convert expr to the contextually-expected type
 ```
 
-`$cast` covers numeric widening/narrowing, `distinct` ↔ underlying, `*mut T` →
+```
+cast.<HttpPort>(8080)                  // int literal -> distinct u16
+cast.<*dyn ToJson>(&cat)               // *CatImage   -> ToJson trait object
+const raw_id: str := cast(self.id)     // CatId       -> str (target from annotation)
+```
+
+`cast` covers numeric widening/narrowing, `distinct` ↔ underlying, `*mut T` →
 `*T`, pointer → `*dyn Trait`, `*T` → `c.ptr.<T>` (see
 [11-c-ffi.md](11-c-ffi.md)), and any conversion the type system defines as
 legal. It never performs a disallowed conversion — illegal casts are compile
 errors, not run-time coercions.
 
-### A written `$cast` may lose; an inserted one may not
+### A written `cast` may lose; an inserted one may not
 
-A `$cast` **the program writes** is allowed to lose precision. Narrowing an
+A `cast` **the program writes** is allowed to lose precision. Narrowing an
 integer keeps the low bits, and narrowing a float rounds — exactly what the
 machine does, and exactly what the program asked for. This holds at compile time
 too, so a constant and the same expression at run time are the same number:
 
 ```
 A :: 400
-X :: u8 := $cast.<u8>(A)       // 144 — the low 8 bits, as at run time
-Y :: u8 := $cast.<u8>(300)     // 44
-Z :: f32 := $cast.<f32>(3.5e40) // inf
+X :: u8 := cast.<u8>(A)        // 144 — the low 8 bits, as at run time
+Y :: u8 := cast.<u8>(300)      // 44
+Z :: f32 := cast.<f32>(3.5e40) // inf
 ```
 
 The conversion the **compiler inserts** to settle an untyped literal on the type
@@ -230,7 +256,7 @@ should become `44`, so a literal the target cannot hold is an error:
 ```
 let y: u8 := 300               // error: the literal `300` does not fit in `u8`
 let z: f32 := 3.5e40           // error: the literal `3.5e40` does not fit in `f32`
-let ok: u8 := $cast.<u8>(x)    // fine for any integer `x` — it was written
+let ok: u8 := cast.<u8>(x)     // fine for any integer `x` — it was written
 ```
 
 "Cannot hold" is exact for integers: the value keeps its arbitrary precision
@@ -279,7 +305,7 @@ Highest to lowest; same-row operators associate left-to-right unless noted.
 Comparison operators do not chain: `a < b < c` is a parse error; write
 `a < b && b < c`. `and`/`or` are exact synonyms for `&&`/`||`. Bitwise operators
 require integer operands. Mixing signed/unsigned or differing widths requires an
-explicit `$cast`.
+explicit `cast`.
 
 Precedence and associativity are **purely syntactic**: they decide how an
 expression parses into a tree, before any meaning is attached. What each operator
@@ -332,44 +358,44 @@ Loops and iteration have their own chapter (see
 [10-loops-and-iteration.md](10-loops-and-iteration.md)); a `loop` exited with
 `break value` yields that value.
 
-## 6.9 Allocation intrinsics (`$new`, `$make`)
+## 6.9 Allocation intrinsics (`new`, `make`)
 
 The language is garbage-collected, so there is no free. Fresh memory comes from
 two intrinsics; std containers (`Vector`, `HashMap`, …) are built on top of them.
 
 ```
-$new.<T>()               // one zeroed, GC-managed T          -> *mut T
-$make.<[]T>(len)         // zeroed slice of `len` elements    -> []mut T
-$make.<[]T>(len, cap)    // as above, with reserved capacity
+new.<T>()               // one zeroed, GC-managed T          -> *mut T
+make.<[]T>(len)         // zeroed slice of `len` elements    -> []mut T
+make.<[]T>(len, cap)    // as above, with reserved capacity
 ```
 
 ```
-const cat := $new.<CatImage>()          // *mut CatImage, all fields zeroed
-const buf := $make.<[]uint8>(1024)      // []mut uint8, zeroed
-let   xs  := Vector.<int>.new()         // std, wraps $make internally
+const cat := new.<CatImage>()          // *mut CatImage, all fields zeroed
+const buf := make.<[]uint8>(1024)      // []mut uint8, zeroed
+let   xs  := Vector.<int>.new()         // std, wraps make internally
 ```
 
 Memory is zero-initialized unless the element type is `#raw` (see
 [09-directives-and-attributes.md](09-directives-and-attributes.md)), in which
 case it is left uninitialized and reads are only permitted in `#unsafe` scopes.
 
-## 6.10 Compile-time statement items (`$assert`)
+## 6.10 Compile-time statement items (`assert`)
 
 Intrinsic calls that return `void` can be used as standalone statements — not
 only inside function bodies, but also as **items** inside a `struct`, `enum`,
-`trait`, or `namespace` body. `$assert(cond[, msg])` is the canonical case: a
+`trait`, or `namespace` body. `assert(cond[, msg])` is the canonical case: a
 compile-time assertion. A body entry is therefore
 `field | variant | decl | comptime-statement`.
 
 ```
 Header :: #packed struct {
-  $assert($size_of.<Self>() == 64, "Header must be 64 bytes")   // static check
+  assert(size_of.<Self>() == 64, "Header must be 64 bytes")   // static check
   magic: uint32,
   len:   uint32,
 }
 ```
 
-`$assert` is checked during compilation and produces no run-time code. A
+`assert` is checked during compilation and produces no run-time code. A
 **run-time** assertion is the ordinary std function `assert(cond, msg)`, not an
 intrinsic (see [08-error-handling-and-defer.md](08-error-handling-and-defer.md)).
 

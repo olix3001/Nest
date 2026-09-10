@@ -54,7 +54,7 @@ use num_bigint::BigInt;
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::symbol::Symbol;
-use crate::common::target::Target;
+use crate::common::options::Target;
 use crate::parser::ast::Lit;
 use crate::sema::def::DefTable;
 use crate::sema::ty::{IntWidth, Ty};

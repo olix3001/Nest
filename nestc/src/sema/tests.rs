@@ -2,7 +2,7 @@
 //! packages, glob/selective binding, `#lang` collection, resolution of uses to
 //! definitions, and `for` / `.?` desugaring.
 
-use crate::common::target::Target;
+use crate::common::options::Target;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
 use super::def::DefKind;
@@ -1014,7 +1014,7 @@ fn messages(src: &str) -> Vec<String> {
 /// depend on it, which is why every other test can take the default.
 fn messages_for(src: &str, target: Target) -> Vec<String> {
     let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
-    session.target = target;
+    session.options.target = target;
     let file = session.load_entry("main").expect("entry loads");
     analyze(&mut session, file);
     session
