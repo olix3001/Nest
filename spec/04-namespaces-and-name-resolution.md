@@ -28,7 +28,7 @@ config :: namespace {
 }
 
 internal_helpers :: namespace {
-  validate_url :: func (url: string) -> bool { return url.len() > 0 }
+  validate_url :: func (url: str) -> bool { return url.len() > 0 }
 }
 ```
 
@@ -50,14 +50,14 @@ not bound to a name and the target need not live in the current namespace:
 ```
 impl CatImage {                             // inherent methods / associated funcs
   @public
-  new :: func (id: CatId, url: string, w: int32, h: int32) -> CatImage {
+  new :: func (id: CatId, url: str, w: int32, h: int32) -> CatImage {
     return .{ id: id, url: url, width: w, height: h }
   }
 }
 
 impl ToJson for CatImage {                  // trait implementation of ToJson
   @public
-  render :: func (self: *CatImage) -> string { ... }
+  render :: func (self: *CatImage) -> str { ... }
 }
 ```
 
@@ -98,7 +98,7 @@ Namespaces nest arbitrarily; members are reached with `.`:
 ```
 @public
 http :: namespace {
-  @public Response :: enum { ok(string), redirect(string), not_found, ... }
+  @public Response :: enum { ok(str), redirect(str), not_found, ... }
   @public Client   :: struct {}
   impl Client { ... }
   @public Router   :: struct { logging: bool }
@@ -142,15 +142,15 @@ nested inside it, never to the outside.
 | `@private` | (field) re-hide one field inside a `@public(all)` aggregate |
 
 ```
-@public CatId :: distinct string
+@public CatId :: distinct str
 
 @public(all)
 CatImage :: struct {
   id: CatId,
-  url: string,
+  url: str,
   width: int32,
   height: int32,
-  @private cache: Option.<string>,   // exported struct, but this field stays private
+  @private cache: Option.<str>,   // exported struct, but this field stays private
 }
 ```
 
@@ -223,7 +223,7 @@ To resolve an unqualified name, the compiler searches in order:
 3. **Enclosing namespaces** — innermost outward to the file namespace, including
    names brought in by `import` (glob or selective) at each level.
 4. **The prelude** — a small implicit set of always-in-scope names (`Result`,
-   `Option`, `string`, the primitive types, the `$`-intrinsics, reflection
+   `Option`, `str`, the primitive types, the `$`-intrinsics, reflection
    helpers, …).
 
 The first match wins; there is no cross-scope overloading. Two glob `import`s at
@@ -287,7 +287,7 @@ method can be reached four ways — each substituting something different:
 | on `*dyn Trait` | `dyn Trait` | decided by the vtable at run time |
 
 The last row is the one that has no impl to point at: `render :: func (self: *Self)`
-declared in `ToJson` is a `func (*dyn ToJson) -> string` when called through a
+declared in `ToJson` is a `func (*dyn ToJson) -> str` when called through a
 `*dyn ToJson`, and the receiver's own vtable supplies the body (§3.4).
 
 ## 4.9 Coherence — where an impl may be written
@@ -332,7 +332,7 @@ impl <T> Storage.<T> {
 
 // implement a trait for a whole family
 impl <T> ToJson for Storage.<T> {                   // ToJson for every Storage.<T>
-  @public render :: func (self: *Storage.<T>) -> string { ... }
+  @public render :: func (self: *Storage.<T>) -> str { ... }
 }
 ```
 
@@ -343,7 +343,7 @@ applies when the parameters satisfy their constraints:
 ```
 // Storage.<T> is ToJson only when its elements are
 impl <T: ToJson> ToJson for Storage.<T> {
-  @public render :: func (self: *Storage.<T>) -> string { ... }
+  @public render :: func (self: *Storage.<T>) -> str { ... }
 }
 ```
 
@@ -360,7 +360,7 @@ for *every* type (optionally constrained):
 
 ```
 impl <T> Describe for T {                     // Describe for absolutely every T
-  @public describe :: func (self: *T) -> string { ... }
+  @public describe :: func (self: *T) -> str { ... }
 }
 
 impl <T: ToJson> Loggable for T { ... }       // Loggable for every T that is ToJson
@@ -375,7 +375,7 @@ Two impls **overlap** when some concrete type is matched by both — for the sam
 inherent set, or for the same trait. Overlap is allowed **only when one impl is
 strictly more specific than the other**; the compiler then selects the most
 specific matching impl at each use site. `impl Storage.<int32>` wins over `impl
-<T> Storage.<T>` for `int32`, while `Storage.<string>` still uses the generic one.
+<T> Storage.<T>` for `int32`, while `Storage.<str>` still uses the generic one.
 
 Impl **A is more specific than B** when every type A matches is also matched by B,
 but not the reverse (A's match set is a strict subset of B's). This orders:

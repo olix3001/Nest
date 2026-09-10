@@ -20,7 +20,7 @@ binding = pattern '::' expr
 right-hand side may be:
 
 - a **value** (`SERVER_PORT :: 8080`, `SERVER_ADDR :: "127.0.0.1"`),
-- a **type** (`CatId :: distinct string`, `Point :: struct { ... }`),
+- a **type** (`CatId :: distinct str`, `Point :: struct { ... }`),
 - a **function** (`main :: func () { ... }`),
 - a **trait** (`ToJson :: trait { ... }`),
 - a **namespace** (`config :: namespace { ... }`),
@@ -109,20 +109,51 @@ memory layout as `T`, but which is not interchangeable with `T` or with any
 other `distinct T`:
 
 ```
-CatId   :: distinct string
-HttpPort :: distinct uint16
+CatId    :: distinct str
+HttpPort :: distinct u16
 ```
 
-A `distinct` type does **not** inherit `T`'s operators or methods; it is an
-opaque newtype. Conversion in either direction is explicit via `$cast`:
+Conversion in either direction is explicit via `$cast`:
 
 ```
-const raw_id: string := $cast(self.id)         // CatId -> string
-const id: CatId       := $cast.<CatId>("abc")  // string -> CatId
+const raw_id: str  := $cast(self.id)          // CatId -> str
+const id: CatId    := $cast.<CatId>("abc")    // str -> CatId
 ```
 
 `distinct` exists to make units and identifiers type-safe: an `HttpPort` cannot
-be silently passed where a plain `uint16` is expected, and vice versa.
+be silently passed where a plain `u16` is expected, and vice versa.
+
+### Method inheritance is one-way
+
+A `distinct T` **inherits `T`'s methods**; `T` does not gain the distinct type's.
+
+```
+CatId :: distinct str
+impl CatId {
+  is_valid :: func (self: CatId) -> bool { ... }
+}
+
+id.len()        // ok — inherited from `str`
+id.is_valid()   // ok — CatId's own
+s.is_valid()    // error: no method `is_valid` on `str`
+```
+
+The asymmetry is the point. A `distinct T` is `T` plus an invariant and some
+extra operations, so everything `T` can do it can do; the operations that assume
+the invariant stay off `T`, where the invariant does not hold. Inheriting in both
+directions would make the type not distinct at all.
+
+A method the distinct type declares itself **wins** over an inherited one of the
+same name, which is how a `distinct` type refines behaviour rather than only
+adding to it. Because the representations are identical, reaching an inherited
+method is a reinterpretation of the receiver and costs nothing at run time.
+
+A `distinct` type also takes **directives**, which is how one becomes a language
+item:
+
+```
+str :: #lang("str") distinct []u8
+```
 
 ## 2.5 Shadowing and scope
 

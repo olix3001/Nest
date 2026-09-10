@@ -46,7 +46,8 @@ use crate::parser::ast::{
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::OpResolution;
 use super::infer::{
-    ArgOrder, Coercion, DynCoerce, MethodDispatch, MethodRes, RecvAdjust, SliceCoerce, Upcast,
+    ArgOrder, Coercion, DistinctRecv, DynCoerce, MethodDispatch, MethodRes, RecvAdjust,
+    SliceCoerce, Upcast,
 };
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
@@ -736,7 +737,18 @@ impl Lowerer<'_> {
         let NodeKind::FieldAccess { base, .. } = self.ast.node(callee).kind.clone() else {
             return Expr::Error(ty);
         };
-        let recv = self.lower_expr(base);
+        let mut recv = self.lower_expr(base);
+        // The method was found on the type this `distinct` type is distinct from
+        // (§2.4). Representations are identical, so reaching it is a
+        // reinterpretation — but the method's `self` is typed as the
+        // representation, so say so before the `&` / `.*` adjustment runs.
+        if let Some(d) = self.ast.meta::<DistinctRecv>(base) {
+            recv = Expr::Intrinsic {
+                name: Symbol::new("cast"),
+                args: vec![recv],
+                ty: d.repr.clone(),
+            };
+        }
         let written: Vec<Option<NodeId>>;
         let slots: &[Option<NodeId>] = match self.ast.meta::<ArgOrder>(callee) {
             Some(o) => {

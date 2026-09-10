@@ -21,3 +21,4 @@
 @public * :: import "iter.nest"
 @public * :: import "range.nest"
 @public * :: import "slice.nest"
+@public * :: import "str.nest"

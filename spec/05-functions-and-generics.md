@@ -17,7 +17,7 @@ main :: func () {
 }
 
 @public
-render :: #inline func (self: *CatImage) -> string {
+render :: #inline func (self: *CatImage) -> str {
   ...
 }
 ```
@@ -56,8 +56,8 @@ param  = 'self' [ ':' type ]
 ```
 
 ```
-new    :: func (id: CatId, url: string, w: int32, h: int32) -> CatImage { ... }
-listen :: func (self: *Router, host: string, port: HttpPort) { ... }
+new    :: func (id: CatId, url: str, w: int32, h: int32) -> CatImage { ... }
+listen :: func (self: *Router, host: str, port: HttpPort) { ... }
 ```
 
 Parameters are immutable bindings inside the body (rebind locally with `let` if
@@ -70,7 +70,7 @@ allowed but `s = other` is not.
 A parameter may carry a **default**, which makes it optional at the call site:
 
 ```
-pad :: func (s: string, width: usize := 8, fill: char := ' ') -> string { ... }
+pad :: func (s: str, width: usize := 8, fill: char := ' ') -> str { ... }
 
 pad("hi")                  // width = 8,  fill = ' '
 pad("hi", 4)               // width = 4,  fill = ' '
@@ -109,7 +109,7 @@ A parameter named `self` marks the function as a **method** of the type its
 ```
 impl Router {
   @public
-  get :: func (self: *mut Router, path: string, handler: func() -> Response) { ... }
+  get :: func (self: *mut Router, path: str, handler: func() -> Response) { ... }
 }
 ```
 
@@ -223,7 +223,7 @@ type. Positional type arguments and `name = type` bindings may be mixed in one
 turbofish (`Map.<K, Value = V>`).
 
 ```
-get :: func <T> (self: *Client, url: string) -> Result.<T, FetchError> {
+get :: func <T> (self: *Client, url: str) -> Result.<T, FetchError> {
   ...
 }
 
@@ -265,7 +265,7 @@ positions to inference:
 ```
 client.get.<[]CatImage>(url)   // explicit
 $make.<[]_>(1024)              // element type inferred
-collect.<_, string>(iter)      // first inferred, second fixed
+collect.<_, str>(iter)      // first inferred, second fixed
 ```
 
 The `.<` token (not bare `<`) removes the C++ `f<a>(b)` ambiguity. `.<...>` is

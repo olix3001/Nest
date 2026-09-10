@@ -118,8 +118,8 @@ like `collect`, `sum`, or a `for` loop:
 const names := cats
   .iter()
   .filter(func (c: *CatImage) -> bool { return c.width > 0 })
-  .map(func (c: *CatImage) -> string { return c.url })
-  .collect.<Vector.<string>>()
+  .map(func (c: *CatImage) -> str { return c.url })
+  .collect.<Vector.<str>>()
 ```
 
 Adapters are lazy: no work happens until a consumer (`for`, `collect`, `sum`, …)

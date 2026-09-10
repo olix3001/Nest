@@ -141,8 +141,6 @@ pub enum Ty {
     ComptimeFloat,
     Bool,
     Char,
-    /// The `string` type.
-    Str,
     /// The unit type `void` (the empty tuple).
     Void,
     /// The uninhabited type of a diverging expression (`return`, `break`, an
@@ -235,7 +233,6 @@ impl Ty {
             Ty::ComptimeFloat => "comptime_float".into(),
             Ty::Bool => "bool".into(),
             Ty::Char => "char".into(),
-            Ty::Str => "string".into(),
             Ty::Void => "void".into(),
             Ty::Never => "never".into(),
             Ty::Nominal { def, args } => {
@@ -591,7 +588,6 @@ impl InferCtxt {
             (Ty::Float(x), Ty::Float(y)) if x == y => Ok(()),
             (Ty::Bool, Ty::Bool)
             | (Ty::Char, Ty::Char)
-            | (Ty::Str, Ty::Str)
             | (Ty::Void, Ty::Void) => Ok(()),
 
             (
@@ -846,7 +842,6 @@ pub fn primitive_ty(name: &str) -> Option<Ty> {
     match name {
         "bool" => return Some(Ty::Bool),
         "char" => return Some(Ty::Char),
-        "string" => return Some(Ty::Str),
         "void" => return Some(Ty::Void),
         "isize" => return Some(Ty::isize()),
         "usize" => return Some(Ty::usize()),
@@ -953,7 +948,7 @@ mod tests {
     fn int_literal_rejects_non_integer() {
         let mut cx = InferCtxt::new();
         let lit = cx.fresh_of(TyVarKind::Int);
-        assert!(cx.unify(&lit, &Ty::Str).is_err());
+        assert!(cx.unify(&lit, &Ty::Bool).is_err());
     }
 
     #[test]

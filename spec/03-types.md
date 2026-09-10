@@ -14,7 +14,7 @@ Unsigned integers: u8  u16  u32  u64   uN    (arbitrary width N in 1..=65535; u1
 Pointer-sized:     isize usize                (signed / unsigned integer wide enough to hold any address or index)
 Floating point:    f16  f32  f64  f80  f128   (exactly these widths; there is no bare `float`)
 Boolean:           bool   (an alias for u1)
-Text:              char   (Unicode scalar, 32-bit)   string   (UTF-8, immutable)
+Text:              char   (Unicode scalar, 32-bit)   str      (UTF-8, borrowed — see below)
 Unit:              void   (the empty tuple; a function with no `-> T` returns void)
 ```
 
@@ -25,6 +25,19 @@ legal type expressions. `i1` is **not** a type; `u1` is spelled `bool`. There is
 **no** bare `int`/`uint` — use the pointer-sized `isize`/`usize` for addresses,
 lengths, and indices (`.len()`, indexing, C interop sizes), and a fixed width
 otherwise. Floats exist only at the widths `f16`/`f32`/`f64`/`f80`/`f128`.
+
+`str` is **not** a compiler primitive. It is declared in `core` as
+`#lang("str") distinct []u8` — a byte slice with a UTF-8 invariant, which is the
+same thing Rust's `str` is. Being `distinct` rather than a plain `[]u8` gives the
+invariant somewhere to live, gives slicing a place to check character boundaries,
+and lets text operations hang off something that is not every byte slice; being
+`distinct` rather than a primitive means it inherits all the slice machinery —
+interior pointers, bounds, GC tracing — rather than reimplementing it. A string
+literal has type `str`, and `s.len()` is its length in **bytes**.
+
+The **owned**, growable string lives in `std`, built on top of `str` and tagged
+`#lang` so that a `str` coerces into it implicitly. The same split applies to
+vectors, which `std` builds on slices.
 
 Integer literals have type `comptime_int` and float literals `comptime_float`
 until context assigns a concrete type (see
@@ -81,7 +94,7 @@ field = [ attribute ]* identifier ':' type ','
 ```
 CatImage :: struct {                 // record struct
   id: CatId,
-  url: string,
+  url: str,
   width: int32,
   height: int32,
 }
@@ -174,11 +187,11 @@ Variant names are **snake_case**. A variant may be bare, carry a positional
 
 ```
 Response :: enum {
-  ok(string),
-  redirect(string),
-  bad_request(string),
+  ok(str),
+  redirect(str),
+  bad_request(str),
   not_found,
-  internal_server_error(string),
+  internal_server_error(str),
 }
 
 Shape :: enum {
@@ -225,7 +238,7 @@ assoc_type = identifier '::' 'type' [ ':' type { '+' type } ]  // trait bounds o
 
 ```
 ToJson :: trait {
-  render :: func (self: *Self) -> string
+  render :: func (self: *Self) -> str
 }
 ```
 
@@ -285,7 +298,7 @@ Option :: enum <T> {
 }
 ```
 
-`Option.<*CatImage>` is an optional pointer; `Option.<string>` an
+`Option.<*CatImage>` is an optional pointer; `Option.<str>` an
 absent-or-present string. There is no `nil`/`null`; the empty value is `.none`,
 and a bare `T` coerces to `.some(value)` in an `Option` context.
 
@@ -311,7 +324,7 @@ fixed, the placeholder `_` requests inference of a position:
 
 ```
 $make.<[]_>(1024)          // element type inferred from context
-collect.<_, string>(iter)  // first type-arg inferred, second fixed
+collect.<_, str>(iter)  // first type-arg inferred, second fixed
 ```
 
 A turbofish argument may also be an **associated-type equality**, `name = type`,

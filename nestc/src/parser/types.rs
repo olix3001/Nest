@@ -18,13 +18,7 @@ impl Parser {
         let directives = self.parse_directives();
 
         match self.peek() {
-            Some(TokenKind::DistinctKw) => {
-                self.reject_directives(&directives, "distinct type");
-                self.bump();
-                let inner = self.parse_type();
-                let span = start.to(self.node_span(inner));
-                self.alloc(span, NodeKind::DistinctType { inner })
-            }
+            Some(TokenKind::DistinctKw) => self.parse_distinct_type(directives, start),
             Some(TokenKind::StructKw) => self.parse_struct_type(directives),
             Some(TokenKind::EnumKw) => self.parse_enum_type(directives),
             Some(TokenKind::TraitKw) => self.parse_trait_type(directives),
@@ -338,6 +332,21 @@ impl Parser {
     }
 
     // ===< struct / enum / trait literals >===
+
+    /// `[directives] distinct T` (§2.4).
+    ///
+    /// A `distinct` type *is* a type declaration, so it takes directives the way
+    /// `struct` / `enum` / `trait` do — `#lang` above all, without which a
+    /// `distinct` type could never be a language item. `str` is exactly that:
+    /// `#lang("str") distinct []u8`.
+    ///
+    /// `start` is the span the directives began at, so the node covers them.
+    pub(crate) fn parse_distinct_type(&mut self, directives: Vec<NodeId>, start: Span) -> NodeId {
+        self.expect(&TokenKind::DistinctKw);
+        let inner = self.parse_type();
+        let span = start.to(self.node_span(inner));
+        self.alloc(span, NodeKind::DistinctType { directives, inner })
+    }
 
     /// `[directives] struct [<g>] [body]`.
     pub(crate) fn parse_struct_type(&mut self, directives: Vec<NodeId>) -> NodeId {

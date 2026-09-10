@@ -632,7 +632,8 @@ impl Collector<'_> {
             | NodeKind::StructType { directives, .. }
             | NodeKind::EnumType { directives, .. }
             | NodeKind::TraitType { directives, .. }
-            | NodeKind::NamespaceExpr { directives, .. } => directives,
+            | NodeKind::NamespaceExpr { directives, .. }
+            | NodeKind::DistinctType { directives, .. } => directives,
             _ => return None,
         };
         for &d in directives {

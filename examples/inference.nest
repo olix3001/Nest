@@ -68,7 +68,7 @@ build_ints :: func () -> usize {
   return xs.len
 }
 
-// The same machinery deduces `Vector.<string>` from a string `push`.
+// The same machinery deduces `Vector.<str>` from a string `push`.
 build_strings :: func () {
   let ws := Vector.new()
   ws.push("hello")

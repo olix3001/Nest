@@ -371,6 +371,14 @@ impl Parser {
                 Some(TokenKind::TraitKw) => self.parse_trait_type(directives),
                 Some(TokenKind::NamespaceKw) => self.parse_namespace(directives),
                 Some(TokenKind::LBracket) => self.parse_bracket_type(directives),
+                // `#lang("str") distinct []u8` — a `distinct` type is a
+                // declaration and carries directives like any other.
+                Some(TokenKind::DistinctKw) => {
+                    let start = directives
+                        .first()
+                        .map_or_else(|| self.cur_span(), |&d| self.node_span(d));
+                    self.parse_distinct_type(directives, start)
+                }
                 _ => {
                     for &d in &directives {
                         let span = self.node_span(d);

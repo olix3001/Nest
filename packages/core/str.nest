@@ -1,0 +1,40 @@
+// The primitive string type.
+//
+// `str` is a **borrowed, UTF-8 view** — the same thing Rust's `str` is. It is
+// `distinct []u8`: identical in representation to a byte slice (a pointer and a
+// byte length), and a different type on purpose.
+//
+// Why distinct rather than a plain `[]u8` (§2.4):
+//
+//   - The UTF-8 invariant needs somewhere to live. If every `[]u8` were a `str`,
+//     `chars()` on arbitrary bytes would either validate on every call or read
+//     garbage.
+//   - Slicing needs a hook. `s[0..2]` on `"héllo"` cuts the `é` in half;
+//     `distinct` gives that check a place to happen.
+//   - Text wants operations bytes do not — `split`, `trim`, `chars` — and they
+//     have to hang off something that is not every `[]u8`.
+//   - `[]u8` should display as `[104, 105]` and `str` as `hi`. One type can only
+//     have one impl.
+//
+// Being `distinct []u8` and not a compiler primitive means all the slice
+// machinery — interior pointers, bounds, GC tracing — is inherited rather than
+// reimplemented. The compiler finds this type by its `#lang` tag, which is how a
+// string literal knows what type it has.
+//
+// The **owned**, growable string is not here and will not be: it belongs to
+// `std`, built on top of this one, and will carry its own `#lang` tag so that a
+// `str` coerces into it implicitly.
+
+@public str :: #lang("str") distinct []u8
+
+// `len` is deliberately absent: a `distinct` type inherits the methods of the
+// type it is distinct from (§2.4), so `s.len()` already resolves to `[]T`'s and
+// gives the length in **bytes**. That is the right answer — the byte length is
+// the O(1) one, and it differs from the character count for any text outside
+// ASCII. The inheritance is one-way, so nothing here leaks back onto `[]u8`.
+impl str {
+  // The underlying bytes. Going this way is always sound: valid UTF-8 is a
+  // subset of arbitrary bytes. The reverse needs a check, and lives in `std`
+  // until there is enough machinery here to write it.
+  as_bytes :: #inline func (self: str) -> []u8 { return $cast.<[]u8>(self) }
+}

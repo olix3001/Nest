@@ -88,7 +88,7 @@ qsort  :: extern("c") func (base: c.ptr.<c.void>, n: c.size_t, size: c.size_t,
   allowed at the boundary. The `c.*` types exist for when you need an *exact* C
   ABI width/shape; language types coerce to their C counterparts per §11.4.
 - The **link symbol** defaults to the binding's own name. To bind a differently
-  named external symbol, attach the `@link_name(string)` attribute: the identifier
+  named external symbol, attach the `@link_name(str)` attribute: the identifier
   you write is what the rest of the program calls, while the compiler emits and
   links against the string. This lets a C-ugly name be renamed to house style:
 
@@ -128,7 +128,7 @@ their C counterparts when passed to an `extern("c")` function (and only there):
 | `isize` / `usize` | `c.ssize_t` / `c.size_t` |
 | `*T` / `*mut T` | `c.ptr.<T>` |
 | `[]T` | `(c.ptr.<T>, c.size_t)` — pointer + length, per the callee's expectation |
-| `string` | `c.ptr.<c.char>` (NUL-terminated copy when required) |
+| `str` | `c.ptr.<c.char>` (NUL-terminated copy when required) |
 | `bool` | `c.bool` |
 
 The reverse direction (C type → language type) is **never** implicit: results

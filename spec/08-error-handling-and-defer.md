@@ -24,7 +24,7 @@ the enum; `Option` is `#lang("option")` for the same reason (see
 A fallible function declares its success and error types:
 
 ```
-get :: func <T> (self: *Client, url: string) -> Result.<T, FetchError> {
+get :: func <T> (self: *Client, url: str) -> Result.<T, FetchError> {
   return .err(.network_error("Failed to reach endpoint"))
 }
 ```
@@ -34,7 +34,7 @@ The error type is usually an enum enumerating failure modes, so callers can
 
 ```
 FetchError :: enum {
-  network_error(string),
+  network_error(str),
   parse_error,
 }
 ```
@@ -147,7 +147,7 @@ silently vanishing into an `Option`-returning function: the two residuals
 disagree, and no impl says how they would convert.
 
 ```
-first_word :: func (s: string) -> Option.<string> {
+first_word :: func (s: str) -> Option.<str> {
   const w := split(s).next().?      // `.none` in, `.none` out
   return .some(w)
 }
@@ -160,7 +160,7 @@ exits — via `return`, via a `.?` short-circuit, or by falling off the end.
 Deferred actions run **LIFO**.
 
 ```
-open_and_use :: func (path: string) -> Result.<void, IoError> {
+open_and_use :: func (path: str) -> Result.<void, IoError> {
   const file := open(path).?
   defer file.close()                 // runs however we leave this function
 

@@ -33,7 +33,7 @@ intrinsic, and a static check inside a struct is the intrinsic statement
   func literal keyword, or a field:
   ```
   CatImage :: #packed #align(4) struct { ... }
-  render   :: #inline func (self: *CatImage) -> string { ... }
+  render   :: #inline func (self: *CatImage) -> str { ... }
   data: #raw [4096]uint8,              // directive on a field
   ```
   Implementations are **not** a directive: they use the `impl` keyword
@@ -69,19 +69,19 @@ Entity :: struct {
 }
 ```
 
-The remaining compiler-acted attribute is `@link_name(string)`, which overrides
+The remaining compiler-acted attribute is `@link_name(str)`, which overrides
 the external link symbol of an `extern` declaration: the binding keeps its
 in-language name while the compiler emits/links against the string. It is only
 meaningful on `extern` functions — see [11-c-ffi.md](11-c-ffi.md) §11.3.
 
 ```
-@public CatId :: distinct string
+@public CatId :: distinct str
 
 @public(all)
 CatImage :: struct {
   id: CatId,
-  url: string,
-  @private cache: Option.<string>,     // struct is exported; this field is not
+  url: str,
+  @private cache: Option.<str>,     // struct is exported; this field is not
 }
 ```
 

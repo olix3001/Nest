@@ -1675,7 +1675,7 @@ fn examples_analyze_without_errors() {
 #[test]
 fn ir_snapshot_generic_element_inferred_from_push() {
     // The container's element type is fixed by the `.push` call site, not by the
-    // `.new()` construction: `xs : Vector.<isize>`, `ws : Vector.<string>`.
+    // `.new()` construction: `xs : Vector.<isize>`, `ws : Vector.<str>`.
     let src = "\
 Vector :: struct <T> { len: usize }
 impl <T> Vector.<T> {
@@ -2199,11 +2199,11 @@ fn ir_snap_named_arguments_bind_to_their_parameters() {
     // argument list, including the one written fully out of order. Nothing after
     // inference has to know that a name was ever written.
     let src = "\
-mk :: func (host: string, port: i32, backlog: i32) -> i32 { return port }
+mk :: func (host: str, port: i32, backlog: i32) -> i32 { return port }
 
 Router :: struct { port: i32 }
 impl Router {
-  listen :: func (self: *Router, host: string, port: i32) -> i32 { return port }
+  listen :: func (self: *Router, host: str, port: i32) -> i32 { return port }
 }
 
 f :: func (r: *Router) -> i32 {
@@ -2227,11 +2227,11 @@ fn ir_snap_default_arguments_are_filled_at_the_call_site() {
     let src = "\
 g :: func (x: i32, y: i32 := 0) -> i32 { return x + y }
 
-pad :: func (s: string, width: usize := 8, fill: char := \'x\') -> usize { return width }
+pad :: func (s: str, width: usize := 8, fill: char := \'x\') -> usize { return width }
 
 Router :: struct { port: i32 }
 impl Router {
-  listen :: func (self: *Router, host: string, port: i32 := 80) -> i32 { return port }
+  listen :: func (self: *Router, host: str, port: i32 := 80) -> i32 { return port }
 }
 
 f :: func (r: *Router) -> i32 {
@@ -2275,6 +2275,66 @@ f :: func () -> i32 {
 }
 ";
     insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn ir_snap_a_distinct_type_inherits_the_methods_of_its_representation() {
+    // §2.4: a `distinct T` inherits `T`'s methods, `T` does not gain the
+    // distinct type's, and a method the distinct type declares itself wins over
+    // an inherited one of the same name.
+    //
+    // Read off the IR: `inherited` casts the receiver to `Base` — the
+    // representations are identical, so reaching it is a reinterpretation and
+    // costs nothing — while `own` and the overriding `shared` take the receiver
+    // as written, calling `Wrapper`'s `shared` and not `Base`'s.
+    let src = "\
+Base :: struct { n: usize }
+impl Base {
+  inherited :: func (self: *Base) -> usize { return self.n }
+  shared    :: func (self: *Base) -> usize { return 1 }
+}
+
+Wrapper :: distinct Base
+impl Wrapper {
+  own    :: func (self: *Wrapper) -> usize { return 2 }
+  shared :: func (self: *Wrapper) -> usize { return 3 }
+}
+
+f :: func (w: Wrapper) -> usize {
+  return w.inherited() + w.own() + w.shared()
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn distinct_method_inheritance_is_one_way() {
+    // The asymmetry is the whole point: a `distinct T` is `T` plus an invariant
+    // and some extra operations, so the operations that assume the invariant
+    // must not be reachable on `T`, where it does not hold.
+    let s = analyze_mem(
+        &[(
+            "main",
+            "MyStr :: distinct []u8\n             impl MyStr {\n  shout :: func (self: MyStr) -> usize { return 1 }\n}\n             g :: func (b: []u8) -> usize { return b.shout() }\n",
+        )],
+        "main",
+    );
+    assert!(diag_contains(&s, "no method `shout` on `[]u8`"), "{:#?}", s.diagnostics);
+}
+
+#[test]
+fn a_string_literal_is_the_core_str_lang_item() {
+    // `str` is not a compiler primitive: it is `#lang("str") distinct []u8` in
+    // core, found by tag like every other language item. A literal therefore
+    // types as a nominal `core.str`, and inherits `[]T`'s methods.
+    let session = analyze_clean(
+        "f :: func () -> usize {\n  const s := \"héllo\"\n  return s.len()\n}\n",
+    );
+    let file = entry_file(&session);
+    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    assert!(text.contains("core.str"), "{text}");
+    // The length is the *byte* length, inherited from the slice impl.
+    assert!(text.contains("core.<impl []T>.len"), "{text}");
 }
 
 #[test]
@@ -2361,7 +2421,7 @@ fn default_argument_rules_are_enforced() {
 fn named_argument_rules_are_enforced() {
     // Each of these reports exactly one diagnostic: a failed binding must not
     // then be re-checked positionally, or one mistake reads as several.
-    const MK: &str = "mk :: func (host: string, port: i32, backlog: i32) -> i32 { return port }\n";
+    const MK: &str = "mk :: func (host: str, port: i32, backlog: i32) -> i32 { return port }\n";
     for (call, needle) in [
         (
             "mk(port: 80, \"h\", 5)",
@@ -2491,15 +2551,15 @@ fn try_propagate_across_unrelated_residuals_is_reported() {
     // A `Result`'s residual has no way into an `Option`, and nothing declared
     // one; the diagnostic names the residual that has no conversion.
     let msg = first_error(
-        "read :: func () -> Result.<i32, string> { return .ok(1) }\nf :: func () -> Option.<i32> {\n  const v := read().?\n  return .some(v)\n}\n",
+        "read :: func () -> Result.<i32, str> { return .ok(1) }\nf :: func () -> Option.<i32> {\n  const v := read().?\n  return .some(v)\n}\n",
     );
-    assert!(msg.contains("core.FromResidual.<string>"), "{msg}");
+    assert!(msg.contains("core.FromResidual.<core.str>"), "{msg}");
 }
 
 #[test]
 fn try_propagate_in_a_function_that_is_not_a_try_type_is_reported() {
     let msg = first_error(
-        "read :: func () -> Result.<i32, string> { return .ok(1) }\nf :: func () -> i32 {\n  const v := read().?\n  return v\n}\n",
+        "read :: func () -> Result.<i32, str> { return .ok(1) }\nf :: func () -> i32 {\n  const v := read().?\n  return v\n}\n",
     );
     assert!(msg.contains("`i32` does not implement"), "{msg}");
 }

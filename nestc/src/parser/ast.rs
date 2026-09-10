@@ -425,7 +425,14 @@ pub enum NodeKind {
     /// `dyn T` — a trait object type.
     DynType { inner: NodeId },
     /// `distinct T` — a fresh nominal type over `T`.
-    DistinctType { inner: NodeId },
+    /// `[directives] distinct T` — a new nominal type with `T`'s representation
+    /// (§2.4). It carries directives for the same reason a `struct` does: a
+    /// `distinct` type is a type *declaration*, so `#lang` must be able to name
+    /// it. `str` is exactly this — `#lang("str") distinct []u8`.
+    DistinctType {
+        directives: Vec<NodeId>,
+        inner: NodeId,
+    },
     /// `func [<g>] (param_types) [-> ret]` — a function *type*.
     FuncType {
         generics: Vec<NodeId>,
@@ -711,7 +718,11 @@ impl NodeKind {
                 out.extend_from_slice(generic_args);
             }
             AssocBinding { ty, .. } => out.push(*ty),
-            PtrType { inner, .. } | DynType { inner } | DistinctType { inner } => out.push(*inner),
+            PtrType { inner, .. } | DynType { inner } => out.push(*inner),
+            DistinctType { directives, inner } => {
+                out.extend_from_slice(directives);
+                out.push(*inner);
+            }
             SliceType {
                 directives, inner, ..
             } => {

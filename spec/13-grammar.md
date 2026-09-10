@@ -41,7 +41,7 @@ const_rhs   = expr
 ```
 
 A `directive` name is drawn from the compiler's fixed set (`packed`, `align`,
-`soa`, `inline`, `const`, `static`, `raw`, `unsafe`, `lang`, …); `#lang(string)`
+`soa`, `inline`, `const`, `static`, `raw`, `unsafe`, `lang`, …); `#lang(str)`
 tags a core-library item as a language item (see
 [09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3 and
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.13).

@@ -220,6 +220,19 @@ pub struct Upcast {
     pub target: Ty,
 }
 
+/// Stamped on a method call's receiver when the method was found on the type a
+/// `distinct` type is distinct *from*, rather than on the distinct type itself
+/// (§2.4).
+///
+/// A `distinct T` has exactly `T`'s representation, so reaching `T`'s method is
+/// a reinterpretation and nothing more — but the method's `self` is typed `T`,
+/// not the distinct type, so the receiver has to be spelled as `T` before the
+/// usual `&` / `.*` adjustment happens. `repr` is that type.
+#[derive(Debug, Clone)]
+pub struct DistinctRecv {
+    pub repr: Ty,
+}
+
 /// The arguments of a call in **parameter** order, once any named argument has
 /// been bound to the parameter it names (§5.3).
 ///
@@ -597,7 +610,7 @@ impl Inferer<'_> {
                 for p in parts {
                     self.infer_expr(p);
                 }
-                Ty::Str
+                self.str_ty()
             }
             NodeKind::Path { .. } => {
                 let ty = self.path_ty(node);
@@ -814,7 +827,7 @@ impl Inferer<'_> {
                     .unwrap_or(IntrinsicResult::Arg);
                 match shape {
                     IntrinsicResult::Usize => Ty::usize(),
-                    IntrinsicResult::Str => Ty::Str,
+                    IntrinsicResult::Str => self.str_ty(),
                     IntrinsicResult::Void => Ty::Void,
                     IntrinsicResult::PtrToArg => Ty::Ptr {
                         mutable: true,
@@ -2005,6 +2018,20 @@ impl Inferer<'_> {
                         &targs,
                     );
                 }
+                // A `distinct` type inherits the methods of the type it is
+                // distinct from (§2.4). Last in the chain, so anything the
+                // distinct type declares itself takes priority.
+                if let Some((m, repr)) = self.distinct_method_def(&recv, name.as_str()) {
+                    self.ast.set_meta(base, DistinctRecv { repr: repr.clone() });
+                    return self.infer_method_call(
+                        callee,
+                        &repr,
+                        m,
+                        MethodDispatch::Static,
+                        args,
+                        &targs,
+                    );
+                }
                 // Nothing found. A field holding a function is still a valid
                 // callee, so only complain when there is no such member at all.
                 if self.field_ty(&recv, name.as_str()).is_none() {
@@ -2689,6 +2716,56 @@ impl Inferer<'_> {
     ///
     /// Only one hop, and only when the outer struct has no such member itself —
     /// `@using` promotes nothing else onto the outer type (§3.10).
+    /// The type a `distinct` type is distinct *from*, if `recv` is one.
+    ///
+    /// Looks through a pointer, so a `*str` receiver reaches `[]u8`'s methods the
+    /// same way a `str` receiver does.
+    fn distinct_repr(&mut self, recv: &Ty) -> Option<Ty> {
+        let s = self.cx.shallow(recv);
+        let (def, ptr) = match &s {
+            Ty::Nominal { def, .. } => (*def, None),
+            Ty::Ptr { inner, mutable } => match self.cx.shallow(inner) {
+                Ty::Nominal { def, .. } => (def, Some(*mutable)),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let d = self.defs.get(def);
+        let (file, node) = (d.file?, d.node?);
+        let rhs = match &self.asts[&file].node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let NodeKind::DistinctType { inner, .. } = self.asts[&file].node(rhs).kind.clone() else {
+            return None;
+        };
+        let repr = self.ty_from_node_in(file, inner);
+        Some(match ptr {
+            Some(mutable) => Ty::Ptr {
+                mutable,
+                inner: Box::new(repr),
+            },
+            None => repr,
+        })
+    }
+
+    /// A method reached through a `distinct` type's **representation** (§2.4).
+    ///
+    /// `distinct T` inherits `T`'s methods; `T` does **not** gain the distinct
+    /// type's. That asymmetry is the point: the distinct type is `T` plus an
+    /// invariant and some extra operations, so everything `T` can do it can do,
+    /// while the operations that assume the invariant stay off `T`.
+    ///
+    /// This runs **last** in the resolution chain, so a method the distinct type
+    /// declares itself always wins over the inherited one of the same name.
+    fn distinct_method_def(&mut self, recv: &Ty, name: &str) -> Option<(DefId, Ty)> {
+        let repr = self.distinct_repr(recv)?;
+        let m = self
+            .method_def(&repr, name)
+            .or_else(|| self.impl_method_def(&repr, name))?;
+        Some((m, repr))
+    }
+
     fn using_method_def(&mut self, recv: &Ty, name: &str) -> Option<(DefId, Upcast)> {
         let s = self.cx.shallow(recv);
         let head = match &s {
@@ -3731,7 +3808,7 @@ impl Inferer<'_> {
                 Some(def) => Ty::Dyn(def),
                 None => Ty::Error,
             },
-            NodeKind::DistinctType { inner } => self.ty_from_node_in(file, inner),
+            NodeKind::DistinctType { inner, .. } => self.ty_from_node_in(file, inner),
             NodeKind::TypePath { generic_args, .. } => self.typepath_ty(file, node, &generic_args),
             // `Type.<args>` in expression position (e.g. a composite-literal head)
             // parses as a postfix generic application; resolve it like a typepath
@@ -3920,11 +3997,27 @@ impl Inferer<'_> {
 
     // ===< literals / helpers >===
 
+    /// The type of a string literal: the `#lang("str")` item in `core`.
+    ///
+    /// `str` is not a compiler primitive — it is `distinct []u8` declared in
+    /// core, so that all the slice machinery (interior pointers, bounds, GC
+    /// tracing) is inherited rather than reimplemented. Found by tag, never by
+    /// name or path, like every other language item.
+    fn str_ty(&self) -> Ty {
+        match self.lang.get("str") {
+            Some(def) => Ty::Nominal {
+                def: self.defs.resolve_alias(def),
+                args: Vec::new(),
+            },
+            None => Ty::Error,
+        }
+    }
+
     fn lit_ty(&mut self, lit: &Lit) -> Ty {
         match lit {
             Lit::Int(_) => self.cx.fresh_of(TyVarKind::Int),
             Lit::Float(_) => self.cx.fresh_of(TyVarKind::Float),
-            Lit::Str(_) => Ty::Str,
+            Lit::Str(_) => self.str_ty(),
             Lit::Char(_) => Ty::Char,
             Lit::Bool(_) => Ty::Bool,
         }

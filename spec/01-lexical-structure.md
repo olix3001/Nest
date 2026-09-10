@@ -156,7 +156,7 @@ f"port is {port}"             // interpolated string (see below)
 ```
 
 Strings are UTF-8, immutable, and length-prefixed (not NUL-terminated). The
-`string` type stores a pointer and a byte length.
+`str` type stores a pointer and a byte length.
 
 **Interpolated strings** are prefixed with `f`. Inside them, `{ expr }` splices
 the result of `expr` (which must satisfy the display/format contract). Braces are

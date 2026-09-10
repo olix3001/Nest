@@ -165,7 +165,7 @@ $cast(expr)         // convert expr to the contextually-expected type
 ```
 $cast.<HttpPort>(8080)                 // int literal -> distinct uint16
 $cast.<*dyn ToJson>(&cat)              // *CatImage   -> ToJson trait object
-const raw_id: string := $cast(self.id) // CatId       -> string (target from annotation)
+const raw_id: str := $cast(self.id) // CatId       -> str (target from annotation)
 ```
 
 `$cast` covers numeric widening/narrowing, `distinct` ↔ underlying, `*mut T` →
@@ -308,7 +308,7 @@ intrinsic (see [08-error-handling-and-defer.md](08-error-handling-and-defer.md))
 
 `f"...{expr}..."` desugars to a call to the standard formatting routine that
 concatenates the literal segments with each `expr`'s display output. It is an
-ordinary expression of type `string`:
+ordinary expression of type `str`:
 
 ```
 f"Invalid dimensions: {w}x{h}"
