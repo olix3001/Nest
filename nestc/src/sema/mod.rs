@@ -28,6 +28,9 @@
 //! 8. **lower** ([`lower`]) — build the typed [`ir`] tree from the resolved,
 //!    desugared, typed AST (structured control flow kept, sugar and auto-deref
 //!    made explicit).
+//! 9. **link** ([`crate::ir::link`]) — merge the per-file programs into one
+//!    whole-program [`Linked`](crate::ir::Linked). Every pass after lowering is
+//!    whole-program, and this is the value they read.
 //!
 //! Results live in the [`Session`], not in the AST nodes: definitions in the
 //! [`DefTable`], per-node facts in the arena's type-indexed metadata side table
@@ -162,6 +165,11 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     for &file in &files {
         lower_one(session, file);
     }
+    // Everything past this point is whole-program: reachability starts at
+    // `main`, exhaustiveness needs every variant of an enum declared elsewhere,
+    // monomorphization collects instantiations across files. Merge the per-file
+    // programs into the one view those passes read (see [`crate::ir::link`]).
+    session.linked = crate::ir::link(&session.ir);
 }
 
 /// Drain a worklist of files, parsing (already done by the loader), creating each

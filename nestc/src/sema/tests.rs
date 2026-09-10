@@ -564,6 +564,17 @@ get :: func (p: *P) -> i32 { return p.x }
 /// are collected explicitly — the guarantee under test is that *every* node
 /// shape has an id and a span, with no exceptions.
 fn ids_of(program: &crate::ir::Program) -> Vec<crate::ir::IrId> {
+    ids_and_typed(program).0
+}
+
+/// The ids of the nodes that must also carry a **type**: expressions, blocks,
+/// parameters and functions. A statement, an arm, a pattern and a binding have
+/// none — they are steps and tests, not values.
+fn typed_ids_of(program: &crate::ir::Program) -> Vec<crate::ir::IrId> {
+    ids_and_typed(program).1
+}
+
+fn ids_and_typed(program: &crate::ir::Program) -> (Vec<crate::ir::IrId>, Vec<crate::ir::IrId>) {
     use crate::ir::{Arm, Binding, Block, Expr, IrId, Pattern, PatternKind, Stmt};
 
     struct Collect(Vec<IrId>);
@@ -603,15 +614,31 @@ fn ids_of(program: &crate::ir::Program) -> Vec<crate::ir::IrId> {
         }
     }
 
+    struct Typed(Vec<IrId>);
+    impl crate::ir::Visitor for Typed {
+        fn visit_block(&mut self, b: &Block) {
+            self.0.push(b.id);
+            crate::ir::walk_block(self, b);
+        }
+        fn visit_expr(&mut self, e: &Expr) {
+            self.0.push(e.id);
+            crate::ir::walk_expr(self, e);
+        }
+    }
+
     let mut c = Collect(Vec::new());
+    let mut t = Typed(Vec::new());
     for f in &program.funcs {
         c.0.push(f.id);
+        t.0.push(f.id);
         for p in &f.params {
             c.0.push(p.id);
+            t.0.push(p.id);
         }
         crate::ir::Visitor::visit_function(&mut c, f);
+        crate::ir::Visitor::visit_function(&mut t, f);
     }
-    c.0
+    (c.0, t.0)
 }
 
 /// The source text a node's span covers.
@@ -697,6 +724,72 @@ f :: func (a: i32, b: i32) -> i32 { return g(a) + g(b) }
         all.iter().all(|i| i.0 < session.ir_meta.allocated()),
         "an id outside the allocated range"
     );
+}
+
+#[test]
+fn every_value_node_is_typed_in_the_side_table() {
+    // The other half of the metadata guarantee: a type is not a field on the
+    // node, so nothing structural forces one to exist. Lowering has to set one
+    // for every expression, block, parameter and function it builds, and an
+    // untyped node would otherwise only surface as `<untyped>` in a dump.
+    let src = "\
+P :: struct { x: i32 }
+f :: func (p: *P, n: i32) -> i32 {
+  let acc := p.x
+  while acc < n { acc = acc + 1 }
+  if acc > 0 { return acc }
+  return n.match { 0 => 1, _ => 2 }
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let typed = typed_ids_of(&session.ir[&file]);
+    assert!(
+        typed.len() > 20,
+        "expected a substantial program: {typed:#?}"
+    );
+    for id in &typed {
+        assert!(
+            session.ir_meta.ty(*id).is_some(),
+            "value node {id} carries no type"
+        );
+    }
+}
+
+#[test]
+fn a_functions_type_is_its_whole_signature() {
+    // A function's `Ty` metadata is its `Ty::Func`, not just its return type —
+    // otherwise `meta.ty` would mean something different for a function than for
+    // every other node, which is the duplication moving types here removed.
+    use crate::sema::ty::{IntWidth, Ty};
+    let i32_ty = Ty::Int {
+        signed: true,
+        width: IntWidth::Fixed(32),
+    };
+    let session = analyze_mem(
+        &[("main", "f :: func (a: i32, b: bool) -> i32 { return a }")],
+        "main",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let func = session.ir[&file]
+        .funcs
+        .iter()
+        .find(|f| f.name.as_str() == "f")
+        .expect("func f");
+    let Some(Ty::Func { params, ret }) = session.ir_meta.ty(func.id) else {
+        panic!("a function is not typed with its signature");
+    };
+    assert_eq!(params, vec![i32_ty.clone(), Ty::Bool]);
+    assert_eq!(*ret, i32_ty);
+    // And each parameter is typed on its own node, in the same order.
+    let param_tys: Vec<_> = func
+        .params
+        .iter()
+        .map(|p| session.ir_meta.ty(p.id).expect("a parameter is typed"))
+        .collect();
+    assert_eq!(param_tys, params);
 }
 
 #[test]
@@ -796,6 +889,97 @@ fn a_cross_file_defaults_span_points_into_its_own_file() {
     assert_eq!(span_text(&session, args[1].id), "7");
 }
 
+// ===< Linking the per-file programs >===
+
+#[test]
+fn linking_merges_every_file_into_one_program() {
+    // Everything after lowering is whole-program, and a `HashMap<FileId,
+    // Program>` cannot express that. `core` is linked in like any other file.
+    let lib = "@public double :: func (x: i32) -> i32 { return x * 2 }\n";
+    let main = "lib :: import \"lib.nest\"\nmain :: func () -> i32 { return lib.double(2) }\n";
+    let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+
+    let named = |n: &str| {
+        session
+            .linked
+            .funcs()
+            .find(|f| f.name.as_str() == n)
+            .map(|f| f.def)
+    };
+    let main_def = named("main").expect("`main` is linked");
+    let double_def = named("double").expect("`double` is linked");
+
+    // Each function is reachable by its def, and knows which file it came from.
+    assert!(session.linked.contains(main_def));
+    assert!(session.linked.contains(double_def));
+    assert_ne!(
+        session.linked.file_of(main_def),
+        session.linked.file_of(double_def),
+        "the two functions should come from different files"
+    );
+
+    // Nothing was lost: the link holds exactly the union of the per-file
+    // programs, `core`'s functions included.
+    let per_file: usize = session.ir.values().map(|p| p.funcs.len()).sum();
+    assert_eq!(session.linked.len(), per_file);
+    assert!(
+        session.linked.len() > 2,
+        "core's functions should be linked in too, got {}",
+        session.linked.len()
+    );
+}
+
+#[test]
+fn the_per_file_programs_survive_linking() {
+    // Linking clones rather than consuming: `--emit=ir` and every IR snapshot
+    // renders one file on its own, and breaking that to save a copy would be a
+    // bad trade.
+    let session = analyze_mem(&[("main", "f :: func () -> i32 { return 1 }")], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let func = session.ir[&file]
+        .funcs
+        .iter()
+        .find(|f| f.name.as_str() == "f")
+        .expect("the per-file program still holds `f`");
+
+    // Both copies name the same node ids, so a fact recorded against one is
+    // visible through the other — which is what makes the shared side table
+    // work across the two views.
+    let linked = session.linked.get(func.def).expect("`f` is linked");
+    assert_eq!(linked.id, func.id);
+    assert_eq!(
+        session.ir_meta.span(linked.id),
+        session.ir_meta.span(func.id)
+    );
+}
+
+#[test]
+fn linked_iteration_order_is_stable() {
+    // Whole-program passes report diagnostics as they walk. Iterating the
+    // backing `HashMap` would order those differently on every run, turning a
+    // test that asserts on them into a flaky one.
+    let src = "a :: func () {}\nb :: func () {}\nc :: func () {}\n";
+    let first: Vec<String> = {
+        let s = analyze_mem(&[("main", src)], "main");
+        s.linked.funcs().map(|f| f.name.to_string()).collect()
+    };
+    for _ in 0..8 {
+        let s = analyze_mem(&[("main", src)], "main");
+        let again: Vec<String> = s.linked.funcs().map(|f| f.name.to_string()).collect();
+        assert_eq!(again, first, "linked iteration order varies between runs");
+    }
+    // And `defs()` walks the same order as `funcs()`.
+    let s = analyze_mem(&[("main", src)], "main");
+    let by_def: Vec<String> = s
+        .linked
+        .defs()
+        .map(|d| s.linked.get(d).expect("a linked func").name.to_string())
+        .collect();
+    assert_eq!(by_def, first);
+}
+
 // ===< IR snapshots (insta) >===
 
 /// Analyze `src` as the entry file and render its lowered IR to text.
@@ -803,7 +987,7 @@ fn ir_text(src: &str) -> String {
     let session = analyze_mem(&[("main", src)], "main");
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     let file = entry_file(&session);
-    crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file])
+    crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file])
 }
 
 #[test]
@@ -876,7 +1060,7 @@ choose :: func (o: Option.<i32>) -> i32 {
 fn ir_text_lenient(src: &str) -> String {
     let session = analyze_mem(&[("main", src)], "main");
     let file = entry_file(&session);
-    crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file])
+    crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file])
 }
 
 #[test]
@@ -1050,7 +1234,7 @@ heavy :: func <T: Weigh> (t: *T) -> i32 { return t.weight() }
     let file = entry_file(&session);
     // The call resolves, and `Self` in the trait's signature became `T`.
     let program = &session.ir[&file];
-    let text = crate::ir::pretty::program_to_string(&session.defs, program);
+    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, program);
     assert!(text.contains("func(*T) -> i32"), "{text}");
     assert!(!text.contains("<error>"), "{text}");
 }
@@ -1298,7 +1482,7 @@ fn a_destructuring_let_keeps_its_pattern_in_the_ir() {
     let s =
         analyze_clean("f :: func (t: (i32, i32)) -> i32 {\n  const (a, b) := t\n  return a\n}\n");
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("let (a, b): (i32, i32)"), "{ir}");
 }
 
@@ -1349,7 +1533,7 @@ fn self_in_a_structural_impl_is_the_structural_target() {
         "Sum :: trait { sum :: func (self: *Self) -> usize }\nimpl <T> Sum for []T { sum :: func (self: *Self) -> usize { return $len(self) } }\nf :: func (s: []i32) -> usize { return s.sum() }\n",
     );
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("(&s: []i32): *[]i32"), "{ir}");
 }
 
@@ -1681,7 +1865,7 @@ f :: func (a: Foo) -> i32 { return a.tag() }
     let file = entry_file(&s);
     // The call targets the concrete impl's `tag`, not the blanket one — the
     // body that returns `1`.
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     let concrete = ir.lines().any(|l| l.contains("func tag(self: Foo)"));
     assert!(concrete, "{ir}");
     assert!(ir.contains("(Foo.tag: func(Foo) -> i32)"), "{ir}");
@@ -1984,7 +2168,8 @@ fn namespace_constant_is_comptime_and_types_each_use_on_its_own() {
     let session =
         analyze_clean("A :: 42\nf :: func () {\n  const a: i8 := A\n  const b: i64 := A\n}\n");
     let file = entry_file(&session);
-    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
     assert!(text.contains("let a: i8"), "{text}");
     assert!(text.contains("let b: i64"), "{text}");
 }
@@ -2004,7 +2189,8 @@ f :: func () -> i32 {
 ";
     let session = analyze_clean(src);
     let file = entry_file(&session);
-    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
     // Every one is a real struct construction, not an untyped bag of values.
     assert_eq!(text.matches("P { x:").count(), 3, "{text}");
     assert!(!text.contains("aggregate"), "{text}");
@@ -2036,7 +2222,8 @@ fn explicit_type_arguments_instantiate_the_callee() {
         "id :: func <T> (x: T) -> T { return x }\nf :: func () { const a := id.<i32>(1) }\n",
     );
     let file = entry_file(&session);
-    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
     assert!(text.contains("let a: i32"), "{text}");
     assert!(
         first_error("id :: func <T> (x: T) -> T { return x }\nf :: func () { const a := id.<i32, i64>(1) }\n")
@@ -2050,7 +2237,8 @@ fn a_generic_type_named_without_arguments_infers_them() {
         "Box :: struct <T> { item: T }\nf :: func () { const b: Box.<i64> := Box { item: 4 } }\n",
     );
     let file = entry_file(&session);
-    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
     assert!(text.contains("Box.<i64>"), "{text}");
 }
 
@@ -2062,7 +2250,8 @@ fn a_method_on_a_generic_impl_solves_the_impl_generics_from_the_receiver() {
         "Box :: struct <T> { it: T }\nimpl <T> Box.<T> { get :: func (self: *Box.<T>) -> T { return self.it } }\nf :: func (b: *Box.<i32>) { const x := b.get() }\n",
     );
     let file = entry_file(&session);
-    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
     assert!(text.contains("let x: i32"), "{text}");
 }
 
@@ -2072,7 +2261,8 @@ fn an_impl_inherits_the_traits_default_method_body() {
         "T :: trait { m :: func (self: *Self) -> i32 { return 7 } }\nS0 :: struct { v: i32 }\nimpl T for S0 {}\nf :: func (s: *S0) -> i32 { return s.m() }\n",
     );
     let file = entry_file(&session);
-    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
     assert!(!text.contains("<error>"), "{text}");
 }
 
@@ -2215,7 +2405,7 @@ fn a_repeat_literals_count_is_the_arrays_length() {
     let s =
         analyze_clean("f :: func () {\n  const a := [_]i32 { 0; 4 }\n  const b: [4]i32 := a\n}\n");
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("let a: [4]i32"), "{ir}");
 }
 
@@ -2235,7 +2425,7 @@ fn a_const_generic_parameter_is_inferred_from_an_argument() {
         "count :: func <const N: usize, T> (a: [N]T) -> usize { return N }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return count(a)\n}\n",
     );
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("func([3]i32) -> usize"), "{ir}");
 }
 
@@ -2289,7 +2479,7 @@ fn len_is_an_inherent_method_the_receiver_type_picks() {
         "f :: func (s: []i32) {\n  const a := [_]i32 { 1, 2, 3 }\n  const n := a.len()\n  const m := s.len()\n}\n",
     );
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("(&a: [3]i32): *[3]i32"), "{ir}");
     assert!(ir.contains("(&s: []i32): *[]i32"), "{ir}");
     assert!(!ir.contains("#virtual") && !ir.contains("#generic"), "{ir}");
@@ -2305,7 +2495,7 @@ fn the_len_intrinsic_folds_on_a_fixed_array_and_reads_a_slice_header() {
         "count :: func <const N: usize, T> (a: [N]T) -> usize { return $len(a) }\nf :: func (s: []i32) -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return $len(a) + $len(s)\n}\n",
     );
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("$len(a: [N]T): usize"), "{ir}");
     assert!(ir.contains("3: usize"), "{ir}");
     assert!(ir.contains("$len(s: []i32): usize"), "{ir}");
@@ -2334,7 +2524,7 @@ fn a_fixed_array_unsizes_to_a_read_only_slice() {
         "take :: func (s: []i32) -> usize { return s.len() }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n",
     );
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(
         ir.contains("$slice(a: [3]i32, .full: core.Range.<usize>): []i32"),
         "{ir}"
@@ -2684,7 +2874,8 @@ fn a_string_literal_is_the_core_str_lang_item() {
     let session =
         analyze_clean("f :: func () -> usize {\n  const s := \"héllo\"\n  return s.len()\n}\n");
     let file = entry_file(&session);
-    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
     assert!(text.contains("core.str"), "{text}");
     // The length is the *byte* length, inherited from the slice impl.
     assert!(text.contains("core.<impl []T>.len"), "{text}");
@@ -2708,7 +2899,8 @@ main :: func () -> i32 { return lib.scaled(2) }
     let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     let file = entry_file(&session);
-    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
     // The cross-file default reached the call site with its own value and type.
     assert!(text.contains("$cast(7: comptime_int): i32"), "{text}");
 }
@@ -2854,7 +3046,7 @@ fn an_array_length_travels_with_the_const_parameter() {
         "count :: func <const N: usize, T> (a: [N]T) -> usize { return $len(a) }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3, 4 }\n  return count(a)\n}\n",
     );
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("$len(a: [N]T): usize"), "{ir}");
     assert!(ir.contains("(count: func([4]i32) -> usize)"), "{ir}");
 }
@@ -2869,7 +3061,7 @@ fn a_trait_method_named_through_its_trait_takes_self_from_context() {
         "Make :: trait { make :: func (n: i32) -> Self }\nW :: struct { v: i32 }\nimpl Make for W { make :: func (n: i32) -> W { return W { v: n } } }\nf :: func () -> W { return Make.make(3) }\n",
     );
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("W.make"), "{ir}");
 }
 
@@ -2891,7 +3083,7 @@ fn try_propagate_works_on_an_option() {
         "head :: func () -> Option.<i32> { return .none }\nf :: func () -> Option.<i32> {\n  const v := head().?\n  return .some(v)\n}\n",
     );
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("core.Option.from_residual"), "{ir}");
 }
 
@@ -2928,6 +3120,6 @@ fn try_abort_is_the_try_unwrap_call() {
         "head :: func () -> Option.<i32> { return .none }\nf :: func () -> i32 { return head().! }\n",
     );
     let file = entry_file(&s);
-    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("unwrap"), "{ir}");
 }

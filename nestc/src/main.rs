@@ -45,7 +45,7 @@ fn main() -> ExitCode {
     if let Some(program) = session.ir.get(&file) {
         print!(
             "\n===< IR >===\n{}",
-            ir::pretty::program_to_string(&session.defs, program)
+            ir::pretty::program_to_string(&session.defs, &session.ir_meta, program)
         );
     }
 

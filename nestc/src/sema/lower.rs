@@ -154,11 +154,14 @@ impl Lowerer<'_> {
     }
 
     fn expr(&self, node: NodeId, ty: Ty, kind: ExprKind) -> Expr {
-        Expr {
-            id: self.id(node),
-            ty,
-            kind,
-        }
+        let id = self.id(node);
+        self.meta.set_ty(id, ty);
+        Expr { id, kind }
+    }
+
+    /// The type of an already-built expression.
+    fn ty_of(&self, e: &Expr) -> Ty {
+        self.meta.ty_or_error(e.id)
     }
 
     fn stmt(&self, node: NodeId, kind: StmtKind) -> Stmt {
@@ -193,11 +196,9 @@ impl Lowerer<'_> {
     /// node's id rather than a borrow of it, so a caller can hand the node
     /// itself to `kind` in the same expression.
     fn derived_expr(&self, from: IrId, ty: Ty, kind: ExprKind) -> Expr {
-        Expr {
-            id: self.derived(from),
-            ty,
-            kind,
-        }
+        let id = self.derived(from);
+        self.meta.set_ty(id, ty);
+        Expr { id, kind }
     }
 
     fn lower_function(&mut self, def: DefId, func: NodeId) -> Option<Function> {
@@ -213,15 +214,26 @@ impl Lowerer<'_> {
         let name = self.defs.get(def).name.clone();
         let ret = self.ty(func);
         let params: Vec<Param> = params.iter().filter_map(|&p| self.lower_param(p)).collect();
-        let recv = recv_of(&params);
-        let mutating = params.iter().any(|p| grants_mutation(&p.ty));
+        let param_tys: Vec<Ty> = params.iter().map(|p| self.meta.ty_or_error(p.id)).collect();
+        let recv = recv_of(&param_tys, &params);
+        let mutating = param_tys.iter().any(grants_mutation);
         let body = body.map(|b| self.lower_block(b));
+        // A function's own type is its whole signature. Keeping only the return
+        // type here would have made `meta.ty` mean something different for a
+        // function than for every other node.
+        let id = self.id(func);
+        self.meta.set_ty(
+            id,
+            Ty::Func {
+                params: param_tys,
+                ret: Box::new(ret),
+            },
+        );
         Some(Function {
-            id: self.id(func),
+            id,
             def,
             name,
             params,
-            ret,
             body,
             extern_abi,
             directives: self.defs.get(def).directives.clone(),
@@ -235,12 +247,9 @@ impl Lowerer<'_> {
             return None;
         };
         let def = self.def_of(param)?;
-        Some(Param {
-            id: self.id(param),
-            def,
-            name,
-            ty: self.ty(param),
-        })
+        let id = self.id(param);
+        self.meta.set_ty(id, self.ty(param));
+        Some(Param { id, def, name })
     }
 
     // ===< blocks / statements >===
@@ -258,12 +267,13 @@ impl Lowerer<'_> {
         }
         let tail = tail.map(|t| Box::new(self.lower_expr(t)));
         let defers = self.defers.pop().unwrap_or_default();
-        let ty = tail.as_ref().map(|t| t.ty.clone()).unwrap_or(Ty::Void);
+        let ty = tail.as_ref().map(|t| self.ty_of(t)).unwrap_or(Ty::Void);
+        let id = self.id(node);
+        self.meta.set_ty(id, ty);
         Block {
-            id: self.id(node),
+            id,
             stmts: out,
             tail,
-            ty,
             defers,
         }
     }
@@ -278,8 +288,7 @@ impl Lowerer<'_> {
     fn lower_binding(&mut self, node: NodeId, pattern: NodeId, value: NodeId, out: &mut Vec<Stmt>) {
         let init = self.lower_expr(value);
         let pattern = self.lower_pattern(pattern);
-        let ty = init.ty.clone();
-        out.push(self.stmt(node, StmtKind::Let { pattern, ty, init }));
+        out.push(self.stmt(node, StmtKind::Let { pattern, init }));
     }
 
     fn lower_stmt(&mut self, node: NodeId, out: &mut Vec<Stmt>) {
@@ -436,10 +445,10 @@ impl Lowerer<'_> {
                 // The block expression's type is the block's own — the tail's,
                 // or `void`. Not the type inference stamped on the node: a
                 // block ending in `return` is typed `never` there, and taking
-                // that here would make `Expr::ty` and the `Block::ty` inside it
-                // disagree for the same node.
+                // that here would make the block expression's type and the
+                // block's own disagree for the same node.
                 let b = self.lower_block(node);
-                let ty = b.ty.clone();
+                let ty = self.meta.ty_or_error(b.id);
                 self.expr(node, ty, ExprKind::Block(b))
             }
             NodeKind::Lit(lit) => self.expr(node, ty, ExprKind::Lit(lit)),
@@ -660,7 +669,7 @@ impl Lowerer<'_> {
                 // `if match p := v { then } else { els }` -> a two-arm match.
                 let scrutinee = Box::new(self.lower_expr(value));
                 let then_block = self.lower_block(then);
-                let then_ty = then_block.ty.clone();
+                let then_ty = self.meta.ty_or_error(then_block.id);
                 let pattern = self.lower_pattern(pattern);
                 let body = self.expr(then, then_ty.clone(), ExprKind::Block(then_block));
                 let mut arms = vec![Arm {
@@ -672,7 +681,7 @@ impl Lowerer<'_> {
                 let else_body = match els {
                     Some(e) => {
                         let b = self.lower_block(e);
-                        let bty = b.ty.clone();
+                        let bty = self.meta.ty_or_error(b.id);
                         self.expr(e, bty, ExprKind::Block(b))
                     }
                     None => self.expr(node, Ty::Void, ExprKind::Tuple { elems: vec![] }),
@@ -835,10 +844,13 @@ impl Lowerer<'_> {
                     // keeps the IR well-formed rather than dropping an argument
                     // and silently changing the call's arity. It has no syntax
                     // anywhere, so it is the one node with no span to record.
-                    out.push(d.unwrap_or_else(|| Expr {
-                        id: self.meta.fresh(),
-                        ty: Ty::Error,
-                        kind: ExprKind::Error,
+                    out.push(d.unwrap_or_else(|| {
+                        let id = self.meta.fresh();
+                        self.meta.set_ty(id, Ty::Error);
+                        Expr {
+                            id,
+                            kind: ExprKind::Error,
+                        }
                     }));
                 }
             }
@@ -956,7 +968,7 @@ impl Lowerer<'_> {
         let callee_ty = match self.ty(callee) {
             f @ Ty::Func { .. } => f,
             _ => Ty::Func {
-                params: call_args.iter().map(|a| a.ty.clone()).collect(),
+                params: call_args.iter().map(|a| self.ty_of(a)).collect(),
                 ret: Box::new(ty.clone()),
             },
         };
@@ -995,7 +1007,7 @@ impl Lowerer<'_> {
     /// so the reconstructed signature has to come from the lowered arguments.
     fn op_call(&mut self, node: NodeId, res: OpResolution, args: Vec<Expr>, ty: Ty) -> Expr {
         let callee_ty = Ty::Func {
-            params: args.iter().map(|a| a.ty.clone()).collect(),
+            params: args.iter().map(|a| self.ty_of(a)).collect(),
             ret: Box::new(ty.clone()),
         };
         let callee = self.expr(node, callee_ty, ExprKind::Global(res.method));
@@ -1106,20 +1118,20 @@ impl Lowerer<'_> {
             == Some(res.trait_def);
         let base_node = base;
         let base = self.lower_expr(base);
-        let recv = match &base.ty {
+        let recv = match self.ty_of(&base) {
             // Already a pointer (an auto-deref site): pass it straight through.
             Ty::Ptr { .. } => base,
             other => {
                 let ptr = Ty::Ptr {
                     mutable,
-                    inner: Box::new(other.clone()),
+                    inner: Box::new(other),
                 };
                 self.expr(
                     base_node,
                     ptr,
                     ExprKind::Ref {
                         mutable,
-                        place: Box::new(base.clone()),
+                        place: Box::new(base),
                     },
                 )
             }
@@ -1153,11 +1165,12 @@ impl Lowerer<'_> {
         // The guard and its `break` are synthetic — nothing in the source is
         // spelled `break` — so they take the condition's span: that is the
         // expression whose value decides whether the jump happens.
+        let break_id = self.id(cond);
+        self.meta.set_ty(break_id, Ty::Void);
         let break_block = Block {
-            id: self.id(cond),
+            id: break_id,
             stmts: vec![self.stmt(cond, StmtKind::Break(None))],
             tail: None,
-            ty: Ty::Void,
             defers: Vec::new(),
         };
         let guard_if = self.expr(
@@ -1180,7 +1193,8 @@ impl Lowerer<'_> {
                 kind: StmtKind::Expr(*tail),
             });
         }
-        body_block.ty = Ty::Void;
+        // A loop body yields nothing, whatever its tail used to say.
+        self.meta.set_ty(body_block.id, Ty::Void);
         self.expr(node, ty, ExprKind::Loop { body: body_block })
     }
 
@@ -1472,7 +1486,7 @@ impl Lowerer<'_> {
     /// resolved at monomorphization).
     fn len_expr(&self, base: Expr, ty: Ty) -> Expr {
         let from = base.id;
-        if let Ty::Array { len, .. } = &base.ty
+        if let Ty::Array { len, .. } = self.meta.ty_or_error(from)
             && let Some(n) = len.value()
         {
             return self.derived_expr(from, ty, ExprKind::Lit(Lit::Int(n.into())));
@@ -1524,7 +1538,7 @@ impl Lowerer<'_> {
         }
         let Ty::Ptr {
             inner: concrete, ..
-        } = value.ty.clone()
+        } = self.ty_of(&value)
         else {
             return None;
         };
@@ -1541,7 +1555,7 @@ impl Lowerer<'_> {
     /// Wrap `base` in an explicit [`ExprKind::Deref`] if its type is a pointer,
     /// so auto-deref field/index access is spelled out in the IR (§3.2).
     fn autoderef(&self, base: Expr) -> Expr {
-        let Ty::Ptr { inner, .. } = base.ty.clone() else {
+        let Ty::Ptr { inner, .. } = self.ty_of(&base) else {
             return base;
         };
         self.derived_expr(
@@ -1557,14 +1571,14 @@ impl Lowerer<'_> {
 /// How a lowered parameter list takes its receiver: the first parameter, if it
 /// is named `self` (§3.4). Nest writes the receiver as an ordinary parameter, so
 /// this is the one place that decides what counts as a method.
-fn recv_of(params: &[Param]) -> Recv {
+fn recv_of(param_tys: &[Ty], params: &[Param]) -> Recv {
     let Some(first) = params.first() else {
         return Recv::None;
     };
     if first.name.as_str() != "self" {
         return Recv::None;
     }
-    match &first.ty {
+    match &param_tys[0] {
         Ty::Ptr { mutable: true, .. } => Recv::MutPtr,
         Ty::Ptr { mutable: false, .. } => Recv::Ptr,
         _ => Recv::Value,

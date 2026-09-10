@@ -13,7 +13,8 @@
 //! - Names are **bound**: every leaf is an [`ExprKind::Local`] /
 //!   [`ExprKind::Global`] carrying the [`DefId`] it refers to, never a string
 //!   path to re-resolve.
-//! - Every node carries its [`Ty`] (see [`Expr::ty`]); nothing is left to infer.
+//! - Every node is **typed**; nothing is left to infer. The type is not a field
+//!   but a [`Meta`] fact (`meta.ty(node.id)`) — see below.
 //! - Auto-deref is **explicit**: a field/index access through a pointer gets an
 //!   [`ExprKind::Deref`] inserted.
 //! - `defer` is **scoped, not duplicated**: each block records its defer bodies
@@ -45,11 +46,19 @@
 //! Every node — [`Function`], [`Param`], [`Block`], [`Stmt`], [`Expr`], [`Arm`],
 //! [`Pattern`], [`Binding`] — carries an [`IrId`], and per-node facts live in a
 //! type-indexed [`Meta`] side table keyed by it, exactly as the AST keys its own
-//! store by `NodeId`. That is where **spans** live, and where every later pass
-//! puts what it computes instead of growing a field the producer's neighbours
-//! have to carry. See [`meta`] for why identity is a field here rather than an
-//! arena slot, and why ids are unique across the whole compilation rather than
-//! per [`Program`].
+//! store by `NodeId`. See [`meta`] for why identity is a field here rather than
+//! an arena slot, and why ids are unique across the whole compilation rather
+//! than per [`Program`].
+//!
+//! The dividing line: **a node holds what is particular to its own shape;
+//! anything that recurs across shapes is metadata.** A `Call`'s [`Dispatch`] and
+//! a `Field`'s name belong to those nodes and nowhere else, so they are fields.
+//! A **span** and a **type** are the same fact on an expression, a block, a
+//! parameter and a function alike, so they are metadata — four fields to keep
+//! in step would be four places to get it wrong, and "what is this node's type"
+//! would be a different question depending on which node you were holding.
+//! Every pass that computes a new per-node fact — layout, const-safety, escape,
+//! liveness — adds it the same way, without touching these definitions.
 //!
 //! What is deliberately *not* done here — each a documented next layer:
 //! generic monomorphization, `match` exhaustiveness and decision trees (arms
@@ -72,9 +81,11 @@ use crate::sema::ty::Ty;
 
 pub use crate::sema::builtins::BuiltinOp;
 
+pub mod link;
 pub mod meta;
 pub mod pretty;
 
+pub use link::{Linked, link};
 pub use meta::{IrId, Meta};
 
 /// A whole lowered program: every function that had a body.
@@ -91,7 +102,6 @@ pub struct Function {
     pub def: DefId,
     pub name: Symbol,
     pub params: Vec<Param>,
-    pub ret: Ty,
     /// The lowered body, or `None` for a **declaration** — an
     /// `extern("c") func` with no body, or a trait method that only states a
     /// signature. A declaration is still a [`Function`] because a call to it is
@@ -185,17 +195,15 @@ pub struct Param {
     pub id: IrId,
     pub def: DefId,
     pub name: Symbol,
-    pub ty: Ty,
 }
 
 /// A sequence of statements and an optional trailing value expression. The
-/// block's type is the tail's type, or `void`.
+/// block's type — its tail's, or `void` — is `meta.ty(block.id)`.
 #[derive(Debug, Clone)]
 pub struct Block {
     pub id: IrId,
     pub stmts: Vec<Stmt>,
     pub tail: Option<Box<Expr>>,
-    pub ty: Ty,
     /// The block's `defer` bodies, in the order they were written. Every exit
     /// from this block — the tail, a `return`, a `break`, a `continue` — runs
     /// them **in reverse**; they are recorded once here rather than copied to
@@ -220,13 +228,10 @@ pub enum StmtKind {
     /// of collapsing into an expression evaluated for effect.
     ///
     /// A `let` pattern is irrefutable, so unlike a `match` arm it never needs a
-    /// fallback; `ty` is the initializer's type, which is what the pattern is
-    /// matched against.
-    Let {
-        pattern: Pattern,
-        ty: Ty,
-        init: Expr,
-    },
+    /// fallback. The type the pattern is matched against is the initializer's,
+    /// `meta.ty(init.id)` — it was a separate field once and was always a copy
+    /// of exactly that.
+    Let { pattern: Pattern, init: Expr },
     /// A place assignment (`place = value`); compound forms were desugared.
     Assign { place: Expr, value: Expr },
     /// An expression evaluated for effect.
@@ -322,16 +327,10 @@ pub struct Binding {
     pub name: Symbol,
 }
 
-/// A typed expression: its identity, its [`Ty`], and what it does.
-///
-/// The type sits on the expression rather than inside each variant because
-/// *every* expression has one and nothing may be left uninferred by this stage —
-/// making it a field turns "what is this expression's type" from a match into a
-/// field read.
+/// An expression: its identity, and what it does. Its type is `meta.ty(id)`.
 #[derive(Debug, Clone)]
 pub struct Expr {
     pub id: IrId,
-    pub ty: Ty,
     pub kind: ExprKind,
 }
 

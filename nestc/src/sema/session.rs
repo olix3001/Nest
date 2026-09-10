@@ -179,6 +179,11 @@ pub struct Session {
     /// after it is whole-program and must be able to ask for a node's span
     /// without first working out which file the node came from.
     pub ir_meta: crate::ir::Meta,
+    /// Every lowered function in the compilation, merged out of [`Session::ir`]
+    /// once lowering is done. This is what the whole-program passes — validation,
+    /// monomorphization, LIR lowering — read; the per-file programs above stay
+    /// as the record of what lowering produced for each file on its own.
+    pub linked: crate::ir::Linked,
     /// The synthetic builtins namespace (primitives) that backs the prelude.
     pub builtins: DefId,
     /// Namespaces globbed into every file's outermost scope (the prelude:
@@ -251,6 +256,7 @@ impl Session {
             files: HashMap::new(),
             ir: HashMap::new(),
             ir_meta: crate::ir::Meta::new(),
+            linked: crate::ir::Linked::default(),
             builtins,
             prelude_globs: vec![builtins],
             packages: HashMap::new(),

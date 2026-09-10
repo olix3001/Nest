@@ -6,15 +6,19 @@ use std::fmt::Write;
 use crate::parser::ast::Lit;
 
 use super::{
-    Arm, Block, Dispatch, Expr, ExprKind, Function, Pattern, PatternKind, Program, Recv, Stmt,
-    StmtKind,
+    Arm, Block, Dispatch, Expr, ExprKind, Function, IrId, Meta, Pattern, PatternKind, Program,
+    Recv, Stmt, StmtKind,
 };
 use crate::sema::def::{DefTable, Directive, DirectiveArg};
 
 /// Render a whole [`Program`].
-pub fn program_to_string(defs: &DefTable, program: &Program) -> String {
+///
+/// `meta` is not optional decoration: since types are per-node metadata rather
+/// than fields, it is where every type in the output comes from.
+pub fn program_to_string(defs: &DefTable, meta: &Meta, program: &Program) -> String {
     let mut p = Printer {
         defs,
+        meta,
         out: String::new(),
         indent: 0,
     };
@@ -26,11 +30,30 @@ pub fn program_to_string(defs: &DefTable, program: &Program) -> String {
 
 struct Printer<'a> {
     defs: &'a DefTable,
+    meta: &'a Meta,
     out: String,
     indent: usize,
 }
 
 impl Printer<'_> {
+    /// A node's type, rendered. Every type in a dump comes through here.
+    fn ty(&self, id: IrId) -> String {
+        self.meta
+            .with_ty(id, |t| t.display(self.defs))
+            .unwrap_or_else(|| "<untyped>".to_string())
+    }
+
+    /// A function's declared return type, read out of the signature its node is
+    /// typed with.
+    fn ret_of(&self, f: &Function) -> String {
+        self.meta
+            .with_ty(f.id, |t| match t {
+                crate::sema::ty::Ty::Func { ret, .. } => ret.display(self.defs),
+                other => other.display(self.defs),
+            })
+            .unwrap_or_else(|| "<untyped>".to_string())
+    }
+
     fn line(&mut self, s: &str) {
         for _ in 0..self.indent {
             self.out.push_str("  ");
@@ -43,7 +66,7 @@ impl Printer<'_> {
         let params = f
             .params
             .iter()
-            .map(|p| format!("{}: {}", p.name, p.ty.display(self.defs)))
+            .map(|p| format!("{}: {}", p.name, self.ty(p.id)))
             .collect::<Vec<_>>()
             .join(", ");
         // The receiver / mutation tags print only when they say something: an
@@ -69,7 +92,7 @@ impl Printer<'_> {
             "{abi}func {}({}) -> {}{tags}",
             f.name,
             params,
-            f.ret.display(self.defs)
+            self.ret_of(f)
         );
         // A declaration has no body to open a brace for — `extern("c") func
         // strlen(...) -> usize` is the whole of it.
@@ -102,12 +125,12 @@ impl Printer<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match &s.kind {
-            StmtKind::Let { pattern, ty, init } => {
+            StmtKind::Let { pattern, init } => {
+                let ty = self.ty(init.id);
                 let e = self.expr(init);
                 self.line(&format!(
-                    "let {}: {} = {e}",
+                    "let {}: {ty} = {e}",
                     pattern_str(self.defs, pattern),
-                    ty.display(self.defs)
                 ));
             }
             StmtKind::Assign { place, value } => {
@@ -135,7 +158,7 @@ impl Printer<'_> {
     /// their bodies inline via nested lines instead, so those emit through
     /// `self.line` and return a short header.
     fn expr(&mut self, e: &Expr) -> String {
-        let ty = e.ty.display(self.defs);
+        let ty = self.ty(e.id);
         match &e.kind {
             ExprKind::Lit(l) => format!("{}: {ty}", lit_str(l)),
             ExprKind::Local(d) => format!("{}: {ty}", self.defs.get(*d).name),

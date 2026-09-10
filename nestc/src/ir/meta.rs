@@ -3,8 +3,16 @@
 //! The storage is [`common::meta::MetaStore`](crate::common::meta::MetaStore),
 //! the same type-indexed table the AST keys by
 //! [`NodeId`](crate::parser::ast::NodeId). What this module adds is the two
-//! things that are specific to the IR: where ids come from, and the span
-//! accessors.
+//! things that are specific to the IR: where ids come from, and named accessors
+//! for the two facts every node has — its **span** and its **type**.
+//!
+//! Those two are metadata rather than fields for the same reason the AST treats
+//! them that way: each is one fact computed by one stage and read by later ones,
+//! and each is the *same* fact whether the node in hand is an expression, a
+//! block, a parameter or a function. A field per node type would be four places
+//! to keep in step. The rule the IR follows is that a node holds only what is
+//! particular to its own shape, and anything that recurs across shapes lives
+//! here.
 //!
 //! Identity differs from the AST's in one way that matters. An AST node's id is
 //! its slot in the arena; an IR node is an owned tree node, so its [`IrId`] is a
@@ -26,6 +34,7 @@ use std::fmt;
 
 use crate::common::meta::MetaStore;
 use crate::common::source::FileSpan;
+use crate::sema::ty::Ty;
 
 /// The identity of one IR node, unique across the whole compilation.
 ///
@@ -138,6 +147,44 @@ impl Meta {
     pub fn span(&self, id: IrId) -> Option<FileSpan> {
         self.get::<FileSpan>(id)
     }
+
+    // ===< Types >===
+    //
+    // A node's type lives here rather than in a field for the same reason the
+    // AST keeps it here: it is a fact one stage computes and later ones read,
+    // and it is the *same* fact on an expression, a block, a parameter and a
+    // function. Repeating it as a field on each would make four places to keep
+    // in step, and would make "what is this node's type" a different question
+    // depending on which node you are holding.
+
+    /// Record `id`'s type. Lowering sets one for every expression, block,
+    /// parameter and function it builds.
+    pub fn set_ty(&self, id: IrId, ty: Ty) {
+        self.set(id, ty);
+    }
+
+    /// `id`'s type, cloned. Use [`Meta::with_ty`] when a borrow will do — a
+    /// `Ty` is a tree, and cloning one to read its head is wasteful.
+    ///
+    /// `None` means no stage ever typed the node. Nothing reaches the IR
+    /// untyped, so like a missing span this is a bug rather than a legitimate
+    /// state; [`Meta::ty_or_error`] is the reading most callers want.
+    pub fn ty(&self, id: IrId) -> Option<Ty> {
+        self.get::<Ty>(id)
+    }
+
+    /// Borrow `id`'s type and run `f` on it.
+    pub fn with_ty<R>(&self, id: IrId, f: impl FnOnce(&Ty) -> R) -> Option<R> {
+        self.with::<Ty, R>(id, f)
+    }
+
+    /// `id`'s type, or [`Ty::Error`] if it somehow has none — so a consumer can
+    /// keep walking instead of unwrapping. An untyped node is already a bug;
+    /// making every reader panic on it turns one bug into a crash while
+    /// reporting an unrelated diagnostic.
+    pub fn ty_or_error(&self, id: IrId) -> Ty {
+        self.ty(id).unwrap_or(Ty::Error)
+    }
 }
 
 #[cfg(test)]
@@ -167,6 +214,18 @@ mod tests {
         assert_eq!(meta.get::<Fact>(b), None);
         assert_eq!(meta.take::<Fact>(a), Some(Fact(1)));
         assert!(!meta.has::<Fact>(a));
+    }
+
+    #[test]
+    fn types_round_trip_and_default_to_error() {
+        let meta = Meta::new();
+        let id = meta.fresh();
+        assert_eq!(meta.ty(id), None);
+        assert_eq!(meta.ty_or_error(id), Ty::Error);
+        meta.set_ty(id, Ty::Bool);
+        assert_eq!(meta.ty(id), Some(Ty::Bool));
+        assert_eq!(meta.with_ty(id, |t| matches!(t, Ty::Bool)), Some(true));
+        assert_eq!(meta.ty_or_error(meta.fresh()), Ty::Error);
     }
 
     #[test]
