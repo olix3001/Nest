@@ -1,0 +1,16 @@
+---
+source: src/sema/tests.rs
+expression: ir_text(src)
+---
+func f(a: Meters, b: Meters) -> Meters {
+  return #builtin(Add) (core.Add.add: func(Meters, Meters) -> Meters)(a: Meters, b: Meters): Meters
+}
+func g(a: Inherits, b: Overrides) -> usize {
+  return #builtin(Add) (core.Add.add: func(usize, usize) -> usize)((Base.show: func(Base) -> usize)($cast(a: Inherits): Base): usize, (<impl Overrides>.show: func(Overrides) -> usize)(b: Overrides): usize): usize
+}
+func show(self: Base) -> usize #recv(value) {
+  return $cast(1: comptime_int): usize
+}
+func show(self: Overrides) -> usize #recv(value) {
+  return $cast(2: comptime_int): usize
+}

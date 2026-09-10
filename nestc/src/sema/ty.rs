@@ -395,11 +395,37 @@ pub struct InferCtxt {
     /// Pending trait/projection [`Obligation`]s, drained to a fixpoint by the
     /// solver after each function body.
     obligations: Vec<Obligation>,
+    /// Every `distinct` type whose representation is numeric, and which family
+    /// it belongs to (§2.4).
+    ///
+    /// A numeric-literal variable is allowed to become one of these, so
+    /// `const p: HttpPort := 80` works for `HttpPort :: distinct u16` exactly as
+    /// it does for `u16` itself. Unification cannot work that out on its own —
+    /// it has no [`DefTable`](super::def::DefTable) and a `distinct` type is an
+    /// ordinary [`Ty::Nominal`] here — so the answer is computed once, up front,
+    /// and handed in.
+    numeric_distincts: HashMap<DefId, TyVarKind>,
 }
 
 impl InferCtxt {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record which `distinct` types stand over a numeric representation, so a
+    /// numeric-literal variable may become one. Computed once per program by
+    /// [`super::infer::infer_file`] and installed into every context it builds.
+    pub fn set_numeric_distincts(&mut self, m: HashMap<DefId, TyVarKind>) {
+        self.numeric_distincts = m;
+    }
+
+    /// Whether `ty` is a `distinct` type standing over a numeric primitive, and
+    /// which family. `None` for everything else.
+    pub fn numeric_distinct_kind(&self, ty: &Ty) -> Option<TyVarKind> {
+        match ty {
+            Ty::Nominal { def, .. } => self.numeric_distincts.get(def).copied(),
+            _ => None,
+        }
     }
 
     /// Allocate a fresh general-purpose variable.
@@ -691,6 +717,13 @@ impl InferCtxt {
         match self.kind(v) {
             TyVarKind::Int => match ty {
                 Ty::Int { .. } => {}
+                // A `distinct` type over an integer is one, for the purpose of
+                // what a literal may become (§2.4). Without this a `distinct`
+                // numeric would be unusable: every literal assigned to one would
+                // need a `$cast`, which is precisely the ceremony the type is
+                // meant to buy back.
+                Ty::Nominal { def, .. }
+                    if self.numeric_distincts.get(def) == Some(&TyVarKind::Int) => {}
                 // Two int literals meeting: keep the other variable numeric too.
                 Ty::Var(w) if self.kind(*w) == TyVarKind::Int => {}
                 Ty::Var(w) if self.kind(*w) == TyVarKind::General => {
@@ -702,6 +735,8 @@ impl InferCtxt {
             },
             TyVarKind::Float => match ty {
                 Ty::Float(_) => {}
+                Ty::Nominal { def, .. }
+                    if self.numeric_distincts.get(def) == Some(&TyVarKind::Float) => {}
                 Ty::Var(w) if self.kind(*w) == TyVarKind::Float => {}
                 Ty::Var(w) if self.kind(*w) == TyVarKind::General => {
                     return self.bind_raw(*w, &Ty::Var(v));

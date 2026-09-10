@@ -2308,6 +2308,83 @@ f :: func (w: Wrapper) -> usize {
 }
 
 #[test]
+fn ir_snap_a_distinct_type_inherits_trait_impls_with_self_rebound() {
+    // §2.4: trait impls carry the same way inherent methods do, and an impl
+    // written for the distinct type wins.
+    //
+    // The important line is `f`. `Self` stays bound to **`Meters`**, not `f64`,
+    // so the builtin's `Output = Self` gives `Meters + Meters -> Meters`. Had
+    // `Self` been rebound to the representation the result would be `f64` and
+    // the distinction would evaporate on the first arithmetic operation — which
+    // is precisely what `distinct` exists to prevent.
+    let src = "\
+Meters :: distinct f64
+
+Show :: trait { show :: func (self: Self) -> usize }
+Base :: struct { n: usize }
+impl Show for Base { show :: func (self: Base) -> usize { return 1 } }
+
+Inherits  :: distinct Base
+Overrides :: distinct Base
+impl Show for Overrides { show :: func (self: Overrides) -> usize { return 2 } }
+
+f :: func (a: Meters, b: Meters) -> Meters { return a + b }
+g :: func (a: Inherits, b: Overrides) -> usize { return a.show() + b.show() }
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn an_inherited_builtin_operator_stays_homogeneous() {
+    // A builtin row is implicitly `Rhs = Self`. `infer_arith_op` links the
+    // operands eagerly for anything that reaches a builtin — which now includes
+    // a `distinct` type over a numeric primitive, nominal though it is — so
+    // mixing the distinct type with its representation is rejected exactly the
+    // way `i32 + f64` is.
+    //
+    // **Exactly one** diagnostic, and it is the same one the primitive case
+    // gives. Re-checking `Rhs` during impl selection as well would add a second
+    // complaint about the one mistake.
+    let s = analyze_mem(
+        &[(
+            "main",
+            "Meters :: distinct f64\nmix :: func (m: Meters, r: f64) -> Meters { return m + r }\n",
+        )],
+        "main",
+    );
+    assert!(
+        diag_contains(&s, "type mismatch: expected `Meters`, found `f64`"),
+        "{:#?}",
+        s.diagnostics
+    );
+    assert_eq!(s.diagnostics.len(), 1, "{:#?}", s.diagnostics);
+}
+
+#[test]
+fn ir_snap_a_literal_settles_on_a_distinct_numeric() {
+    // A `comptime_int` may become a `distinct` type over an integer, the same
+    // way it becomes the integer itself (§2.4). Without this every literal
+    // assigned to a distinct numeric would need a `$cast`, which is exactly the
+    // ceremony the type exists to buy back.
+    //
+    // Note the literal in `p + 1` types as `HttpPort`, not `isize`: reaching a
+    // builtin makes the operands homogeneous, so the literal learns what it
+    // should be instead of falling back to the default integer.
+    let src = "\
+HttpPort :: distinct u16
+Meters   :: distinct f64
+
+f :: func () -> HttpPort {
+  const p: HttpPort := 80
+  return p
+}
+g :: func () -> Meters { return 1.5 }
+h :: func (p: HttpPort) -> HttpPort { return p + 1 }
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
 fn distinct_method_inheritance_is_one_way() {
     // The asymmetry is the whole point: a `distinct T` is `T` plus an invariant
     // and some extra operations, so the operations that assume the invariant

@@ -1,0 +1,14 @@
+---
+source: src/sema/tests.rs
+expression: ir_text(src)
+---
+func f() -> HttpPort {
+  let p: HttpPort = 80: HttpPort
+  return p: HttpPort
+}
+func g() -> Meters {
+  return 1.5: Meters
+}
+func h(p: HttpPort) -> HttpPort {
+  return #builtin(Add) (core.Add.add: func(HttpPort, HttpPort) -> HttpPort)(p: HttpPort, 1: HttpPort): HttpPort
+}

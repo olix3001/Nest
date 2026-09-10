@@ -306,6 +306,10 @@ pub fn infer_file(
             )
         })
         .collect();
+    // Which `distinct` types stand over a numeric representation (§2.4).
+    // Computed once for the whole program, because unification needs the answer
+    // and has no def table of its own — see `InferCtxt::set_numeric_distincts`.
+    let numeric_distincts = numeric_distincts(defs, asts);
     // Each pass below gets its own inference context: a `const` generic solved
     // for one function says nothing about the next.
     macro_rules! fresh {
@@ -319,7 +323,11 @@ pub fn infer_file(
                 impls,
                 in_scope_traits: &in_scope_traits,
                 file,
-                cx: InferCtxt::new(),
+                cx: {
+                    let mut cx = InferCtxt::new();
+                    cx.set_numeric_distincts(numeric_distincts.clone());
+                    cx
+                },
                 env: HashMap::new(),
                 types: HashMap::new(),
                 ret: Ty::Void,
@@ -350,6 +358,68 @@ pub fn infer_file(
         cx.infer_func(func);
         cx.finish();
     }
+}
+
+/// Every `distinct` type in the program whose representation is numeric, and
+/// which family it belongs to.
+///
+/// Follows the chain, so a `distinct` over a `distinct` over an integer counts.
+/// Resolution has already run, so each step is a def lookup rather than a
+/// syntactic guess: the inner type node resolves either to a primitive — in
+/// which case its name gives the family — or to another type def to follow.
+fn numeric_distincts(defs: &DefTable, asts: &HashMap<FileId, Ast>) -> HashMap<DefId, TyVarKind> {
+    /// The inner type node of `def`, if `def` is a `distinct` type.
+    fn distinct_inner(
+        defs: &DefTable,
+        asts: &HashMap<FileId, Ast>,
+        def: DefId,
+    ) -> Option<(FileId, NodeId)> {
+        let d = defs.get(def);
+        let (file, node) = (d.file?, d.node?);
+        let ast = asts.get(&file)?;
+        let rhs = match &ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        match &ast.node(rhs).kind {
+            NodeKind::DistinctType { inner, .. } => Some((file, *inner)),
+            _ => None,
+        }
+    }
+
+    let mut out = HashMap::new();
+    for d in defs.iter() {
+        let Some((mut file, mut inner)) = distinct_inner(defs, asts, d.id) else {
+            continue;
+        };
+        // Walk the chain, with a bound: a `distinct` cycle is a separate error
+        // and this pass must not hang on one.
+        let mut kind = None;
+        for _ in 0..16 {
+            let Some(ast) = asts.get(&file) else { break };
+            let Some(Resolution::Def(next)) = ast.meta::<Resolution>(inner) else {
+                break;
+            };
+            let next = defs.resolve_alias(next);
+            let nd = defs.get(next);
+            if nd.kind == DefKind::Primitive {
+                kind = match super::ty::primitive_ty(nd.name.as_str()) {
+                    Some(Ty::Int { .. }) => Some(TyVarKind::Int),
+                    Some(Ty::Float(_)) => Some(TyVarKind::Float),
+                    _ => None,
+                };
+                break;
+            }
+            match distinct_inner(defs, asts, next) {
+                Some((f, i)) => (file, inner) = (f, i),
+                None => break,
+            }
+        }
+        if let Some(k) = kind {
+            out.insert(d.id, k);
+        }
+    }
+    out
 }
 
 /// Gather every trait [`DefId`] nameable from `file_ns` — its own members and
@@ -1229,7 +1299,14 @@ impl Inferer<'_> {
         // need not be `Self` (`impl Shl.<i32> for BitSet` shifts by an `i32`)
         // and its `Output` need not be either. Forcing either here would reject
         // every heterogeneous operator before selection got a chance to look.
-        if !matches!(self.cx.shallow(&lty), Ty::Nominal { .. }) {
+        // A `distinct` type over a numeric primitive is nominal but reaches a
+        // *builtin* impl, which is homogeneous — so it belongs on the primitive
+        // side of this test. Without it the literal in `port + 1` never learns
+        // it should be a `HttpPort` and quietly defaults to `isize`.
+        let l = self.cx.shallow(&lty);
+        let homogeneous =
+            !matches!(l, Ty::Nominal { .. }) || self.cx.numeric_distinct_kind(&l).is_some();
+        if homogeneous {
             self.expect(node, &rty, &lty);
             let _ = self.cx.unify(&out, &lty);
         }
@@ -1669,6 +1746,45 @@ impl Inferer<'_> {
             if self.trial_impl(i, &s, args) {
                 let score = if generic { 1 } else { 2 };
                 consider(score, Choice::User(i), &mut best, &mut ambiguous);
+            }
+        }
+
+        // Nothing fit directly. A `distinct` type then falls back to the type it
+        // is distinct from (§2.4), inheriting its trait impls the way it
+        // inherits its methods.
+        //
+        // Running this **only when the direct search found nothing** is what
+        // gives the distinct type's own impl priority, with no scoring rule
+        // needed. And note what is *not* substituted: `Self` stays bound to the
+        // distinct type, so a builtin's `Output = Self` yields the distinct type
+        // rather than the representation — `Meters + Meters` is `Meters`, which
+        // is the whole reason `distinct` exists (§2.4). Only the *matching* is
+        // done against the representation.
+        if best.is_none() && !is_var(&s) {
+            if let Some(repr) = self.distinct_repr(&s) {
+                let repr = self.cx.shallow(&repr);
+                if let Some(row) = self
+                    .builtin_row_for_trait(trait_def)
+                    .filter(|r| self.builtin_matches(r, &repr))
+                {
+                    // Trait arguments are deliberately *not* checked here, for
+                    // the same reason the primitive path does not check them:
+                    // `infer_arith_op` has already linked the operands eagerly
+                    // for anything that reaches a builtin, so a mismatched `Rhs`
+                    // has been reported once already. Re-checking it would make
+                    // `Meters + f64` report twice where `i32 + f64` reports once.
+                    consider(2, Choice::Builtin(row), &mut best, &mut ambiguous);
+                }
+                let inherited: Vec<usize> = (0..self.impls.impls.len())
+                    .filter(|&i| self.impls.impls[i].trait_def == Some(trait_def))
+                    .collect();
+                for i in inherited {
+                    let generic = self.impls.impls[i].self_is_generic();
+                    if self.trial_impl(i, &repr, args) {
+                        let score = if generic { 1 } else { 2 };
+                        consider(score, Choice::User(i), &mut best, &mut ambiguous);
+                    }
+                }
             }
         }
 

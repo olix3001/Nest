@@ -148,6 +148,60 @@ same name, which is how a `distinct` type refines behaviour rather than only
 adding to it. Because the representations are identical, reaching an inherited
 method is a reinterpretation of the receiver and costs nothing at run time.
 
+### Trait impls carry too, with `Self` rebound
+
+Trait impls are inherited on the same terms, and an impl written for the distinct
+type wins over an inherited one.
+
+What is *not* substituted matters as much as what is: **`Self` stays bound to the
+distinct type.** Only the matching is done against the representation.
+
+```
+Meters :: distinct f64
+
+a + b       // Meters — not f64
+```
+
+The operator traits declare `Output` as `Self.Output`, and the primitive impls
+give `Output = Self`. With `Self` bound to `Meters`, the result is `Meters`. Had
+`Self` been rebound to `f64` the distinction would evaporate on the first
+arithmetic operation, which is exactly what `distinct` exists to prevent.
+
+An inherited operator stays **homogeneous** — `Rhs = Self` — so mixing the
+distinct type with its representation is still an error:
+
+```
+mix :: func (m: Meters, r: f64) -> Meters { return m + r }
+// error: `Meters` does not implement `core.Add.<f64>`
+```
+
+Note this only applies to `Self`. An inherited method that returns the
+*representation* still returns it: `impl Base { twin :: func (self: *Base) -> Base }`
+inherited by `Wrapper` yields a `Base`, because nothing has established that the
+result satisfies whatever invariant `Wrapper` carries.
+
+### Literals settle on a distinct numeric
+
+A `comptime_int` may become a `distinct` type over an integer, exactly as it
+becomes the integer itself; likewise `comptime_float`:
+
+```
+HttpPort :: distinct u16
+
+const p: HttpPort := 80        // no `$cast` needed
+q :: func (p: HttpPort) -> HttpPort { return p + 1 }   // `1` is a HttpPort
+```
+
+Without this every literal reaching a distinct numeric would need a `$cast`,
+which is the ceremony the type exists to buy back.
+
+**To inherit nothing**, use a tuple struct instead — it is a new type with a
+field, not a new name for one:
+
+```
+Opaque :: struct (f64)     // no methods, no operators, no traits
+```
+
 A `distinct` type also takes **directives**, which is how one becomes a language
 item:
 
