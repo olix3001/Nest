@@ -49,12 +49,17 @@ fn main() -> ExitCode {
         );
     }
 
+    // Warnings are printed too, and do not fail the build: a lint is evidence
+    // that the author probably meant something else, not a claim that the
+    // program is wrong.
+    if !session.diagnostics.is_empty() {
+        eprintln!("\n{} diagnostic(s):\n", session.diagnostics.len());
+        for diag in &session.diagnostics {
+            eprint!("{}", render(diag, &session.sources));
+        }
+    }
     if !session.has_errors() {
         return ExitCode::SUCCESS;
-    }
-    eprintln!("\n{} diagnostic(s):\n", session.diagnostics.len());
-    for diag in &session.diagnostics {
-        eprint!("{}", render(diag, &session.sources));
     }
     ExitCode::FAILURE
 }

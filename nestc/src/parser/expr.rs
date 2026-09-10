@@ -703,7 +703,14 @@ impl Parser {
         };
         // A closure parameter takes no default: a closure is written at the point
         // it is passed, so an omitted argument has no call site to fill it in from.
-        self.alloc(span, NodeKind::Param { name, ty, default: None })
+        self.alloc(
+            span,
+            NodeKind::Param {
+                name,
+                ty,
+                default: None,
+            },
+        )
     }
 
     /// Whether the `{` at the cursor opens a closure header — i.e. a top-level

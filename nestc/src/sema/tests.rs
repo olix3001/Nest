@@ -995,12 +995,27 @@ fn string_is_not_a_primitive() {
 
 // ===< The divergence check >===
 
-/// Analyze `src` and return the messages of every diagnostic it produced.
+/// Analyze `src` and return the messages of every **error** it produced.
+///
+/// Warnings are deliberately excluded: they are lints, and a test asking "was
+/// this rejected" is asking about errors. Use [`warnings`] for the lints.
 fn messages(src: &str) -> Vec<String> {
     let session = analyze_mem(&[("main", src)], "main");
     session
         .diagnostics
         .iter()
+        .filter(|d| d.severity == crate::common::diagnostic::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+/// Analyze `src` and return the messages of every **warning** it produced.
+fn warnings(src: &str) -> Vec<String> {
+    let session = analyze_mem(&[("main", src)], "main");
+    session
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::common::diagnostic::Severity::Warning)
         .map(|d| d.message.clone())
         .collect()
 }
@@ -1973,6 +1988,185 @@ f :: func (s: *S) { let d: *dyn T := s }
     let msgs = messages(src);
     assert_eq!(msgs.len(), 1, "{msgs:#?}");
     assert!(msgs[0].contains("associated constant `MAX`"), "{}", msgs[0]);
+}
+
+// ===< Declaration-level rules >===
+
+#[test]
+fn a_trait_impl_must_meet_every_requirement() {
+    // A trait is a promise about what a type can do. An impl that leaves a
+    // method out breaks it silently — and a `dyn` coercion builds a vtable out
+    // of exactly this list, so a missing method is a hole in a table something
+    // will later jump through.
+    let src = "\
+T :: trait {
+  a :: func (self: *Self) -> i32
+  b :: func (self: *Self) -> i32
+  Item :: type
+  MAX :: i32
+  MIN :: i32 := 0
+  d :: func (self: *Self) -> i32 { return 1 }
+}
+S :: struct { n: i32 }
+impl T for S { a :: func (self: *S) -> i32 { return self.n } }
+";
+    let msgs = messages(src);
+    // One diagnostic listing everything: an impl that forgot four things made
+    // one mistake, not four.
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    let m = &msgs[0];
+    assert!(m.contains("method `b`"), "{m}");
+    assert!(m.contains("associated type `Item`"), "{m}");
+    assert!(m.contains("associated constant `MAX`"), "{m}");
+    // ...and nothing the trait already answered.
+    assert!(
+        !m.contains("`MIN`"),
+        "a defaulted constant was demanded: {m}"
+    );
+    assert!(!m.contains("`d`"), "a defaulted method was demanded: {m}");
+}
+
+#[test]
+fn a_complete_impl_is_accepted() {
+    let src = "\
+T :: trait {
+  Item :: type
+  MAX :: i32
+  a :: func (self: *Self) -> i32
+  d :: func (self: *Self) -> i32 { return 1 }
+}
+S :: struct { n: i32 }
+impl T for S {
+  Item :: i32
+  MAX :: 100
+  a :: func (self: *S) -> i32 { return self.n }
+}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+#[test]
+fn a_type_may_not_contain_itself_by_value() {
+    for (src, needle) in [
+        ("Node :: struct { next: Node }\n", "`Node` contains itself"),
+        (
+            "A :: struct { b: B }\nB :: struct { a: A }\n",
+            "contains itself through",
+        ),
+        // An array is not a pointer: `[4]T` is four `T`s laid end to end.
+        ("Arr :: struct { xs: [4]Arr }\n", "`Arr` contains itself"),
+        // Through an enum payload.
+        ("E :: enum { leaf, node(E) }\n", "`E` contains itself"),
+    ] {
+        let msgs = messages(src);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected one diagnostic for {src:?}: {msgs:#?}"
+        );
+        assert!(
+            msgs[0].contains("recursive type has no size") && msgs[0].contains(needle),
+            "wrong diagnostic for {src:?}: {}",
+            msgs[0]
+        );
+    }
+}
+
+#[test]
+fn recursion_through_a_pointer_is_fine() {
+    // The whole point of a linked structure: `*T` is one word whatever it points
+    // at, so the layout terminates.
+    let src = "\
+OkPtr :: struct { next: *OkPtr }
+OkOpt :: struct { next: Option.<*OkOpt> }
+List  :: enum { nil, cons(i32, *List) }
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+#[test]
+fn a_directive_must_be_written_somewhere_it_means_something() {
+    // Directives are *carried* through the front end without interpretation,
+    // which is right — but it means one written in the wrong place is silently
+    // ignored forever rather than reported.
+    for (src, needle) in [
+        (
+            "#packed\nE :: enum { a, b }\n",
+            "`#packed` does not apply to an enum",
+        ),
+        (
+            "#soa\nD :: distinct i32\n",
+            "`#soa` does not apply to a `distinct` type",
+        ),
+        ("#align(3)\nS :: struct { x: i32 }\n", "not a power of two"),
+        ("#align(0)\nS :: struct { x: i32 }\n", "not a power of two"),
+    ] {
+        let msgs = messages(src);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected one diagnostic for {src:?}: {msgs:#?}"
+        );
+        assert!(
+            msgs[0].contains(needle),
+            "wrong diagnostic for {src:?}: {}",
+            msgs[0]
+        );
+    }
+    // A power of two on a struct is fine.
+    assert!(messages("#align(16)\n#packed\nS :: struct { x: i32 }\n").is_empty());
+}
+
+#[test]
+fn main_takes_no_parameters_and_returns_a_status() {
+    assert!(
+        messages("main :: func (n: i32) -> i32 { return n }\n")[0]
+            .contains("`main` takes no parameters")
+    );
+    assert!(
+        messages("S :: struct { x: i32 }\nmain :: func () -> S { return S { x: 1 } }\n")[0]
+            .contains("`main` must return")
+    );
+    // The three legal shapes.
+    for src in [
+        "main :: func () { }\n",
+        "main :: func () -> i32 { return 0 }\n",
+        "sink :: func () -> never { loop { } }\nmain :: func () -> never { sink() }\n",
+    ] {
+        assert!(
+            messages(src).is_empty(),
+            "rejected {src:?}: {:#?}",
+            messages(src)
+        );
+    }
+}
+
+#[test]
+fn code_after_a_diverging_statement_is_a_warning_not_an_error() {
+    // Unreachable code is a lint: the program means what it says, and deleting
+    // the dead lines changes nothing about how it runs. Rejecting it outright
+    // would turn a work-in-progress function with a temporary early `return`
+    // into a compile error.
+    let src = "f :: func () -> i32 {\n  return 1\n  let x := 2\n  return x\n}\n";
+    assert!(messages(src).is_empty(), "it was reported as an error");
+    let warns = warnings(src);
+    assert_eq!(warns.len(), 1, "{warns:#?}");
+    assert!(warns[0].contains("unreachable code"), "{}", warns[0]);
+}
+
+#[test]
+fn only_the_first_unreachable_statement_is_reported() {
+    // Everything past it is unreachable for the same reason, and listing all of
+    // it turns one stray `return` into a page of diagnostics.
+    let src = "f :: func () -> i32 {\n  return 1\n  let a := 2\n  let b := 3\n  let c := 4\n  return a\n}\n";
+    assert_eq!(warnings(src).len(), 1, "{:#?}", warnings(src));
+}
+
+#[test]
+fn reachable_code_after_a_branch_is_not_reported() {
+    // An `if` with no `else` completes, so what follows it runs.
+    let src = "f :: func (n: i32) -> i32 {\n  if n > 0 { return 1 }\n  return 0\n}\n";
+    assert!(warnings(src).is_empty(), "{:#?}", warnings(src));
 }
 
 // ===< Object safety >===

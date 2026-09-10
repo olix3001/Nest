@@ -24,10 +24,12 @@ use crate::sema::def::DefTable;
 use super::{Arm, Block, Expr, ExprKind, Linked, Meta, Stmt, StmtKind};
 
 pub mod constness;
+pub mod declarations;
 pub mod divergence;
 pub mod exhaustive;
 pub mod mutability;
 pub mod object_safety;
+pub mod reachability;
 
 /// Run every IR validation pass over `linked`, in order, collecting what they
 /// report.
@@ -38,6 +40,8 @@ pub fn run(defs: &DefTable, meta: &Meta, linked: &Linked) -> Vec<Diagnostic> {
     exhaustive::check(defs, meta, linked, &mut out);
     constness::check(defs, meta, linked, &mut out);
     object_safety::check(defs, meta, linked, &mut out);
+    reachability::check(defs, meta, linked, &mut out);
+    declarations::check(defs, meta, linked, &mut out);
     out
 }
 

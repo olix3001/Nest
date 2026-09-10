@@ -102,11 +102,91 @@ pub fn build(
             };
             if let Some(info) = record(defs, ast, file, &generics, ty, for_ty, &items) {
                 check_coherence(defs, ast, pkg_of, diags, id, &info);
+                check_completeness(defs, asts, diags, id, &info);
                 table.impls.push(info);
             }
         }
     }
     table
+}
+
+// ===< completeness >===
+
+/// Every requirement a trait states must be met by its impl.
+///
+/// A trait is a promise about what a type can do; an impl that leaves a method
+/// out breaks the promise silently. It matters more than it looks, because a
+/// `dyn` coercion builds a **vtable** out of exactly this list — a missing
+/// method is a hole in a table something will later jump through.
+///
+/// Three kinds of requirement, and the rule is the same for each: it must be
+/// supplied unless the trait itself supplied a default.
+///
+/// - a **method**, unless the trait gave it a body;
+/// - an **associated type**, always (a trait cannot guess it);
+/// - an **associated constant**, unless the trait gave it a `:=` default.
+///
+/// All of them are reported in **one** diagnostic. An impl that forgot four
+/// methods made one mistake — it was written against the wrong version of the
+/// trait, or it is not finished — and four separate errors would say the same
+/// thing four times.
+fn check_completeness(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    diags: &mut Vec<Diagnostic>,
+    node: NodeId,
+    imp: &ImplInfo,
+) {
+    let Some(trait_def) = imp.trait_def else {
+        return;
+    };
+    // A blanket impl (`impl <T> Trait for T`) is checked where it is written,
+    // like any other. Nothing special is needed: its members are its own.
+    let mut missing: Vec<String> = Vec::new();
+    for (name, &member) in &defs.get(trait_def).ns.members {
+        if imp.members.contains_key(name) || imp.assoc.contains_key(name) {
+            continue;
+        }
+        let d = defs.get(member);
+        let (Some(file), Some(mnode)) = (d.file, d.node) else {
+            continue;
+        };
+        let Some(ast) = asts.get(&file) else { continue };
+        // The member's node is the `ConstBind`; what it binds says which kind of
+        // requirement this is, and whether the trait already answered it.
+        let rhs = match &ast.node(mnode).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => mnode,
+        };
+        let kind = match &ast.node(rhs).kind {
+            // A method with a body is a default: the impl may stay silent.
+            NodeKind::FuncExpr { body: Some(_), .. } => continue,
+            NodeKind::FuncExpr { .. } => "method",
+            NodeKind::AssocType { .. } => "associated type",
+            NodeKind::AssocConst {
+                default: Some(_), ..
+            } => continue,
+            NodeKind::AssocConst { .. } => "associated constant",
+            _ => continue,
+        };
+        missing.push(format!("{kind} `{name}`"));
+    }
+    if missing.is_empty() {
+        return;
+    }
+    // The def table's namespace is a map, so the order it yields is not stable
+    // between runs. Sort, or the diagnostic reads differently on every build.
+    missing.sort();
+    let trait_name = defs.canonical_string(trait_def);
+    let list = missing.join(", ");
+    let ast = &asts[&imp.file];
+    report(
+        diags,
+        imp.file,
+        ast,
+        node,
+        format!("this `impl` of `{trait_name}` is missing {list}"),
+    );
 }
 
 // ===< coherence >===
