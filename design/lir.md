@@ -324,6 +324,47 @@ of assuming "never moves" and later wanting a copying or generational collector
 is a change to safepoint semantics, which means revisiting every pass that reads
 them. That asymmetry is the whole argument.
 
+### Interior pointers
+
+A slice may point into the **middle** of an object: `s[2..5]` of a buffer, or a
+`str` cut out of a longer one. The collector must therefore resolve an arbitrary
+address back to the object that contains it.
+
+This is the most expensive constraint in this design and it should be budgeted as
+real work, not a detail. It needs an **object-start table** — per-card offsets
+letting any address find its containing object's base — and, because the
+collector may move, relocation has to preserve each interior pointer's *offset*
+rather than simply rewriting an address.
+
+It is the right call: without it, every subslice would have to carry its owner
+separately, which costs a word on the most common data type in the language.
+
+### User control
+
+Three intrinsics:
+
+| Intrinsic | Meaning |
+|---|---|
+| `$gc_collect()` | Request a collection now. |
+| `$gc_keep_alive(x)` | A no-op that **counts as a use**, so `x` stays in the live set up to this point. |
+| `$gc_pin(x)` | Make an object immortal and immovable. |
+
+`$gc_keep_alive` exists for a specific failure. Liveness ends at the last *read*,
+so this is wrong:
+
+```
+let buf := alloc Bytes
+let p   := &buf.data
+some_c_func(p)          // `buf` is already dead here — nothing reads it again
+```
+
+The collector may free or move `buf` during the call even though C is using its
+address. `$gc_keep_alive(buf)` after the call extends the live range across it.
+
+`$gc_pin` is for handing a pointer to C for longer than one call. A pinned object
+is never moved and never collected, which is a leak by construction — that is the
+trade, and it is why the intrinsic is explicit rather than inferred.
+
 ### What is not a root
 
 A pointer that is dead after the safepoint is not in the live set, and a
@@ -331,17 +372,70 @@ non-pointer local never is. Precision matters here for a reason beyond
 performance: an over-approximate live set keeps garbage alive, and with a moving
 collector it also means relocating objects nothing will ever read again.
 
-## 7. What LIR still carries
+## 7. Names and metadata
+
+**LIR has no concept of an `impl`.** A method is a function with a name, and that
+name is flat. Where the IR prints `<impl Wrapper>.own` or
+`core.<impl []T>.len`, LIR prints one symbol.
+
+**Every LIR function carries the name it will have in the binary** — the exact
+symbol the linker sees. That means mangling happens at or before LIR lowering,
+not in codegen, and that `@link_name("...")` has already been applied by the time
+a function reaches LIR.
+
+Two names are therefore worth keeping side by side on each function:
+
+| Field | Example | Used for |
+|---|---|---|
+| `name` | `core.Vec.<i32>.push` | dumps, diagnostics, profiles |
+| `symbol` | `_NC4core3VecIi32E4push` | the object file; what LIR *is* keyed by |
+
+`symbol` is the authority. `name` exists because a reader debugging a LIR dump
+should not have to demangle by hand, and it is dropped at codegen.
+
+The precedence for `symbol`:
+
+1. `@link_name("...")` if present — verbatim, no mangling.
+2. Otherwise the mangled form of the canonical path plus type arguments.
+
+An `extern("c")` function with no `@link_name` mangles to its bare name, because
+that is what C expects.
+
+### Directives that survive to LIR
+
+Directives are *carried* through the whole pipeline (`Def` and `ir::Function`
+both hold a `Vec<Directive>` and the front end deliberately passes along ones it
+has no opinion about). These are the ones LIR and codegen must still see:
+
+| Directive | On | Meaning at this level |
+|---|---|---|
+| `#packed`, `#align(N)`, `#soa` | types, fields | already consumed by layout, but kept for debug info and for FFI checks |
+| `#section("...")` | functions, constants | which object-file section the symbol lands in |
+| `#offset(N)` | functions, constants | a fixed position in the generated binary |
+| `#inline` | functions | a codegen hint, never semantics |
+| `#raw` | fields | no zero-initialization |
+| `#unsafe` | functions, blocks | checks suppressed |
+
+`#section` and `#offset` are the two that do not exist yet anywhere — see the
+plan.
+
+## 8. What LIR still carries
 
 - **Types.** Every local and every instruction is typed. Codegen needs layout,
   and the drop/root passes need to know what is a pointer.
 - **Spans.** On every instruction, for debug metadata.
 - **Def ids.** So a diagnostic raised in a LIR pass can name a source item.
 
-## 8. What LIR no longer has
+## 9. What LIR no longer has
 
 Generics and `const` generic parameters (monomorphization runs before lowering,
 so LIR is fully concrete), traits and dynamic dispatch as *concepts* (a `dyn`
 call is an indirect call through a vtable slot), `defer` as a construct,
-structured control flow, and the distinction between a `match`, an `if` and a
-`while`.
+structured control flow, the distinction between a `match`, an `if` and a
+`while`, and **`impl` blocks** — a method is just a function with a name.
+
+`distinct` types are also gone. A `distinct T` has exactly `T`'s representation,
+so the `$cast` the IR emits when a distinct type reaches an inherited method is a
+no-op here: by this point the check that the method is *available* has already
+happened, and LIR sees two names for one layout. It does not need to know which
+was written.
