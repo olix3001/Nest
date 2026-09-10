@@ -17,7 +17,8 @@
 
 use std::collections::HashMap;
 
-use crate::common::source::FileId;
+use crate::common::diagnostic::Diagnostic;
+use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
@@ -77,8 +78,15 @@ pub struct ImplTable {
     pub impls: Vec<ImplInfo>,
 }
 
-/// Build the [`ImplTable`] from every collected, resolved file.
-pub fn build(defs: &DefTable, asts: &HashMap<FileId, Ast>, files: &[FileId]) -> ImplTable {
+/// Build the [`ImplTable`] from every collected, resolved file, checking each
+/// impl's **coherence** (§4.8) as it goes.
+pub fn build(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    pkg_of: &HashMap<FileId, String>,
+    diags: &mut Vec<Diagnostic>,
+    files: &[FileId],
+) -> ImplTable {
     let mut table = ImplTable::default();
     for &file in files {
         let ast = &asts[&file];
@@ -93,11 +101,150 @@ pub fn build(defs: &DefTable, asts: &HashMap<FileId, Ast>, files: &[FileId]) -> 
                 continue;
             };
             if let Some(info) = record(defs, ast, file, &generics, ty, for_ty, &items) {
+                check_coherence(defs, ast, pkg_of, diags, id, &info);
                 table.impls.push(info);
             }
         }
     }
     table
+}
+
+// ===< coherence >===
+
+/// Which package a definition belongs to: `Some(name)` for a package's own
+/// definitions, `None` for the program being compiled (files reached by path,
+/// which are one unit and may implement each other's things freely).
+///
+/// A definition with no source file is a **synthesized primitive** — `i32`,
+/// `bool`, the width-parameterized integers the resolver interns on demand.
+/// Those are the language's, which for this purpose means `core`'s: the core
+/// library is the one place that may hang methods off them.
+fn owner<'a>(
+    defs: &DefTable,
+    pkg_of: &'a HashMap<FileId, String>,
+    def: DefId,
+) -> Option<&'a str> {
+    match defs.get(def).file {
+        Some(f) => pkg_of.get(&f).map(String::as_str),
+        None => Some("core"),
+    }
+}
+
+/// Check the two rules that keep impls from colliding across libraries (§4.8).
+///
+/// 1. An **inherent** `impl T { … }` may only be written where `T` is defined.
+///    Two packages both adding a `len` to `[]T` — or to someone else's
+///    `Widget` — would be an unresolvable clash at every call site, and unlike a
+///    trait impl there is no name to qualify it with. This is why `.len()` lives
+///    in `core`: `[]T` is `core`'s type, so `core` is the only place it can.
+/// 2. A **trait** impl must have something of its own in it: either the trait or
+///    the self type belongs to the impl's package. `impl ForeignTrait for
+///    ForeignType` is the case two libraries can write identically and neither
+///    can be preferred, so it is refused here rather than discovered as an
+///    ambiguity in whoever imports both.
+///
+/// The self type counts as the impl's own when a local type appears **anywhere**
+/// in it, not just at its head: `impl FromResidual.<Io> for Result.<T, Cfg>` is
+/// this package's business because `Cfg` is, even though `Result` is `core`'s.
+fn check_coherence(
+    defs: &DefTable,
+    ast: &Ast,
+    pkg_of: &HashMap<FileId, String>,
+    diags: &mut Vec<Diagnostic>,
+    node: NodeId,
+    imp: &ImplInfo,
+) {
+    let here = pkg_of.get(&imp.file).map(String::as_str);
+    let describe = |pkg: Option<&str>| match pkg {
+        Some(p) => format!("package `{p}`"),
+        None => "this program".to_string(),
+    };
+    match imp.trait_def {
+        // --- inherent ---
+        None => {
+            // A structural target (`[]T`, `[N]T`, `*T`, a tuple) has no head def;
+            // those types are the language's, so `core` owns them.
+            let target = match imp.self_head {
+                Some(h) if imp.generics.contains(&h) => {
+                    report(
+                        diags,
+                        imp.file,
+                        ast,
+                        node,
+                        "an inherent `impl` needs a concrete type; a type parameter is not \
+                         one this package defines",
+                    );
+                    return;
+                }
+                Some(h) => owner(defs, pkg_of, h),
+                None => Some("core"),
+            };
+            if target != here {
+                let msg = format!(
+                    "an inherent `impl` must live where its type is defined, and this \
+                     type belongs to {} (not {})",
+                    describe(target),
+                    describe(here)
+                );
+                report(diags, imp.file, ast, node, msg);
+            }
+        }
+        // --- trait ---
+        Some(t) => {
+            if owner(defs, pkg_of, t) == here {
+                return;
+            }
+            if mentions_local(defs, ast, pkg_of, here, imp, imp.self_node) {
+                return;
+            }
+            let msg = format!(
+                "`{}` and this type both belong to other packages: a trait impl must \
+                 live where the trait or the type is defined, or two libraries could \
+                 write the same one",
+                defs.canonical_string(t)
+            );
+            report(diags, imp.file, ast, node, msg);
+        }
+    }
+}
+
+/// Whether a type expression mentions a type defined in `here` — at its head or
+/// among its generic arguments, recursively. The impl's own generic parameters
+/// do not count: they stand for whatever the use site picks, including types
+/// from anywhere.
+fn mentions_local(
+    defs: &DefTable,
+    ast: &Ast,
+    pkg_of: &HashMap<FileId, String>,
+    here: Option<&str>,
+    imp: &ImplInfo,
+    node: NodeId,
+) -> bool {
+    if let Some(Resolution::Def(d)) = ast.meta::<Resolution>(node) {
+        let d = defs.resolve_alias(d);
+        if !imp.generics.contains(&d)
+            && !matches!(defs.get(d).kind, DefKind::TypeParam | DefKind::ConstParam)
+            && owner(defs, pkg_of, d) == here
+        {
+            return true;
+        }
+    }
+    ast.node(node)
+        .kind
+        .children()
+        .into_iter()
+        .any(|c| mentions_local(defs, ast, pkg_of, here, imp, c))
+}
+
+fn report(
+    diags: &mut Vec<Diagnostic>,
+    file: FileId,
+    ast: &Ast,
+    node: NodeId,
+    message: impl Into<String>,
+) {
+    let span = ast.node(node).span;
+    diags.push(Diagnostic::error(message).with_primary(FileSpan::new(file, span), ""));
 }
 
 fn record(

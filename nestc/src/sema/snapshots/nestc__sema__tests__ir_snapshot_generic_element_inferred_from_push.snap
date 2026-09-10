@@ -4,16 +4,16 @@ expression: ir_text(src)
 ---
 func build_ints() -> usize {
   let xs: Vector.<isize> = (Vector.new: func() -> Vector.<isize>)(): Vector.<isize>
-  ((xs: Vector.<isize>.push): func(*mut Vector.<isize>, isize) -> void)($cast(1: comptime_int): isize): void
+  (Vector.push: func(*mut Vector.<isize>, isize) -> void)((&mut xs: Vector.<isize>): *mut Vector.<isize>, $cast(1: comptime_int): isize): void
   return (xs: Vector.<isize>.len): usize
 }
 func build_strings() -> void {
   let ws: Vector.<string> = (Vector.new: func() -> Vector.<string>)(): Vector.<string>
-  tail ((ws: Vector.<string>.push): func(*mut Vector.<string>, string) -> void)("hi": string): void
+  tail (Vector.push: func(*mut Vector.<string>, string) -> void)((&mut ws: Vector.<string>): *mut Vector.<string>, "hi": string): void
 }
 func new() -> Vector.<T> {
   return Vector { len: $cast(0: comptime_int): usize }: Vector.<T>
 }
-func push(self: *mut Vector.<T>, value: T) -> void {
+func push(self: *mut Vector.<T>, value: T) -> void #recv(mut ptr) #mutating {
   ((self: *mut Vector.<T>.*): Vector.<T>.len): usize = #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(((self: *mut Vector.<T>.*): Vector.<T>.len): usize, $cast(1: comptime_int): usize): usize
 }

@@ -1,0 +1,31 @@
+// `Result` and its short-circuiting behaviour.
+
+* :: import "control.nest"
+
+@public Result :: #lang("result") enum <T, E> {
+  ok(T),
+  err(E),
+}
+
+// `result.?` / `result.!` branch on a `Result`: `ok` is the success output,
+// `err` the residual `.?` propagates.
+impl <T, E> Try for Result.<T, E> {
+  Output :: T
+  Residual :: E
+  branch :: func (self: Result.<T, E>) -> ControlFlow.<E, T> {
+    return self.match {
+      .ok(v)  => .proceed(v),
+      .err(e) => .stop(e),
+    }
+  }
+  unwrap :: func (self: Result.<T, E>) -> T {
+    return self.match {
+      .ok(v)  => v,
+      .err(e) => $abort(e),
+    }
+  }
+}
+
+impl <T, E> FromResidual.<E> for Result.<T, E> {
+  from_residual :: func (r: E) -> Result.<T, E> { return .err(r) }
+}

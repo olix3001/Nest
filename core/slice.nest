@@ -1,0 +1,25 @@
+// Inherent methods on the built-in sequences.
+//
+// `.len()` is **not** compiler syntax. It is an ordinary inherent method on the
+// primitive types, written here — an `impl` with no trait, on a type no other
+// package is allowed to write one for — with the `$len` primitive (§6.4) as its
+// body. That is what makes `a.len()` on a `[3]i32`, `s.len()` on a `[]i32`, and a
+// future `Vector.len()` one spelling with one meaning, instead of a special case
+// the compiler carries.
+//
+// The coherence rule is why these can only live in `core`: an inherent impl may
+// only be written in the package that defines the type, and the structural types
+// belong to `core` (§4.9).
+//
+// `Self` inside these impls is the structural target: `[]T` in the first, `[N]T`
+// in the second. On a `[N]T` whose `N` is known, `$len` folds to the literal
+// count at compile time, so the inlined call costs nothing; on a `[]T` it reads
+// the slice header's length.
+
+impl <T> []T {
+  len :: #inline func (self: *Self) -> usize { return $len(self) }
+}
+
+impl <T, const N: usize> [N]T {
+  len :: #inline func (self: *Self) -> usize { return $len(self) }
+}

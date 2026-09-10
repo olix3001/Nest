@@ -47,6 +47,16 @@ pub fn resolve_fields(
                     }
                 }
             }
+            // `base.0` on a **tuple struct** names a field like any other: its
+            // members are defs named by their positions (see
+            // `collect::collect_struct`). On an anonymous tuple there is no def
+            // to bind — the projection is structural — so nothing is recorded
+            // and `lower` keeps it an `Expr::TupleIndex`.
+            NodeKind::TupleIndex { base, index } => {
+                if let Some(f) = pass.field_of(pass.ty(base), &Symbol::new(&index.to_string())) {
+                    ast.set_meta(id, Resolution::Def(f));
+                }
+            }
             // A composite literal's field names belong to the literal's *type*,
             // so they are bound from here rather than from the `FieldInit`,
             // which has no type of its own.

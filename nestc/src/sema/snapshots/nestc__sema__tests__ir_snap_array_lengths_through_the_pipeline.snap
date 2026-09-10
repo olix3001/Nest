@@ -1,0 +1,17 @@
+---
+source: src/sema/tests.rs
+expression: ir_text(src)
+---
+func count(a: [N]T) -> usize {
+  return $len(a: [N]T): usize
+}
+func take(s: []i32) -> usize {
+  return (core.<impl []T>.len: func(*[]i32) -> usize)((&s: []i32): *[]i32): usize
+}
+func f() -> usize {
+  let inferred: [3]i32 = $array($cast(1: comptime_int): i32, $cast(2: comptime_int): i32, $cast(3: comptime_int): i32): [3]i32
+  let written: [3]i32 = inferred: [3]i32
+  let folded: usize = 3: usize
+  let method: usize = (core.<impl [N]T>.len: func(*[3]i32) -> usize)((&written: [3]i32): *[3]i32): usize
+  return #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(#builtin(Add) (core.Add.add: func(usize, usize) -> usize)(#builtin(Add) (core.Add.add: func(usize, usize) -> usize)((count: func([3]i32) -> usize)(inferred: [3]i32): usize, folded: usize): usize, method: usize): usize, (take: func([]i32) -> usize)($slice(written: [3]i32, .full: core.Range.<usize>): []i32): usize): usize
+}

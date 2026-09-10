@@ -5,8 +5,8 @@ use std::fmt::Write;
 
 use crate::parser::ast::Lit;
 
-use super::{Arm, Block, Expr, Function, Pattern, Program, Stmt};
-use crate::sema::def::DefTable;
+use super::{Arm, Block, Dispatch, Expr, Function, Pattern, Program, Recv, Stmt};
+use crate::sema::def::{DefTable, Directive, DirectiveArg};
 
 /// Render a whole [`Program`].
 pub fn program_to_string(defs: &DefTable, program: &Program) -> String {
@@ -43,14 +43,40 @@ impl Printer<'_> {
             .map(|p| format!("{}: {}", p.name, p.ty.display(self.defs)))
             .collect::<Vec<_>>()
             .join(", ");
-        self.line(&format!(
-            "func {}({}) -> {} {{",
+        // The receiver / mutation tags print only when they say something: an
+        // unannotated `func` is a non-method that cannot write through anything.
+        let mut tags = String::new();
+        for d in &f.directives {
+            let _ = write!(tags, " {}", directive_str(d));
+        }
+        match f.recv {
+            Recv::None => {}
+            Recv::Value => tags.push_str(" #recv(value)"),
+            Recv::Ptr => tags.push_str(" #recv(ptr)"),
+            Recv::MutPtr => tags.push_str(" #recv(mut ptr)"),
+        }
+        if f.mutating {
+            tags.push_str(" #mutating");
+        }
+        let abi = match &f.extern_abi {
+            Some(a) => format!("extern(\"{a}\") "),
+            None => String::new(),
+        };
+        let header = format!(
+            "{abi}func {}({}) -> {}{tags}",
             f.name,
             params,
             f.ret.display(self.defs)
-        ));
+        );
+        // A declaration has no body to open a brace for — `extern("c") func
+        // strlen(...) -> usize` is the whole of it.
+        let Some(body) = &f.body else {
+            self.line(&header);
+            return;
+        };
+        self.line(&format!("{header} {{"));
         self.indent += 1;
-        self.block(&f.body);
+        self.block(body);
         self.indent -= 1;
         self.line("}");
     }
@@ -73,9 +99,13 @@ impl Printer<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Let { name, ty, init, .. } => {
+            Stmt::Let { pattern, ty, init } => {
                 let e = self.expr(init);
-                self.line(&format!("let {name}: {} = {e}", ty.display(self.defs)));
+                self.line(&format!(
+                    "let {}: {} = {e}",
+                    pattern_str(self.defs, pattern),
+                    ty.display(self.defs)
+                ));
             }
             Stmt::Assign { place, value } => {
                 let p = self.expr(place);
@@ -112,6 +142,7 @@ impl Printer<'_> {
                 callee,
                 args,
                 builtin,
+                dispatch,
                 ..
             } => {
                 let c = self.expr(callee);
@@ -121,11 +152,33 @@ impl Printer<'_> {
                     .collect::<Vec<_>>()
                     .join(", ");
                 // A builtin primitive operator prints its tag so the O(1)
-                // codegen marker is visible in the dump.
-                match builtin {
-                    Some(op) => format!("#builtin({op:?}) ({c})({a}): {ty}"),
-                    None => format!("({c})({a}): {ty}"),
+                // codegen marker is visible in the dump; a non-static dispatch
+                // prints the trait whose slot (or impl) the call still needs.
+                let mut prefix = String::new();
+                if let Some(op) = builtin {
+                    let _ = write!(prefix, "#builtin({op:?}) ");
                 }
+                match dispatch {
+                    Dispatch::Static => {}
+                    Dispatch::Virtual { trait_def, .. } => {
+                        let _ = write!(
+                            prefix,
+                            "#virtual({}) ",
+                            self.defs.canonical_string(*trait_def)
+                        );
+                    }
+                    Dispatch::Generic {
+                        trait_def, self_ty, ..
+                    } => {
+                        let _ = write!(
+                            prefix,
+                            "#generic({}, {}) ",
+                            self.defs.canonical_string(*trait_def),
+                            self_ty.display(self.defs)
+                        );
+                    }
+                }
+                format!("{prefix}({c})({a}): {ty}")
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let l = self.expr(lhs);
@@ -247,7 +300,7 @@ impl Printer<'_> {
     }
 
     fn arm(&mut self, a: &Arm) {
-        let mut header = format!("{} =>", pattern_str(&a.pattern));
+        let mut header = format!("{} =>", pattern_str(self.defs, &a.pattern));
         if let Some(g) = &a.guard {
             let g = self.expr(g);
             let _ = write!(header, " if {g}");
@@ -257,7 +310,7 @@ impl Printer<'_> {
     }
 }
 
-fn pattern_str(p: &Pattern) -> String {
+fn pattern_str(defs: &DefTable, p: &Pattern) -> String {
     match p {
         Pattern::Wildcard => "_".into(),
         Pattern::Binding { name, .. } => name.to_string(),
@@ -266,32 +319,32 @@ fn pattern_str(p: &Pattern) -> String {
             if sub.is_empty() {
                 format!(".{name}")
             } else {
-                let s = sub.iter().map(pattern_str).collect::<Vec<_>>().join(", ");
+                let s = sub.iter().map(|p| pattern_str(defs, p)).collect::<Vec<_>>().join(", ");
                 format!(".{name}({s})")
             }
         }
         Pattern::Tuple(ps) => {
-            let s = ps.iter().map(pattern_str).collect::<Vec<_>>().join(", ");
+            let s = ps.iter().map(|p| pattern_str(defs, p)).collect::<Vec<_>>().join(", ");
             format!("({s})")
         }
-        Pattern::Or(ps) => ps.iter().map(pattern_str).collect::<Vec<_>>().join(" | "),
+        Pattern::Or(ps) => ps.iter().map(|p| pattern_str(defs, p)).collect::<Vec<_>>().join(" | "),
         Pattern::Struct { def, fields, rest } => {
             let mut parts: Vec<String> = fields
                 .iter()
-                .map(|(n, p)| format!("{n}: {}", pattern_str(p)))
+                .map(|(n, p)| format!("{n}: {}", pattern_str(defs, p)))
                 .collect();
             if *rest {
                 parts.push("..".into());
             }
-            let head = def.map_or_else(|| ".".to_string(), |d| format!("#{} ", d.0));
+            let head = def.map_or_else(|| ".".to_string(), |d| format!("{} ", defs.canonical_string(d)));
             format!("{head}{{ {} }}", parts.join(", "))
         }
         Pattern::TupleStruct { def, elems, rest } => {
-            let mut parts: Vec<String> = elems.iter().map(pattern_str).collect();
+            let mut parts: Vec<String> = elems.iter().map(|p| pattern_str(defs, p)).collect();
             if *rest {
                 parts.push("..".into());
             }
-            let head = def.map_or_else(String::new, |d| format!("#{}", d.0));
+            let head = def.map_or_else(String::new, |d| defs.canonical_string(d));
             format!("{head}({})", parts.join(", "))
         }
         Pattern::Slice {
@@ -299,14 +352,14 @@ fn pattern_str(p: &Pattern) -> String {
             rest,
             suffix,
         } => {
-            let mut parts: Vec<String> = prefix.iter().map(pattern_str).collect();
+            let mut parts: Vec<String> = prefix.iter().map(|p| pattern_str(defs, p)).collect();
             if let Some(binding) = rest {
                 parts.push(match binding {
                     Some(b) => format!(".. {}", b.name),
                     None => "..".into(),
                 });
             }
-            parts.extend(suffix.iter().map(pattern_str));
+            parts.extend(suffix.iter().map(|p| pattern_str(defs, p)));
             format!("[{}]", parts.join(", "))
         }
         Pattern::Range {
@@ -320,10 +373,29 @@ fn pattern_str(p: &Pattern) -> String {
             format!("{s}{op}{e}")
         }
         Pattern::At { binding, pattern } => {
-            format!("{} @ {}", binding.name, pattern_str(pattern))
+            format!("{} @ {}", binding.name, pattern_str(defs, pattern))
         }
-        Pattern::Deref(p) => format!("&{}", pattern_str(p)),
+        Pattern::Deref(p) => format!("&{}", pattern_str(defs, p)),
     }
+}
+
+/// A directive as `#name(args)`, the way it was written.
+pub fn directive_str(d: &Directive) -> String {
+    if d.args.is_empty() {
+        return format!("#{}", d.name);
+    }
+    let args = d
+        .args
+        .iter()
+        .map(|a| match a {
+            DirectiveArg::Int(n) => n.to_string(),
+            DirectiveArg::Str(s) => format!("{s:?}"),
+            DirectiveArg::Name(n) => n.to_string(),
+            DirectiveArg::Other => "?".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("#{}({args})", d.name)
 }
 
 fn lit_str(l: &Lit) -> String {

@@ -232,7 +232,7 @@ classify :: func (code: int, node: *Tree) -> string {
     301 | 302 => \"redirect\",
     400..=499 => \"client\",
     500.. => \"server\",
-    m @ .text(s) if s.len > 280 => \"long\",
+    m @ .text(s) if s.len() > 280 => \"long\",
     .rect { w, h } => \"rect\",
     [first, .. rest] => \"slice\",
     &.leaf(v) => \"leaf\",

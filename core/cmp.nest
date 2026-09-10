@@ -1,0 +1,20 @@
+// Equality and ordering.
+//
+// `==` / `!=` lower through `Eq.eq`; `<`, `<=`, `>`, `>=` lower through
+// `Ord.cmp` and a match on the `Ordering` it returns (§6.13). The primitives
+// stay a primitive comparison instruction — see `sema::lower` — so these traits
+// are what *user* types implement to join in.
+
+@public Ordering :: #lang("ordering") enum {
+  less,
+  equal,
+  greater,
+}
+
+@public Eq :: #lang("eq") trait {
+  eq :: func (self: Self, rhs: Self) -> bool
+}
+
+@public Ord :: #lang("ord") trait {
+  cmp :: func (self: Self, rhs: Self) -> Ordering
+}

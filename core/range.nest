@@ -1,0 +1,32 @@
+// Range types.
+
+* :: import "option.nest"
+* :: import "iter.nest"
+
+// Every surface range form, one variant each, so lowering keeps the bound
+// count and the `..<` / `..=` distinction the syntax carried. It is its own
+// iterator: `into_iter` hands the range back, `next` walks it.
+@public Range :: #lang("range") enum <T> {
+  // `..`
+  full,
+  // `a..`
+  from(T),
+  // `..<b`
+  to(T),
+  // `..=b`
+  to_inclusive(T),
+  // `a..<b`
+  exclusive(T, T),
+  // `a..=b`
+  inclusive(T, T),
+}
+
+impl <T> IntoIterator for Range.<T> {
+  Iter :: Range.<T>
+  into_iter :: func (self: Range.<T>) -> Range.<T> { return self }
+}
+
+impl <T> Iterator for Range.<T> {
+  Item :: T
+  next :: func (self: *mut Range.<T>) -> Option.<T> { return .none }
+}

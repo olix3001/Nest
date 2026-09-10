@@ -1,6 +1,6 @@
 ---
 source: src/parser/tests.rs
-expression: "tree(\"\\\nclassify :: func (code: int, node: *Tree) -> string {\n  return code.match {\n    200 => \\\"ok\\\",\n    301 | 302 => \\\"redirect\\\",\n    400..=499 => \\\"client\\\",\n    500.. => \\\"server\\\",\n    m @ .text(s) if s.len > 280 => \\\"long\\\",\n    .rect { w, h } => \\\"rect\\\",\n    [first, .. rest] => \\\"slice\\\",\n    &.leaf(v) => \\\"leaf\\\",\n    _ => \\\"other\\\",\n  }\n}\n\")"
+expression: "tree(\"\\\nclassify :: func (code: int, node: *Tree) -> string {\n  return code.match {\n    200 => \\\"ok\\\",\n    301 | 302 => \\\"redirect\\\",\n    400..=499 => \\\"client\\\",\n    500.. => \\\"server\\\",\n    m @ .text(s) if s.len() > 280 => \\\"long\\\",\n    .rect { w, h } => \\\"rect\\\",\n    [first, .. rest] => \\\"slice\\\",\n    &.leaf(v) => \\\"leaf\\\",\n    _ => \\\"other\\\",\n  }\n}\n\")"
 ---
 File
   ConstBind ::
@@ -41,8 +41,9 @@ File
                 VariantPat .text (tuple)
                   BindingPat s
               Binary Gt
-                FieldAccess .len
-                  Path `s`
+                Call
+                  FieldAccess .len
+                    Path `s`
                 Lit Int(280)
               Lit Str("long")
             MatchArm

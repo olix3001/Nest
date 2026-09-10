@@ -3,8 +3,8 @@ source: src/sema/tests.rs
 expression: "ir_text(\"P :: struct { x: i32 }\\nimpl P {\\n  get :: func (self: *P) -> i32 { return self.x }\\n}\\nuse_m :: func (p: *P) -> i32 { return p.get() }\\n\")"
 ---
 func use_m(p: *P) -> i32 {
-  return (((p: *P.*): P.get): func(*P) -> i32)(): i32
+  return (P.get: func(*P) -> i32)(p: *P): i32
 }
-func get(self: *P) -> i32 {
+func get(self: *P) -> i32 #recv(ptr) {
   return ((self: *P.*): P.x): i32
 }

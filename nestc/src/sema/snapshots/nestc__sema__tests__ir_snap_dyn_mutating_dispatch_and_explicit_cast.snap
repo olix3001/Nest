@@ -1,0 +1,16 @@
+---
+source: src/sema/tests.rs
+expression: ir_text(src)
+---
+func use_dyn(b: *Box2, m: *mut Box2) -> i32 #mutating {
+  let explicit: *dyn Draw = (b: *Box2 as *dyn Draw from Box2)
+  let w: *mut dyn Draw = (m: *mut Box2 as *mut dyn Draw from Box2)
+  #virtual(Draw) (Draw.scale: func(*mut dyn Draw, i32) -> void)(w: *mut dyn Draw, $cast(2: comptime_int): i32): void
+  return #virtual(Draw) (Draw.area: func(*dyn Draw) -> i32)(explicit: *dyn Draw): i32
+}
+func area(self: *Box2) -> i32 #recv(ptr) {
+  return ((self: *Box2.*): Box2.w): i32
+}
+func scale(self: *mut Box2, k: i32) -> void #recv(mut ptr) #mutating {
+  ((self: *mut Box2.*): Box2.w): i32 = #builtin(Mul) (core.Mul.mul: func(i32, i32) -> i32)(((self: *mut Box2.*): Box2.w): i32, k: i32): i32
+}

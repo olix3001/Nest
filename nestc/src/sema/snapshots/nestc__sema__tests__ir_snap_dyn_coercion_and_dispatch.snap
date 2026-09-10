@@ -4,8 +4,8 @@ expression: ir_text(src)
 ---
 func go(c: *Cat) -> i32 {
   let j: *dyn ToJson = (c: *Cat as *dyn ToJson from Cat)
-  return (((j: *dyn ToJson.*): dyn ToJson.render): func(*dyn ToJson) -> i32)(): i32
+  return #virtual(ToJson) (ToJson.render: func(*dyn ToJson) -> i32)(j: *dyn ToJson): i32
 }
-func render(self: *Cat) -> i32 {
+func render(self: *Cat) -> i32 #recv(ptr) {
   return ((self: *Cat.*): Cat.age): i32
 }

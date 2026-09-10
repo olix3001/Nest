@@ -19,38 +19,60 @@
 //!   access it stands for (`e.t`, or `&e.t` through a pointer), and a `*T` →
 //!   `*dyn Trait` unsizing into an [`ir::Expr::DynCast`] that keeps the erased
 //!   pointee for vtable selection.
+//! - a **method call** becomes an ordinary [`ir::Expr::Call`] whose `args[0]` is
+//!   the receiver: whatever the `self` parameter wanted — a value, a `*Self`, a
+//!   `*mut Self` — is spelled out as an `&` / `&mut` / `.*` here, using the
+//!   adjustment [`super::infer`] recorded, and the call carries the
+//!   [`ir::Dispatch`] that says whether the callee is a known function, a vtable
+//!   slot, or a bound awaiting monomorphization.
+//! - an **operator** becomes the same kind of call to the method its `#lang`
+//!   trait resolved to (§6.13) — including `a[i]`, which on a user type is
+//!   `Index.index(&a, i).*`, and `a < b`, which on a user type tests the
+//!   `Ordering` that `Ord.cmp` returns.
 //!
-//! Not lowered (documented stubs, matching [`super::infer`]): bitwise / shift
-//! operators (they stay [`ir::Expr::Binary`]) and closures / nested-function
-//! values. `match` arms stay structured — patterns keep their full shape, but
-//! decision-tree compilation is a later, CFG-level pass.
+//! Not lowered here: closures / nested-function values (they need a captured
+//! environment, which is a representation decision the IR does not make), and
+//! `match` decision trees — arms stay structured, patterns keep their full
+//! shape, and compiling them to tests is a later, CFG-level pass.
 
 use std::collections::HashMap;
 
 use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{
-    Ast, CompositeBody, Lit, NodeId, NodeKind, RangeKind, UnOp, VariantArgs, VariantPatArgs,
+    Ast, BinOp, CompositeBody, Lit, NodeId, NodeKind, RangeKind, UnOp, VariantArgs, VariantPatArgs,
 };
 
-use super::def::{DefId, DefKind, DefTable};
-use super::infer::{Coercion, DynCoerce, SliceCoerce, Upcast};
+use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::OpResolution;
+use super::infer::{
+    ArgOrder, Coercion, DynCoerce, MethodDispatch, MethodRes, RecvAdjust, SliceCoerce, Upcast,
+};
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
-use crate::ir::{Arm, Binding, Block, Expr, Function, Param, Pattern, Program, Stmt};
+use crate::ir::{
+    Arm, Binding, Block, Dispatch, Expr, Function, Param, Pattern, Program, Recv, Stmt,
+};
 
 /// Lower every function body in `file` to IR.
-pub fn lower_file(defs: &DefTable, asts: &HashMap<FileId, Ast>, file: FileId) -> Program {
+pub fn lower_file(
+    defs: &DefTable,
+    lang: &LangItems,
+    asts: &HashMap<FileId, Ast>,
+    file: FileId,
+) -> Program {
     let ast = &asts[&file];
     let mut lo = Lowerer {
         defs,
+        lang,
         ast,
         defers: Vec::new(),
     };
     // Iterate the `Func` defs of this file: each carries the name/DefId and its
-    // node is the `ConstBind` whose RHS is the `FuncExpr` (a bodyless one — a
-    // trait method signature or an `extern` decl — is skipped).
+    // node is the `ConstBind` whose RHS is the `FuncExpr`. A **bodyless** one is
+    // emitted too, with `body: None` — an `extern("c") func` is a real symbol
+    // the linker must resolve and a call to it is an ordinary call, so dropping
+    // it here would lose the only record of its signature and ABI.
     let mut funcs = Vec::new();
     for def in defs.iter() {
         if def.kind != DefKind::Func || def.file != Some(file) {
@@ -63,7 +85,14 @@ pub fn lower_file(defs: &DefTable, asts: &HashMap<FileId, Ast>, file: FileId) ->
             _ => continue,
         };
         if let Some(f) = lo.lower_function(def.id, func) {
-            funcs.push(f);
+            // A bodyless, non-`extern` function is a trait's *requirement* — a
+            // signature an impl must satisfy, with no code and no symbol of its
+            // own. It is reachable as a `Dispatch::Virtual` slot through its
+            // def; emitting it here would put a body-less stub in the program
+            // that nothing links.
+            if f.body.is_some() || f.extern_abi.is_some() {
+                funcs.push(f);
+            }
         }
     }
     Program { funcs }
@@ -71,6 +100,10 @@ pub fn lower_file(defs: &DefTable, asts: &HashMap<FileId, Ast>, file: FileId) ->
 
 struct Lowerer<'a> {
     defs: &'a DefTable,
+    /// The `#lang` registry, consulted for the types an operator's desugaring
+    /// mentions but the surface syntax never wrote — `Ordering`, for the `cmp`
+    /// a user-type comparison lowers to.
+    lang: &'a LangItems,
     ast: &'a Ast,
     /// Stack of pending `defer` bodies, one frame per open block (innermost last).
     defers: Vec<Vec<Expr>>,
@@ -78,19 +111,31 @@ struct Lowerer<'a> {
 
 impl Lowerer<'_> {
     fn lower_function(&mut self, def: DefId, func: NodeId) -> Option<Function> {
-        let NodeKind::FuncExpr { params, body, .. } = self.ast.node(func).kind.clone() else {
+        let NodeKind::FuncExpr {
+            params,
+            body,
+            extern_abi,
+            ..
+        } = self.ast.node(func).kind.clone()
+        else {
             return None;
         };
         let name = self.defs.get(def).name.clone();
         let ret = self.ty(func);
-        let params = params.iter().filter_map(|&p| self.lower_param(p)).collect();
-        let body = self.lower_block(body?);
+        let params: Vec<Param> = params.iter().filter_map(|&p| self.lower_param(p)).collect();
+        let recv = recv_of(&params);
+        let mutating = params.iter().any(|p| grants_mutation(&p.ty));
+        let body = body.map(|b| self.lower_block(b));
         Some(Function {
             def,
             name,
             params,
             ret,
             body,
+            extern_abi,
+            directives: self.defs.get(def).directives.clone(),
+            recv,
+            mutating,
         })
     }
 
@@ -131,21 +176,19 @@ impl Lowerer<'_> {
     }
 
     /// Lower a pattern-binding statement (`let` / `const` / synthetic `::`) to
-    /// an IR `Let`, or — for a destructuring pattern that binds no single def —
-    /// keep the initializer for effect.
+    /// an IR `Let`.
+    ///
+    /// The pattern travels whole: a plain `let x := e` is a
+    /// [`Pattern::Binding`], and a destructuring `let (a, b) := p` keeps its
+    /// tuple/struct shape so the names it introduces survive. A `let` pattern is
+    /// irrefutable, so unlike a `match` arm there is nothing to fall back to.
     fn lower_binding(&mut self, pattern: NodeId, value: NodeId, out: &mut Vec<Stmt>) {
         let init = self.lower_expr(value);
-        match self.def_of(pattern) {
-            Some(def) => out.push(Stmt::Let {
-                def,
-                name: self.defs.get(def).name.clone(),
-                ty: init.ty().clone(),
-                init,
-            }),
-            // A destructuring binding: keep the initializer for effect
-            // (pattern-binding lowering is a later refinement).
-            None => out.push(Stmt::Expr(init)),
-        }
+        out.push(Stmt::Let {
+            pattern: self.lower_pattern(pattern),
+            ty: init.ty().clone(),
+            init,
+        });
     }
 
     fn lower_stmt(&mut self, node: NodeId, out: &mut Vec<Stmt>) {
@@ -290,13 +333,6 @@ impl Lowerer<'_> {
                     Some(_) => return self.lower_name(node, ty),
                 }
                 let base = autoderef(self.lower_expr(base));
-                // `a.len` / `s.len` is not a struct projection (§3.2): it is
-                // sugar for the `$len` intrinsic, and lowers to exactly what a
-                // hand-written `$len(a)` does, so there is one node shape for
-                // the two spellings.
-                if super::infer::is_len_field(base.ty(), name.as_str()) {
-                    return len_expr(base, ty);
-                }
                 Expr::Field {
                     base: Box::new(base),
                     name,
@@ -306,29 +342,41 @@ impl Lowerer<'_> {
             }
             NodeKind::TupleIndex { base, index } => {
                 let base = autoderef(self.lower_expr(base));
+                // On a tuple struct this is a field projection out of a nominal
+                // type, and `fields` bound it to the field's def: emit the same
+                // `Expr::Field` a named access does, so every later stage reads
+                // the offset off the struct's own definition (directives
+                // included) rather than re-deriving it positionally.
+                if let Some(def) = self.resolved_def(node) {
+                    return Expr::Field {
+                        base: Box::new(base),
+                        name: Symbol::new(&index.to_string()),
+                        def: Some(def),
+                        ty,
+                    };
+                }
                 Expr::TupleIndex {
                     base: Box::new(base),
                     index,
                     ty,
                 }
             }
-            NodeKind::Call { callee, args } => {
-                let callee = Box::new(self.lower_expr(callee));
-                let args = args.iter().map(|&a| self.lower_expr(a)).collect();
-                Expr::Call {
-                    callee,
-                    args,
-                    builtin: None,
-                    ty,
-                }
-            }
+            NodeKind::Call { callee, args } => self.lower_call(callee, &args, ty),
             NodeKind::GenericApply { base, .. } => self.lower_expr(base),
             // An arithmetic operator that resolved through an operator trait
             // lowers to a **uniform** call to the chosen method — the same shape
             // for a primitive `i32 + i32` and a user `Vec3 + Vec3` (§6). The
             // `builtin` tag lets codegen recognize the primitive case in O(1).
             NodeKind::Binary { op, lhs, rhs } => match self.ast.meta::<OpResolution>(node) {
-                Some(res) => self.lower_op_call(res, lhs, rhs, ty),
+                // A comparison resolves to `Eq.eq` / `Ord.cmp`, whose results
+                // are not the comparison's own — they need the test around them.
+                Some(res) if is_comparison(op) => self.lower_cmp(res, op, lhs, rhs),
+                Some(res) => {
+                    let args = vec![self.lower_expr(lhs), self.lower_expr(rhs)];
+                    self.op_call(res, args, ty)
+                }
+                // `&&` / `||` and the comparisons of the numeric core dispatch
+                // on nothing: they stay primitive (§6.13).
                 None => Expr::Binary {
                     op,
                     lhs: Box::new(self.lower_expr(lhs)),
@@ -336,30 +384,45 @@ impl Lowerer<'_> {
                     ty,
                 },
             },
+            // `&x` / `&mut x` are the built-in pointer operations, not trait
+            // calls (§6.13); `-x` and `~x` are, and lower to the same uniform
+            // call shape a binary operator does.
             NodeKind::Unary { op, operand } => match op {
                 UnOp::Ref | UnOp::RefMut => Expr::Ref {
                     mutable: matches!(op, UnOp::RefMut),
                     place: Box::new(self.lower_expr(operand)),
                     ty,
                 },
-                _ => Expr::Unary {
-                    op,
-                    operand: Box::new(self.lower_expr(operand)),
-                    ty,
+                _ => match self.ast.meta::<OpResolution>(node) {
+                    Some(res) => {
+                        let args = vec![self.lower_expr(operand)];
+                        self.op_call(res, args, ty)
+                    }
+                    None => Expr::Unary {
+                        op,
+                        operand: Box::new(self.lower_expr(operand)),
+                        ty,
+                    },
                 },
             },
             NodeKind::Deref { base } => Expr::Deref {
                 base: Box::new(self.lower_expr(base)),
                 ty,
             },
-            NodeKind::Index { base, index } => {
-                let base = autoderef(self.lower_expr(base));
-                Expr::Index {
-                    base: Box::new(base),
-                    index: Box::new(self.lower_expr(index)),
-                    ty,
+            NodeKind::Index { base, index } => match self.ast.meta::<OpResolution>(node) {
+                // A user type indexes through `Index` / `IndexMut`, which hand
+                // back a *pointer* to the element: `a[i]` is `index(&a, i).*`.
+                Some(res) => self.lower_index_call(res, base, index, ty),
+                // Arrays and slices index directly.
+                None => {
+                    let base = autoderef(self.lower_expr(base));
+                    Expr::Index {
+                        base: Box::new(base),
+                        index: Box::new(self.lower_expr(index)),
+                        ty,
+                    }
                 }
-            }
+            },
             NodeKind::Slice { base, range } => Expr::Intrinsic {
                 name: Symbol::new("slice"),
                 args: vec![self.lower_expr(base), self.lower_expr(range)],
@@ -454,10 +517,20 @@ impl Lowerer<'_> {
             NodeKind::IntrinsicCall { name, args, .. } => {
                 let mut lowered: Vec<Expr> =
                     args.iter().map(|&a| self.lower_expr(a)).collect();
-                // `$len(a)` folds on a fixed array exactly like the `.len` sugar
-                // that lowers to it.
+                // `$len(a)` folds on a fixed array — the length is part of the
+                // type, so there is nothing left to compute at run time. This is
+                // the whole of `core`'s `Len` impls once they are inlined.
                 if name.as_str() == "len" && lowered.len() == 1 {
                     return len_expr(autoderef(lowered.remove(0)), ty);
+                }
+                // An explicit `$cast.<*dyn Trait>(p)` builds the same fat
+                // pointer the implicit coercion does; it is a spelling of the
+                // unsizing, not a reinterpretation of bits, so it lowers to the
+                // same node (§3.4).
+                if name.as_str() == "cast" && lowered.len() == 1 {
+                    if let Some(cast) = dyn_cast(lowered[0].clone(), &ty) {
+                        return cast;
+                    }
                 }
                 Expr::Intrinsic {
                     name,
@@ -466,29 +539,255 @@ impl Lowerer<'_> {
                 }
             }
             NodeKind::Arg { value, .. } => self.lower_expr(value),
-            // Closures / nested-function values are not lowered in the bootstrap.
+            // A nested item — a local `func`, `struct`, or `import` written
+            // among a block's statements — is a *definition*, not a step the
+            // block runs. It was collected and lowered on its own (a nested
+            // `func` becomes its own [`Function`]), so here it contributes
+            // nothing to the enclosing body.
+            NodeKind::Decl { .. }
+            | NodeKind::ConstBind { .. }
+            | NodeKind::NamespaceExpr { .. }
+            | NodeKind::ImplBlock { .. }
+            | NodeKind::Import { .. } => Expr::Tuple {
+                elems: Vec::new(),
+                ty: Ty::Void,
+            },
+            // Closures and nested-function *values* are the one expression form
+            // that has no IR yet: they need a captured environment, which is a
+            // representation decision the IR does not make (see the module doc).
             _ => Expr::Error(ty),
         }
     }
 
-    /// Lower an arithmetic operator to a uniform call to its resolved method.
-    /// The callee is the trait/impl method as a global; its function type is
-    /// reconstructed from the operand and result types so the IR stays fully
-    /// typed. `builtin` carries through the primitive-op tag for codegen.
-    fn lower_op_call(&mut self, res: OpResolution, lhs: NodeId, rhs: NodeId, ty: Ty) -> Expr {
-        // Lower the operands first: an operand that coerces (a `comptime_int`
-        // literal, say) presents its *converted* type to the call, so the
-        // reconstructed signature has to come from the lowered arguments.
-        let args = vec![self.lower_expr(lhs), self.lower_expr(rhs)];
+    // ===< calls >===
+
+    /// Lower a call. A method call (`recv.m(args)`) and a free call
+    /// (`f(args)`) become the **same** [`Expr::Call`]: the difference is that
+    /// the method's receiver is `args[0]`, adjusted to what its `self` parameter
+    /// wants, and that its [`Dispatch`] may be virtual or generic.
+    fn lower_call(&mut self, callee: NodeId, args: &[NodeId], ty: Ty) -> Expr {
+        // `recv.m.<T>(x)` — the resolution sits on the field access the
+        // turbofish wraps.
+        let head = match self.ast.node(callee).kind.clone() {
+            NodeKind::GenericApply { base, .. } => base,
+            _ => callee,
+        };
+        if let Some(res) = self.ast.meta::<MethodRes>(head) {
+            return self.lower_method_call(head, res, args, ty);
+        }
+        // `Pair(1, 2)` is not a call at all: a callee naming a type constructs
+        // it (§3.3). It builds the same `Expr::Construct` the positional
+        // composite literal `.{1, 2}` builds — a tuple struct has one
+        // representation in the IR regardless of which syntax reached it.
+        // Named arguments were bound to their parameters during inference; take
+        // the order it recorded so the IR is positional, always.
+        let reordered = self.ast.meta::<ArgOrder>(head).map(|o| o.args);
+        let args = reordered.as_deref().unwrap_or(args);
+        if let Some(def) = self.construct_target(head, &ty) {
+            let fields = args
+                .iter()
+                .enumerate()
+                .map(|(i, &a)| (Symbol::new(&i.to_string()), self.lower_expr(a)))
+                .collect();
+            return Expr::Construct { def, fields, ty };
+        }
+        let callee = Box::new(self.lower_expr(callee));
+        let args = args.iter().map(|&a| self.lower_expr(a)).collect();
+        Expr::Call {
+            callee,
+            args,
+            builtin: None,
+            dispatch: Dispatch::Static,
+            ty,
+        }
+    }
+
+    /// The struct a call's callee names, when the callee is a type rather than a
+    /// function — the construction form. `None` for an ordinary call.
+    fn construct_target(&self, callee: NodeId, ty: &Ty) -> Option<DefId> {
+        if !matches!(self.ast.node(callee).kind, NodeKind::Path { .. }) {
+            return None;
+        }
+        let def = self.resolved_def(callee)?;
+        if self.defs.get(def).kind != DefKind::Struct {
+            return None;
+        }
+        // Name the def the *type* settled on, not the one the path resolved to:
+        // an alias resolves to its target here the same way it does elsewhere.
+        match ty {
+            Ty::Nominal { def, .. } => Some(*def),
+            _ => None,
+        }
+    }
+
+    /// Lower `recv.m(args)` using the resolution inference stamped on the
+    /// `recv.m` node.
+    ///
+    /// The receiver is not a field being read: it is the first *argument*, and
+    /// whatever the `self` parameter asked for — a value, a `*Self`, a
+    /// `*mut Self` — is spelled out here as an explicit `&` / `&mut` / `.*`, so
+    /// nothing downstream has to re-derive an implicit adjustment.
+    fn lower_method_call(
+        &mut self,
+        callee: NodeId,
+        res: MethodRes,
+        args: &[NodeId],
+        ty: Ty,
+    ) -> Expr {
+        let NodeKind::FieldAccess { base, .. } = self.ast.node(callee).kind.clone() else {
+            return Expr::Error(ty);
+        };
+        let recv = self.lower_expr(base);
+        let reordered = self.ast.meta::<ArgOrder>(callee).map(|o| o.args);
+        let args = reordered.as_deref().unwrap_or(args);
+        let mut call_args = vec![adjust_recv(recv, res.adjust, &res.self_ty)];
+        call_args.extend(args.iter().map(|&a| self.lower_expr(a)));
+        // Inference recorded the instantiated signature on this node; falling
+        // back to a reconstruction keeps the IR typed if it did not.
+        let callee_ty = match self.ty(callee) {
+            f @ Ty::Func { .. } => f,
+            _ => Ty::Func {
+                params: call_args.iter().map(|a| a.ty().clone()).collect(),
+                ret: Box::new(ty.clone()),
+            },
+        };
+        let dispatch = match res.dispatch {
+            MethodDispatch::Static => Dispatch::Static,
+            MethodDispatch::Virtual(trait_def) => Dispatch::Virtual {
+                trait_def,
+                method: res.method,
+            },
+            MethodDispatch::Generic(trait_def) => Dispatch::Generic {
+                trait_def,
+                method: res.method,
+                self_ty: res.self_ty.clone(),
+            },
+        };
+        Expr::Call {
+            callee: Box::new(Expr::Global(res.method, callee_ty)),
+            args: call_args,
+            builtin: None,
+            dispatch,
+            ty,
+        }
+    }
+
+    /// Lower an operator to a uniform call to its resolved method. The callee is
+    /// the trait/impl method as a global; its function type is reconstructed
+    /// from the (already lowered) argument and result types so the IR stays
+    /// fully typed. `builtin` carries through the primitive-op tag for codegen.
+    ///
+    /// Operands are lowered by the caller on purpose: one that coerces (a
+    /// `comptime_int` literal, say) presents its *converted* type to the call,
+    /// so the reconstructed signature has to come from the lowered arguments.
+    fn op_call(&mut self, res: OpResolution, args: Vec<Expr>, ty: Ty) -> Expr {
         let callee_ty = Ty::Func {
             params: args.iter().map(|a| a.ty().clone()).collect(),
             ret: Box::new(ty.clone()),
         };
-        let callee = Box::new(Expr::Global(res.method, callee_ty));
         Expr::Call {
-            callee,
+            callee: Box::new(Expr::Global(res.method, callee_ty)),
             args,
             builtin: res.builtin,
+            dispatch: Dispatch::Static,
+            ty,
+        }
+    }
+
+    /// Lower a comparison that resolved to a user impl (§6.13).
+    ///
+    /// `==` is the method itself and `!=` its negation; the four relations all
+    /// go through the *one* `Ord.cmp`, testing the `Ordering` it returns. That
+    /// test is a `match`, not a primitive compare on the enum: the arms are what
+    /// say which orderings count, and a decision-tree pass turns them into the
+    /// discriminant check later.
+    fn lower_cmp(&mut self, res: OpResolution, op: BinOp, lhs: NodeId, rhs: NodeId) -> Expr {
+        let args = vec![self.lower_expr(lhs), self.lower_expr(rhs)];
+        if matches!(op, BinOp::Eq | BinOp::Ne) {
+            let call = self.op_call(res, args, Ty::Bool);
+            return match op {
+                BinOp::Ne => Expr::Unary {
+                    op: UnOp::Not,
+                    operand: Box::new(call),
+                    ty: Ty::Bool,
+                },
+                _ => call,
+            };
+        }
+        let ordering = match self.lang.get("ordering") {
+            Some(d) => Ty::Nominal {
+                def: self.defs.resolve_alias(d),
+                args: Vec::new(),
+            },
+            None => Ty::Error,
+        };
+        let call = self.op_call(res, args, ordering);
+        // Which single `Ordering` answers the relation, and whether landing on
+        // it means `true`: `a < b` is "`.less`, yes"; `a >= b` is "`.less`, no".
+        let (variant, hit) = match op {
+            BinOp::Lt => ("less", true),
+            BinOp::Ge => ("less", false),
+            BinOp::Gt => ("greater", true),
+            _ => ("greater", false),
+        };
+        Expr::Match {
+            scrutinee: Box::new(call),
+            arms: vec![
+                Arm {
+                    pattern: Pattern::Variant {
+                        name: Symbol::new(variant),
+                        sub: Vec::new(),
+                    },
+                    guard: None,
+                    body: Expr::Lit(Lit::Bool(hit), Ty::Bool),
+                },
+                Arm {
+                    pattern: Pattern::Wildcard,
+                    guard: None,
+                    body: Expr::Lit(Lit::Bool(!hit), Ty::Bool),
+                },
+            ],
+            ty: Ty::Bool,
+        }
+    }
+
+    /// Lower `a[i]` on a type that indexes through `Index` / `IndexMut`: the
+    /// trait method takes the container by pointer and hands back a pointer to
+    /// the element, so the surface `a[i]` is `index(&a, i).*` (§6.13).
+    fn lower_index_call(
+        &mut self,
+        res: OpResolution,
+        base: NodeId,
+        index: NodeId,
+        ty: Ty,
+    ) -> Expr {
+        // `IndexMut` is the write side; its `self` and its result are `*mut`.
+        let mutable = self
+            .lang
+            .get("index_mut")
+            .map(|t| self.defs.resolve_alias(t))
+            == Some(res.trait_def);
+        let base = self.lower_expr(base);
+        let recv = match base.ty() {
+            // Already a pointer (an auto-deref site): pass it straight through.
+            Ty::Ptr { .. } => base,
+            other => Expr::Ref {
+                mutable,
+                place: Box::new(base.clone()),
+                ty: Ty::Ptr {
+                    mutable,
+                    inner: Box::new(other.clone()),
+                },
+            },
+        };
+        let index = self.lower_expr(index);
+        let elem_ptr = Ty::Ptr {
+            mutable,
+            inner: Box::new(ty.clone()),
+        };
+        let call = self.op_call(res, vec![recv, index], elem_ptr);
+        Expr::Deref {
+            base: Box::new(call),
             ty,
         }
     }
@@ -793,6 +1092,83 @@ fn len_expr(base: Expr, ty: Ty) -> Expr {
         args: vec![base],
         ty,
     }
+}
+
+/// Apply the receiver adjustment a method call implies, spelling out in the IR
+/// what the surface `x.m()` left to the type checker (§3.4).
+fn adjust_recv(recv: Expr, adjust: RecvAdjust, self_ty: &Ty) -> Expr {
+    match adjust {
+        RecvAdjust::None => recv,
+        RecvAdjust::Ref { mutable } => Expr::Ref {
+            mutable,
+            place: Box::new(recv),
+            ty: self_ty.clone(),
+        },
+        RecvAdjust::Deref => Expr::Deref {
+            base: Box::new(recv),
+            ty: self_ty.clone(),
+        },
+    }
+}
+
+/// The [`Expr::DynCast`] an explicit `$cast.<*dyn Trait>(p)` denotes, when that
+/// is what it is: a pointer value reaching a pointer-to-trait-object type. Any
+/// other `$cast` is a real conversion and stays an intrinsic.
+fn dyn_cast(value: Expr, to: &Ty) -> Option<Expr> {
+    let Ty::Ptr { inner, .. } = to else {
+        return None;
+    };
+    if !matches!(**inner, Ty::Dyn(_)) {
+        return None;
+    }
+    let Ty::Ptr { inner: from, .. } = value.ty().clone() else {
+        return None;
+    };
+    Some(Expr::DynCast {
+        value: Box::new(value),
+        concrete: *from,
+        ty: to.clone(),
+    })
+}
+
+/// How a lowered parameter list takes its receiver: the first parameter, if it
+/// is named `self` (§3.4). Nest writes the receiver as an ordinary parameter, so
+/// this is the one place that decides what counts as a method.
+fn recv_of(params: &[Param]) -> Recv {
+    let Some(first) = params.first() else {
+        return Recv::None;
+    };
+    if first.name.as_str() != "self" {
+        return Recv::None;
+    }
+    match &first.ty {
+        Ty::Ptr { mutable: true, .. } => Recv::MutPtr,
+        Ty::Ptr { mutable: false, .. } => Recv::Ptr,
+        _ => Recv::Value,
+    }
+}
+
+/// Whether a parameter of this type lets the callee write into the caller's
+/// storage — a `*mut T` or a `[]mut T`, or one reached through a read-only
+/// pointer or slice to such a thing (`*[]mut T` still hands out the mutable
+/// view). Arrays, tuples and named types are *values*: their own `mut` marks
+/// only the local copy.
+fn grants_mutation(ty: &Ty) -> bool {
+    match ty {
+        Ty::Ptr { mutable, inner } | Ty::Slice { mutable, inner } => {
+            *mutable || grants_mutation(inner)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a [`BinOp`] is one of the six comparisons, which reach `Eq` / `Ord`
+/// by a method name that is not the operator's own.
+fn is_comparison(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+    )
 }
 
 /// Wrap `base` in an explicit [`Expr::Deref`] if its type is a pointer, so

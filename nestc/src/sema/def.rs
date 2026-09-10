@@ -139,6 +139,40 @@ impl Namespace {
     }
 }
 
+/// One `#name(args...)` directive as written on a definition (§9).
+///
+/// The name is kept verbatim and the arguments are kept as the small literal
+/// vocabulary directives draw on — `#align(16)`, `#lang("add")`,
+/// `#link_name("printf")`. Nothing here interprets them; a directive this
+/// front end has no opinion about still travels, so adding one later is a
+/// matter of reading it where it matters rather than re-plumbing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Directive {
+    pub name: Symbol,
+    pub args: Vec<DirectiveArg>,
+}
+
+impl Directive {
+    /// Whether this is the directive called `name`.
+    pub fn is(&self, name: &str) -> bool {
+        self.name.as_str() == name
+    }
+}
+
+/// One argument of a [`Directive`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectiveArg {
+    /// An integer literal: `#align(16)`.
+    Int(i128),
+    /// A string literal: `#lang("add")`.
+    Str(Symbol),
+    /// A bare name: `#repr(c)`.
+    Name(Symbol),
+    /// Anything else the directive vocabulary does not cover; kept so an
+    /// unrecognized form is still visible rather than silently dropped.
+    Other,
+}
+
 /// One definition. Leaf defs (locals, params, fields) leave `ns` empty; the
 /// namespace-like kinds populate it during collection and import wiring.
 #[derive(Debug, Clone)]
@@ -159,6 +193,15 @@ pub struct Def {
     pub canonical: Vec<Symbol>,
     /// The `#lang("tag")` this def is marked with, if any.
     pub lang: Option<Symbol>,
+    /// Every directive written on this definition, in source order (§9).
+    ///
+    /// Directives are *carried*, not acted on, by the front end: `#inline`,
+    /// `#packed`, `#soa`, `#align(16)`, `#unsafe` all describe how a later stage
+    /// should lay out or emit the thing, and that stage is not this one. Keeping
+    /// them on the def rather than only in the AST is what lets the IR — whose
+    /// every node names a [`DefId`] and nothing else — still reach them, so a
+    /// `#soa` on a struct is available wherever that struct's type turns up.
+    pub directives: Vec<Directive>,
     /// Members this def owns (empty for leaf defs).
     pub ns: Namespace,
     /// For an [`DefKind::Import`] binding: the def it aliases (a namespace or a
@@ -227,6 +270,7 @@ impl DefTable {
             node,
             canonical,
             lang: None,
+            directives: Vec::new(),
             ns: Namespace::default(),
             alias: None,
             using: false,

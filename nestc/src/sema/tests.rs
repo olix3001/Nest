@@ -32,6 +32,12 @@ fn entry_file(session: &Session) -> crate::common::source::FileId {
         .expect("an entry file")
 }
 
+/// A lowered function's body. Every function tested here has one — a `None`
+/// body is a declaration (`extern("c") func …`), which these tests never build.
+fn body_of(f: &crate::ir::Function) -> &crate::ir::Block {
+    f.body.as_ref().expect("a function with a body")
+}
+
 /// Find the first node in `ast` matching `pred`.
 fn find(ast: &Ast, mut pred: impl FnMut(&NodeKind) -> bool) -> Option<NodeId> {
     ast.ids().find(|&id| pred(&ast.node(id).kind))
@@ -177,11 +183,14 @@ fn package_import_resolves() {
 mp :: import <mathpkg>
 main :: func () { const x := mp.triple(3) }
 ";
-    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", mainsrc)));
-    session.register_package(
-        "mathpkg",
-        "@public triple :: func (n: isize) -> isize { return n }\n",
-    );
+    // A package is registered by the *path* of its root file, which the session's
+    // loader resolves — so an in-memory package root is as valid as an on-disk one.
+    let mut session = Session::with_loader(Box::new(
+        MemLoader::new()
+            .with("main", mainsrc)
+            .with("mathpkg", "@public triple :: func (n: isize) -> isize { return n }\n"),
+    ));
+    session.register_package("mathpkg", "mathpkg");
     let file = session.load_entry("main").unwrap();
     analyze(&mut session, file);
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
@@ -192,6 +201,33 @@ main :: func () { const x := mp.triple(3) }
     )
     .unwrap();
     assert!(matches!(resolution(&session, file, fa), Resolution::Def(_)));
+}
+
+#[test]
+fn core_is_an_ordinary_multi_file_package() {
+    // `core` gets no special loading path: it is registered by the path of its
+    // root file, and its siblings are reached by ordinary relative imports that
+    // re-export into the root. Swapping in a two-file `core` proves the compiler
+    // finds its `#lang` items by *tag* — not by name, file, or position — which is
+    // the whole reason the library is not baked into the compiler.
+    //
+    // Note the trait is called `Plus`, not `Add`: only `#lang("add")` matters.
+    let loader = MemLoader::new()
+        .with("main", "f :: func (a: i32, b: i32) -> i32 { return a + b }\n")
+        .with("fakecore", "@public * :: import \"fakeops.nest\"\n")
+        .with(
+            "fakeops",
+            "@public Plus :: #lang(\"add\") trait <Rhs> {\n  Output :: type\n  add :: func (self: Self, rhs: Rhs) -> Self.Output\n}\n",
+        );
+    let mut session = Session::with_loader(Box::new(loader));
+    // Re-registering `core` replaces the default on-disk one.
+    session.register_package("core", "fakecore");
+    let file = session.load_entry("main").unwrap();
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    // The operator reached the trait in the *sibling* file, not the root.
+    let add = session.lang_items.get("add").expect("add lang item");
+    assert_eq!(session.defs.get(add).name.as_str(), "Plus");
 }
 
 #[test]
@@ -432,16 +468,15 @@ f :: func (n: i32) {
         matches!(e, Expr::Loop { body, .. }
             if matches!(body.stmts.first(), Some(Stmt::Expr(Expr::If { .. }))))
     };
-    let in_stmts = func
-        .body
+    let body = body_of(func);
+    let in_stmts = body
         .stmts
         .iter()
         .any(|s| matches!(s, Stmt::Expr(e) if is_guarded_loop(e)));
-    let in_tail = func.body.tail.as_deref().is_some_and(is_guarded_loop);
+    let in_tail = body.tail.as_deref().is_some_and(is_guarded_loop);
     assert!(
         in_stmts || in_tail,
-        "while did not lower to a guarded loop: {:#?}",
-        func.body
+        "while did not lower to a guarded loop: {body:#?}"
     );
 }
 
@@ -465,21 +500,21 @@ f :: func () -> i32 {
         .find(|f| f.name.as_str() == "f")
         .expect("func f");
     // The deferred body is recorded once on the block that owns it...
-    assert_eq!(func.body.defers.len(), 1, "{:#?}", func.body);
+    let body = body_of(func);
+    assert_eq!(body.defers.len(), 1, "{body:#?}");
     assert!(
-        matches!(&func.body.defers[0], Expr::Call { .. }),
+        matches!(&body.defers[0], Expr::Call { .. }),
         "defer body is not the call: {:#?}",
-        func.body.defers
+        body.defers
     );
     // ...and is not copied ahead of either `return`, even though there are two.
     assert!(
-        !func
-            .body
+        !body
             .stmts
             .iter()
             .any(|s| matches!(s, Stmt::Expr(Expr::Call { .. }))),
         "deferred call was duplicated into the statement list: {:#?}",
-        func.body.stmts
+        body.stmts
     );
 }
 
@@ -499,7 +534,7 @@ get :: func (p: *P) -> i32 { return p.x }
         .find(|f| f.name.as_str() == "get")
         .expect("func get");
     // The returned `p.x` is `(p.*).x` — a Field over an explicit Deref.
-    let ret = func.body.stmts.iter().find_map(|s| match s {
+    let ret = body_of(func).stmts.iter().find_map(|s| match s {
         Stmt::Return(Some(e)) => Some(e),
         _ => None,
     });
@@ -611,9 +646,12 @@ fn ir_snap_arithmetic_operators() {
 }
 
 #[test]
-fn ir_snap_bitwise_and_shift_stay_primitive() {
-    // `& | ^ << >>` are not routed through operator traits in the bootstrap:
-    // they stay a primitive `Binary`.
+fn ir_snap_bitwise_and_shift_dispatch_through_their_traits() {
+    // `& | ^ << >>` reach `BitAnd` / `BitOr` / `BitXor` / `Shl` / `Shr` exactly
+    // as `+` reaches `Add` (§6.13). On the integer core the builtin row wins and
+    // tags the call, so codegen still emits one instruction — the uniform call
+    // shape costs nothing, and a user `impl Shl for BitSet` slots into the same
+    // node.
     insta::assert_snapshot!(ir_text(
         "bits :: func (a: i32, b: i32) -> i32 {\n  let an := a & b\n  let orr := a | b\n  let xr := a ^ b\n  let sl := a << b\n  let sr := a >> b\n  return an\n}\n"
     ));
@@ -635,6 +673,8 @@ fn ir_snap_logical_and_or() {
 
 #[test]
 fn ir_snap_unary_operators() {
+    // `-a` and `~a` are `Neg.neg` / `BitNot.bitnot`; `!a` is not a trait call
+    // (boolean negation dispatches on nothing).
     insta::assert_snapshot!(ir_text(
         "un :: func (a: i32, b: bool) -> i32 {\n  let n := -a\n  let bn := ~a\n  let no := !b\n  return n\n}\n"
     ));
@@ -642,8 +682,14 @@ fn ir_snap_unary_operators() {
 
 #[test]
 fn ir_snap_ref_and_deref() {
+    // Pointers survive into the IR *with their permission*: `&` / `&mut` are
+    // `Expr::Ref { mutable }`, `.*` is `Expr::Deref`, and the `mut` rides on the
+    // `Ty::Ptr` rather than being tracked beside it. A function that receives a
+    // `*mut` is tagged `#mutating` — that pair (the type says what may be
+    // written, the tag says who may write) is what the IR-level mutability check
+    // reads, and it is why nothing has to re-derive it from the syntax.
     insta::assert_snapshot!(ir_text(
-        "rd :: func (p: *i32) -> i32 {\n  let r := &p\n  return p.*\n}\n"
+        "rd :: func (p: *i32, q: *mut i32) -> i32 {\n  let r := &p\n  let w := &mut q\n  q.* = 1\n  return p.*\n}\n"
     ));
 }
 
@@ -877,16 +923,16 @@ fn ir_snap_try_abort_lowers_to_unwrap() {
 #[test]
 fn ir_snap_const_generic_length_and_len() {
     // `N` stays symbolic inside the generic body and is solved per call site;
-    // `.len` folds on a known array and stays `$len` on a slice.
+    // `.len()` is `core`'s inherent method on the sequences; its body is `$len`.
     insta::assert_snapshot!(ir_text(
-        "count :: func <const N: usize, T> (a: [N]T) -> usize { return a.len }\nf :: func (s: []i32) -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return count(a) + a.len + $len(s)\n}\n"
+        "count :: func <const N: usize, T> (a: [N]T) -> usize { return a.len() }\nf :: func (s: []i32) -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return count(a) + a.len() + $len(s)\n}\n"
     ));
 }
 
 #[test]
 fn ir_snap_array_unsizes_to_a_slice() {
     insta::assert_snapshot!(ir_text(
-        "take :: func (s: []i32) -> usize { return s.len }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n"
+        "take :: func (s: []i32) -> usize { return s.len() }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n"
     ));
 }
 
@@ -937,6 +983,221 @@ fn ir_snap_auto_deref_field_chain() {
     insta::assert_snapshot!(ir_text(
         "Q :: struct { v: i32 }\nP :: struct { inner: Q }\nchain :: func (p: *P) -> i32 { return p.inner.v }\n"
     ));
+}
+
+#[test]
+fn ir_snap_user_operators_reach_their_impls() {
+    // Every operator that is a trait call, on a type that implements it (§6.13):
+    // the prefix unaries, a **heterogeneous** shift (`Rhs` is `i32`, not `Self`,
+    // which is why the operands cannot be forced equal before selection),
+    // equality, the four relations through the one `Ord.cmp`, and indexing on
+    // both sides of an assignment.
+    let src = "\
+Bits :: struct { w: i32 }
+impl Neg for Bits { Output :: Bits  neg :: func (self: Bits) -> Bits { return self } }
+impl BitNot for Bits { Output :: Bits  bitnot :: func (self: Bits) -> Bits { return self } }
+impl Shl.<i32> for Bits { Output :: Bits  shl :: func (self: Bits, rhs: i32) -> Bits { return self } }
+impl Eq for Bits { eq :: func (self: Bits, rhs: Bits) -> bool { return true } }
+impl Ord for Bits { cmp :: func (self: Bits, rhs: Bits) -> Ordering { return .equal } }
+impl Index.<i32> for Bits { Output :: i32  index :: func (self: *Bits, i: i32) -> *i32 { return &self.w } }
+impl IndexMut.<i32> for Bits { Output :: i32  index_mut :: func (self: *mut Bits, i: i32) -> *mut i32 { return &mut self.w } }
+ops :: func (a: Bits, b: Bits, g: *mut Bits) -> bool {
+  const n := -a
+  const c := ~a
+  const s := a << 2
+  const ne := a != b
+  const lt := a < b
+  const r := g[1]
+  g[2] = 9
+  return ne && lt
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn an_operator_operand_is_checked_against_the_impls_own_signature() {
+    // `Shl.<i32>` shifts by an `i32`. Shifting by a `Bits` is not a mismatch the
+    // operator decided — it is that no impl of `Shl.<Bits>` exists, which is
+    // what the operands being free to differ makes it possible to say.
+    let src = "\
+Bits :: struct { w: i32 }
+impl Shl.<i32> for Bits { Output :: Bits  shl :: func (self: Bits, rhs: i32) -> Bits { return self } }
+f :: func (a: Bits, b: Bits) -> Bits { return a << b }
+";
+    assert!(
+        first_error(src).contains("does not implement `core.Shl.<Bits>`"),
+        "{src}"
+    );
+}
+
+#[test]
+fn two_impls_on_one_type_may_each_bind_output() {
+    // A type's namespace hosts every trait impl on it, so `Add` and `Mul` both
+    // park an `Output` there. Neither redeclares the other: the projection goes
+    // through the impl that bound it.
+    analyze_clean(
+        "V :: struct { n: i32 }\nimpl Add for V { Output :: V  add :: func (self: V, rhs: V) -> V { return self } }\nimpl Mul for V { Output :: V  mul :: func (self: V, rhs: V) -> V { return self } }\nf :: func (a: V, b: V) -> V { return a + b * a }\n",
+    );
+}
+
+#[test]
+fn a_destructuring_let_keeps_its_pattern_in_the_ir() {
+    // `let (a, b) := t` binds two names; the IR keeps the whole pattern rather
+    // than dropping to an initializer evaluated for effect.
+    let s = analyze_clean("f :: func (t: (i32, i32)) -> i32 {\n  const (a, b) := t\n  return a\n}\n");
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(ir.contains("let (a, b): (i32, i32)"), "{ir}");
+}
+
+// ===< `Self`, dynamic dispatch, and coherence >===
+
+#[test]
+fn ir_snap_self_resolves_per_impl_kind() {
+    // `Self` is the *implementing* type, and there are four ways a call can
+    // arrive at a signature that mentions it. Each lands on a different answer,
+    // and the IR shows all four side by side:
+    //
+    //   - an inherent impl        -> the type itself (`Counter`)
+    //   - a trait impl            -> the impl's target (`Counter` again, but via
+    //                                the impl's own signature)
+    //   - a bounded type param    -> the parameter (`T`), still generic
+    //   - a trait object          -> `dyn Step`, the erased type
+    //
+    // The last two are the interesting ones: neither has picked an impl, so the
+    // call carries the trait and waits — `#generic` for monomorphization,
+    // `#virtual` for the vtable.
+    let src = "\
+Step :: trait {
+  step :: func (self: *Self) -> i32
+  twice :: func (self: *Self) -> i32
+}
+Counter :: struct { n: i32 }
+impl Counter {
+  bump :: func (self: *Self) -> i32 { return self.n }
+}
+impl Step for Counter {
+  step :: func (self: *Self) -> i32 { return self.n }
+  twice :: func (self: *Self) -> i32 { return self.n }
+}
+inherent :: func (c: *Counter) -> i32 { return c.bump() }
+concrete :: func (c: *Counter) -> i32 { return c.step() }
+bounded  :: func <T: Step> (t: *T) -> i32 { return t.step() }
+erased   :: func (d: *dyn Step) -> i32 { return d.step() }
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn self_in_a_structural_impl_is_the_structural_target() {
+    // `impl <T> []T` has no named type for `Self` to point at, and it still
+    // means the target: `self: *Self` there is a `*[]T`. This is the same
+    // binding `core` relies on for `.len()`.
+    let s = analyze_clean(
+        "Sum :: trait { sum :: func (self: *Self) -> usize }\nimpl <T> Sum for []T { sum :: func (self: *Self) -> usize { return $len(self) } }\nf :: func (s: []i32) -> usize { return s.sum() }\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(ir.contains("(&s: []i32): *[]i32"), "{ir}");
+}
+
+#[test]
+fn a_trait_object_is_only_a_type_behind_a_pointer() {
+    // `dyn Trait` is unsized — its size is the erased type's, which is exactly
+    // what the type no longer says. Every position that needs a size rejects it.
+    for src in [
+        "T1 :: trait { m :: func (self: *Self) -> i32 }\nf :: func (x: dyn T1) -> i32 { return 0 }\n",
+        "T1 :: trait { m :: func (self: *Self) -> i32 }\nS :: struct { f: dyn T1 }\n",
+        "T1 :: trait { m :: func (self: *Self) -> i32 }\nf :: func (xs: []dyn T1) -> i32 { return 0 }\n",
+    ] {
+        assert!(
+            first_error(src).contains("use it behind a pointer"),
+            "{src}"
+        );
+    }
+    // Behind one it is fine, including as a slice's *element*: the pointer is
+    // what has the size.
+    analyze_clean(
+        "T1 :: trait { m :: func (self: *Self) -> i32 }\nf :: func (xs: []*dyn T1, y: *mut dyn T1) -> i32 { return 0 }\n",
+    );
+}
+
+#[test]
+fn dyn_needs_a_trait() {
+    assert!(
+        first_error("f :: func (x: *dyn i32) -> i32 { return 0 }\n")
+            .contains("is not a trait"),
+    );
+}
+
+#[test]
+fn ir_snap_dyn_mutating_dispatch_and_explicit_cast() {
+    // A `*mut T` unsizes to a `*mut dyn Trait`, which is what lets a mutating
+    // method be called through the object; and `$cast.<*dyn Trait>(p)` is the
+    // *same* unsizing written out, so it lowers to the same fat-pointer node
+    // rather than to a reinterpretation of bits.
+    let src = "\
+Draw :: trait {
+  area :: func (self: *Self) -> i32
+  scale :: func (self: *mut Self, k: i32)
+}
+Box2 :: struct { w: i32 }
+impl Draw for Box2 {
+  area :: func (self: *Self) -> i32 { return self.w }
+  scale :: func (self: *mut Self, k: i32) { self.w = self.w * k }
+}
+use_dyn :: func (b: *Box2, m: *mut Box2) -> i32 {
+  const explicit := $cast.<*dyn Draw>(b)
+  let w: *mut dyn Draw := m
+  w.scale(2)
+  return explicit.area()
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn an_inherent_impl_must_live_where_its_type_is_defined() {
+    // Two libraries each adding a `double` to `i32` would be an unresolvable
+    // clash at every call site, and an inherent method has no trait name to
+    // qualify it with. Only the defining package may write one (§4.8).
+    assert!(
+        first_error("impl i32 { double :: func (self: i32) -> i32 { return self } }\n")
+            .contains("must live where its type is defined"),
+    );
+    // The built-in sequences are the language's — which for this purpose means
+    // `core`'s. That is *why* `.len()` lives there.
+    assert!(
+        first_error("impl <T> []T { first :: func (self: *Self) -> usize { return 0 } }\n")
+            .contains("must live where its type is defined"),
+    );
+    // The defining program may, of course.
+    analyze_clean(
+        "Mine :: struct { n: i32 }\nimpl Mine { get :: func (self: Mine) -> i32 { return self.n } }\n",
+    );
+}
+
+#[test]
+fn a_trait_impl_needs_the_trait_or_the_type_to_be_its_own() {
+    // Foreign trait + foreign type is the pair two libraries can write
+    // identically with no way to prefer either.
+    assert!(
+        first_error(
+            "impl Eq for Option.<i32> { eq :: func (self: Option.<i32>, rhs: Option.<i32>) -> bool { return true } }\n"
+        )
+        .contains("both belong to other packages"),
+    );
+    // A local trait on a foreign type is fine…
+    analyze_clean(
+        "Tag :: trait { tag :: func (self: Self) -> i32 }\nimpl Tag for i32 { tag :: func (self: i32) -> i32 { return 0 } }\n",
+    );
+    // …and so is a foreign trait whose self type *mentions* a local type, even
+    // though its head does not: `Cfg` is what makes this impl this package's
+    // business.
+    analyze_clean(
+        "Cfg :: struct { n: i32 }\nimpl Eq for Result.<i32, Cfg> {\n  eq :: func (self: Result.<i32, Cfg>, rhs: Result.<i32, Cfg>) -> bool { return true }\n}\n",
+    );
 }
 
 // ===< examples smoke test >===
@@ -1152,24 +1413,36 @@ f :: func (a: Wrap.<i32>, b: Wrap.<i32>) -> Wrap.<i32> { return a + b }
 
 #[test]
 fn concrete_impl_beats_generic() {
-    // A blanket `impl <T> Add for T` and a concrete `impl Add for Foo` both
-    // apply to `Foo`; the concrete one wins with no ambiguity.
+    // A blanket `impl <T> Tag for T` and a concrete `impl Tag for Foo` both
+    // apply to `Foo`; the concrete one wins with no ambiguity. The trait is
+    // declared here rather than reused from `core` because a blanket impl of a
+    // foreign trait is exactly what coherence forbids (§4.8).
     let src = "\
+Tag :: trait { tag :: func (self: Self) -> i32 }
 Foo :: struct { n: i32 }
-impl <T> Add for T { Output :: T  add :: func (self: T, rhs: T) -> T { return self } }
-impl Add for Foo { Output :: Foo  add :: func (self: Foo, rhs: Foo) -> Foo { return self } }
-f :: func (a: Foo, b: Foo) -> Foo { return a + b }
+impl <T> Tag for T { tag :: func (self: T) -> i32 { return 0 } }
+impl Tag for Foo { tag :: func (self: Foo) -> i32 { return 1 } }
+f :: func (a: Foo) -> i32 { return a.tag() }
 ";
     let s = analyze1(src);
     assert!(!s.has_errors(), "{:#?}", s.diagnostics);
     let file = entry_file(&s);
-    assert!(is_nominal_named(&s, &binop_ty(&s, file, BinOp::Add), "Foo"));
+    // The call targets the concrete impl's `tag`, not the blanket one — the
+    // body that returns `1`.
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    let concrete = ir
+        .lines()
+        .any(|l| l.contains("func tag(self: Foo)"));
+    assert!(concrete, "{ir}");
+    assert!(ir.contains("(Foo.tag: func(Foo) -> i32)"), "{ir}");
 }
 
 #[test]
 fn two_equally_specific_impls_are_ambiguous() {
     // A user `impl Add for i32` is exactly as specific as the builtin row for
-    // the integer family, so a concrete `i32 + i32` has no best choice.
+    // the integer family, so a concrete `i32 + i32` has no best choice. (It is
+    // also an orphan-rule violation — the point here is only that selection
+    // reports the tie rather than silently picking one.)
     let src = "\
 impl Add for i32 { Output :: i32  add :: func (self: i32, rhs: i32) -> i32 { return self } }
 f :: func (a: i32, b: i32) -> i32 { return a + b }
@@ -1637,7 +1910,7 @@ fn field_uses_are_bound_to_their_definitions() {
     assert_eq!(bound, 3, "expected both field inits and the access to bind");
 }
 
-// ===< const generics, array lengths, and `.len` >===
+// ===< const generics, array lengths, and `.len()` >===
 
 #[test]
 fn an_array_length_is_part_of_the_type() {
@@ -1734,26 +2007,42 @@ fn a_named_constant_is_a_usable_array_length() {
 }
 
 #[test]
-fn len_folds_on_a_fixed_array_and_stays_a_call_on_a_slice() {
-    // The length of a `[N]T` with a known `N` is in the type already, so `.len`
-    // is a literal; a slice keeps `$len` for the header read.
+fn len_is_an_inherent_method_the_receiver_type_picks() {
+    // `.len()` is not compiler syntax: it is `core`'s inherent method on the
+    // sequences, and which impl runs is decided by the receiver's type — the
+    // `[N]T` one for an array, the `[]T` one for a slice. Neither call names a
+    // trait, because neither impl has one.
     let s = analyze_clean(
-        "f :: func (s: []i32) {\n  const a := [_]i32 { 1, 2, 3 }\n  const n := a.len\n  const m := s.len\n}\n",
+        "f :: func (s: []i32) {\n  const a := [_]i32 { 1, 2, 3 }\n  const n := a.len()\n  const m := s.len()\n}\n",
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
-    assert!(ir.contains("let n: usize = 3: usize"), "{ir}");
-    assert!(ir.contains("let m: usize = $len(s: []i32): usize"), "{ir}");
+    assert!(ir.contains("(&a: [3]i32): *[3]i32"), "{ir}");
+    assert!(ir.contains("(&s: []i32): *[]i32"), "{ir}");
+    assert!(!ir.contains("#virtual") && !ir.contains("#generic"), "{ir}");
 }
 
 #[test]
-fn the_len_intrinsic_is_callable_directly_and_agrees_with_the_sugar() {
+fn the_len_intrinsic_folds_on_a_fixed_array_and_reads_a_slice_header() {
+    // `$len` is the primitive `.len()`'s body is written in. On a `[N]T` whose
+    // `N` is known it folds to the literal count right here; on a `[]T` it stays
+    // for the header read, and on a still-generic `[N]T` it stays for
+    // monomorphization to substitute.
     let s = analyze_clean(
-        "f :: func (s: []i32) -> usize { return $len(s) }\ng :: func (s: []i32) -> usize { return s.len }\n",
+        "count :: func <const N: usize, T> (a: [N]T) -> usize { return $len(a) }\nf :: func (s: []i32) -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return $len(a) + $len(s)\n}\n",
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
-    assert_eq!(ir.matches("$len(s: []i32): usize").count(), 2, "{ir}");
+    assert!(ir.contains("$len(a: [N]T): usize"), "{ir}");
+    assert!(ir.contains("3: usize"), "{ir}");
+    assert!(ir.contains("$len(s: []i32): usize"), "{ir}");
+}
+
+#[test]
+fn len_works_through_a_mutable_slice() {
+    // `[]mut T` calls a method declared on `[]T`: dropping a write permission is
+    // always safe, so the receiver satisfies the `self` parameter.
+    analyze_clean("f :: func (s: []mut i32) -> usize { return s.len() }\n");
 }
 
 #[test]
@@ -1769,7 +2058,7 @@ fn a_fixed_array_unsizes_to_a_read_only_slice() {
     // One `func (s: []T)` serves every length; the IR shows the full sub-slice
     // the source left implicit — the same `$slice` an explicit `a[..]` emits.
     let s = analyze_clean(
-        "take :: func (s: []i32) -> usize { return s.len }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n",
+        "take :: func (s: []i32) -> usize { return s.len() }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n",
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
@@ -1783,7 +2072,7 @@ fn a_fixed_array_unsizes_to_a_read_only_slice() {
 fn a_fixed_array_does_not_unsize_to_a_mutable_slice() {
     // Handing out a mutable view is a permission the coercion must not grant.
     assert!(
-        first_error("take :: func (s: []mut i32) -> usize { return s.len }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n")
+        first_error("take :: func (s: []mut i32) -> usize { return s.len() }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n")
             .contains("type mismatch"),
     );
 }
@@ -1794,6 +2083,222 @@ fn an_unknown_field_on_a_slice_is_still_reported() {
         first_error("f :: func (s: []i32) -> usize { return s.size }\n")
             .contains("no field `size`"),
     );
+}
+
+#[test]
+fn ir_snap_array_lengths_through_the_pipeline() {
+    // Every way a length reaches the IR, in one place:
+    //
+    //   - `[_]T { … }`  — the literal's element count becomes the type's `N`
+    //   - `[3]i32`      — written out, and the same type as the inferred one
+    //   - `[N]T`        — still a `const` parameter; `$len` cannot fold yet and
+    //                     stays for monomorphization to substitute
+    //   - `$len(a)`     — folds to the literal on a known `N`
+    //   - `a.len()`     — `core`'s inherent method; which impl runs is picked by
+    //                     the receiver's type, so an array and a slice reach
+    //                     different ones
+    //   - `take(a)`     — the `[3]i32` -> `[]i32` unsizing, spelled as the
+    //                     whole sub-slice it means
+    let src = "\
+count :: func <const N: usize, T> (a: [N]T) -> usize { return $len(a) }
+take :: func (s: []i32) -> usize { return s.len() }
+f :: func () -> usize {
+  const inferred := [_]i32 { 1, 2, 3 }
+  const written: [3]i32 := inferred
+  const folded := $len(written)
+  const method := written.len()
+  return count(inferred) + folded + method + take(written)
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn ir_snap_tuple_structs_are_structs_with_positional_names() {
+    // A tuple struct has no machinery of its own: its members are ordinary
+    // fields named by their positions (§3.3), so every form below lands on the
+    // same two IR nodes a record struct uses.
+    //
+    //   - `Pair(1, 2)`  — a callee naming a type constructs it, and the
+    //                     arguments are checked against the field types (the
+    //                     literals come out `i32`, not the default integer)
+    //   - `.{ 3, 4 }`   — the positional composite literal builds the *same*
+    //                     `Construct`; which syntax was written does not survive
+    //   - `p.0`         — an `Expr::Field` carrying the field's def, so a later
+    //                     stage reads the offset off the struct's own definition
+    //   - `t.1`         — on an anonymous tuple there is no def to name, so this
+    //                     one stays a structural `TupleIndex`
+    //   - `Pair(a, b)`  — the pattern destructures positionally
+    //   - `Wrap.<T>`    — the fields substitute like any other generic struct's
+    let src = "\
+Pair :: struct (i32, i32)
+Wrap :: struct <T> (T)
+
+f :: func () -> i32 {
+  let mut p := Pair(1, 2)
+  const q: Pair := .{ 3, 4 }
+  const w := Wrap(5)
+  const t := (6, 7)
+  p.0 = p.1 + t.1
+  return q.match {
+    Pair(a, b) => a + b + w.0 + p.0,
+  }
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn a_tuple_struct_call_checks_its_arguments() {
+    // The construction form is not a function call, so it does not borrow the
+    // function-call diagnostics: the arity is the struct's field count, and a
+    // record struct rejects the call shape outright — it is built with a
+    // composite literal, whose fields are checked where the literal is inferred.
+    for (src, needle) in [
+        (
+            "Pair :: struct (i32, i32)\nf :: func () { const p := Pair(1, 2, 3) }\n",
+            "`Pair` has 2 field(s) but 3 were supplied",
+        ),
+        (
+            "Pair :: struct (i32, i32)\nf :: func () { const p := Pair(1, true) }\n",
+            "type mismatch: expected `i32`, found `bool`",
+        ),
+        (
+            "Rec :: struct { a: i32 }\nf :: func () { const r := Rec(1) }\n",
+            "`Rec` is not a tuple struct",
+        ),
+    ] {
+        let s = analyze_mem(&[("main", src)], "main");
+        assert!(diag_contains(&s, needle), "{:#?}", s.diagnostics);
+    }
+}
+
+#[test]
+fn a_positional_access_out_of_range_says_so() {
+    // The tuple case reports the arity rather than the type: its elements are
+    // often still unsolved variables here, and the count is the whole story.
+    for (src, needle) in [
+        (
+            "f :: func () -> i32 {\n  const t := (1, 2)\n  return t.5\n}\n",
+            "index 5 is out of range for a tuple of 2 element(s)",
+        ),
+        (
+            "Pair :: struct (i32, i32)\nf :: func (p: Pair) -> i32 { return p.7 }\n",
+            "no field `7` on `Pair`",
+        ),
+    ] {
+        let s = analyze_mem(&[("main", src)], "main");
+        assert!(diag_contains(&s, needle), "{:#?}", s.diagnostics);
+    }
+}
+
+#[test]
+fn ir_snap_named_arguments_bind_to_their_parameters() {
+    // Named arguments are bound to parameters during inference (§5.3), so the IR
+    // is positional *always*: all three calls below lower to the identical
+    // argument list, including the one written fully out of order. Nothing after
+    // inference has to know that a name was ever written.
+    let src = "\
+mk :: func (host: string, port: i32, backlog: i32) -> i32 { return port }
+
+Router :: struct { port: i32 }
+impl Router {
+  listen :: func (self: *Router, host: string, port: i32) -> i32 { return port }
+}
+
+f :: func (r: *Router) -> i32 {
+  const a := mk(\"h\", 8080, 5)
+  const b := mk(\"h\", port: 8080, backlog: 5)
+  const c := mk(host: \"h\", backlog: 5, port: 8080)
+  const d := r.listen(\"h\", port: 80)
+  return a + b + c + d
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn named_argument_rules_are_enforced() {
+    // Each of these reports exactly one diagnostic: a failed binding must not
+    // then be re-checked positionally, or one mistake reads as several.
+    const MK: &str = "mk :: func (host: string, port: i32, backlog: i32) -> i32 { return port }\n";
+    for (call, needle) in [
+        (
+            "mk(port: 80, \"h\", 5)",
+            "a positional argument cannot follow a named one",
+        ),
+        ("mk(\"h\", prot: 80, backlog: 5)", "`mk` has no parameter named `prot`"),
+        (
+            "mk(\"h\", port: 80, port: 81)",
+            "argument for parameter `port` supplied twice",
+        ),
+        ("mk(host: \"h\", port: 80)", "missing argument for parameter `backlog`"),
+    ] {
+        let src = format!("{MK}f :: func () -> i32 {{ return {call} }}\n");
+        let s = analyze_mem(&[("main", &src)], "main");
+        let errors: Vec<&str> = s
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert!(
+            errors.iter().any(|m| m.contains(needle)),
+            "expected {needle:?} in {errors:#?}"
+        );
+        assert_eq!(errors.len(), 1, "expected one diagnostic, got {errors:#?}");
+    }
+    // A callee with no parameter *names* to bind to: a function-typed value.
+    let s = analyze_mem(
+        &[("main", "f :: func (g: func (i32) -> i32) -> i32 { return g(x: 1) }\n")],
+        "main",
+    );
+    assert!(
+        diag_contains(&s, "cannot pass argument `x` by name"),
+        "{:#?}",
+        s.diagnostics
+    );
+}
+
+#[test]
+fn a_const_generic_parameter_must_be_an_integer() {
+    // `Const` represents one kind of compile-time value: an unsigned integer.
+    // The check is at the *declaration*, so a parameter that is declared and
+    // never used is still rejected, and an `impl`'s generics — which belong to
+    // no function — are covered too.
+    for (src, needle) in [
+        (
+            "Point :: struct { x: i32, y: i32 }\nf :: func <const X: Point> () {}\n",
+            "a `const` generic parameter must have an integer type, but `X` is `Point`",
+        ),
+        (
+            "f :: func <const B: bool> () {}\n",
+            "a `const` generic parameter must have an integer type, but `B` is `bool`",
+        ),
+        (
+            "T :: struct { a: i32 }\nimpl <const X: T> T { m :: func (self: *Self) {} }\n",
+            "a `const` generic parameter must have an integer type",
+        ),
+    ] {
+        let s = analyze_mem(&[("main", src)], "main");
+        assert!(diag_contains(&s, needle), "{:#?}", s.diagnostics);
+    }
+    // The integer case that the language actually uses stays clean.
+    let s = analyze_clean("f :: func <const N: usize> (a: [N]i32) -> usize { return $len(a) }\n");
+    assert!(!s.has_errors(), "{:#?}", s.diagnostics);
+}
+
+#[test]
+fn an_array_length_travels_with_the_const_parameter() {
+    // A `[N]T` parameter keeps `N` symbolic all the way into the IR: the call
+    // site's `[3]i32` solves it for *that* instantiation, and the callee's body
+    // still says `[N]T` because it is one body for every length.
+    let s = analyze_clean(
+        "count :: func <const N: usize, T> (a: [N]T) -> usize { return $len(a) }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3, 4 }\n  return count(a)\n}\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
+    assert!(ir.contains("$len(a: [N]T): usize"), "{ir}");
+    assert!(ir.contains("(count: func([4]i32) -> usize)"), "{ir}");
 }
 
 // ===< static trait calls >===

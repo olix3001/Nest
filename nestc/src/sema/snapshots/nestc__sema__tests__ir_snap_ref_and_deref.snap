@@ -1,8 +1,10 @@
 ---
 source: src/sema/tests.rs
-expression: "ir_text(\"rd :: func (p: *i32) -> i32 {\\n  let r := &p\\n  return p.*\\n}\\n\")"
+expression: "ir_text(\"rd :: func (p: *i32, q: *mut i32) -> i32 {\\n  let r := &p\\n  let w := &mut q\\n  q.* = 1\\n  return p.*\\n}\\n\")"
 ---
-func rd(p: *i32) -> i32 {
+func rd(p: *i32, q: *mut i32) -> i32 #mutating {
   let r: **i32 = (&p: *i32): **i32
+  let w: *mut *mut i32 = (&mut q: *mut i32): *mut *mut i32
+  (q: *mut i32.*): i32 = $cast(1: comptime_int): i32
   return (p: *i32.*): i32
 }

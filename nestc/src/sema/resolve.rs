@@ -12,7 +12,7 @@
 //! enclosing namespaces (each with its `import`ed names and globs), then the
 //! prelude (builtins + the public members of `core`). The first match wins.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::FileId;
@@ -44,6 +44,7 @@ pub fn resolve_file(
         scopes: Vec::new(),
         ns_stack: vec![file_ns],
         self_ty: Vec::new(),
+        dyn_ok: HashSet::new(),
     };
     if let Some(root) = ast.root() {
         r.resolve_node(root);
@@ -65,6 +66,9 @@ struct Resolver<'a> {
     ns_stack: Vec<DefId>,
     /// `Self` targets for the enclosing `impl`/`trait` bodies.
     self_ty: Vec<DefId>,
+    /// Type nodes that sit directly under a pointer, and may therefore be a
+    /// `dyn Trait` (§3.4). Filled in on the way down, so the `dyn` sees it.
+    dyn_ok: HashSet<NodeId>,
 }
 
 impl Resolver<'_> {
@@ -154,12 +158,25 @@ impl Resolver<'_> {
                 // namespace both follow it (never the implemented trait).
                 let self_ty = for_ty.unwrap_or(ty);
                 let self_def = self.type_head_def(self_ty);
-                let host = self_def.unwrap_or_else(|| self.current_ns());
-                if let Some(sd) = self_def {
-                    self.self_ty.push(sd);
-                } else {
-                    self.self_ty.push(host);
-                }
+                // The member host is the target type's namespace when the target
+                // names one, and otherwise the anonymous `<impl>` namespace
+                // collection created for this block — the same choice collection
+                // made, so the names it parked there are the names found here.
+                let host = self_def
+                    .or_else(|| self.def_of(id))
+                    .unwrap_or_else(|| self.current_ns());
+                // A structural target (`impl <T> []T`) names no type, so
+                // collection bound `Self` in that anonymous namespace as an alias
+                // for the target's type expression; prefer it over the enclosing
+                // namespace, which `Self` has no business meaning.
+                let self_binding = self_def.or_else(|| {
+                    self.defs
+                        .get(host)
+                        .ns
+                        .get_direct(&Symbol::new("Self"))
+                        .map(|d| self.defs.resolve_alias(d))
+                });
+                self.self_ty.push(self_binding.unwrap_or(host));
                 self.ns_stack.push(host);
                 for item in items {
                     self.resolve_node(item);
@@ -248,6 +265,38 @@ impl Resolver<'_> {
                 self.pop_scope();
                 if let Some(e) = els {
                     self.resolve_node(e);
+                }
+            }
+
+            // ===< type nodes with a position rule >===
+            //
+            // `dyn Trait` is unsized: it is a type only *behind a pointer*, so
+            // `*dyn ToJson` names one and a bare `dyn ToJson` — as a variable's
+            // type, a field, a parameter, a slice element — names nothing that
+            // has a size (§3.4). The permission is granted on the way down, by
+            // the pointer, to exactly its own pointee.
+            NodeKind::PtrType { inner, .. } => {
+                self.dyn_ok.insert(inner);
+                self.resolve_node(inner);
+            }
+            NodeKind::DynType { inner } => {
+                if !self.dyn_ok.contains(&id) {
+                    self.report(
+                        id,
+                        "`dyn Trait` is unsized: use it behind a pointer, as `*dyn Trait`",
+                    );
+                }
+                self.resolve_node(inner);
+                // Only a trait has a vtable; `dyn i32` is not a trait object.
+                if let Some(Resolution::Def(d)) = self.ast.meta::<Resolution>(inner) {
+                    let d = self.defs.resolve_alias(d);
+                    if self.defs.get(d).kind != DefKind::Trait {
+                        let msg = format!(
+                            "`{}` is not a trait, so `dyn` does not apply to it",
+                            self.defs.canonical_string(d)
+                        );
+                        self.report(id, msg);
+                    }
                 }
             }
 

@@ -7,19 +7,29 @@
 //! annotated with a resolved [`Ty`] in the arena's metadata side table (read
 //! back by [`super::lower`] and the pretty-printer).
 //!
-//! The engine is Hindley–Milner unification (see [`super::ty`]) with two
-//! bootstrap-scoped simplifications, each a place a later pass slots in:
+//! The engine is Hindley–Milner unification (see [`super::ty`]) plus a **trait
+//! solver**: an operator, a method call, or a `.?` raises an [`Obligation`], and
+//! selection picks the impl that discharges it — uniformly over user `impl`s and
+//! the builtin rows of [`super::builtins`], so `i32 + i32` and `Vec3 + Vec3` go
+//! through the same machinery and differ only in which candidate wins.
 //!
-//! - **Operators are typed by the builtin numeric rule**, not by resolving the
-//!   `Add`/`Ord`/… `#lang` trait and picking an `impl`. `a + b` unifies its
-//!   operands and yields their type; comparisons yield `bool`. Operator
-//!   *overloading* for user types is the job of the (future) trait-selection
-//!   pass; this stage is correct for the primitive numeric core.
-//! - **Generics are not monomorphized.** A generic type parameter is treated as
-//!   a rigid opaque ([`Ty::Nominal`] over the param's own def), and turbofish /
-//!   `<Assoc = T>` arguments are recorded but not yet propagated into a full
-//!   substitution. Closures are typed by their signature; captures are not
-//!   threaded into the enclosing body's variables.
+//! Method resolution runs down a fixed ladder, and *which rung answered* is
+//! recorded on the call as a [`MethodRes`], because it is what lowering needs
+//! and what the receiver's type alone cannot say:
+//!
+//! 1. an inherent member of the receiver's own namespace;
+//! 2. any `impl` whose target unifies with the receiver — inherent or trait,
+//!    which is the only way to reach a method on a structural type like `[]T`;
+//! 3. a bound on a generic parameter (`<T: Summing>`) — dispatch waits for
+//!    monomorphization;
+//! 4. a trait object (`*dyn Summing`) — dispatch waits for the vtable;
+//! 5. one `@using` hop to an embedded sub-object (§3.10).
+//!
+//! What this stage deliberately leaves open: **generics are not
+//! monomorphized** — a type parameter is a rigid opaque ([`Ty::Nominal`] over
+//! the param's own def), and turbofish / `<Assoc = T>` arguments are recorded
+//! but not propagated into a full substitution. Closures are typed by their
+//! signature; captures are not threaded into the enclosing body's variables.
 
 use std::collections::{HashMap, HashSet};
 
@@ -91,8 +101,65 @@ pub struct OpResolution {
     /// The trait method the operator dispatches to (the `#lang` trait's method
     /// for a builtin, the impl's method for a user type).
     pub method: DefId,
+    /// The `#lang` trait the operator went through. Kept because [`method`] on a
+    /// user impl is the *impl's* member, whose parent is the host type — so it
+    /// no longer says which trait was meant, and `Index` vs `IndexMut` is
+    /// exactly that question.
+    ///
+    /// [`method`]: OpResolution::method
+    pub trait_def: DefId,
     /// The builtin-op tag, or `None` for a user impl.
     pub builtin: Option<BuiltinOp>,
+}
+
+/// How a method call `recv.m(args)` resolved, stamped onto the call's **callee**
+/// node (the `recv.m` field access) so [`super::lower`] can build the one shape
+/// every call has in the IR: a [`crate::ir::Expr::Call`] whose `args[0]` is the
+/// receiver.
+///
+/// The surface syntax hides three different things behind one dot — an inherent
+/// method, a vtable slot, a bound awaiting monomorphization — and only this
+/// stage knows which. Rather than leave lowering to re-derive it from the
+/// receiver's type, the answer is recorded here in the form the IR wants.
+#[derive(Debug, Clone)]
+pub struct MethodRes {
+    /// The function the call targets: an impl's member for a statically
+    /// resolved call, the trait's own declaration for a virtual or generic one.
+    pub method: DefId,
+    /// How the callee is reached.
+    pub dispatch: MethodDispatch,
+    /// The adjustment the receiver needs to become the `self` argument.
+    pub adjust: RecvAdjust,
+    /// The receiver's type *after* the adjustment — i.e. the `self` parameter's
+    /// type, which is also the first parameter of the callee's function type.
+    pub self_ty: Ty,
+}
+
+/// The dispatch kind of a resolved [`MethodRes`], mirroring
+/// [`crate::ir::Dispatch`] without the IR's already-substituted types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodDispatch {
+    /// A direct call to a known function.
+    Static,
+    /// Through the vtable of a `*dyn Trait` receiver; the payload is the trait.
+    Virtual(DefId),
+    /// Through a type parameter's bound; the payload is the trait.
+    Generic(DefId),
+}
+
+/// What lowering must do to the receiver expression to hand it to the `self`
+/// parameter (§3.4). Nest has no implicit reference-taking in the type system —
+/// the adjustment is decided here and *written out* in the IR, so `x.m()` on a
+/// `*mut Self` method is an `&mut x` the later mutability check can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvAdjust {
+    /// The receiver already has the `self` parameter's type.
+    None,
+    /// Take its address: the method wants `*Self` / `*mut Self` and the receiver
+    /// is a value.
+    Ref { mutable: bool },
+    /// Read through it: the method wants `Self` and the receiver is a pointer.
+    Deref,
 }
 
 /// Records that a node's value is converted on the way to the type the context
@@ -153,6 +220,34 @@ pub struct Upcast {
     pub target: Ty,
 }
 
+/// The arguments of a call in **parameter** order, once any named argument has
+/// been bound to the parameter it names (§5.3).
+///
+/// Only stamped on calls that actually use a named argument, so a purely
+/// positional call — the overwhelming majority — carries nothing and lowering
+/// takes its arguments as written. Binding happens here, during inference,
+/// because this is the one stage that has both the written arguments and the
+/// callee's parameter *names*; every later stage then talks about arguments by
+/// position alone.
+#[derive(Debug, Clone)]
+pub struct ArgOrder {
+    /// One entry per parameter, in declaration order.
+    pub args: Vec<NodeId>,
+}
+
+/// What binding a call's arguments to its parameters produced.
+enum ArgBinding {
+    /// A purely positional call: use the arguments exactly as written, and let
+    /// the ordinary positional checks do the rest.
+    AsWritten,
+    /// Bound, in parameter order.
+    Bound(Vec<NodeId>),
+    /// Did not bind, and a diagnostic said why. The arguments must **not** be
+    /// checked against the signature afterwards — every such check would be a
+    /// second complaint about the same mistake.
+    Failed,
+}
+
 /// Infer types for every function body in `file`, annotating each expression
 /// node with its resolved [`Ty`]. `asts` is the whole parsed program (read-only)
 /// so a field access can reach a struct declared in another file.
@@ -171,30 +266,70 @@ pub fn infer_file(
     // The set of trait defs a use site in this file may select impls of: only
     // in-scope traits are candidates (§ trait selection, Rust-style).
     let in_scope_traits = in_scope_traits(defs, prelude_globs, file_ns);
-    // Every `func` with a body is its own inference problem.
+    // Every `func` with a body is its own inference problem. A bodyless
+    // `extern("c") func` joins them: it has no body to check, but it is a real
+    // symbol whose *signature* still has to be typed for calls to it — and for
+    // the IR, which carries the declaration through (§11.3).
+    //
+    // A bodyless func that is not `extern` is a trait's requirement, not a
+    // definition. Those are typed on demand by `func_def_ty` when a call selects
+    // them, which is the only way an abstract `Self.Output` in the signature
+    // ever gets a concrete answer.
     let fns: Vec<NodeId> = ast
         .ids()
-        .filter(|&id| matches!(&ast.node(id).kind, NodeKind::FuncExpr { body: Some(_), .. }))
+        .filter(|&id| {
+            matches!(
+                &ast.node(id).kind,
+                NodeKind::FuncExpr { body: Some(_), .. }
+                    | NodeKind::FuncExpr {
+                        body: None,
+                        extern_abi: Some(_),
+                        ..
+                    }
+            )
+        })
         .collect();
-    for func in fns {
-        let mut cx = Inferer {
-            defs,
-            asts,
-            ast,
-            diags,
-            lang,
-            impls,
-            in_scope_traits: &in_scope_traits,
-            file,
-            cx: InferCtxt::new(),
-            env: HashMap::new(),
-            types: HashMap::new(),
-            ret: Ty::Void,
-            breaks: Vec::new(),
-            alias_stack: Vec::new(),
-            const_stack: Vec::new(),
-            int_values: HashMap::new(),
+    // Each pass below gets its own inference context: a `const` generic solved
+    // for one function says nothing about the next.
+    macro_rules! fresh {
+        () => {
+            Inferer {
+                defs,
+                asts,
+                ast,
+                diags,
+                lang,
+                impls,
+                in_scope_traits: &in_scope_traits,
+                file,
+                cx: InferCtxt::new(),
+                env: HashMap::new(),
+                types: HashMap::new(),
+                ret: Ty::Void,
+                breaks: Vec::new(),
+                alias_stack: Vec::new(),
+                const_stack: Vec::new(),
+                int_values: HashMap::new(),
+            }
         };
+    }
+    // Declaration-level check, once over the whole file: a `const` generic
+    // parameter's *type* is checked where it is written, not where it is used, so
+    // one that is declared and never used is still rejected. It cannot ride along
+    // with the per-function passes below for the same reason — an `impl`'s
+    // generics belong to no function.
+    {
+        let mut cx = fresh!();
+        let const_params: Vec<NodeId> = ast
+            .ids()
+            .filter(|&id| matches!(&ast.node(id).kind, NodeKind::GenericConstParam { .. }))
+            .collect();
+        for g in const_params {
+            cx.check_const_param(g);
+        }
+    }
+    for func in fns {
+        let mut cx = fresh!();
         cx.infer_func(func);
         cx.finish();
     }
@@ -338,18 +473,36 @@ impl Inferer<'_> {
             let resolved = self.record_comptime_coercion(node, resolved);
             self.ast.set_meta(node, resolved);
         }
-        self.finalize_upcasts();
+        self.finalize_metas();
     }
 
-    /// Resolve the target type recorded on each `@using` coercion, which was
-    /// captured mid-inference and may still hold unsolved variables.
-    fn finalize_upcasts(&mut self) {
+    /// Resolve the types carried by the per-node facts the stage stamped along
+    /// the way — an `@using` target, a method's `self`, an unsized pointee, a
+    /// slice coercion's result.
+    ///
+    /// Each was captured *mid*-inference, when the variables it mentions may not
+    /// have been solved yet; the node types above get finalized in the same
+    /// sweep, and these have to travel with them or lowering would read a type
+    /// that is still a `?3`.
+    fn finalize_metas(&mut self) {
         for node in self.ast.ids() {
-            let Some(up) = self.ast.meta::<Upcast>(node) else {
-                continue;
-            };
-            let target = self.cx.finalize(&up.target, &mut || {});
-            self.ast.set_meta(node, Upcast { target, ..up });
+            if let Some(up) = self.ast.meta::<Upcast>(node) {
+                let target = self.cx.finalize(&up.target, &mut || {});
+                self.ast.set_meta(node, Upcast { target, ..up });
+            }
+            if let Some(m) = self.ast.meta::<MethodRes>(node) {
+                let self_ty = self.cx.finalize(&m.self_ty, &mut || {});
+                self.ast.set_meta(node, MethodRes { self_ty, ..m });
+            }
+            if let Some(d) = self.ast.meta::<DynCoerce>(node) {
+                let concrete = self.cx.finalize(&d.concrete, &mut || {});
+                self.ast.set_meta(node, DynCoerce { concrete, ..d });
+            }
+            if let Some(sc) = self.ast.meta::<SliceCoerce>(node) {
+                let to = self.cx.finalize(&sc.to, &mut || {});
+                let range = self.cx.finalize(&sc.range, &mut || {});
+                self.ast.set_meta(node, SliceCoerce { to, range });
+            }
         }
     }
 
@@ -422,7 +575,7 @@ impl Inferer<'_> {
                 }
                 ty
             }
-            NodeKind::Unary { op, operand } => self.infer_unary(op, operand),
+            NodeKind::Unary { op, operand } => self.infer_unary(node, op, operand),
             NodeKind::Binary { op, lhs, rhs } => self.infer_binary(node, op, lhs, rhs),
             NodeKind::Tuple { elems } => {
                 if elems.is_empty() {
@@ -442,30 +595,30 @@ impl Inferer<'_> {
                 if let Some(ft) = self.field_ty(&bty, name.as_str()) {
                     return ft;
                 }
-                // `s.len` is the one field arrays and slices have (§3.2). It is
-                // not a declared `DefKind::Field`, so it is answered here and
-                // lowered to its own IR node rather than to a struct access.
-                if self.is_len_access(&bty, name.as_str()) {
-                    return Ty::usize();
-                }
-                // A field we cannot type is `Error`, not a fresh variable — a
-                // dangling variable would be a false "type annotations needed"
-                // (see `finish`). Say why, unless the base is already broken.
-                let base_ty = self.cx.resolve(&bty);
-                if !matches!(base_ty, Ty::Error) && !is_var(&base_ty) {
-                    let msg = format!(
-                        "no field `{name}` on `{}`",
-                        base_ty.display(self.defs)
-                    );
-                    self.report(node, msg);
-                }
-                Ty::Error
+                self.no_such_field(node, &bty, name.as_str())
             }
             NodeKind::TupleIndex { base, index } => {
                 let bty = self.infer_expr(base);
-                match self.autoderef(&bty) {
-                    Ty::Tuple(elems) => elems.get(index as usize).cloned().unwrap_or(Ty::Error),
-                    _ => Ty::Error,
+                if let Ty::Tuple(elems) = self.autoderef(&bty) {
+                    if let Some(t) = elems.get(index as usize) {
+                        return t.clone();
+                    }
+                    // Say the arity rather than the type: the elements are often
+                    // still unsolved variables at this point, and the count is
+                    // the whole of what went wrong.
+                    let msg = format!(
+                        "index {index} is out of range for a tuple of {} element(s)",
+                        elems.len()
+                    );
+                    self.report(node, msg);
+                    return Ty::Error;
+                }
+                // A tuple struct's positional members are real fields named
+                // `0`, `1`, … (see `collect_struct`), so `p.0` outside a tuple
+                // is the very lookup a named field access does (§3.3).
+                match self.field_ty(&bty, &index.to_string()) {
+                    Some(ft) => ft,
+                    None => self.no_such_field(node, &bty, &index.to_string()),
                 }
             }
             NodeKind::Call { callee, args } => self.infer_call(callee, &args),
@@ -479,10 +632,14 @@ impl Inferer<'_> {
             }
             NodeKind::Index { base, index } => {
                 let bty = self.infer_expr(base);
-                self.infer_expr(index);
+                let ity = self.infer_expr(index);
                 match self.autoderef(&bty) {
+                    // Indexing the built-in sequences is the language's own: the
+                    // element type is right there in the type (§3.2).
                     Ty::Slice { inner, .. } | Ty::Array { inner, .. } => *inner,
-                    _ => Ty::Error,
+                    // Anything else indexes through `Index` (§6.13): the result
+                    // is the impl's `Output`, and `a[i]` means `index(&a, i).*`.
+                    other => self.infer_index_op(node, other, ity),
                 }
             }
             NodeKind::Slice { base, range } => {
@@ -771,7 +928,11 @@ impl Inferer<'_> {
                 self.bind_pattern(pattern, &vty);
             }
             NodeKind::Assign { place, value, .. } => {
-                let pty = self.infer_expr(place);
+                // `a[i] = v` on a user type is the *write* side of indexing:
+                // `IndexMut.index_mut`, not `Index.index` (§6.13). This is the
+                // only place that knows the index expression is a place, so the
+                // trait swap happens here rather than in `infer_expr`.
+                let pty = self.infer_index_place(place);
                 let vty = self.infer_expr(value);
                 self.expect(value, &vty, &pty);
             }
@@ -814,7 +975,7 @@ impl Inferer<'_> {
 
     // ===< operators >===
 
-    fn infer_unary(&mut self, op: UnOp, operand: NodeId) -> Ty {
+    fn infer_unary(&mut self, node: NodeId, op: UnOp, operand: NodeId) -> Ty {
         let oty = self.infer_expr(operand);
         match op {
             UnOp::Ref => Ty::Ptr {
@@ -832,14 +993,107 @@ impl Inferer<'_> {
                 if let Some(v) = self.int_values.remove(&operand) {
                     self.int_values.insert(operand, -v);
                 }
-                oty
+                self.infer_prefix_op(node, "neg", "neg", oty)
             }
-            UnOp::BitNot => oty,
+            UnOp::BitNot => self.infer_prefix_op(node, "bitnot", "bitnot", oty),
+            // `!` is not a trait: boolean negation is the language's own, on
+            // `bool` only (§6.13, "what is not a trait method").
             UnOp::Not => {
                 self.expect(operand, &oty, &Ty::Bool);
                 Ty::Bool
             }
         }
+    }
+
+    /// Type a prefix operator (`-a`, `~a`) through its `#lang` trait, exactly
+    /// the way [`Inferer::infer_arith_op`] types a binary one: register the
+    /// `Self.Output` projection and return the variable it solves.
+    fn infer_prefix_op(&mut self, node: NodeId, lang: &str, method: &str, oty: Ty) -> Ty {
+        let Some(trait_def) = self.lang.get(lang) else {
+            return oty;
+        };
+        let trait_def = self.defs.resolve_alias(trait_def);
+        let out = self.cx.fresh();
+        // Same numeric-core threading as the binaries: a primitive (or still
+        // unknown) operand keeps its own type through the operator, so a literal
+        // flowing into `-x` is not cut off from what pins `x`.
+        if !matches!(self.cx.shallow(&oty), Ty::Nominal { .. }) {
+            let _ = self.cx.unify(&out, &oty);
+        }
+        self.cx.register(Obligation::Projection {
+            self_ty: oty,
+            trait_def,
+            args: Vec::new(),
+            assoc: Symbol::new("Output"),
+            out: out.clone(),
+            origin: node,
+            method: Some(Symbol::new(method)),
+        });
+        out
+    }
+
+    /// Type an assignment's place, routing a user-type `a[i]` through
+    /// `IndexMut` instead of `Index`. Every other place — including indexing an
+    /// array or a slice, which needs no trait — types as an ordinary expression.
+    fn infer_index_place(&mut self, place: NodeId) -> Ty {
+        let NodeKind::Index { base, index } = self.ast.node(place).kind.clone() else {
+            return self.infer_expr(place);
+        };
+        let bty = self.infer_expr(base);
+        let ity = self.infer_expr(index);
+        let head = self.autoderef(&bty);
+        if matches!(head, Ty::Slice { .. } | Ty::Array { .. } | Ty::Error) {
+            let ty = match head {
+                Ty::Slice { inner, .. } | Ty::Array { inner, .. } => *inner,
+                _ => Ty::Error,
+            };
+            self.types.insert(place, ty.clone());
+            return ty;
+        }
+        let Some(trait_def) = self.lang.get("index_mut") else {
+            return Ty::Error;
+        };
+        let trait_def = self.defs.resolve_alias(trait_def);
+        let out = self.cx.fresh();
+        self.cx.register(Obligation::Projection {
+            self_ty: head,
+            trait_def,
+            args: vec![ity],
+            assoc: Symbol::new("Output"),
+            out: out.clone(),
+            origin: place,
+            method: Some(Symbol::new("index_mut")),
+        });
+        self.types.insert(place, out.clone());
+        out
+    }
+
+    /// Type `a[i]` on a type that is not an array or a slice, through the
+    /// `#lang("index")` trait: `Index.<Idx>`'s `Output` is the element type, and
+    /// lowering emits `Index.index(&a, i).*` for it (§6.13).
+    ///
+    /// The write side (`a[i] = v` through `IndexMut`) is decided at the
+    /// assignment, which is the only place that knows this node is a *place*;
+    /// see [`Inferer::infer_stmt`]'s `Assign` arm.
+    fn infer_index_op(&mut self, node: NodeId, base: Ty, index: Ty) -> Ty {
+        if matches!(base, Ty::Error) {
+            return Ty::Error;
+        }
+        let Some(trait_def) = self.lang.get("index") else {
+            return Ty::Error;
+        };
+        let trait_def = self.defs.resolve_alias(trait_def);
+        let out = self.cx.fresh();
+        self.cx.register(Obligation::Projection {
+            self_ty: base,
+            trait_def,
+            args: vec![index],
+            assoc: Symbol::new("Output"),
+            out: out.clone(),
+            origin: node,
+            method: Some(Symbol::new("index")),
+        });
+        out
     }
 
     fn infer_binary(&mut self, node: NodeId, op: BinOp, lhs: NodeId, rhs: NodeId) -> Ty {
@@ -860,31 +1114,39 @@ impl Inferer<'_> {
                 self.check_cmp_bound(node, op, &lty);
                 Ty::Bool
             }
-            // Arithmetic `+ - * / %` dispatch through the operator trait: the
-            // result is the projected `Output` of the selected impl, chosen
-            // uniformly for primitives (builtin) and user types (§6). Bitwise /
-            // shift stay a primitive `Binary` in the bootstrap.
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-                self.infer_arith_op(node, op, lty, rty)
-            }
-            _ => {
-                self.expect(rhs, &rty, &lty);
-                lty
-            }
+            // Arithmetic, bitwise, and shift binaries all dispatch through
+            // their operator trait: the result is the projected `Output` of the
+            // selected impl, chosen uniformly for primitives (a builtin row) and
+            // user types (an `impl`) — §6.13.
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Rem
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::Shl
+            | BinOp::Shr => self.infer_arith_op(node, op, lty, rty),
         }
     }
 
     /// For a comparison whose operands are a concrete nominal type, require the
-    /// corresponding equality/ordering trait via a [`Obligation::Trait`] bound.
-    /// A primitive or still-unknown operand is left alone (primitives are the
-    /// language's own comparison).
+    /// corresponding equality/ordering trait via a [`Obligation::Trait`] bound,
+    /// and stamp the method the selected impl supplies so lowering emits the
+    /// call (`Eq.eq` for `==` / `!=`, `Ord.cmp` for the four relations — §6.13).
+    ///
+    /// A primitive or still-unknown operand is left alone: comparing the numeric
+    /// core is the language's own, and lowering keeps it a primitive
+    /// [`crate::ir::Expr::Binary`] rather than routing an `i32 < i32` through a
+    /// three-way `cmp` the machine would only have to undo.
     fn check_cmp_bound(&mut self, node: NodeId, op: BinOp, lty: &Ty) {
         if !matches!(self.cx.shallow(lty), Ty::Nominal { .. }) {
             return;
         }
-        let lang = match op {
-            BinOp::Eq | BinOp::Ne => "eq",
-            _ => "ord",
+        let (lang, method) = match op {
+            BinOp::Eq | BinOp::Ne => ("eq", "eq"),
+            _ => ("ord", "cmp"),
         };
         let Some(trait_def) = self.lang.get(lang) else {
             return;
@@ -894,7 +1156,7 @@ impl Inferer<'_> {
             trait_def: self.defs.resolve_alias(trait_def),
             args: Vec::new(),
             origin: node,
-            stamp: None,
+            stamp: Some(Symbol::new(method)),
         });
     }
 
@@ -904,20 +1166,25 @@ impl Inferer<'_> {
     /// homogeneous (the numeric core and bootstrap operator overloading both
     /// have `Rhs = Self`), matching the pre-trait numeric behavior.
     fn infer_arith_op(&mut self, node: NodeId, op: BinOp, lty: Ty, rty: Ty) -> Ty {
-        self.expect(node, &rty, &lty);
         let Some(trait_def) = self.lang.get(binop_lang(op)) else {
             // No operator trait registered: fall back to primitive typing.
+            self.expect(node, &rty, &lty);
             return lty;
         };
         let trait_def = self.defs.resolve_alias(trait_def);
         let out = self.cx.fresh();
-        // Numeric-core threading: for a primitive or still-unknown operand the
-        // result *is* the operand type (`Output = Self`), so link them eagerly.
-        // This keeps the pre-trait behavior — a literal's type flows through a
-        // chain of `+`s and back from the return — even while the projection is
-        // still deferred. A concrete *nominal* operand is left to the impl,
-        // whose `Output` may legitimately differ from `Self`.
+        // Numeric-core threading: for a primitive or still-unknown operand both
+        // operands are the same type and the result *is* that type
+        // (`Output = Self`), so link them eagerly. This keeps a literal's type
+        // flowing through a chain of `+`s and back from the return, even while
+        // the projection is still deferred.
+        //
+        // A concrete *nominal* operand is left entirely to the impl: its `Rhs`
+        // need not be `Self` (`impl Shl.<i32> for BitSet` shifts by an `i32`)
+        // and its `Output` need not be either. Forcing either here would reject
+        // every heterogeneous operator before selection got a chance to look.
         if !matches!(self.cx.shallow(&lty), Ty::Nominal { .. }) {
+            self.expect(node, &rty, &lty);
             let _ = self.cx.unify(&out, &lty);
         }
         self.cx.register(Obligation::Projection {
@@ -927,7 +1194,7 @@ impl Inferer<'_> {
             assoc: Symbol::new("Output"),
             out: out.clone(),
             origin: node,
-            op: Some(op),
+            method: Some(Symbol::new(binop_method(op))),
         });
         out
     }
@@ -983,6 +1250,7 @@ impl Inferer<'_> {
                                     *origin,
                                     OpResolution {
                                         method,
+                                        trait_def: *trait_def,
                                         builtin: None,
                                     },
                                 );
@@ -1013,19 +1281,26 @@ impl Inferer<'_> {
                 assoc,
                 out,
                 origin,
-                op,
+                method,
             } => match self.select(self_ty, *trait_def, args) {
                 Select::Ok(choice) => {
                     let assoc_ty = match choice {
                         Choice::Builtin(row) => self.builtin_output(row, self_ty),
                         Choice::User(i) => {
                             let map = self.commit_impl(i, self_ty, args);
+                            // The impl is chosen; now hold the operands to the
+                            // signature it actually declares. Nothing before
+                            // this point could: which `Rhs` / `Idx` applies is a
+                            // property of the winning impl, not of the operator.
+                            if let Some(name) = method {
+                                self.check_op_operands(i, name, self_ty, args, &map, *origin);
+                            }
                             self.user_assoc(i, *origin, assoc, &map)
                         }
                     };
                     self.expect(*origin, &assoc_ty, out);
-                    if let Some(binop) = op {
-                        self.stamp_op(*origin, choice, *trait_def, *binop);
+                    if let Some(name) = method {
+                        self.stamp_op(*origin, choice, *trait_def, name);
                     }
                     Outcome::Solved
                 }
@@ -1425,6 +1700,41 @@ impl Inferer<'_> {
         map
     }
 
+    /// Unify an operator's operands with the parameters of the method the
+    /// selected impl supplies.
+    ///
+    /// The receiver goes through [`Inferer::unify_self_param`] because an
+    /// operator's `self` may be declared by pointer (`Index.index(self: *Self,
+    /// …)`) while the obligation's self type is the value. The remaining
+    /// parameters line up with the obligation's trait arguments — the `rhs` of a
+    /// binary, the index of an `a[i]` — and are checked strictly, so
+    /// `bits << "x"` is a type error against the impl's own `Rhs`.
+    fn check_op_operands(
+        &mut self,
+        i: usize,
+        name: &Symbol,
+        self_ty: &Ty,
+        args: &[Ty],
+        map: &Subst,
+        origin: NodeId,
+    ) {
+        let Some(&m) = self.impls.impls[i].members.get(name) else {
+            return;
+        };
+        let sig = self.func_def_ty(m);
+        let sig = self.subst_type_params(&sig, map);
+        let Ty::Func { params, .. } = self.cx.shallow(&sig) else {
+            return;
+        };
+        if let Some(p) = params.first() {
+            let p = p.clone();
+            self.unify_self_param(&p, self_ty);
+        }
+        for (p, a) in params.iter().skip(1).zip(args) {
+            self.expect(origin, a, p);
+        }
+    }
+
     /// The associated type `assoc` a user impl binds, with the impl's generics
     /// substituted. Reports if the impl fails to bind it.
     fn user_assoc(
@@ -1452,8 +1762,11 @@ impl Inferer<'_> {
 
     /// Stamp how an operator resolved onto its node, so lowering emits a uniform
     /// call (builtin-tagged for primitives).
-    fn stamp_op(&mut self, origin: NodeId, choice: Choice, trait_def: DefId, op: BinOp) {
+    fn stamp_op(&mut self, origin: NodeId, choice: Choice, trait_def: DefId, name: &Symbol) {
         let (method, builtin) = match choice {
+            // A builtin's callee is the `#lang` trait's own declaration: there
+            // is no impl to point at, and the [`BuiltinOp`] tag is what codegen
+            // reads anyway.
             Choice::Builtin(row) => (
                 self.defs
                     .get(trait_def)
@@ -1463,16 +1776,17 @@ impl Inferer<'_> {
                     .copied(),
                 Some(row.op),
             ),
-            Choice::User(i) => (
-                self.impls.impls[i]
-                    .members
-                    .get(&Symbol::new(binop_method(op)))
-                    .copied(),
-                None,
-            ),
+            Choice::User(i) => (self.impls.impls[i].members.get(name).copied(), None),
         };
         if let Some(method) = method {
-            self.ast.set_meta(origin, OpResolution { method, builtin });
+            self.ast.set_meta(
+                origin,
+                OpResolution {
+                    method,
+                    trait_def,
+                    builtin,
+                },
+            );
         }
     }
 
@@ -1592,10 +1906,8 @@ impl Inferer<'_> {
         };
         // A call whose callee names a type is a construction, not a function call.
         if let Some(def) = self.callee_type_def(callee) {
-            for a in args {
-                self.infer_expr(*a);
-            }
             let nominal = self.nominal_of(def);
+            self.check_construction(callee, &nominal, args);
             self.types.insert(callee, nominal.clone());
             return nominal;
         }
@@ -1608,32 +1920,57 @@ impl Inferer<'_> {
                 // Inherent (or trait-impl) method already collected into the
                 // receiver type's namespace: the fast path.
                 if let Some(m) = self.method_def(&recv, name.as_str()) {
-                    return self.infer_method_call(callee, &recv, m, args, &targs);
+                    return self.infer_method_call(
+                        callee,
+                        &recv,
+                        m,
+                        MethodDispatch::Static,
+                        args,
+                        &targs,
+                    );
                 }
-                // Otherwise search in-scope trait impls whose self type unifies
-                // with the receiver — the only way to reach a method on a
-                // structural receiver (`[]T`, a range), whose impl parks its
+                // Otherwise search every impl whose self type unifies with the
+                // receiver — the only way to reach a method on a structural
+                // receiver (`[]T`, `[N]T`, a range), whose impl parks its
                 // members outside any nominal namespace.
-                if let Some(m) = self.trait_method_def(&recv, name.as_str()) {
-                    return self.infer_method_call(callee, &recv, m, args, &targs);
+                if let Some(m) = self.impl_method_def(&recv, name.as_str()) {
+                    // The impl was selected right here, so this is a direct
+                    // call even though the method came from a trait.
+                    return self.infer_method_call(
+                        callee,
+                        &recv,
+                        m,
+                        MethodDispatch::Static,
+                        args,
+                        &targs,
+                    );
                 }
                 // A method on a bounded type parameter resolves in the bound:
                 // `<I: Summing>` makes `it.total()` mean `Summing.total`, with
                 // the concrete impl picked once `I` is instantiated.
                 if let Some(m) = self.bound_method_def(&recv, name.as_str()) {
-                    return self.infer_method_call(callee, &recv, m, args, &targs);
+                    let d = self.method_dispatch(m, MethodDispatch::Generic);
+                    return self.infer_method_call(callee, &recv, m, d, args, &targs);
                 }
                 // A method on a trait object resolves in the trait itself; which
                 // impl runs is a vtable lookup a later stage performs.
                 if let Some(m) = self.dyn_method_def(&recv, name.as_str()) {
-                    return self.infer_method_call(callee, &recv, m, args, &targs);
+                    let d = self.method_dispatch(m, MethodDispatch::Virtual);
+                    return self.infer_method_call(callee, &recv, m, d, args, &targs);
                 }
                 // Last, the one ergonomic exception `@using` grants (§3.10): a
                 // method the outer struct does not have resolves on the upcast
                 // target, with the receiver bound to the embedded sub-object.
                 if let Some((m, up)) = self.using_method_def(&recv, name.as_str()) {
                     self.ast.set_meta(base, up.clone());
-                    return self.infer_method_call(callee, &up.target, m, args, &targs);
+                    return self.infer_method_call(
+                        callee,
+                        &up.target,
+                        m,
+                        MethodDispatch::Static,
+                        args,
+                        &targs,
+                    );
                 }
                 // Nothing found. A field holding a function is still a valid
                 // callee, so only complain when there is no such member at all.
@@ -1664,11 +2001,211 @@ impl Inferer<'_> {
                 // is, so it becomes a variable the context solves.
                 let inst = self.open_trait_self(callee, def, &inst, &map);
                 self.types.insert(callee, inst.clone());
-                return self.apply_call(callee, &inst, args);
+                // Named arguments are bound to their parameters here, so
+                // `apply_call` — and every stage after it — sees one positional
+                // list in declaration order.
+                let args = match self.bind_args(callee, def, args) {
+                    ArgBinding::AsWritten => args.to_vec(),
+                    ArgBinding::Bound(a) => a,
+                    ArgBinding::Failed => {
+                        self.infer_args_only(args);
+                        return match self.cx.shallow(&inst) {
+                            Ty::Func { ret, .. } => *ret,
+                            _ => Ty::Error,
+                        };
+                    }
+                };
+                return self.apply_call(callee, &inst, &args);
             }
         }
         let cty = self.infer_expr(callee);
+        self.reject_named_args(
+            args,
+            "this call goes through a function value, which has parameter types but no parameter names",
+        );
         self.apply_call(callee, &cty, args)
+    }
+
+    /// `Pair(1, 2)` — a call whose callee names a type builds a value of it
+    /// (§3.3). Only a **tuple** struct is built this way: a record struct is
+    /// built with a composite literal, whose fields are checked where the
+    /// literal is inferred, and a unit struct takes no arguments at all.
+    ///
+    /// The positional arguments are checked against the declared field types,
+    /// so `Pair(1, 2)` on a `struct (i32, i32)` pins its literals to `i32`
+    /// rather than leaving them at the default integer type.
+    fn check_construction(&mut self, callee: NodeId, nominal: &Ty, args: &[NodeId]) {
+        self.reject_named_args(
+            args,
+            "a tuple struct's fields are positions — use a composite literal to build one by field name",
+        );
+        let Some(fields) = self.tuple_struct_tys(nominal) else {
+            // Not a tuple struct: still infer the arguments so their own errors
+            // are reported, then say why the call shape is wrong.
+            for a in args {
+                self.infer_expr(*a);
+            }
+            if !args.is_empty() {
+                let msg = format!(
+                    "`{}` is not a tuple struct, so it cannot be constructed by a call — use a composite literal",
+                    nominal.display(self.defs)
+                );
+                self.report(callee, msg);
+            }
+            return;
+        };
+        if fields.len() != args.len() {
+            for a in args {
+                self.infer_expr(*a);
+            }
+            let msg = format!(
+                "`{}` has {} field(s) but {} were supplied",
+                nominal.display(self.defs),
+                fields.len(),
+                args.len()
+            );
+            self.report(callee, msg);
+            return;
+        }
+        for (&a, want) in args.iter().zip(&fields) {
+            let got = self.infer_expr(a);
+            self.expect(a, &got, want);
+        }
+    }
+
+    /// The name a call argument was written with, if it was written by name.
+    fn arg_name(&self, arg: NodeId) -> Option<Symbol> {
+        match &self.ast.node(arg).kind {
+            NodeKind::Arg { name, .. } => name.clone(),
+            _ => None,
+        }
+    }
+
+    /// The **value** parameter names of a function def, in declaration order.
+    ///
+    /// A leading `self` is excluded: a method call's receiver is not one of its
+    /// written arguments, so the names line up with `args` either way.
+    fn func_param_names(&self, def: DefId) -> Option<Vec<Symbol>> {
+        let d = self.defs.get(def);
+        let (file, node) = (d.file?, d.node?);
+        let ast = &self.asts[&file];
+        let rhs = match &ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let NodeKind::FuncExpr { params, .. } = &ast.node(rhs).kind else {
+            return None;
+        };
+        Some(
+            params
+                .iter()
+                .filter_map(|&p| match &ast.node(p).kind {
+                    NodeKind::Param { name, .. } if name.as_str() != "self" => Some(name.clone()),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// Bind a call's arguments to `def`'s parameters and return them in
+    /// **parameter** order, stamping the result on `callee` for lowering (§5.3).
+    ///
+    /// Positional arguments bind by position; a named one binds to the parameter
+    /// it names. Once a named argument appears the rest of the call must also be
+    /// named — a positional argument after one has no position left to mean,
+    /// since the named arguments before it may have claimed any slot.
+    ///
+    /// Returns `None` for a purely positional call, which needs no reordering and
+    /// nothing the positional path does not already check, and for a call that
+    /// does not bind, having reported why.
+    fn bind_args(&mut self, callee: NodeId, def: DefId, args: &[NodeId]) -> ArgBinding {
+        if !args.iter().any(|&a| self.arg_name(a).is_some()) {
+            return ArgBinding::AsWritten;
+        }
+        let Some(names) = self.func_param_names(def) else {
+            return ArgBinding::AsWritten;
+        };
+        let mut slots: Vec<Option<NodeId>> = vec![None; names.len()];
+        let mut seen_named = false;
+        for (i, &a) in args.iter().enumerate() {
+            match self.arg_name(a) {
+                None => {
+                    if seen_named {
+                        self.report(
+                            a,
+                            "a positional argument cannot follow a named one — once a call names \
+                             an argument, the rest must be named too",
+                        );
+                        return ArgBinding::Failed;
+                    }
+                    // A surplus positional argument is an arity error; let the
+                    // arity check below word it.
+                    match slots.get_mut(i) {
+                        Some(slot) => *slot = Some(a),
+                        None => return ArgBinding::Failed,
+                    }
+                }
+                Some(n) => {
+                    seen_named = true;
+                    let Some(idx) = names.iter().position(|p| *p == n) else {
+                        let msg = format!(
+                            "`{}` has no parameter named `{n}`",
+                            self.defs.canonical_string(def)
+                        );
+                        self.report(a, msg);
+                        return ArgBinding::Failed;
+                    };
+                    if slots[idx].is_some() {
+                        let msg = format!("argument for parameter `{n}` supplied twice");
+                        self.report(a, msg);
+                        return ArgBinding::Failed;
+                    }
+                    slots[idx] = Some(a);
+                }
+            }
+        }
+        // Naming arguments makes "3 of 4 supplied" unhelpful — say which.
+        let missing: Vec<String> = slots
+            .iter()
+            .zip(&names)
+            .filter(|(s, _)| s.is_none())
+            .map(|(_, n)| format!("`{n}`"))
+            .collect();
+        if !missing.is_empty() {
+            let msg = format!("missing argument for parameter {}", missing.join(", "));
+            self.report(callee, msg);
+            return ArgBinding::Failed;
+        }
+        let ordered: Vec<NodeId> = slots.into_iter().flatten().collect();
+        self.ast.set_meta(
+            callee,
+            ArgOrder {
+                args: ordered.clone(),
+            },
+        );
+        ArgBinding::Bound(ordered)
+    }
+
+    /// Infer every argument for its own sake, without checking any of them
+    /// against a signature. Used after a binding failure: the arguments may well
+    /// contain errors of their own worth reporting, but comparing them to
+    /// parameters they were never matched to would not be.
+    fn infer_args_only(&mut self, args: &[NodeId]) {
+        for &a in args {
+            self.infer_expr(a);
+        }
+    }
+
+    /// Report any named argument on a call that cannot accept one — a call through
+    /// a function-typed value or field, which carries types but no parameter
+    /// names, and a tuple-struct construction, whose fields are positions.
+    fn reject_named_args(&mut self, args: &[NodeId], what: &str) {
+        for &a in args {
+            if let Some(n) = self.arg_name(a) {
+                let msg = format!("cannot pass argument `{n}` by name: {what}");
+                self.report(a, msg);
+            }
+        }
     }
 
     /// Infer the arguments and unify them against a (already-instantiated) callee
@@ -1712,12 +2249,21 @@ impl Inferer<'_> {
         (self.defs.get(m).kind == DefKind::Func).then_some(m)
     }
 
-    /// Resolve a method `name` by searching in-scope trait impls whose self type
-    /// unifies with the receiver. Used when the method is not an inherent /
-    /// namespace member — notably for structural receivers (`[]T`, a range),
-    /// whose impls have no host namespace. Concrete impls beat generic; a tie is
-    /// treated as unresolved (no dispatch).
-    fn trait_method_def(&mut self, recv: &Ty, name: &str) -> Option<DefId> {
+    /// Resolve a method `name` by searching every `impl` whose self type unifies
+    /// with the receiver — inherent impls (`impl <T> []T { len :: … }`) and
+    /// in-scope trait impls alike.
+    ///
+    /// This is the only way to reach a method on a **structural** receiver
+    /// (`[]T`, `[N]T`, a range): those types have no namespace to hang members
+    /// off, so their impls park members anonymously and are found by unifying
+    /// the target instead of by name. It is what makes `s.len()` on a slice work
+    /// without the compiler knowing anything about `len`.
+    ///
+    /// Ranking, most specific first: an **inherent** impl beats a trait impl —
+    /// a type's own method is not something a trait can take over — and a
+    /// concrete target beats a blanket one. A tie is treated as unresolved: two
+    /// equally specific candidates is a question the program has to answer.
+    fn impl_method_def(&mut self, recv: &Ty, name: &str) -> Option<DefId> {
         let s = self.cx.shallow(recv);
         let s = self.autoderef(&s);
         if matches!(s, Ty::Error) || is_var(&s) {
@@ -1728,25 +2274,32 @@ impl Inferer<'_> {
         let mut ambiguous = false;
         for i in 0..self.impls.impls.len() {
             let imp = self.impls.impls[i].clone();
-            let Some(td) = imp.trait_def else { continue };
-            if !self.in_scope_traits.contains(&td) {
-                continue;
-            }
-            // An impl that does not override the member still provides it when
-            // the trait declared a default body (§ trait defaults).
-            let Some(method) = imp
-                .members
-                .get(&sym)
-                .copied()
-                .or_else(|| self.trait_default_method(td, &sym))
-            else {
-                continue;
+            let method = match imp.trait_def {
+                // An impl that does not override the member still provides it
+                // when the trait declared a default body (§ trait defaults).
+                Some(td) => {
+                    if !self.in_scope_traits.contains(&td) {
+                        continue;
+                    }
+                    imp.members
+                        .get(&sym)
+                        .copied()
+                        .or_else(|| self.trait_default_method(td, &sym))
+                }
+                None => imp.members.get(&sym).copied(),
             };
+            let Some(method) = method else { continue };
             if self.defs.get(method).kind != DefKind::Func {
                 continue;
             }
             if self.trial_impl(i, &s, &[]) {
-                let score = if imp.self_is_generic() { 1 } else { 2 };
+                let inherent = imp.trait_def.is_none();
+                let score = match (inherent, imp.self_is_generic()) {
+                    (true, false) => 4,
+                    (true, true) => 3,
+                    (false, false) => 2,
+                    (false, true) => 1,
+                };
                 match best {
                     Some((bs, _)) if bs > score => {}
                     Some((bs, _)) if bs == score => ambiguous = true,
@@ -1815,21 +2368,55 @@ impl Inferer<'_> {
     /// generics unsolved. So try the direct unification first, then `*Self`
     /// against a value receiver (the call takes its address), then a value
     /// `self` against a pointer receiver (the call derefs it).
+    ///
+    /// Each attempt unifies **receiver into parameter**, in that order: the
+    /// receiver is the value and the parameter is the slot it flows into, which
+    /// is what lets a `[]mut T` call a method declared on `[]T` — dropping a
+    /// write permission is safe, and only this direction says so.
     fn unify_self_param(&mut self, param: &Ty, recv: &Ty) {
         let snap = self.cx.snapshot();
-        if self.cx.unify(param, recv).is_ok() {
+        if self.cx.unify(recv, param).is_ok() {
             return;
         }
         self.cx.rollback(snap);
         if let Ty::Ptr { inner, .. } = self.cx.shallow(param) {
             let snap = self.cx.snapshot();
-            if self.cx.unify(&inner, recv).is_ok() {
+            if self.cx.unify(recv, &inner).is_ok() {
                 return;
             }
             self.cx.rollback(snap);
         }
         if let Ty::Ptr { inner, .. } = self.cx.shallow(recv) {
-            let _ = self.cx.unify(param, &inner);
+            let _ = self.cx.unify(&inner, param);
+        }
+    }
+
+    /// Which adjustment [`Inferer::unify_self_param`] settled on, read back off
+    /// the solved types: a pointer parameter with a value receiver took its
+    /// address, a value parameter with a pointer receiver read through it.
+    fn recv_adjust(&mut self, param: &Ty, recv: &Ty) -> RecvAdjust {
+        let p = self.cx.shallow(param);
+        let r = self.cx.shallow(recv);
+        match (&p, &r) {
+            (Ty::Ptr { mutable, .. }, other) if !matches!(other, Ty::Ptr { .. }) => {
+                RecvAdjust::Ref { mutable: *mutable }
+            }
+            (other, Ty::Ptr { .. }) if !matches!(other, Ty::Ptr { .. }) => RecvAdjust::Deref,
+            _ => RecvAdjust::None,
+        }
+    }
+
+    /// The dispatch tag for a call that landed on a trait's own declaration:
+    /// `wrap` applied to the owning trait, or plain [`MethodDispatch::Static`]
+    /// if the method turns out not to be a trait member after all.
+    fn method_dispatch(
+        &self,
+        method: DefId,
+        wrap: fn(DefId) -> MethodDispatch,
+    ) -> MethodDispatch {
+        match self.defs.get(method).parent {
+            Some(p) if self.defs.get(p).kind == DefKind::Trait => wrap(p),
+            _ => MethodDispatch::Static,
         }
     }
 
@@ -1975,7 +2562,7 @@ impl Inferer<'_> {
         let target = self.field_ty(&s, self.defs.get(field).name.as_str())?;
         let method = self
             .method_def(&target, name)
-            .or_else(|| self.trait_method_def(&target, name))?;
+            .or_else(|| self.impl_method_def(&target, name))?;
         // The receiver lowers to the sub-object itself (`e.t` / `p.*.t`); the
         // method's own `*Self` parameter re-addresses it as usual, so this is
         // never the pointer form of the coercion.
@@ -1997,6 +2584,7 @@ impl Inferer<'_> {
         callee: NodeId,
         recv: &Ty,
         method: super::def::DefId,
+        dispatch: MethodDispatch,
         args: &[NodeId],
         targs: &[NodeId],
     ) -> Ty {
@@ -2011,18 +2599,46 @@ impl Inferer<'_> {
         let Ty::Func { params, ret } = self.cx.shallow(&inst) else {
             return Ty::Error;
         };
-        // Bind the `self` parameter to the receiver.
+        // Bind the `self` parameter to the receiver, and record what the call
+        // site has to do to the receiver expression to produce it.
         if let Some(self_param) = params.first() {
             let p = self_param.clone();
             self.unify_self_param(&p, recv);
+            let adjust = self.recv_adjust(&p, recv);
+            self.ast.set_meta(
+                callee,
+                MethodRes {
+                    method,
+                    dispatch,
+                    adjust,
+                    self_ty: self.cx.resolve(&p),
+                },
+            );
         }
         // Unify the remaining parameters with the call arguments.
         let value_params = &params[params.len().min(1)..];
+        let args = match self.bind_args(callee, method, args) {
+            ArgBinding::AsWritten => args.to_vec(),
+            ArgBinding::Bound(a) => a,
+            ArgBinding::Failed => {
+                self.infer_args_only(args);
+                return *ret;
+            }
+        };
+        let args = &args[..];
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_expr(*a)).collect();
         if value_params.len() == arg_tys.len() {
             for (p, (arg_node, aty)) in value_params.iter().zip(args.iter().zip(&arg_tys)) {
                 self.expect(*arg_node, aty, p);
             }
+        } else {
+            let msg = format!(
+                "`{}` takes {} argument(s) but {} were supplied",
+                self.defs.get(method).name,
+                value_params.len(),
+                arg_tys.len()
+            );
+            self.report(callee, msg);
         }
         *ret
     }
@@ -2126,6 +2742,31 @@ impl Inferer<'_> {
 
     /// The declared type of a `<const N: T>` parameter — what `N` is worth as a
     /// value in the body, and what an explicit argument must satisfy.
+    /// Check one `<const N: T>` declaration.
+    ///
+    /// A `const` generic is a compile-time *value* that takes part in type
+    /// identity — `[3]i32` and `[4]i32` are different types (§3.2, §5) — and
+    /// [`Const`] represents exactly one kind of value: an unsigned integer.
+    /// Admitting a struct or an array here would mean teaching that little
+    /// lattice structured values, structural equality, and a mangling, for no
+    /// gain the language asks for. So anything but an integer is rejected at the
+    /// declaration rather than silently degrading to a `Const::Error` at the
+    /// first use.
+    fn check_const_param(&mut self, node: NodeId) {
+        let NodeKind::GenericConstParam { name, ty } = self.ast.node(node).kind.clone() else {
+            return;
+        };
+        let t = self.ty_from_node(ty);
+        if matches!(self.cx.shallow(&t), Ty::Int { .. } | Ty::Error) {
+            return;
+        }
+        let msg = format!(
+            "a `const` generic parameter must have an integer type, but `{name}` is `{}`",
+            self.cx.resolve(&t).display(self.defs)
+        );
+        self.report(node, msg);
+    }
+
     fn const_param_ty(&mut self, param: DefId) -> Ty {
         let d = self.defs.get(param);
         let (Some(file), Some(node)) = (d.file, d.node) else {
@@ -2588,7 +3229,8 @@ impl Inferer<'_> {
     }
 
     /// `$len` takes exactly one array or slice; anything else has no length to
-    /// report.
+    /// report. A pointer to one counts — `core`'s `Len` impls take `self` by
+    /// pointer and hand it straight to `$len`.
     fn check_len_intrinsic(&mut self, node: NodeId, args: &[NodeId], arg_tys: &[Ty]) {
         let [arg] = args else {
             self.report(node, "`$len` takes exactly one argument");
@@ -2596,7 +3238,7 @@ impl Inferer<'_> {
         };
         let ty = self.autoderef(&arg_tys[0]);
         // An unsolved receiver is not yet wrong; a `[N]T` / `[]T` is right.
-        if is_len_field(&ty, "len") || matches!(ty, Ty::Error) || is_var(&ty) {
+        if has_len(&ty) || matches!(ty, Ty::Error) || is_var(&ty) {
             return;
         }
         let msg = format!(
@@ -2606,16 +3248,23 @@ impl Inferer<'_> {
         self.report(*arg, msg);
     }
 
-    /// Whether `base.name` is the built-in `len` of an array or a slice,
-    /// reading through a pointer the way any field access does.
-    fn is_len_access(&mut self, base: &Ty, name: &str) -> bool {
-        is_len_field(&self.autoderef(base), name)
-    }
-
     /// The declared type of field `name` on a nominal struct type, if reachable,
     /// with the struct's generics substituted by the use-site's type arguments
     /// (so `Wrap.<i32>`'s `T` field reads back as `i32`). Auto-derefs through a
     /// pointer first (§3.2).
+    /// The type of a field access that found no field. It is `Error`, not a
+    /// fresh variable — a dangling variable would surface as a false "type
+    /// annotations needed" (see `finish`). Says why, unless the base is itself
+    /// already broken or still unsolved, where the real error is elsewhere.
+    fn no_such_field(&mut self, node: NodeId, base: &Ty, name: &str) -> Ty {
+        let base = self.cx.resolve(base);
+        if !matches!(base, Ty::Error) && !is_var(&base) {
+            let msg = format!("no field `{name}` on `{}`", base.display(self.defs));
+            self.report(node, msg);
+        }
+        Ty::Error
+    }
+
     fn field_ty(&mut self, base: &Ty, name: &str) -> Option<Ty> {
         let base = self.autoderef(base);
         let Ty::Nominal { def, args } = base else {
@@ -2632,14 +3281,14 @@ impl Inferer<'_> {
         }
         let d = self.defs.get(field);
         let (file, node) = (d.file?, d.node?);
-        match self.asts[&file].node(node).kind.clone() {
-            NodeKind::Field { ty, .. } => {
-                let map = self.nominal_subst(def, &args);
-                let t = self.ty_from_node_in(file, ty);
-                Some(self.subst_type_params(&t, &map))
-            }
-            _ => None,
-        }
+        let t = match self.asts[&file].node(node).kind.clone() {
+            NodeKind::Field { ty, .. } => self.ty_from_node_in(file, ty),
+            // A tuple struct's field def points straight at the positional type
+            // node: there is no `Field` node wrapping it (see `collect_struct`).
+            _ => self.ty_from_node_in(file, node),
+        };
+        let map = self.nominal_subst(def, &args);
+        Some(self.subst_type_params(&t, &map))
     }
 
     /// The declared payload types of enum variant `name` on `base`, in order,
@@ -3335,13 +3984,15 @@ impl Subst {
     }
 }
 
-/// Whether a field access names the built-in `len` of an array or a slice
-/// (§3.2). Arrays and slices have no declared fields, so `len` is answered by
-/// the checker itself; this predicate is the single place inference (which
-/// types it `usize`) and lowering (which emits [`crate::ir::Expr::Len`], or the
-/// literal count when `[N]T`'s `N` is known) agree on when it applies.
-pub fn is_len_field(base: &Ty, name: &str) -> bool {
-    name == "len" && matches!(base, Ty::Array { .. } | Ty::Slice { .. })
+/// Whether `$len` has an answer for this type: an array or a slice carries its
+/// element count, nothing else does (§3.2, §6.4).
+///
+/// `.len()` itself is **not** compiler syntax — it is `core`'s `Len` trait,
+/// implemented for `[N]T` and `[]T` with a body that is this intrinsic. That is
+/// what makes `a.len()`, `s.len()`, and a future `Vector.len()` one spelling
+/// with one meaning instead of a special case the checker has to know about.
+pub fn has_len(base: &Ty) -> bool {
+    matches!(base, Ty::Array { .. } | Ty::Slice { .. })
 }
 
 /// The outcome of attempting one [`Obligation`].
@@ -3379,7 +4030,12 @@ fn is_var(ty: &Ty) -> bool {
     matches!(ty, Ty::Var(_))
 }
 
-/// The `#lang` tag of the operator trait an arithmetic [`BinOp`] dispatches to.
+/// The `#lang` tag of the operator trait a [`BinOp`] dispatches to (§6.13).
+///
+/// Only the operators that *are* trait calls appear: `&&` / `||` and the
+/// comparisons are not in this table — the first two are control flow, and the
+/// comparisons reach `Eq` / `Ord` through [`Inferer::check_cmp_bound`], whose
+/// method (`eq` / `cmp`) is not named after the operator.
 fn binop_lang(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "add",
@@ -3387,12 +4043,17 @@ fn binop_lang(op: BinOp) -> &'static str {
         BinOp::Mul => "mul",
         BinOp::Div => "div",
         BinOp::Rem => "rem",
+        BinOp::BitAnd => "bitand",
+        BinOp::BitOr => "bitor",
+        BinOp::BitXor => "bitxor",
+        BinOp::Shl => "shl",
+        BinOp::Shr => "shr",
         _ => "",
     }
 }
 
-/// The trait method name an arithmetic [`BinOp`] calls.
+/// The trait method name a [`BinOp`] calls.
 fn binop_method(op: BinOp) -> &'static str {
-    // For the arithmetic operators the method name equals the `#lang` tag.
+    // For every operator trait in the table the method name equals the tag.
     binop_lang(op)
 }

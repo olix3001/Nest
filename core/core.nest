@@ -1,0 +1,23 @@
+// The `core` package root.
+//
+// `core` is the small set of always-available declarations the compiler wires
+// built-in syntax to (`#lang` items) plus the prelude types every program can
+// name unqualified (`Option`, `Result`, ...). It is an **ordinary package**: a
+// directory of `.nest` files with this one as its root, loaded from disk like any
+// other. Nothing about it is baked into the compiler — the compiler finds what it
+// needs by `#lang` tag, never by name or by path, so swapping this package out
+// swaps the language's operators and control flow with it.
+//
+// This file only re-exports. Every declaration lives in a topic file, and the
+// prelude globs this root's `@public` members into every file's outermost scope.
+//
+// Signatures are illustrative in places — there is no codegen yet.
+
+@public * :: import "ops.nest"
+@public * :: import "cmp.nest"
+@public * :: import "control.nest"
+@public * :: import "option.nest"
+@public * :: import "result.nest"
+@public * :: import "iter.nest"
+@public * :: import "range.nest"
+@public * :: import "slice.nest"

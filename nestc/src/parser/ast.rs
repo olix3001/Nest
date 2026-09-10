@@ -441,6 +441,8 @@ pub enum NodeKind {
     /// `[attrs] name: ty` — a struct/enum record field.
     Field {
         attrs: Vec<NodeId>,
+        /// `#align(4)`, `#raw`, … written before the field (§9).
+        directives: Vec<NodeId>,
         name: Symbol,
         ty: NodeId,
     },
@@ -732,8 +734,14 @@ impl NodeKind {
                 out.extend_from_slice(generics);
                 kind.collect_children(out);
             }
-            Field { attrs, ty, .. } => {
+            Field {
+                attrs,
+                directives,
+                ty,
+                ..
+            } => {
                 out.extend_from_slice(attrs);
+                out.extend_from_slice(directives);
                 out.push(*ty);
             }
             EnumType {

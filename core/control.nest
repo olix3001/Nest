@@ -1,0 +1,33 @@
+// The `.?` / `.!` machinery.
+//
+// `.?` / `.!` lower through `Try`: `branch` splits a value into its success
+// output or the residual that `.?` propagates, and `unwrap` is `.!` itself.
+
+// What `Try.branch` answers: keep going with the success value, or stop and
+// carry the residual out. It is its own type (not `Result`) because "this
+// short-circuits" and "this failed" are different questions — an `Option` stops
+// with no error value at all.
+@public ControlFlow :: #lang("control_flow") enum <B, C> {
+  // Short-circuit, carrying the residual. Named `stop` rather than `break`
+  // because `break` is a keyword.
+  stop(B),
+  // Keep going, carrying the output.
+  proceed(C),
+}
+
+@public Try :: #lang("try") trait {
+  Output :: type
+  Residual :: type
+  branch :: func (self: Self) -> ControlFlow.<Self.Residual, Self.Output>
+  unwrap :: func (self: Self) -> Self.Output
+}
+
+// Rebuilding the *enclosing function's* type from a propagated residual. This
+// is a trait of its own, generic in the residual it accepts, so that `.?` can
+// cross error types: a function returning `Result.<T, ConfigError>` accepts an
+// `IoError` residual exactly when an
+// `impl <T> FromResidual.<IoError> for Result.<T, ConfigError>` is in scope.
+// The identity case is the impl each `Try` type provides for its own residual.
+@public FromResidual :: #lang("from_residual") trait <R> {
+  from_residual :: func (r: R) -> Self
+}

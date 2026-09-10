@@ -18,16 +18,35 @@
 //! - `defer` is **scoped, not duplicated**: each block records its defer bodies
 //!   once in [`Block::defers`]; every exit from that block runs them in reverse,
 //!   which the CFG stage emits as one epilogue per scope.
-//!
 //! - implicit coercions are **explicit**: an `@using` upcast is the field access
 //!   it stands for, and a `*T` → `*dyn Trait` unsizing is an [`Expr::DynCast`]
 //!   carrying the erased pointee.
 //!
-//! What is deliberately *not* lowered yet (each a documented next layer, see
-//! [`crate::sema::lower`]): bitwise / shift operators (they stay a primitive
-//! [`Expr::Binary`]), generic monomorphization, and `match` exhaustiveness /
-//! decision trees — arms stay structured, though [`Pattern`] keeps every form's
-//! full shape for the pass that builds them.
+//! Three things the surface language hides behind one syntax become one node
+//! with a tag, so a consumer that does not care about the distinction can ignore
+//! it and one that does gets the answer in O(1):
+//!
+//! - **Every call is [`Expr::Call`]** — a free call, an operator, and a method
+//!   call alike. A method's receiver is `args[0]`, already adjusted (the `&` /
+//!   `&mut` / `.*` the call site implied is written out), and
+//!   [`Dispatch`] says how the callee is reached: directly, through a trait
+//!   object's vtable, or through a bound that monomorphization will resolve.
+//! - **Every operator is a call too** (§6.13), with [`BuiltinOp`] marking the
+//!   ones that are machine instructions. `&&` / `||`, `!`, and comparisons on
+//!   the numeric core are the exceptions: they dispatch on nothing and stay
+//!   [`Expr::Binary`] / [`Expr::Unary`].
+//! - **Pointers keep their permission in the type**: `*T` and `*mut T` are one
+//!   [`Ty::Ptr`] with a `mutable` flag, and [`Function::recv`] /
+//!   [`Function::mutating`] say what a callee may write through.
+//!
+//! What is deliberately *not* done here — each a documented next layer:
+//! generic monomorphization, `match` exhaustiveness and decision trees (arms
+//! stay structured, and [`Pattern`] keeps every form's full shape for the pass
+//! that builds them), vtable layout and object-safety checking for
+//! [`Dispatch::Virtual`], and the mutability check that reads the pointer
+//! permissions above. Closures are the one *expression* with no IR yet: they
+//! need a captured environment, which is a representation decision this layer
+//! does not make.
 //!
 //! Traversal is via the [`Visitor`] / [`VisitorMut`] traits, whose default
 //! methods walk every child so an implementation overrides only the nodes it
@@ -36,7 +55,7 @@
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{BinOp, Lit, UnOp};
 
-use crate::sema::def::DefId;
+use crate::sema::def::{DefId, Directive};
 use crate::sema::ty::Ty;
 
 pub use crate::sema::builtins::BuiltinOp;
@@ -57,7 +76,91 @@ pub struct Function {
     pub name: Symbol,
     pub params: Vec<Param>,
     pub ret: Ty,
-    pub body: Block,
+    /// The lowered body, or `None` for a **declaration** — an
+    /// `extern("c") func` with no body, or a trait method that only states a
+    /// signature. A declaration is still a [`Function`] because a call to it is
+    /// an ordinary call and codegen still needs its signature; what it has no
+    /// code of its own.
+    pub body: Option<Block>,
+    /// The ABI of an `extern("c") func`, or `None` for a Nest function. Present
+    /// on definitions too: `extern("c") func f() { … }` is a Nest body that is
+    /// *emitted* with the C ABI and calling convention (§11.3).
+    pub extern_abi: Option<Symbol>,
+    /// The `#...` directives written on this function, in source order (§9).
+    /// They are carried, not interpreted: `#inline` is a codegen decision,
+    /// `#unsafe` a check-suppression, and both belong to a later stage. The
+    /// same list is on the function's [`Def`](crate::sema::def::Def), which is
+    /// how directives on *types* (`#soa`, `#packed`) are reached.
+    pub directives: Vec<Directive>,
+    /// How this function takes its receiver, if it is a method (§3.4). This is
+    /// what a vtable slot needs to know about a `dyn` call and what the later
+    /// mutability check reads to decide whether `x.m()` requires a mutable `x`.
+    pub recv: Recv,
+    /// Whether the function can write through **any** of its parameters — one
+    /// of them is a `*mut T` or a `[]mut T` (transitively, through a pointer or
+    /// slice element). A `false` here is the strong statement: nothing the
+    /// caller lent this function can come back changed.
+    ///
+    /// It is deliberately a *syntactic* fact about the signature, not a summary
+    /// of the body: the IR-level mutability check needs the permission the type
+    /// grants, and computing what the body really touches is an analysis that
+    /// runs on the CFG.
+    pub mutating: bool,
+}
+
+/// How a function takes its `self` (§3.4). Recorded per [`Function`] because
+/// the receiver's shape — value, pointer, mutable pointer — is what decides
+/// whether a call site must own or may only borrow, and what a vtable slot's
+/// first argument is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recv {
+    /// Not a method: no `self` parameter.
+    None,
+    /// `self: Self` — the receiver is passed by value.
+    Value,
+    /// `self: *Self` — a read-only borrow.
+    Ptr,
+    /// `self: *mut Self` — a mutable borrow; this is the "mutating method".
+    MutPtr,
+}
+
+impl Recv {
+    /// Whether a call through this receiver can modify the callee's `self`.
+    pub fn mutates(self) -> bool {
+        matches!(self, Recv::MutPtr)
+    }
+}
+
+/// How a [`Expr::Call`] finds the code it runs.
+///
+/// Every call is one `Expr::Call`; this tag is the *only* thing that separates a
+/// direct jump from a vtable load, so a consumer that does not care about
+/// dispatch can ignore it entirely. Neither non-static form is resolved here on
+/// purpose: picking the vtable slot (and generating the vtable) belongs to the
+/// IR → LIR lowering, and picking the impl for a generic belongs to
+/// monomorphization. What this stage owes them is the *inputs* to those choices,
+/// which is exactly what each variant carries.
+#[derive(Debug, Clone)]
+pub enum Dispatch {
+    /// A direct call: [`callee`](Expr::Call::callee) is the function itself — a
+    /// [`Expr::Global`] naming it, or any expression of function type.
+    Static,
+    /// A **virtual** call through a trait object's vtable. The receiver
+    /// (`args[0]`) is the `*dyn Trait` fat pointer, `trait_def` is that trait,
+    /// and `method` is the trait's own declaration the call selected. The pair
+    /// names the slot; which concrete function sits in it is a property of the
+    /// vtable the LIR builds, not of this call.
+    Virtual { trait_def: DefId, method: DefId },
+    /// A call on a **type parameter's** bound — `<T: Summing>` makes `t.total()`
+    /// mean `Summing.total` with no impl chosen yet. `self_ty` is the receiver
+    /// type as inference left it (a rigid type parameter, or something built
+    /// over one); monomorphization substitutes it and re-selects, turning this
+    /// into a [`Dispatch::Static`] call.
+    Generic {
+        trait_def: DefId,
+        method: DefId,
+        self_ty: Ty,
+    },
 }
 
 /// A bound function parameter.
@@ -86,11 +189,16 @@ pub struct Block {
 /// A statement: an effect with no value contribution to its block.
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    /// `let`/`const` binding (mutability is not tracked in the IR: the checker
-    /// already enforced it).
+    /// A `let` / `const` binding. The bound name is a [`Pattern::Binding`] in
+    /// the common case; a destructuring `let (a, b) := p` keeps its whole
+    /// pattern here, so the bindings it introduces survive into the IR instead
+    /// of collapsing into an expression evaluated for effect.
+    ///
+    /// A `let` pattern is irrefutable, so unlike a `match` arm it never needs a
+    /// fallback; `ty` is the initializer's type, which is what the pattern is
+    /// matched against.
     Let {
-        def: DefId,
-        name: Symbol,
+        pattern: Pattern,
         ty: Ty,
         init: Expr,
     },
@@ -200,6 +308,10 @@ pub enum Expr {
     /// intrinsic op in **O(1)** — when it is `Some`, the call *is* the machine
     /// instruction and needs no function lookup; when `None`, it is an ordinary
     /// user call.
+    /// A method call is this same node: the receiver is `args[0]` (adjusted to
+    /// what the `self` parameter wants — lowering inserts the `&` or the `.*`),
+    /// and [`dispatch`](Expr::Call::dispatch) says whether the callee is reached
+    /// directly, through a vtable, or through a bound awaiting monomorphization.
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
@@ -207,6 +319,8 @@ pub enum Expr {
         /// [`crate::sema::builtins`]); codegen emits it inline. `None` for a
         /// normal function/method call.
         builtin: Option<BuiltinOp>,
+        /// How the callee is reached (see [`Dispatch`]).
+        dispatch: Dispatch,
         ty: Ty,
     },
     /// A primitive binary operation (numeric / boolean core). Operator-trait
@@ -356,7 +470,9 @@ pub trait Visitor: Sized {
 }
 
 pub fn walk_function<V: Visitor>(v: &mut V, func: &Function) {
-    v.visit_block(&func.body);
+    if let Some(body) = &func.body {
+        v.visit_block(body);
+    }
 }
 
 pub fn walk_block<V: Visitor>(v: &mut V, block: &Block) {
@@ -480,7 +596,9 @@ pub trait VisitorMut: Sized {
 }
 
 pub fn walk_function_mut<V: VisitorMut>(v: &mut V, func: &mut Function) {
-    v.visit_block(&mut func.body);
+    if let Some(body) = &mut func.body {
+        v.visit_block(body);
+    }
 }
 
 pub fn walk_block_mut<V: VisitorMut>(v: &mut V, block: &mut Block) {

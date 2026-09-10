@@ -16,9 +16,16 @@
 //!    (§4.6).
 //! 4. **desugar** ([`desugar`]) — lower `for` / `.?` / `.!` to their core
 //!    `#lang` forms (§6.13).
-//! 5. **infer** ([`infer`]) — Hindley–Milner type inference per function body,
-//!    annotating every expression node with its resolved [`Ty`](ty::Ty) (§3.7).
-//! 6. **lower** ([`lower`]) — build the typed [`ir`] tree from the resolved,
+//! 5. **impls** ([`impls`]) — index every `impl` as a unit (trait, target,
+//!    generics, members) for the solver to select over, and check each one's
+//!    **coherence**: an inherent impl only where its type is defined, a trait
+//!    impl only where the trait or the type is (§4.9).
+//! 6. **infer** ([`infer`]) — Hindley–Milner type inference plus trait selection
+//!    per function body, annotating every expression node with its resolved
+//!    [`Ty`](ty::Ty) (§3.7) and every method call with how it dispatches.
+//! 7. **fields** ([`fields`]) — bind each field *use* to its definition, now
+//!    that inference has typed the bases those uses hang off.
+//! 8. **lower** ([`lower`]) — build the typed [`ir`] tree from the resolved,
 //!    desugared, typed AST (structured control flow kept, sugar and auto-deref
 //!    made explicit).
 //!
@@ -131,8 +138,19 @@ pub fn analyze(session: &mut Session, entry: FileId) {
         desugar_one(session, file);
     }
     // Index every impl once the whole program is resolved; inference selects
-    // over this table (operators, trait methods) per function body.
-    let impls = impls::build(&session.defs, &session.asts, &files);
+    // over this table (operators, trait methods) per function body. This is also
+    // where each impl's coherence is checked — it is the one pass that sees the
+    // trait, the self type, and the package all three at once.
+    let impls = {
+        let Session {
+            defs,
+            asts,
+            pkg_of,
+            diagnostics,
+            ..
+        } = &mut *session;
+        impls::build(defs, asts, pkg_of, diagnostics, &files)
+    };
     for &file in &files {
         infer_one(session, &impls, file);
     }
@@ -202,9 +220,22 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
 
         // Load each import target and enqueue it for collection.
         let mut decls = Vec::with_capacity(raw_imports.len());
+        let in_package = session.pkg_of.get(&file).cloned();
         for raw in raw_imports {
             let (target, enqueue) = load_target(session, file, &name, &raw);
             if let Some(f) = enqueue {
+                // Package membership is transitive along *file* imports: a
+                // package is a directory, so every file it reaches relatively is
+                // its own. This is what gives `core`'s topic files the canonical
+                // path `core` — and what lets the coherence rules recognize
+                // `impl []T` in `core/slice.nest` as living in the package that
+                // owns the structural types (§4.9).
+                //
+                // A *package* import is not transitive: importing `<std>` from
+                // inside `core` does not make `std` part of `core`.
+                if let (Some(pkg), ImportTarget::File(_)) = (&in_package, &target) {
+                    session.pkg_of.entry(f).or_insert_with(|| pkg.clone());
+                }
                 queue.push(f);
             }
             decls.push(ImportDecl {
@@ -299,7 +330,7 @@ fn resolve_fields_one(session: &mut Session, file: FileId) {
 }
 
 fn lower_one(session: &mut Session, file: FileId) {
-    let program = lower::lower_file(&session.defs, &session.asts, file);
+    let program = lower::lower_file(&session.defs, &session.lang_items, &session.asts, file);
     session.ir.insert(file, program);
 }
 

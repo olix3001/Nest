@@ -59,7 +59,7 @@ first_positive :: func (xs: []i32) -> Option.<i32> {
 
 @public
 head_of :: func (xs: []i32) -> Option.<i32> {
-  if xs.len == 0 {
+  if xs.len() == 0 {
     return .none
   }
   return .some(xs[0])

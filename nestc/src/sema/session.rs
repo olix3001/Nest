@@ -25,8 +25,20 @@ use crate::parser::parse::Parser;
 use super::def::{DefId, DefKind, DefTable, LangItems, Visibility};
 use super::imports::ImportDecl;
 
-/// The embedded bootstrap core library source (see `core/prelude.nest`).
-pub const CORE_SRC: &str = include_str!("core/prelude.nest");
+/// Where to find the `core` package when nothing says otherwise.
+///
+/// `core` is an ordinary package — a directory of `.nest` files rooted at
+/// `core.nest` — and the compiler ships *no* copy of it. This default points at
+/// the one in the repository, which is what lets the test suite and a dev build
+/// run straight from a checkout; a real driver overrides it (see
+/// [`Session::with_core_path`]) or sets `NEST_CORE`.
+pub fn default_core_path() -> String {
+    if let Ok(p) = std::env::var("NEST_CORE") {
+        return p;
+    }
+    // `nestc/` sits next to `core/` in the repository.
+    format!("{}/../core/core.nest", env!("CARGO_MANIFEST_DIR"))
+}
 
 /// The fixed-name primitive types the prelude makes available without an import
 /// (§4.6). They have no source definition; each becomes a [`DefKind::Primitive`]
@@ -60,22 +72,33 @@ pub struct FsLoader;
 
 impl FileLoader for FsLoader {
     fn load(&self, from: &str, spec: &str) -> Result<(String, String), String> {
-        use std::path::Path;
-        let base = Path::new(from).parent().unwrap_or_else(|| Path::new(""));
-        let mut path = base.join(spec);
-        if path.extension().is_none() {
-            path.set_extension("nest");
-        }
-        let key = path.to_string_lossy().into_owned();
-        match std::fs::read_to_string(&path) {
-            Ok(src) => Ok((key, src)),
-            Err(err) => Err(format!("cannot read import \"{spec}\": {err}")),
-        }
+        load_from_fs(from, spec)
+    }
+}
+
+/// Resolve `spec` against `from`'s directory and read it. Shared by [`FsLoader`]
+/// and by [`MemLoader`]'s fallback.
+fn load_from_fs(from: &str, spec: &str) -> Result<(String, String), String> {
+    use std::path::Path;
+    let base = Path::new(from).parent().unwrap_or_else(|| Path::new(""));
+    let mut path = base.join(spec);
+    if path.extension().is_none() {
+        path.set_extension("nest");
+    }
+    let key = path.to_string_lossy().into_owned();
+    match std::fs::read_to_string(&path) {
+        Ok(src) => Ok((key, src)),
+        Err(err) => Err(format!("cannot read import \"{spec}\": {err}")),
     }
 }
 
 /// An in-memory loader for tests: `import "spec"` looks `spec` up in a map,
-/// after normalizing away a leading `./` and a `.nest` suffix.
+/// after normalizing away a leading `./` and a `.nest` suffix, and falls back to
+/// the real filesystem when the map has no entry.
+///
+/// The fallback is what lets an in-memory program import the on-disk `core`: the
+/// overlay-then-disk shape is also what an editor needs, where unsaved buffers
+/// shadow the files behind them.
 #[derive(Debug, Default)]
 pub struct MemLoader {
     files: HashMap<String, String>,
@@ -99,21 +122,26 @@ impl MemLoader {
 }
 
 impl FileLoader for MemLoader {
-    fn load(&self, _from: &str, spec: &str) -> Result<(String, String), String> {
+    fn load(&self, from: &str, spec: &str) -> Result<(String, String), String> {
         let key = Self::norm(spec);
-        match self.files.get(&key) {
-            Some(src) => Ok((format!("mem:{key}"), src.clone())),
-            None => Err(format!("no in-memory file for import \"{spec}\"")),
+        if let Some(src) = self.files.get(&key) {
+            return Ok((format!("mem:{key}"), src.clone()));
         }
+        load_from_fs(from, spec)
+            .map_err(|err| format!("no in-memory file for import \"{spec}\", and {err}"))
     }
 }
 
-/// A registered package: its name and the source of its root namespace. `<std>`
-/// evaluates to this root; `<std/io>` walks into its public member `io`.
+/// A registered package: its name and the path of its root namespace file.
+/// `<std>` evaluates to that root; `<std/io>` walks into its public member `io`.
+///
+/// The path goes through the session's [`FileLoader`], so a package's own files
+/// import each other exactly the way user files do — there is no package-internal
+/// import mechanism, because a package is just a directory.
 #[derive(Debug, Clone)]
 pub struct Package {
     pub name: String,
-    pub root_src: String,
+    pub root_path: String,
 }
 
 /// Per-file analysis bookkeeping, created when a file is collected. The parsed
@@ -157,14 +185,25 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session using the real filesystem loader and only the embedded `core`
-    /// package registered.
+    /// A session using the real filesystem loader, with `core` at
+    /// [`default_core_path`].
     pub fn new() -> Self {
         Self::with_loader(Box::new(FsLoader))
     }
 
     /// A session with a custom [`FileLoader`] (e.g. [`MemLoader`] for tests).
     pub fn with_loader(loader: Box<dyn FileLoader>) -> Self {
+        Self::with_loader_and_core(loader, &default_core_path())
+    }
+
+    /// A session whose `core` package root is `core_path`. The path is resolved
+    /// by the session's loader, so an in-memory `core` is as valid as an on-disk
+    /// one.
+    pub fn with_core_path(core_path: &str) -> Self {
+        Self::with_loader_and_core(Box::new(FsLoader), core_path)
+    }
+
+    fn with_loader_and_core(loader: Box<dyn FileLoader>, core_path: &str) -> Self {
         let mut defs = DefTable::new();
         // The builtins namespace holds the primitive types.
         let builtins = defs.alloc(
@@ -208,19 +247,19 @@ impl Session {
             cache: HashMap::new(),
             loader,
         };
-        session.register_package("core", CORE_SRC);
+        session.register_package("core", core_path);
         session
     }
 
-    /// Register a package by name and root source. Call before [`Session::analyze`]
+    /// Register a package by name and root *path*. Call before [`Session::analyze`]
     /// to make `import <name/...>` resolvable; the package manager passes the set
     /// of linked libraries this way. `core` is registered automatically.
-    pub fn register_package(&mut self, name: &str, root_src: &str) {
+    pub fn register_package(&mut self, name: &str, root_path: &str) {
         self.packages.insert(
             name.to_string(),
             Package {
                 name: name.to_string(),
-                root_src: root_src.to_string(),
+                root_path: root_path.to_string(),
             },
         );
     }
@@ -257,7 +296,19 @@ impl Session {
             return Some(id);
         }
         let pkg = self.packages.get(name)?.clone();
-        let file = self.parse_cached(&key, &format!("<{}>", pkg.name), &pkg.root_src);
+        // The root is loaded through the loader so that the *file name* it is
+        // parsed under is its real path: that name is what a relative
+        // `import "sibling.nest"` inside the package resolves against.
+        let (path, src) = match self.loader.load("", &pkg.root_path) {
+            Ok(pair) => pair,
+            Err(msg) => {
+                self.diagnostics.push(Diagnostic::error(format!(
+                    "cannot load package `{name}`: {msg}"
+                )));
+                return None;
+            }
+        };
+        let file = self.parse_cached(&key, &path, &src);
         self.pkg_of.insert(file, pkg.name.clone());
         Some(file)
     }

@@ -1,0 +1,15 @@
+---
+source: src/sema/tests.rs
+expression: ir_text(src)
+---
+func f() -> i32 {
+  let p: Pair = Pair { 0: $cast(1: comptime_int): i32, 1: $cast(2: comptime_int): i32 }: Pair
+  let q: Pair = Pair { 0: $cast(3: comptime_int): i32, 1: $cast(4: comptime_int): i32 }: Pair
+  let w: Wrap.<i32> = Wrap { 0: $cast(5: comptime_int): i32 }: Wrap.<i32>
+  let t: (isize, i32) = ($cast(6: comptime_int): isize, $cast(7: comptime_int): i32): (isize, i32)
+  (p: Pair.0): i32 = #builtin(Add) (core.Add.add: func(i32, i32) -> i32)((p: Pair.1): i32, (t: (isize, i32).1): i32): i32
+  match q: Pair {
+    Pair(a, b) => #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.Add.add: func(i32, i32) -> i32)(a: i32, b: i32): i32, (w: Wrap.<i32>.0): i32): i32, (p: Pair.0): i32): i32
+  }
+  return <match: i32>
+}

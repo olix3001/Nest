@@ -1,0 +1,34 @@
+// Iteration.
+//
+// `for x in it { ... }` lowers through `IntoIterator.into_iter` then
+// `Iterator.next` (§10).
+
+* :: import "option.nest"
+
+@public Iterator :: #lang("iterator") trait {
+  Item :: type
+  next :: func (self: *mut Self) -> Option.<Self.Item>
+}
+
+@public IntoIterator :: #lang("into_iterator") trait {
+  Iter :: type
+  into_iter :: func (self: Self) -> Self.Iter
+}
+
+// Iterating a slice hands out a cursor `SliceIter` over its elements.
+@public SliceIter :: struct <T> {
+  data: []T,
+  pos: usize,
+}
+
+impl <T> IntoIterator for []T {
+  Iter :: SliceIter.<T>
+  into_iter :: func (self: []T) -> SliceIter.<T> {
+    return SliceIter.<T> { data: self, pos: 0 }
+  }
+}
+
+impl <T> Iterator for SliceIter.<T> {
+  Item :: T
+  next :: func (self: *mut SliceIter.<T>) -> Option.<T> { return .none }
+}

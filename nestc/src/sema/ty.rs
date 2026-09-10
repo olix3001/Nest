@@ -23,7 +23,7 @@ use num_bigint::BigInt;
 use std::collections::HashMap;
 
 use crate::common::symbol::Symbol;
-use crate::parser::ast::{BinOp, NodeId};
+use crate::parser::ast::NodeId;
 
 use super::def::DefId;
 
@@ -338,10 +338,11 @@ pub enum Obligation {
         assoc: Symbol,
         out: Ty,
         origin: NodeId,
-        /// `Some` when this projection is an operator's `Output`; fulfillment
-        /// stamps the resolved call onto `origin` so lowering emits a uniform
-        /// [`crate::ir::Expr::Call`].
-        op: Option<BinOp>,
+        /// The trait method this projection's operator calls (`"add"`, `"neg"`,
+        /// `"index"`, …), when it has one. Fulfillment stamps the member the
+        /// selected impl supplies onto `origin`, so lowering emits a uniform
+        /// [`crate::ir::Expr::Call`] whether a builtin or a user impl won.
+        method: Option<Symbol>,
     },
     /// A variant literal (`.some(x)`) whose enum is only known from context:
     /// once `recv` resolves to a `Nominal` enum, unify each payload argument

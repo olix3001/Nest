@@ -399,15 +399,27 @@ impl Parser {
         (types, end)
     }
 
-    /// `[attrs] ident ':' type` — one record field.
+    /// `[attrs] [directives] ident ':' type` — one record field.
+    ///
+    /// A field takes both decorations: attributes control visibility and the
+    /// `@using` upcast, directives control layout (`#align(4)`, `#raw` — §9).
     fn parse_field(&mut self) -> NodeId {
         let start = self.cur_span();
         let attrs = self.parse_attributes();
+        let directives = self.parse_directives();
         let name = self.expect_ident();
         self.expect(&TokenKind::Colon);
         let ty = self.parse_type();
         let span = start.to(self.node_span(ty));
-        self.alloc(span, NodeKind::Field { attrs, name, ty })
+        self.alloc(
+            span,
+            NodeKind::Field {
+                attrs,
+                directives,
+                name,
+                ty,
+            },
+        )
     }
 
     /// `[directives] enum [<g>] { variant* }`.

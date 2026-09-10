@@ -19,7 +19,7 @@ use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, ImportPath, NodeId, NodeKind, StructKind};
 
 use super::DefMeta;
-use super::def::{DefId, DefKind, DefTable, LangItems, Visibility};
+use super::def::{DefId, DefKind, DefTable, Directive, DirectiveArg, LangItems, Visibility};
 use super::imports::{RawImport, RawTarget};
 
 /// Collect every namespace-level definition of `file` into `file_ns`, returning
@@ -39,6 +39,9 @@ pub fn collect_file(
         ast,
         file,
         imports: Vec::new(),
+        in_impl: false,
+        pending: Vec::new(),
+        anon_impls: 0,
     };
     if let Some(root) = ast.root() {
         if let NodeKind::File { items } = &ast.node(root).kind {
@@ -56,6 +59,16 @@ struct Collector<'a> {
     ast: &'a Ast,
     file: FileId,
     imports: Vec<RawImport>,
+    /// Whether collection is inside an `impl` body, where a name may repeat
+    /// across impls that share a host namespace.
+    in_impl: bool,
+    /// Directives written on the enclosing [`NodeKind::Decl`], waiting for the
+    /// binding inside it to claim them.
+    pending: Vec<Directive>,
+    /// How many anonymous `impl` namespaces this file has needed so far; the
+    /// count names them apart (`<impl 1>`, `<impl 2>`, …) so two impls on
+    /// structural targets stay distinguishable in a def dump.
+    anon_impls: usize,
 }
 
 /// Visibility gathered from an item's attributes.
@@ -107,7 +120,13 @@ impl Collector<'_> {
             } => {
                 let vis = self.visibility(&attrs);
                 self.check_namespace_binding(item, &directives);
+                // Directives written *before* the binding (`#inline\nf :: func …`)
+                // and directives written on the RHS form (`f :: #inline func …`)
+                // mean the same thing, so the binding collects both.
+                let here = self.directives(&directives);
+                let outer = std::mem::replace(&mut self.pending, here);
                 self.collect_binding(item, vis, scope);
+                self.pending = outer;
             }
             _ => {
                 self.check_namespace_binding(node, &[]);
@@ -171,6 +190,14 @@ impl Collector<'_> {
         let kind = def_kind_of(&rhs_kind);
         let lang = self.lang_tag(&rhs_kind);
         let def = self.define(name, kind, vis.level(), scope, bind, lang);
+        // §9: directives are carried, not acted on, by this stage. Recording
+        // them on the def is what lets the IR reach them — every IR node names a
+        // `DefId`, so a `#soa` on a struct or an `#inline` on a function is
+        // available wherever that definition turns up, without the later stages
+        // re-walking the AST.
+        let mut directives = std::mem::take(&mut self.pending);
+        directives.extend(self.rhs_directives(&rhs_kind));
+        self.defs.get_mut(def).directives = directives;
 
         // A namespace-like RHS is where the resolver looks for this def when it
         // descends into the body (to set the current namespace / `Self`), so mark
@@ -239,14 +266,43 @@ impl Collector<'_> {
     fn collect_struct(&mut self, kind: StructKind, ty: DefId, vis: Vis) {
         let fields = match kind {
             StructKind::Record(fields) => fields,
-            // Tuple/unit structs have positional/no named members.
-            StructKind::Tuple(_) | StructKind::Unit => return,
+            // A tuple struct's members are positional, and are collected under
+            // the names their positions give them — `p.0`, `p.1`. That is the
+            // spelling the surface language uses (§3.3), so making them real
+            // field defs means tuple structs need no separate machinery: field
+            // typing, `Pair(1, 2)`'s argument check, and `.0` all go through the
+            // same path a record's named field does.
+            StructKind::Tuple(types) => {
+                let member_vis = if vis.all {
+                    Visibility::Public
+                } else {
+                    Visibility::Private
+                };
+                for (i, t) in types.iter().enumerate() {
+                    self.define(
+                        Symbol::new(&i.to_string()),
+                        DefKind::Field,
+                        member_vis,
+                        ty,
+                        *t,
+                        None,
+                    );
+                }
+                return;
+            }
+            StructKind::Unit => return,
         };
         // At most one field per struct may be `@using` (§3.10); the first one
         // wins and any further one is an error.
         let mut upcast_seen = false;
         for f in fields {
-            if let NodeKind::Field { attrs, name, .. } = self.ast.node(f).kind.clone() {
+            if let NodeKind::Field {
+                attrs,
+                directives,
+                name,
+                ..
+            } = self.ast.node(f).kind.clone()
+            {
                 let hidden = attrs.iter().any(|&a| self.is_attr(a, "private"));
                 let member_vis = if vis.all && !hidden {
                     Visibility::Public
@@ -254,6 +310,7 @@ impl Collector<'_> {
                     Visibility::Private
                 };
                 let def = self.define(name, DefKind::Field, member_vis, ty, f, None);
+                self.defs.get_mut(def).directives = self.directives(&directives);
                 if attrs.iter().any(|&a| self.is_attr(a, "using")) {
                     if upcast_seen {
                         self.report(f, "a struct may have at most one `@using` field");
@@ -300,19 +357,63 @@ impl Collector<'_> {
             .type_head_name(self_ty)
             .and_then(|name| self.defs.get(scope).ns.members.get(&name).copied())
             .filter(|&d| self.defs.get(d).kind.is_namespace_like());
-        let host = target.unwrap_or_else(|| {
-            self.define(
-                Symbol::new("<impl>"),
-                DefKind::Namespace,
+        let host = match target {
+            Some(t) => t,
+            // The target names no type collected here — a structural `impl <T>
+            // []T`, or an impl for a type another package owns. The members
+            // still need somewhere to live, so give the block a namespace of its
+            // own. It is deliberately *not* a member of `scope`: nothing may
+            // name it, and inserting it would collide with the next such impl.
+            None => {
+                self.anon_impls += 1;
+                let name = Symbol::new(&format!("<impl {}>", self.target_label(self_ty)));
+                let mut canonical = self.defs.get(scope).canonical.clone();
+                canonical.push(name.clone());
+                let span = self.ast.node(node).span;
+                let id = self.defs.alloc(
+                    name,
+                    DefKind::Namespace,
+                    Visibility::Private,
+                    Some(scope),
+                    Some(self.file),
+                    Some(span),
+                    Some(node),
+                    canonical,
+                );
+                self.ast.set_meta(node, DefMeta(id));
+                id
+            }
+        };
+        // An impl whose target is **structural** — `impl <T> []T`, `impl Iterator
+        // for Range.<T>` reaching a type the core library does not own — has no
+        // named type for `Self` to point at. Bind `Self` in the impl's own
+        // namespace as an alias for the target's type expression, so `self: *Self`
+        // means `*[]T` there exactly as it means `*Vec3` in `impl Vec3`.
+        if target.is_none() {
+            let span = self.ast.node(self_ty).span;
+            let mut canonical = self.defs.get(host).canonical.clone();
+            canonical.push(Symbol::new("Self"));
+            let id = self.defs.alloc(
+                Symbol::new("Self"),
+                DefKind::TypeAlias,
                 Visibility::Private,
-                scope,
-                node,
-                None,
-            )
-        });
+                Some(host),
+                Some(self.file),
+                Some(span),
+                Some(self_ty),
+                canonical,
+            );
+            self.defs
+                .get_mut(host)
+                .ns
+                .members
+                .insert(Symbol::new("Self"), id);
+        }
+        let outer = std::mem::replace(&mut self.in_impl, true);
         for item in items {
             self.collect_item(item, host);
         }
+        self.in_impl = outer;
     }
 
     // ===< imports >===
@@ -355,15 +456,24 @@ impl Collector<'_> {
         let mut canonical = self.defs.get(scope).canonical.clone();
         canonical.push(name.clone());
         let span = self.ast.node(node).span;
-        // Duplicate-member check (§4.3): impl namespaces are exempt but those go
-        // through their own host, so a plain clash here is an error.
-        if let Some(&prev) = self.defs.get(scope).ns.members.get(&name) {
-            if !matches!(kind, DefKind::Func) || !matches!(self.defs.get(prev).kind, DefKind::Func)
-            {
-                self.report(
-                    node,
-                    format!("`{name}` is already defined in this namespace"),
-                );
+        // Duplicate-member check (§4.3). Impl members are exempt: a type's
+        // namespace is the host for *every* trait impl on it, so `impl Add for
+        // Vec3` and `impl Mul for Vec3` both park an `Output` there and neither
+        // is a redeclaration. Which one a use means is never asked of the
+        // namespace — an associated type is projected through the impl that
+        // bound it, and a method through the impl selection chose (§4.8) — so
+        // the entry is a convenience, not the authority. Two impls that really
+        // do overlap are caught as an ambiguity when one of them is selected.
+        if !self.in_impl {
+            if let Some(&prev) = self.defs.get(scope).ns.members.get(&name) {
+                if !matches!(kind, DefKind::Func)
+                    || !matches!(self.defs.get(prev).kind, DefKind::Func)
+                {
+                    self.report(
+                        node,
+                        format!("`{name}` is already defined in this namespace"),
+                    );
+                }
             }
         }
         let id = self.defs.alloc(
@@ -393,6 +503,43 @@ impl Collector<'_> {
         match &self.ast.node(pattern).kind {
             NodeKind::BindingPat { name, .. } => Some(name.clone()),
             _ => None,
+        }
+    }
+
+    /// A short label for an `impl`'s target, used to name the anonymous
+    /// namespace its members live in (`<impl []T>`).
+    ///
+    /// It is a *display* name — nothing resolves through it — so it only has to
+    /// be readable in an IR dump and stable as the file around it changes. A
+    /// shape it cannot render falls back to the running count, which is why the
+    /// counter is bumped either way.
+    fn target_label(&self, ty: NodeId) -> String {
+        match self.ast.node(ty).kind.clone() {
+            NodeKind::TypePath { path, .. } => match &self.ast.node(path).kind {
+                NodeKind::Path { segments } => segments
+                    .iter()
+                    .map(Symbol::as_str)
+                    .collect::<Vec<_>>()
+                    .join("."),
+                _ => self.anon_impls.to_string(),
+            },
+            NodeKind::PtrType { mutable, inner } => {
+                let m = if mutable { "mut " } else { "" };
+                format!("*{m}{}", self.target_label(inner))
+            }
+            NodeKind::SliceType { mutable, inner, .. } => {
+                let m = if mutable { "mut " } else { "" };
+                format!("[]{m}{}", self.target_label(inner))
+            }
+            NodeKind::ArrayType { mutable, inner, .. } => {
+                let m = if mutable { "mut " } else { "" };
+                format!("[N]{m}{}", self.target_label(inner))
+            }
+            NodeKind::TupleType { .. } => "(..)".to_string(),
+            NodeKind::FuncType { .. } => "func".to_string(),
+            NodeKind::DynType { inner } => format!("dyn {}", self.target_label(inner)),
+            NodeKind::GenericApply { base, .. } => self.target_label(base),
+            _ => self.anon_impls.to_string(),
         }
     }
 
@@ -432,6 +579,50 @@ impl Collector<'_> {
             }
         }
         false
+    }
+
+    /// The directives a `::`-RHS form carries on itself (`f :: #inline func …`).
+    fn rhs_directives(&self, rhs_kind: &NodeKind) -> Vec<Directive> {
+        match rhs_kind {
+            NodeKind::FuncExpr { directives, .. }
+            | NodeKind::StructType { directives, .. }
+            | NodeKind::EnumType { directives, .. }
+            | NodeKind::TraitType { directives, .. }
+            | NodeKind::NamespaceExpr { directives, .. } => self.directives(directives),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Read a run of `#name(args)` nodes into their [`Directive`] values.
+    fn directives(&self, nodes: &[NodeId]) -> Vec<Directive> {
+        nodes
+            .iter()
+            .filter_map(|&d| match &self.ast.node(d).kind {
+                NodeKind::Directive { name, args } => Some(Directive {
+                    name: name.clone(),
+                    args: args.iter().map(|&a| self.directive_arg(a)).collect(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One directive argument, out of the small literal vocabulary §9 uses.
+    fn directive_arg(&self, arg: NodeId) -> DirectiveArg {
+        let value = match &self.ast.node(arg).kind {
+            NodeKind::Arg { value, .. } => *value,
+            _ => arg,
+        };
+        match &self.ast.node(value).kind {
+            NodeKind::Lit(crate::parser::ast::Lit::Str(s)) => DirectiveArg::Str(Symbol::new(s)),
+            NodeKind::Lit(crate::parser::ast::Lit::Int(n)) => {
+                i128::try_from(n).map(DirectiveArg::Int).unwrap_or(DirectiveArg::Other)
+            }
+            NodeKind::Path { segments } if segments.len() == 1 => {
+                DirectiveArg::Name(segments[0].clone())
+            }
+            _ => DirectiveArg::Other,
+        }
     }
 
     /// Extract a `#lang("tag")` from a form that carries directives.

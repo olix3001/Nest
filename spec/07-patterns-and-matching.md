@@ -88,7 +88,7 @@ matches, and yields that arm's value. All arms share a common type; the whole
 ```
 return result.match {
   .ok(cats) => {
-    assert(cats.len > 0, "Cat array was empty")     // std runtime assert
+    assert(cats.len() > 0, "Cat array was empty")     // std runtime assert
     let cat := cats[0]
     const json := $cast.<*dyn ToJson>(&cat).render()
     io.println(json)
@@ -116,7 +116,7 @@ code.match {
 
 // @-binding: keep the whole value and inspect inside
 msg.match {
-  m @ .text(s) if s.len > 280 => truncate(m),
+  m @ .text(s) if s.len() > 280 => truncate(m),
   m                           => m,
 }
 

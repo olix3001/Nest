@@ -23,7 +23,7 @@ common widths `i8`/`i16`/`i32`/`i64` and `u8`/`u16`/`u32`/`u64` are just the
 familiar cases of an arbitrary-width family, so `u7`, `i24`, `u4096` are equally
 legal type expressions. `i1` is **not** a type; `u1` is spelled `bool`. There is
 **no** bare `int`/`uint` — use the pointer-sized `isize`/`usize` for addresses,
-lengths, and indices (`.len`, indexing, C interop sizes), and a fixed width
+lengths, and indices (`.len()`, indexing, C interop sizes), and a fixed width
 otherwise. Floats exist only at the widths `f16`/`f32`/`f64`/`f80`/`f128`.
 
 Integer literals have type `comptime_int` and float literals `comptime_float`
@@ -129,11 +129,18 @@ data.
 ```
 
 Slices, like pointers, are **immutable by default**: `s[i] = x` is legal only
-when `s : []mut T`. Indexing is `s[i]`, length is `s.len`, sub-slicing is
+when `s : []mut T`. Indexing is `s[i]`, length is `s.len()`, sub-slicing is
 `s[lo..<hi]` (see the range operators in
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.12).
-`s.len` is sugar for the `$len(s)` intrinsic (§6.4), which may also be called
-directly; on a `[N]T` whose `N` is known it is a compile-time constant.
+
+`.len()` is **not** compiler syntax. It is an ordinary inherent method the core
+library declares on the built-in sequences — `impl <T> []T { len :: ... }` and
+`impl <T, const N: usize> [N]T { len :: ... }` — whose body is the `$len(s)`
+intrinsic (§6.4). Writing it that way is what makes `a.len()`, `s.len()`, and the
+std `Vector`'s `.len()` one spelling with one meaning; only `core` can declare it,
+because only the defining package may write an inherent impl (§4.9). `$len` may
+also be called directly, and on a `[N]T` whose `N` is known it folds to a
+compile-time constant.
 Out-of-bounds indexing traps at run time (unless in an `#unsafe`
 scope, §9). A slice-of-structs may be laid out struct-of-arrays with the `#soa`
 directive (§9). Growable sequences are the std `Vector` (§3.9).
@@ -231,10 +238,16 @@ ToJson :: trait {
   [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.1, §4.8).
 - **Static bound:** `func <T: ToJson>(...)` accepts any `T` implementing `ToJson`
   and is monomorphized — no vtable.
-- **Dynamic dispatch:** the type `dyn ToJson` is a trait object; used behind a
-  pointer, `*dyn ToJson`, it is a fat pointer (data + vtable). A `*T` coerces to
-  `*dyn Trait` when `T: Trait`, or explicitly `$cast.<*dyn ToJson>(&cat)`. Method
-  calls on it dispatch through the vtable:
+- **Dynamic dispatch:** the type `dyn ToJson` is a trait object. It is **unsized**
+  — its size is the erased type's, which is precisely what the type no longer
+  says — so it names a type only **behind a pointer**: `*dyn ToJson` (or
+  `*mut dyn ToJson`) is a fat pointer, data + vtable. A bare `dyn ToJson` as a
+  variable's type, a field, a parameter, or a slice element is an error; a slice
+  *of pointers*, `[]*dyn ToJson`, is fine, because the pointer is what has the
+  size. A `*T` coerces to `*dyn Trait` when `T: Trait` (and `*mut T` to
+  `*mut dyn Trait`), or explicitly `$cast.<*dyn ToJson>(&cat)` — the same
+  unsizing, written out. Method calls on it dispatch through the vtable, with
+  `Self` resolved to `dyn ToJson`:
 
 ```
 const j: *dyn ToJson := &cat

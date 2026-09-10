@@ -7,7 +7,7 @@ func head() -> core.Option.<i32> {
 }
 func tpo() -> core.Option.<i32> {
   block: i32 {
-    let __try1: core.ControlFlow.<void, i32> = (((head: func() -> core.Option.<i32>)(): core.Option.<i32>.branch): func(core.Option.<i32>) -> core.ControlFlow.<void, i32>)(): core.ControlFlow.<void, i32>
+    let __try1: core.ControlFlow.<void, i32> = (core.Option.branch: func(core.Option.<i32>) -> core.ControlFlow.<void, i32>)((head: func() -> core.Option.<i32>)(): core.Option.<i32>): core.ControlFlow.<void, i32>
     match __try1: core.ControlFlow.<void, i32> {
       .proceed(__v2) => __v2: i32
       block: void {

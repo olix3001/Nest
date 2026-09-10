@@ -1,0 +1,33 @@
+// `Option` and its short-circuiting behaviour.
+
+* :: import "control.nest"
+
+@public Option :: #lang("option") enum <T> {
+  some(T),
+  none,
+}
+
+// `Option` short-circuits with nothing to carry, so its residual is `void` and
+// rebuilding from it is `.none`. That is also what stops a `Result`'s residual
+// from propagating out of an `Option`-returning function: the two residual
+// types do not agree, and no conversion impl says how they would.
+impl <T> Try for Option.<T> {
+  Output :: T
+  Residual :: void
+  branch :: func (self: Option.<T>) -> ControlFlow.<void, T> {
+    return self.match {
+      .some(v) => .proceed(v),
+      .none    => .stop(()),
+    }
+  }
+  unwrap :: func (self: Option.<T>) -> T {
+    return self.match {
+      .some(v) => v,
+      .none    => $abort(),
+    }
+  }
+}
+
+impl <T> FromResidual.<void> for Option.<T> {
+  from_residual :: func (r: void) -> Option.<T> { return .none }
+}

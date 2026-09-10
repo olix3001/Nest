@@ -103,15 +103,25 @@ pub fn defs_to_string(session: &Session) -> String {
             .as_ref()
             .map(|t| format!(" lang=\"{t}\""))
             .unwrap_or_default();
+        // `#lang` prints on its own above; the rest of the directives print
+        // here, because a `#soa` on a struct or a `#packed` is carried on the
+        // def and is the only record of it once the AST is behind us (§9).
+        let directives: String = def
+            .directives
+            .iter()
+            .filter(|d| !d.is("lang"))
+            .map(|d| format!(" {}", crate::ir::pretty::directive_str(d)))
+            .collect();
         out.push_str(&format!(
-            "d{:<3} {:<10} {:<5} `{}`{}{}{}\n",
+            "d{:<3} {:<10} {:<5} `{}`{}{}{}{}\n",
             def.id.0,
             def.kind.label(),
             vis,
             defs.canonical_string(def.id),
             parent,
             alias,
-            lang
+            lang,
+            directives
         ));
     }
     let mut langs: Vec<_> = session.lang_items.iter().collect();

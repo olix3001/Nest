@@ -28,7 +28,7 @@ config :: namespace {
 }
 
 internal_helpers :: namespace {
-  validate_url :: func (url: string) -> bool { return url.len > 0 }
+  validate_url :: func (url: string) -> bool { return url.len() > 0 }
 }
 ```
 
@@ -65,9 +65,14 @@ impl ToJson for CatImage {                  // trait implementation of ToJson
 - `impl Trait for T { ... }` implements `Trait` for `T`; the compiler checks every
   required method is present with a matching signature (`Self` resolved to `T`).
 - Because the target is written in the header (not a name binding), you can
-  implement traits for types declared elsewhere (subject to visibility). This also
-  rules out the meaningless forms an earlier draft allowed, such as binding an impl
-  to an imported value.
+  implement traits for types declared elsewhere (subject to visibility, and to the
+  coherence rules of §4.9). This also rules out the meaningless forms an earlier
+  draft allowed, such as binding an impl to an imported value.
+- The target is an ordinary **type**, not necessarily a named one: `impl <T> []T`
+  and `impl <T, const N: usize> [N]T` add inherent methods to the built-in
+  sequences, and that is where `.len()` comes from (§3.2). Nothing special happens
+  for these — they are looked up by matching the target type rather than by name,
+  which is exactly how `impl <T> Iterator for []T` already works.
 
 The block after the header is a namespace body — `impl` is dedicated sugar for
 "a namespace attached to a type", so the `namespace` keyword is not repeated. Both
@@ -263,12 +268,50 @@ types, letting one trait definition apply uniformly to every implementor.
 
 `Self` is **not** a keyword: it is an ordinary identifier that name resolution
 binds — as if by an implicit `::` constant scoped to the trait/impl — to the
-implementing type. It is therefore a plain path, so `Self`, `Self.Residual`, and
+implementing type. That works for a structural target too: inside `impl <T> []T`,
+`Self` is `[]T`, so `self: *Self` means `self: *[]T`. It is therefore a plain path, so `Self`, `Self.Residual`, and
 `Self.Item.<T>` resolve their root the same way any other qualified name does.
 Likewise `self` is just the receiver **parameter** (the parameter named `self`;
 see [05-functions-and-generics.md](05-functions-and-generics.md) §5.2). Both names
 are reserved — user code may not rebind them, and neither resolves outside a
 trait/impl/method.
+
+At a **call site**, `Self` is whatever the receiver turned out to be, and a trait
+method can be reached four ways — each substituting something different:
+
+| Call | `Self` becomes | Which code runs |
+|------|----------------|-----------------|
+| on a concrete type, inherent method | that type | known here |
+| on a concrete type, trait method | that type | the selected impl, known here |
+| on `<T: Trait>` | `T` | decided at monomorphization |
+| on `*dyn Trait` | `dyn Trait` | decided by the vtable at run time |
+
+The last row is the one that has no impl to point at: `render :: func (self: *Self)`
+declared in `ToJson` is a `func (*dyn ToJson) -> string` when called through a
+`*dyn ToJson`, and the receiver's own vtable supplies the body (§3.4).
+
+## 4.9 Coherence — where an impl may be written
+
+An impl is found by *matching its target*, not by naming it, so two libraries that
+write the same impl produce a clash at every use site with no way to prefer either
+and no syntax to qualify one. Two rules keep that from arising:
+
+1. **An inherent `impl T { ... }` may only be written in the package that defines
+   `T`.** The built-in types — the primitives, `*T`, `[]T`, `[N]T`, tuples — are
+   the language's, which for this purpose means the `core` library's; that is why
+   `.len()` is declared there and cannot be added to `[]T` by anyone else.
+2. **A trait impl must have something of its own in it:** either the trait or the
+   target belongs to the package writing the impl. `impl ForeignTrait for
+   ForeignType` is refused. The target counts as your own when one of your types
+   appears *anywhere* in it, not only at its head — `impl FromResidual.<IoError>
+   for Result.<T, MyError>` is yours because `MyError` is, even though `Result` is
+   `core`'s.
+
+A **blanket** impl (§4.8) has a bare parameter as its target, which is never a
+local type, so it is only legal for a trait you define.
+
+Files reached by path are one program and one unit for this purpose: they may
+implement each other's traits and types freely. The boundary is the *package*.
 
 ## 4.8 Generic impls
 

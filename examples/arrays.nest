@@ -1,4 +1,4 @@
-// arrays.nest — fixed-length arrays, `const` generic values, and `.len`.
+// arrays.nest — fixed-length arrays, `const` generic values, and `.len()`.
 // No imports.
 
 // The length of a `[N]T` is part of its type, so these are different types and
@@ -19,19 +19,21 @@ sum :: func <const N: usize, T> (xs: [N]T) -> usize {
   return N
 }
 
-// `.len` is sugar for the `$len` intrinsic. On a fixed array whose length is
-// known it folds to a constant; on a slice it reads the header at run time.
+// `.len()` is not syntax: it is an inherent method the core library declares on
+// `[N]T` and on `[]T`, with the `$len` intrinsic as its body. The receiver's type
+// picks which of the two runs. `$len` itself folds to a constant on a fixed array
+// whose length is known, and reads the header on a slice.
 @public
 lengths :: func (s: []i32) -> usize {
   const fixed := triple()
-  return fixed.len + $len(s)
+  return fixed.len() + $len(s)
 }
 
 // A fixed array coerces to a read-only slice, which is how one function serves
 // both shapes.
 @public
 count_slice :: func (s: []i32) -> usize {
-  return s.len
+  return s.len()
 }
 
 @public

@@ -1,9 +1,9 @@
 ---
 source: src/sema/tests.rs
-expression: "ir_text(\"take :: func (s: []i32) -> usize { return s.len }\\nf :: func () -> usize {\\n  const a := [_]i32 { 1, 2, 3 }\\n  return take(a)\\n}\\n\")"
+expression: "ir_text(\"take :: func (s: []i32) -> usize { return s.len() }\\nf :: func () -> usize {\\n  const a := [_]i32 { 1, 2, 3 }\\n  return take(a)\\n}\\n\")"
 ---
 func take(s: []i32) -> usize {
-  return $len(s: []i32): usize
+  return (core.<impl []T>.len: func(*[]i32) -> usize)((&s: []i32): *[]i32): usize
 }
 func f() -> usize {
   let a: [3]i32 = $array($cast(1: comptime_int): i32, $cast(2: comptime_int): i32, $cast(3: comptime_int): i32): [3]i32

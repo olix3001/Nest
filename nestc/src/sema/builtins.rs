@@ -32,6 +32,13 @@ pub enum BuiltinOp {
     Mul,
     Div,
     Rem,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Neg,
+    BitNot,
 }
 
 /// Which primitive family a [`BuiltinRow`] applies to.
@@ -40,7 +47,6 @@ pub enum BuiltinOp {
 /// or float-only op is one more row); the current arithmetic set is all
 /// `Numeric`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Applies {
     /// Any integer type (`iN` / `uN`, `isize` / `usize`).
     Int,
@@ -123,6 +129,62 @@ pub const BUILTIN_OPS: &[BuiltinRow] = &[
         applies: Applies::Numeric,
         output: OutputRule::SameAsSelf,
         op: BuiltinOp::Rem,
+    },
+    // Bitwise and shift are integer-only (§6.7: "bitwise operators require
+    // integer operands"), which is the whole reason [`Applies`] distinguishes
+    // the families — a `f32 & f32` finds no row and is reported as a missing
+    // impl rather than silently doing something.
+    BuiltinRow {
+        lang: "bitand",
+        method: "bitand",
+        applies: Applies::Int,
+        output: OutputRule::SameAsSelf,
+        op: BuiltinOp::BitAnd,
+    },
+    BuiltinRow {
+        lang: "bitor",
+        method: "bitor",
+        applies: Applies::Int,
+        output: OutputRule::SameAsSelf,
+        op: BuiltinOp::BitOr,
+    },
+    BuiltinRow {
+        lang: "bitxor",
+        method: "bitxor",
+        applies: Applies::Int,
+        output: OutputRule::SameAsSelf,
+        op: BuiltinOp::BitXor,
+    },
+    BuiltinRow {
+        lang: "shl",
+        method: "shl",
+        applies: Applies::Int,
+        output: OutputRule::SameAsSelf,
+        op: BuiltinOp::Shl,
+    },
+    BuiltinRow {
+        lang: "shr",
+        method: "shr",
+        applies: Applies::Int,
+        output: OutputRule::SameAsSelf,
+        op: BuiltinOp::Shr,
+    },
+    // The prefix unaries. They take no `rhs`, which changes nothing here: a row
+    // describes the *self* family and the output rule, and the arity is the
+    // trait method's business.
+    BuiltinRow {
+        lang: "neg",
+        method: "neg",
+        applies: Applies::Numeric,
+        output: OutputRule::SameAsSelf,
+        op: BuiltinOp::Neg,
+    },
+    BuiltinRow {
+        lang: "bitnot",
+        method: "bitnot",
+        applies: Applies::Int,
+        output: OutputRule::SameAsSelf,
+        op: BuiltinOp::BitNot,
     },
 ];
 

@@ -138,7 +138,7 @@ Core intrinsics (extensible; not a closed list):
 | `$new.<T>()` | allocate one zeroed, GC-managed `T`; yields `*mut T` (§6.9) |
 | `$make.<[]T>(len[, cap])` | allocate a zeroed, GC-managed slice (§6.9) |
 | `$size_of.<T>()` / `$align_of.<T>()` | layout queries (`usize`), `#const` |
-| `$len(x)` | element count of an array or slice (`usize`); `x.len` is sugar for it |
+| `$len(x)` | element count of an array or slice (`usize`); the core library's `.len()` method is written in terms of it |
 | `$assert(cond[, msg])` | compile-time assertion (§6.10) |
 | `$panic(msg)` | abort the program with a message |
 | `$embed_file("path")` | splice a file's bytes as a compile-time `[]uint8` |
@@ -214,9 +214,18 @@ explicit `$cast`.
 
 Precedence and associativity are **purely syntactic**: they decide how an
 expression parses into a tree, before any meaning is attached. What each operator
-*does* is then defined by a core-library trait (§6.13). The built-in numeric and
-integer types implement those traits in the core library; they are not special-cased
-in the compiler.
+*does* is then defined by a core-library trait (§6.13).
+
+The built-in numeric types satisfy those traits too, but not through source
+`impl`s: they are width-parameterized (`u4096` is as real as `u8`), so there is
+no finite set of impls to write. The compiler instead carries one **builtin row**
+per primitive operator, and the trait solver considers those rows *uniformly with
+user impls* when selecting. A primitive `a + b` and a `Vec3 + Vec3` therefore go
+through the same selection and reach the same call shape; the row simply marks
+the result as a machine instruction rather than a function body. Two consequences
+are worth knowing: bitwise and shift rows apply to integers only, and a user impl
+for a primitive is exactly as specific as the row, so it is an ambiguity rather
+than an override (and is refused outright by coherence — §4.9).
 
 ## 6.8 Block and `if` as expressions
 
@@ -367,7 +376,12 @@ are `Add.add(a, b)`, differing only in which `impl` is selected.
 | `a < b`, `a <= b`, `a > b`, `a >= b` | `"ord"` | `Ord` | `cmp(self: Self, rhs: Self) -> Ordering` |
 | `a[i]` (read)  | `"index"`     | `Index`    | `index(self: *Self, i: Idx) -> *Self.Output` |
 | `a[i] = v` (write) | `"index_mut"` | `IndexMut` | `index_mut(self: *mut Self, i: Idx) -> *mut Self.Output` |
-| `a += b`, `a -= b`, … | `"add_assign"`, `"sub_assign"`, … | `AddAssign`, … | `add_assign(self: *mut Self, rhs: Rhs)` |
+
+Compound assignment is deliberately **absent** from the table: `a += b` is not an
+operator of its own but sugar for `a = a + b`, so it needs no `#lang` item and
+inherits whatever `Add` the type has. A separate `AddAssign` would let `+=` and
+`+` disagree for the same type, which is a difference no reader expects to have
+to check.
 
 Two supporting `#lang` enums round out the set: `Ordering` (`#lang("ordering")`,
 `enum { less, equal, greater }`) is what `Ord.cmp` returns, and `Result` /
@@ -383,14 +397,17 @@ Applied **after** parsing, to the operator tree §6.7 produced:
 - Prefix `-a` ⇒ `Neg.neg(a)`; prefix `~a` ⇒ `BitNot.bitnot(a)`.
 - Equality: `a == b` ⇒ `Eq.eq(a, b)`; `a != b` ⇒ the negation of that `bool`.
 - Ordering: all four relations go through one method, `Ord.cmp`, and test its
-  `Ordering` result — `a < b` ⇒ `Ord.cmp(a, b) == .less`, `a >= b` ⇒
-  `Ord.cmp(a, b) != .less`, etc. One `cmp` gives every ordering relation.
+  `Ordering` result — `a < b` is "`cmp` answered `.less`", `a >= b` is "`cmp` did
+  not answer `.less`", and so on. One `cmp` gives every ordering relation.
+- The numeric core is the exception to those last two: `i32 == i32` and
+  `i32 < i32` are the machine's own compare, and are *not* routed through a
+  three-way `cmp` the hardware would only have to undo. `Eq` and `Ord` are what a
+  **user** type is compared by.
 - Indexing: `a[i]` in value position ⇒ `Index.index(&a, i).*`; `a[i]` as the
   place of an assignment ⇒ `IndexMut.index_mut(&mut a, i).*`.
-- Compound assignment: `a += b` ⇒ `AddAssign.add_assign(&mut a, b)` (and likewise
-  for `-=` `*=` `/=` `%=`). A type may implement `AddAssign` independently of
-  `Add`; where it does not, the core library's blanket impl defines
-  `a += b` as `a = a + b`.
+- Compound assignment: `a += b` ⇒ `a = a + b` (and likewise for `-=` `*=` `/=`
+  `%=` and the bitwise/shift forms), so it dispatches through the same `Add` the
+  plain `+` does.
 
 ### What is *not* a trait method
 
