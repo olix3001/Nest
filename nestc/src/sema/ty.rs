@@ -16,13 +16,16 @@
 //! `comptime_float` collapse of §1: a float literal *is* a `comptime_float`,
 //! i.e. `f128`, but collapses to `f64` when nothing pins its width — a literal
 //! too big or too precise to survive that collapse is an error unless its use
-//! really is an `f80` / `f128`). A general variable that is never solved is a
-//! "type annotations needed" error.
+//! really is an `f80` / `f128`). A string literal gets the same treatment with
+//! kind [`TyVarKind::Str`]: it is a `comptime_str` that becomes `str`, `[]u8`
+//! or `[]char` depending on its use site, and defaults to `str`. A general
+//! variable that is never solved is a "type annotations needed" error.
 
 use num_bigint::BigInt;
 use std::collections::HashMap;
 
 use crate::common::symbol::Symbol;
+use crate::common::target::Target;
 use crate::parser::ast::NodeId;
 
 use super::def::DefId;
@@ -37,12 +40,14 @@ pub enum IntWidth {
 }
 
 impl IntWidth {
-    /// The number of value bits, taking a pointer-sized width as 64 (the only
-    /// target the bootstrap compiles for).
-    pub fn bits(self) -> u32 {
+    /// The number of value bits. A pointer-sized width is the target's, which
+    /// is why the target has to be handed in: `usize` is 64 bits or 32
+    /// depending on the machine being compiled for, and no site that asks this
+    /// question may decide that for itself (see [`Target`]).
+    pub fn bits(self, target: Target) -> u32 {
         match self {
             IntWidth::Fixed(n) => n as u32,
-            IntWidth::Ptr => 64,
+            IntWidth::Ptr => target.pointer_bits,
         }
     }
 }
@@ -71,6 +76,16 @@ pub enum TyVarKind {
     /// A float literal (`comptime_float`, conceptually `f128`): unifies only
     /// with a float type, and collapses to `f64` when left unconstrained.
     Float,
+    /// A string literal (`comptime_str`): unifies with `str`, `[]u8` or
+    /// `[]char`, and defaults to `str` (§1.5).
+    ///
+    /// The set is exactly the three types whose contents the compiler can
+    /// produce from the literal's bytes on its own — `str` and `[]u8` *are*
+    /// those bytes, and `[]char` is them transcoded, which the const evaluator
+    /// does at compile time. Any other string-like type is a library type, and
+    /// how a literal reaches one is a conversion question shared with
+    /// `[]T` → `Vec.<T>`; it is deliberately not answered here.
+    Str,
 }
 
 /// A **const-generic** inference variable: an index into
@@ -139,6 +154,10 @@ pub enum Ty {
     ComptimeInt,
     /// An untyped float literal, the `comptime_float` counterpart.
     ComptimeFloat,
+    /// An untyped string literal: a sequence of bytes with no chosen runtime
+    /// representation. Like [`Ty::ComptimeInt`] it survives into the IR only as
+    /// the type of a constant and of the literal under a `$cast`; §1.5.
+    ComptimeStr,
     Bool,
     Char,
     /// The unit type `void` (the empty tuple).
@@ -231,6 +250,7 @@ impl Ty {
             .to_string(),
             Ty::ComptimeInt => "comptime_int".into(),
             Ty::ComptimeFloat => "comptime_float".into(),
+            Ty::ComptimeStr => "comptime_str".into(),
             Ty::Bool => "bool".into(),
             Ty::Char => "char".into(),
             Ty::Void => "void".into(),
@@ -414,6 +434,13 @@ pub struct InferCtxt {
     /// ordinary [`Ty::Nominal`] here — so the answer is computed once, up front,
     /// and handed in.
     numeric_distincts: HashMap<DefId, TyVarKind>,
+    /// The `#lang("str")` type, when the program has one.
+    ///
+    /// Handed in for the same reason [`InferCtxt::numeric_distincts`] is:
+    /// unification decides what a string-literal variable may become, and `str`
+    /// is an ordinary [`Ty::Nominal`] here — found by tag, never by name, so
+    /// only the caller can say which one it is (§1.5).
+    str_ty: Option<Ty>,
 }
 
 impl InferCtxt {
@@ -426,6 +453,114 @@ impl InferCtxt {
     /// [`super::infer::infer_file`] and installed into every context it builds.
     pub fn set_numeric_distincts(&mut self, m: HashMap<DefId, TyVarKind>) {
         self.numeric_distincts = m;
+    }
+
+    /// Record the `#lang("str")` type a string literal defaults to. Computed
+    /// once per program by [`super::infer::infer_file`], like
+    /// [`InferCtxt::set_numeric_distincts`].
+    pub fn set_str_ty(&mut self, ty: Option<Ty>) {
+        self.str_ty = ty;
+    }
+
+    /// Whether `ty` is one of the three types a string literal may become
+    /// (§1.5): `str` itself, `[]u8`, or `[]char`.
+    ///
+    /// The slices are the immutable ones on purpose. A literal lives in
+    /// read-only data, so handing one out as `[]mut u8` would offer a write to
+    /// memory that cannot take it.
+    pub fn admits_str(&self, ty: &Ty) -> bool {
+        if self.str_ty.as_ref() == Some(ty) {
+            return true;
+        }
+        match ty {
+            Ty::Slice {
+                mutable: false,
+                inner,
+            } => matches!(
+                **inner,
+                Ty::Char
+                    | Ty::Int {
+                        signed: false,
+                        width: IntWidth::Fixed(8),
+                    }
+            ),
+            _ => false,
+        }
+    }
+
+    /// Render `ty` for a **diagnostic**, naming an unsolved literal variable as
+    /// the comptime type it is rather than as `?0`.
+    ///
+    /// `f("hi")` against a `[]mut u8` parameter is a mismatch whose right-hand
+    /// side is still a variable, because a literal only settles when something
+    /// accepts it — and "found `?0`" names the compiler's bookkeeping instead of
+    /// the program. "found `comptime_str`" is the same fact in the language's
+    /// own words.
+    pub fn describe(&self, ty: &Ty, defs: &super::def::DefTable) -> String {
+        self.name_literals(ty).display(defs)
+    }
+
+    /// [`InferCtxt::resolve`], with every still-unsolved literal variable
+    /// replaced by its comptime type.
+    fn name_literals(&self, ty: &Ty) -> Ty {
+        match self.resolve(ty) {
+            Ty::Var(v) => match self.kind(v) {
+                TyVarKind::Int => Ty::ComptimeInt,
+                TyVarKind::Float => Ty::ComptimeFloat,
+                TyVarKind::Str => Ty::ComptimeStr,
+                TyVarKind::General => Ty::Var(v),
+            },
+            Ty::Ptr { mutable, inner } => Ty::Ptr {
+                mutable,
+                inner: Box::new(self.name_literals(&inner)),
+            },
+            Ty::Slice { mutable, inner } => Ty::Slice {
+                mutable,
+                inner: Box::new(self.name_literals(&inner)),
+            },
+            Ty::Array {
+                len,
+                mutable,
+                inner,
+            } => Ty::Array {
+                len,
+                mutable,
+                inner: Box::new(self.name_literals(&inner)),
+            },
+            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.name_literals(e)).collect()),
+            Ty::Func { params, ret } => Ty::Func {
+                params: params.iter().map(|p| self.name_literals(p)).collect(),
+                ret: Box::new(self.name_literals(&ret)),
+            },
+            Ty::Nominal { def, args } => Ty::Nominal {
+                def,
+                args: args.iter().map(|a| self.name_literals(a)).collect(),
+            },
+            other => other,
+        }
+    }
+
+    /// Settle an open `comptime_str` variable on `str`, returning the type
+    /// either way. Anything else is returned resolved and untouched.
+    ///
+    /// Called where a use is about to dispatch on the type — see
+    /// [`super::infer::Inferer::pin_str`], which is the caller that explains
+    /// why.
+    pub fn pin_str(&mut self, ty: &Ty) -> Ty {
+        let resolved = self.shallow(ty);
+        let Ty::Var(v) = resolved else {
+            return resolved;
+        };
+        if self.kind(v) != TyVarKind::Str {
+            return Ty::Var(v);
+        }
+        match self.str_ty.clone() {
+            Some(str_ty) => {
+                let _ = self.unify(&Ty::Var(v), &str_ty);
+                str_ty
+            }
+            None => Ty::Var(v),
+        }
     }
 
     /// Whether `ty` is a `distinct` type standing over a numeric primitive, and
@@ -769,6 +904,14 @@ impl InferCtxt {
                 }
                 _ => return Err((Ty::Var(v), ty.clone())),
             },
+            TyVarKind::Str => match ty {
+                _ if self.admits_str(ty) => {}
+                Ty::Var(w) if self.kind(*w) == TyVarKind::Str => {}
+                Ty::Var(w) if self.kind(*w) == TyVarKind::General => {
+                    return self.bind_raw(*w, &Ty::Var(v));
+                }
+                _ => return Err((Ty::Var(v), ty.clone())),
+            },
             TyVarKind::General => {}
         }
         if self.occurs(v, ty) {
@@ -822,6 +965,12 @@ impl InferCtxt {
                 let default = match self.kind(v) {
                     TyVarKind::Int => Some(Ty::isize()),
                     TyVarKind::Float => Some(Ty::Float(FloatWidth::F64)),
+                    // A string literal nothing pinned is a `str`. When the
+                    // program has no `#lang("str")` item there is nothing to
+                    // default *to*; that is already an error reported where the
+                    // literal was typed, so leave it ambiguous rather than
+                    // inventing a second complaint.
+                    TyVarKind::Str => self.str_ty.clone(),
                     // A general variable whose only constraint was `never`.
                     TyVarKind::General if self.saw_never.contains(&v) => Some(Ty::Never),
                     TyVarKind::General => None,
@@ -882,8 +1031,8 @@ impl InferCtxt {
 /// Whether `value` is representable in an integer type of this width and
 /// signedness — the "coerces to any integer type **it fits**" rule for a
 /// `comptime_int`.
-pub fn int_fits(value: &BigInt, signed: bool, width: IntWidth) -> bool {
-    let bits = width.bits();
+pub fn int_fits(value: &BigInt, signed: bool, width: IntWidth, target: Target) -> bool {
+    let bits = width.bits(target);
     if bits == 0 {
         return false;
     }

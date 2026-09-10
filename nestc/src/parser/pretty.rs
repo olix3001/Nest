@@ -250,6 +250,7 @@ fn lit_str(lit: &Lit) -> String {
         Lit::Int(n) => format!("Int({n})"),
         Lit::Float(x) => format!("Float({x})"),
         Lit::Str(s) => format!("Str({s:?})"),
+        Lit::Bytes(b) => format!("Bytes({})", crate::parser::ast::bytes_repr(b)),
         Lit::Char(c) => format!("Char({c:?})"),
         Lit::Bool(b) => format!("Bool({b})"),
     }

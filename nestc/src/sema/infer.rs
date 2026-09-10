@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
+use crate::common::target::Target;
 use crate::parser::ast::{
     Ast, BinOp, Lit, NodeId, NodeKind, SliceRest, UnOp, VariantArgs, VariantPatArgs, WideFloat,
 };
@@ -293,6 +294,7 @@ pub fn infer_file(
     prelude_globs: &[DefId],
     file_ns: DefId,
     file: FileId,
+    target: Target,
 ) {
     let ast = &asts[&file];
     // The set of trait defs a use site in this file may select impls of: only
@@ -325,6 +327,10 @@ pub fn infer_file(
     // Computed once for the whole program, because unification needs the answer
     // and has no def table of its own — see `InferCtxt::set_numeric_distincts`.
     let numeric_distincts = numeric_distincts(defs, asts);
+    // What a string literal defaults to, for the same reason: unification
+    // decides whether a `comptime_str` variable may become a given type, and
+    // `str` is found by `#lang` tag, which unification cannot do.
+    let str_ty = str_lang_ty(defs, lang);
     // Each pass below gets its own inference context: a `const` generic solved
     // for one function says nothing about the next.
     macro_rules! fresh {
@@ -338,9 +344,11 @@ pub fn infer_file(
                 impls,
                 in_scope_traits: &in_scope_traits,
                 file,
+                target,
                 cx: {
                     let mut cx = InferCtxt::new();
                     cx.set_numeric_distincts(numeric_distincts.clone());
+                    cx.set_str_ty(str_ty.clone());
                     cx
                 },
                 env: HashMap::new(),
@@ -412,16 +420,24 @@ pub fn infer_file(
 
 /// Whether the `::` binding at `node` defines a value (see
 /// [`super::is_value_rhs`]).
-fn binds_a_value(
-    defs: &DefTable,
-    asts: &HashMap<FileId, Ast>,
-    ast: &Ast,
-    node: NodeId,
-) -> bool {
+fn binds_a_value(defs: &DefTable, asts: &HashMap<FileId, Ast>, ast: &Ast, node: NodeId) -> bool {
     match &ast.node(node).kind {
         NodeKind::ConstBind { rhs, .. } => super::is_value_rhs(defs, asts, ast, *rhs),
         _ => false,
     }
+}
+
+/// The `#lang("str")` type, or `None` when the program declares no such item.
+///
+/// `str` is not a compiler primitive — it is `distinct []u8` declared in core,
+/// so that all the slice machinery (interior pointers, bounds, GC tracing) is
+/// inherited rather than reimplemented. Found by tag, never by name or path,
+/// like every other language item.
+fn str_lang_ty(defs: &DefTable, lang: &LangItems) -> Option<Ty> {
+    lang.get("str").map(|def| Ty::Nominal {
+        def: defs.resolve_alias(def),
+        args: Vec::new(),
+    })
 }
 
 /// Every `distinct` type in the program whose representation is numeric, and
@@ -542,6 +558,9 @@ struct Inferer<'a> {
     /// Traits selectable at this file's use sites (see [`in_scope_traits`]).
     in_scope_traits: &'a HashSet<DefId>,
     file: FileId,
+    /// The machine being compiled for. Only `isize` / `usize` depend on it
+    /// today, through [`IntWidth::bits`](super::ty::IntWidth::bits).
+    target: Target,
     cx: InferCtxt,
     /// Type of each in-scope value def (params, locals) by [`DefId`].
     env: HashMap<super::def::DefId, Ty>,
@@ -772,6 +791,7 @@ impl Inferer<'_> {
                     return self.def_ty(def);
                 }
                 let bty = self.infer_expr(base);
+                let bty = self.pin_str(&bty);
                 if let Some(ft) = self.field_ty(&bty, name.as_str()) {
                     return ft;
                 }
@@ -812,6 +832,7 @@ impl Inferer<'_> {
             }
             NodeKind::Index { base, index } => {
                 let bty = self.infer_expr(base);
+                let bty = self.pin_str(&bty);
                 let ity = self.infer_expr(index);
                 match self.autoderef(&bty) {
                     // Indexing the built-in sequences is the language's own: the
@@ -1309,6 +1330,10 @@ impl Inferer<'_> {
     fn infer_binary(&mut self, node: NodeId, op: BinOp, lhs: NodeId, rhs: NodeId) -> Ty {
         let lty = self.infer_expr(lhs);
         let rty = self.infer_expr(rhs);
+        // An operator dispatches on its operands' types, so a string literal
+        // has to have settled on one by now (see [`Inferer::pin_str`]).
+        let lty = self.pin_str(&lty);
+        let rty = self.pin_str(&rty);
         match op {
             BinOp::And | BinOp::Or => {
                 self.expect(lhs, &lty, &Ty::Bool);
@@ -2175,6 +2200,7 @@ impl Inferer<'_> {
         if let NodeKind::FieldAccess { base, name } = self.ast.node(callee).kind.clone() {
             if self.resolved_def(callee).is_none() {
                 let recv = self.infer_expr(base);
+                let recv = self.pin_str(&recv);
                 // Inherent (or trait-impl) method already collected into the
                 // receiver type's namespace: the fast path.
                 if let Some(m) = self.method_def(&recv, name.as_str()) {
@@ -3381,6 +3407,25 @@ impl Inferer<'_> {
         }
     }
 
+    /// Pin an open `comptime_str` to `str` when something is about to ask a
+    /// question of it that only a concrete type can answer — a method call, a
+    /// field, an index, an operator.
+    ///
+    /// The openness of a string literal (§1.5) exists so that one may be *passed
+    /// to* a `[]u8` or `[]char` slot; the type it *is* on its own is `str`, and
+    /// every method, operator and impl a string literal reaches is `str`'s. A
+    /// variable left open at one of these sites would find no impls at all and
+    /// report "no method on `?3`", which names the compiler's bookkeeping
+    /// instead of the program. Pinning here also keeps `==` on strings
+    /// registering its `Eq` obligation, as it did when a literal was simply a
+    /// `str`.
+    ///
+    /// Only an *unsolved* variable is pinned: once a use site has settled the
+    /// literal on `[]u8`, indexing it is indexing a byte slice.
+    fn pin_str(&mut self, ty: &Ty) -> Ty {
+        self.cx.pin_str(ty)
+    }
+
     /// The exact integer a path names, when it resolves to a constant whose
     /// value is an integer literal (following a chain of such constants).
     fn const_int_value(&self, node: NodeId) -> Option<num_bigint::BigInt> {
@@ -3413,10 +3458,18 @@ impl Inferer<'_> {
         let comptime = match &self.ast.node(node).kind {
             NodeKind::Lit(Lit::Int(_)) => Ty::ComptimeInt,
             NodeKind::Lit(Lit::Float(_)) => Ty::ComptimeFloat,
+            NodeKind::Lit(Lit::Str(_)) => Ty::ComptimeStr,
             _ => return resolved,
         };
-        // A literal that stayed untyped needs no conversion.
-        if !matches!(resolved, Ty::Int { .. } | Ty::Float(_)) {
+        // A literal that stayed untyped needs no conversion. For a string that
+        // means: it settled on one of the three types §1.5 lets it become, and
+        // the cast is what materializes the bytes as that type — the `[]char`
+        // case really is a transcoding, and the const evaluator performs it.
+        let converts = match comptime {
+            Ty::ComptimeStr => self.cx.admits_str(&resolved),
+            _ => matches!(resolved, Ty::Int { .. } | Ty::Float(_)),
+        };
+        if !converts {
             return resolved;
         }
         self.ast.set_meta(node, Coercion { to: resolved });
@@ -3433,7 +3486,7 @@ impl Inferer<'_> {
         let Ty::Int { signed, width } = resolved else {
             return;
         };
-        if super::ty::int_fits(&value, *signed, *width) {
+        if super::ty::int_fits(&value, *signed, *width, self.target) {
             return;
         }
         let msg = format!(
@@ -3511,6 +3564,7 @@ impl Inferer<'_> {
         let ty = match self.ast.node(rhs).kind.clone() {
             NodeKind::Lit(Lit::Int(_)) => Ty::ComptimeInt,
             NodeKind::Lit(Lit::Float(_)) => Ty::ComptimeFloat,
+            NodeKind::Lit(Lit::Str(_)) if self.lang.get("str").is_some() => Ty::ComptimeStr,
             // `-1` / `+1` are still literals for this purpose.
             NodeKind::Unary { operand, .. } => self.comptime_rhs_ty(operand)?,
             _ => return None,
@@ -3542,7 +3596,9 @@ impl Inferer<'_> {
     /// constant was declared in.
     fn const_rhs_ty(&mut self, file: FileId, rhs: NodeId) -> Ty {
         match self.asts[&file].node(rhs).kind.clone() {
-            // Numeric literals stay comptime: a fresh variable per use.
+            // Literals stay comptime: a fresh variable per use, so one use of
+            // `A :: "hi"` may be a `str` and another a `[]u8`, exactly as one
+            // use of `N :: 1` may be an `i8` and another an `i64`.
             NodeKind::Lit(Lit::Int(_)) => self.cx.fresh_of(TyVarKind::Int),
             NodeKind::Lit(Lit::Float(_)) => self.cx.fresh_of(TyVarKind::Float),
             NodeKind::Lit(l) => self.lit_ty(&l),
@@ -4397,20 +4453,35 @@ impl Inferer<'_> {
     /// tracing) is inherited rather than reimplemented. Found by tag, never by
     /// name or path, like every other language item.
     fn str_ty(&self) -> Ty {
-        match self.lang.get("str") {
-            Some(def) => Ty::Nominal {
-                def: self.defs.resolve_alias(def),
-                args: Vec::new(),
-            },
-            None => Ty::Error,
-        }
+        str_lang_ty(self.defs, self.lang).unwrap_or(Ty::Error)
     }
 
     fn lit_ty(&mut self, lit: &Lit) -> Ty {
         match lit {
             Lit::Int(_) => self.cx.fresh_of(TyVarKind::Int),
             Lit::Float(_) => self.cx.fresh_of(TyVarKind::Float),
-            Lit::Str(_) => self.str_ty(),
+            // A string literal is a `comptime_str` (§1.5): a variable that the
+            // use site settles on `str`, `[]u8` or `[]char`, exactly as a
+            // numeric literal's settles on a width. It defaults to `str`.
+            Lit::Str(_) => match self.lang.get("str") {
+                // With no `#lang("str")` item there is nothing for the literal
+                // to default to, and nothing it could unify with either. That is
+                // a broken `core`, already reported as such; `Ty::Error` here
+                // keeps it from cascading, which is what this case did before
+                // the literal became open at all.
+                None => Ty::Error,
+                Some(_) => self.cx.fresh_of(TyVarKind::Str),
+            },
+            // A byte-string literal has exactly one type: it is bytes, and
+            // nothing about it is open (§1.5). No UTF-8 promise attaches to it,
+            // so it is *not* a `str`, and no variable is needed.
+            Lit::Bytes(_) => Ty::Slice {
+                mutable: false,
+                inner: Box::new(Ty::Int {
+                    signed: false,
+                    width: crate::sema::ty::IntWidth::Fixed(8),
+                }),
+            },
             Lit::Char(_) => Ty::Char,
             Lit::Bool(_) => Ty::Bool,
         }
@@ -4479,11 +4550,10 @@ impl Inferer<'_> {
             // against the pre-attempt substitution (the rollback above), so a
             // nested variable an earlier step already solved prints as itself
             // rather than as `?3` / `?c0`.
-            let (a, b) = (self.cx.resolve(&a), self.cx.resolve(&b));
             let msg = format!(
                 "type mismatch: expected `{}`, found `{}`",
-                b.display(self.defs),
-                a.display(self.defs)
+                self.cx.describe(&b, self.defs),
+                self.cx.describe(&a, self.defs)
             );
             self.report(node, msg);
         }

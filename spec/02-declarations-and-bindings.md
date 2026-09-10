@@ -37,7 +37,9 @@ function body (a local type or local constant).
 `SERVER_PORT :: 8080` has **no single runtime type**. A numeric literal is a
 `comptime_int` (§3.1), and a constant bound to one stays untyped: each use site
 settles it for itself, which is what lets the same `MAX` be an `i8` in one place
-and an `i64` in another.
+and an `i64` in another. A string literal behaves the same way — `GREETING ::
+"hi"` is a `comptime_str`, and one use of it may be a `str` and another a `[]u8`
+(§1.5).
 
 To **pin** a constant to one type, write the type and give the value after `:=`:
 
@@ -67,9 +69,11 @@ CAPACITY :: u32 := next_pow2(1000)
 ```
 
 Evaluation runs an interpreter over the same subset `#const` admits: integers,
-floats, booleans, characters, and composites of those, with locals, branches,
-`match` and loops. It holds no pointers and no heap values, so taking an address
-is not a constant expression. Integer arithmetic is exact and division by zero is
+floats, booleans, characters, string and byte-string literals, and composites of
+those, with locals, branches, `match` and loops. It holds no pointers and no heap
+values, so taking an address is not a constant expression — a string literal is
+not an exception, being read-only data the compiled program contains rather than
+something allocated. Integer arithmetic is exact and division by zero is
 an error rather than a trap, since there is no running program to trap. A
 computation that does not terminate is reported against a step budget.
 

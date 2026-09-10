@@ -19,6 +19,7 @@
 //! thing.
 
 use crate::common::diagnostic::Diagnostic;
+use crate::common::target::Target;
 use crate::sema::def::DefTable;
 
 use super::{Arm, Block, Expr, ExprKind, Linked, Meta, Stmt, StmtKind};
@@ -34,13 +35,13 @@ pub mod reachability;
 
 /// Run every IR validation pass over `linked`, in order, collecting what they
 /// report.
-pub fn run(defs: &DefTable, meta: &Meta, linked: &Linked) -> Vec<Diagnostic> {
+pub fn run(defs: &DefTable, meta: &Meta, linked: &Linked, target: Target) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     divergence::check(defs, meta, linked, &mut out);
     mutability::check(defs, meta, linked, &mut out);
-    exhaustive::check(defs, meta, linked, &mut out);
+    exhaustive::check(defs, meta, linked, target, &mut out);
     constness::check(defs, meta, linked, &mut out);
-    constants::check(defs, meta, linked, &mut out);
+    constants::check(defs, meta, linked, target, &mut out);
     object_safety::check(defs, meta, linked, &mut out);
     reachability::check(defs, meta, linked, &mut out);
     declarations::check(defs, meta, linked, &mut out);

@@ -94,6 +94,14 @@ converts to any integer type whose range holds its value. Between concrete
 numeric types there are **no implicit conversions**; widening and narrowing both
 go through `$cast`.
 
+String literals are open in the same way: a literal is a `comptime_str` that
+settles on `str`, `[]u8` or `[]char` at its use site and defaults to `str`
+(§1.5). A byte-string literal `b"..."` is not open — it is a `[]u8`.
+
+The widths of `isize` and `usize` are the **target's**, so whether a
+`comptime_int` fits one is a question about the machine being compiled for, not
+about the source.
+
 ## 3.2 Pointers (`*T`, `*mut T`, `&x`)
 
 Pointers are Go-style: explicit in type and at the point of taking an address,

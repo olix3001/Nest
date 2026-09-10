@@ -158,6 +158,43 @@ f"port is {port}"             // interpolated string (see below)
 Strings are UTF-8, immutable, and length-prefixed (not NUL-terminated). The
 `str` type stores a pointer and a byte length.
 
+A string literal has the type `comptime_str` until its use site settles it, the
+way an integer literal is a `comptime_int`. It may become any of three types:
+
+```
+str        the default: what a literal is when nothing else pins it
+[]u8       the same bytes, viewed as a byte slice
+[]char     the same text, transcoded to code points at compile time
+```
+
+Those three and no others: they are exactly the types the compiler can produce
+from the literal's own bytes. A library string type (`String`, a rope, a small
+buffer) is reached by a conversion the library defines, not by the literal
+changing type. The slices are the read-only ones — a literal lives in read-only
+data, so `[]mut u8` is not among them.
+
+A literal is `str` for every purpose other than being *passed to* one of the
+other two: a method call, an operator or a field access settles it on `str`
+immediately, because that is the type whose impls a string has.
+
+### Byte-string literals
+
+```
+b"GET "                       // []u8
+b"\x00\x01\xff"               // any octet, whether or not it is UTF-8
+```
+
+`b"..."` is a **byte** string: its type is `[]u8` and only `[]u8`, and it carries
+no UTF-8 promise. It exists for the data that is not text — a magic number, a
+protocol frame, a lookup table — where writing `"\u{...}"` would mean something
+other than the bytes intended.
+
+Its escapes are `\n \t \r \\ \" \0` and `\xNN`, where `NN` is two hex digits
+naming one byte. `\u{...}` is **not** allowed: a code point above 127 is more
+than one byte, so the escape would silently mean something other than it says.
+The literal's own characters must be ASCII for the same reason; write anything
+else as `\xNN`.
+
 **Interpolated strings** are prefixed with `f`. Inside them, `{ expr }` splices
 the result of `expr` (which must satisfy the display/format contract). Braces are
 escaped by doubling: `{{` and `}}`.

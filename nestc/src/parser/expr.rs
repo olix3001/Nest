@@ -332,6 +332,11 @@ impl Parser {
                 self.bump();
                 self.alloc(span, NodeKind::Lit(Lit::Str(s)))
             }
+            Some(TokenKind::Bytes(b)) => {
+                let b = b.clone();
+                self.bump();
+                self.alloc(span, NodeKind::Lit(Lit::Bytes(b)))
+            }
             Some(TokenKind::Char(c)) => {
                 let c = *c;
                 self.bump();

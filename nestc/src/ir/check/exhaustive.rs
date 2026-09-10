@@ -54,6 +54,7 @@ use num_bigint::BigInt;
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::symbol::Symbol;
+use crate::common::target::Target;
 use crate::parser::ast::Lit;
 use crate::sema::def::DefTable;
 use crate::sema::ty::{IntWidth, Ty};
@@ -64,11 +65,22 @@ use crate::ir::{
 };
 
 /// Report every non-exhaustive `match` and every unreachable arm.
-pub fn check(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagnostic>) {
+pub fn check(
+    defs: &DefTable,
+    meta: &Meta,
+    linked: &Linked,
+    target: Target,
+    out: &mut Vec<Diagnostic>,
+) {
     for func in linked.funcs() {
         let Some(body) = &func.body else { continue };
         let mut w = Walk {
-            cx: Cx { defs, meta, linked },
+            cx: Cx {
+                defs,
+                meta,
+                linked,
+                target,
+            },
             out,
         };
         w.block(body);
@@ -82,6 +94,9 @@ struct Cx<'a> {
     defs: &'a DefTable,
     meta: &'a Meta,
     linked: &'a Linked,
+    /// The machine being compiled for: it fixes the range of `isize` / `usize`,
+    /// and therefore which integer patterns exhaust one.
+    target: Target,
 }
 
 struct Walk<'a> {
@@ -966,7 +981,7 @@ impl Cx<'_> {
         match self.resolve(ty) {
             Ty::Bool => (BigInt::from(0), BigInt::from(1)),
             Ty::Char => (BigInt::from(0), BigInt::from(0x10_FFFF_u32)),
-            Ty::Int { signed, width } => int_bounds(signed, width),
+            Ty::Int { signed, width } => int_bounds(signed, width, self.target),
             // A `comptime_int` is arbitrary precision, so nothing finite covers
             // it. Give it a range no finite set of patterns can fill.
             _ => (BigInt::from(i128::MIN), BigInt::from(i128::MAX)),
@@ -1009,6 +1024,7 @@ fn lit_ctor(l: &Lit) -> Ctor {
         }
         Lit::Float(f) => Ctor::Opaque(f.to_string()),
         Lit::Str(s) => Ctor::Opaque(s.clone()),
+        Lit::Bytes(b) => Ctor::Opaque(crate::parser::ast::bytes_repr(b)),
     }
 }
 
@@ -1028,8 +1044,8 @@ fn as_range(c: &Ctor) -> Option<(BigInt, BigInt)> {
     }
 }
 
-fn int_bounds(signed: bool, width: IntWidth) -> (BigInt, BigInt) {
-    let bits = width.bits();
+fn int_bounds(signed: bool, width: IntWidth, target: Target) -> (BigInt, BigInt) {
+    let bits = width.bits(target);
     if signed {
         let limit = BigInt::from(1) << (bits - 1);
         (-limit.clone(), limit - 1)

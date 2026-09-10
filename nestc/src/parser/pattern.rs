@@ -403,6 +403,7 @@ impl Parser {
                 TokenKind::Int(_)
                     | TokenKind::Float(_)
                     | TokenKind::Str(_)
+                    | TokenKind::Bytes(_)
                     | TokenKind::Char(_)
                     | TokenKind::TrueKw
                     | TokenKind::FalseKw
@@ -416,6 +417,7 @@ impl Parser {
             TokenKind::Int(n) => Lit::Int(n),
             TokenKind::Float(x) => Lit::Float(x.value),
             TokenKind::Str(s) => Lit::Str(s),
+            TokenKind::Bytes(b) => Lit::Bytes(b),
             TokenKind::Char(c) => Lit::Char(c),
             TokenKind::TrueKw => Lit::Bool(true),
             TokenKind::FalseKw => Lit::Bool(false),

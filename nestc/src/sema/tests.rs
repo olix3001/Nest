@@ -2,6 +2,7 @@
 //! packages, glob/selective binding, `#lang` collection, resolution of uses to
 //! definitions, and `for` / `.?` desugaring.
 
+use crate::common::target::Target;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
 use super::def::DefKind;
@@ -1001,6 +1002,21 @@ fn string_is_not_a_primitive() {
 /// this rejected" is asking about errors. Use [`warnings`] for the lints.
 fn messages(src: &str) -> Vec<String> {
     let session = analyze_mem(&[("main", src)], "main");
+    session
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::common::diagnostic::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+/// [`messages`], for a chosen [`Target`]. Only the pointer-sized integer types
+/// depend on it, which is why every other test can take the default.
+fn messages_for(src: &str, target: Target) -> Vec<String> {
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
+    session.target = target;
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
     session
         .diagnostics
         .iter()
@@ -4844,11 +4860,7 @@ FACT5 :: u32 := factorial(5)
 main :: func () {}
 ";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
-    assert!(
-        ir_text(src).contains("// = 120"),
-        "{}",
-        ir_text(src)
-    );
+    assert!(ir_text(src).contains("// = 120"), "{}", ir_text(src));
 }
 
 /// `#const` restricts calls and run-time effects, not control flow (§5.1), so
@@ -4953,10 +4965,7 @@ A :: i32 := spin()
 main :: func () {}
 ";
     let msgs = messages(src);
-    assert!(
-        msgs.iter().any(|m| m.contains("step budget")),
-        "{msgs:#?}"
-    );
+    assert!(msgs.iter().any(|m| m.contains("step budget")), "{msgs:#?}");
 }
 
 /// Arithmetic is exact and the range check happens where the number is still in
@@ -4965,10 +4974,22 @@ main :: func () {}
 #[test]
 fn a_typed_constant_that_does_not_fit_is_reported() {
     let msgs = messages("A :: u8 := 300\nmain :: func () {}\n");
-    assert!(
-        msgs.iter().any(|m| m.contains("does not fit")),
-        "{msgs:#?}"
-    );
+    assert!(msgs.iter().any(|m| m.contains("does not fit")), "{msgs:#?}");
+}
+
+/// The width of `usize` is the **target's**, not an assumption baked into the
+/// range check. The bootstrap only ever selects a 64-bit target, so this is the
+/// test that keeps the plumbing honest: the same source is accepted for a
+/// 64-bit machine and rejected for a 32-bit one, and nothing but the
+/// [`Target`](crate::common::target::Target) differs between the two runs.
+#[test]
+fn a_pointer_sized_constant_is_checked_against_the_target() {
+    let src = "A :: usize := 5_000_000_000
+main :: func () {}
+";
+    assert!(messages_for(src, Target::HOST_64).is_empty());
+    let msgs = messages_for(src, Target { pointer_bits: 32 });
+    assert!(msgs.iter().any(|m| m.contains("does not fit")), "{msgs:#?}");
 }
 
 /// Division by zero traps at run time; at compile time there is nothing to trap.
@@ -5052,4 +5073,96 @@ main :: func () { const r: i32 := pick(.red) }
          f :: func (p: P) -> i32 { return match p.a { 0 => 1, _ => 2, } }\n\
          main :: func () { const r: i32 := f(.{ a: 0 }) }\n",
     );
+}
+
+// ===< `comptime_str` and byte strings (§1.5) >===
+
+/// A string literal is open, exactly as a numeric one is: the use site picks
+/// which of the three types §1.5 admits it becomes.
+#[test]
+fn a_string_literal_settles_on_str_bytes_or_chars() {
+    let src = "\
+bytes :: func (b: []u8) -> usize { return b.len() }
+chars :: func (c: []char) -> usize { return c.len() }
+text  :: func (s: str) -> usize { return s.len() }
+main :: func () {
+  const a: usize := bytes(\"hi\")
+  const b: usize := chars(\"hi\")
+  const c: usize := text(\"hi\")
+  const d: []u8 := \"hi\"
+  const e: []char := \"hi\"
+}
+";
+    analyze_clean(src);
+    // Each settled type is reached through an explicit `$cast` off the literal's
+    // own `comptime_str`, the way an integer literal reaches its width.
+    let ir = ir_text(src);
+    assert!(ir.contains("$cast(\"hi\": comptime_str): []u8"), "{ir}");
+    assert!(ir.contains("$cast(\"hi\": comptime_str): []char"), "{ir}");
+    assert!(ir.contains("$cast(\"hi\": comptime_str): core.str"), "{ir}");
+}
+
+/// A literal lives in read-only data, so a mutable view of it is not one of the
+/// types it may become — and the mismatch names `comptime_str`, not `?0`.
+#[test]
+fn a_string_literal_is_not_a_mutable_slice() {
+    let msg = first_error("f :: func (b: []mut u8) {}\nmain :: func () { f(\"hi\") }\n");
+    assert!(msg.contains("expected `[]mut u8`"), "{msg}");
+    assert!(msg.contains("found `comptime_str`"), "{msg}");
+}
+
+/// A constant bound to a string literal stays open, so one use of it may be a
+/// `str` and another a `[]u8` (§2.5).
+#[test]
+fn a_string_constant_is_comptime_and_settles_per_use() {
+    let src = "\
+A :: \"hi\"
+bytes :: func (b: []u8) {}
+text  :: func (s: str) {}
+main :: func () {
+  bytes(A)
+  text(A)
+}
+";
+    analyze_clean(src);
+    let ir = ir_text(src);
+    assert!(ir.contains("const A :: comptime_str"), "{ir}");
+    assert!(ir.contains("(A: []u8)"), "{ir}");
+    assert!(ir.contains("(A: core.str)"), "{ir}");
+}
+
+/// The `[]char` case is a real transcoding, and §1.5 says it happens at compile
+/// time — so the const evaluator is what performs it.
+#[test]
+fn a_string_constant_is_transcoded_to_chars_at_compile_time() {
+    let ir = ir_text("CHARS :: []char := \"hé\"\nmain :: func () {}\n");
+    assert!(ir.contains("// = { 'h', 'é' }"), "{ir}");
+    let ir = ir_text("BYTES :: []u8 := \"hi\"\nmain :: func () {}\n");
+    assert!(ir.contains("// = b\"hi\""), "{ir}");
+}
+
+/// A method call, an operator or a field access needs a receiver type now, so
+/// the literal settles on `str` rather than staying open — `no method on `?3``
+/// would name the compiler's bookkeeping instead of the program.
+#[test]
+fn a_method_call_pins_a_string_literal_to_str() {
+    let session = analyze_clean("f :: func () -> usize { return \"hé\".len() }\n");
+    let file = entry_file(&session);
+    let ir =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
+    assert!(ir.contains("core.<impl []T>.len"), "{ir}");
+}
+
+/// `b"..."` is bytes and only bytes: no UTF-8 promise, and no openness either.
+#[test]
+fn a_byte_string_is_a_byte_slice() {
+    let src =
+        "RAW :: b\"\\x00\\xffok\"\nbytes :: func (b: []u8) {}\nmain :: func () { bytes(RAW) }\n";
+    analyze_clean(src);
+    let ir = ir_text(src);
+    assert!(ir.contains("const RAW :: []u8"), "{ir}");
+    assert!(ir.contains("// = b\"\\x00\\xffok\""), "{ir}");
+    // It is not a `str`, and no conversion makes it one implicitly.
+    let msg = first_error("f :: func (s: str) {}\nmain :: func () { f(b\"hi\") }\n");
+    assert!(msg.contains("expected `core.str`, found `[]u8`"), "{msg}");
 }

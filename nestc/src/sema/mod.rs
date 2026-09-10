@@ -288,7 +288,12 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // The validation passes deliberately deferred out of inference. They run on
     // the linked IR, where all surface sugar is already resolved, and they only
     // report — see [`crate::ir::check`].
-    let diags = crate::ir::check::run(&session.defs, &session.ir_meta, &session.linked);
+    let diags = crate::ir::check::run(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        session.target,
+    );
     session.diagnostics.extend(diags);
 }
 
@@ -426,6 +431,7 @@ fn resolve_one(session: &mut Session, file: FileId) {
 fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
     let file_ns = session.files[&file].ns;
     let globs = session.prelude_globs.clone();
+    let target = session.target;
     let Session {
         asts,
         defs,
@@ -442,6 +448,7 @@ fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
         &globs,
         file_ns,
         file,
+        target,
     );
 }
 

@@ -68,8 +68,34 @@ pub enum Lit {
     Int(BigInt),
     Float(f64),
     Str(String),
+    /// A byte string `b"..."`: the bytes as written, with no UTF-8 promise.
+    /// Its type is `[]u8` and only `[]u8` — see [`Lit::Str`], which is open.
+    Bytes(Vec<u8>),
     Char(char),
     Bool(bool),
+}
+
+/// Render bytes the way `b"..."` is written: ASCII printables as themselves,
+/// everything else as `\xNN`.
+///
+/// Shared by the AST dump, the IR dump and the const evaluator so that a byte
+/// string reads the same wherever it is shown, and so that what is shown can be
+/// pasted back into a program.
+pub fn bytes_repr(bytes: &[u8]) -> String {
+    let mut out = String::from("b\"");
+    for &b in bytes {
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            0x20..=0x7e => out.push(b as char),
+            _ => out.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Binary operators, in every precedence band the grammar defines.

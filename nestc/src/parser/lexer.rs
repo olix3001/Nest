@@ -47,6 +47,15 @@ pub enum TokenKind {
     #[token("\"", lex_string)]
     Str(String),
 
+    /// `b"..."` — a **byte** string: the bytes as written, with no UTF-8
+    /// promise, so `\xNN` may name any octet (§1.5).
+    ///
+    /// The two-character opener is what keeps this apart from the identifier
+    /// `b` followed by a string: the longer match wins, so `b"hi"` is one token
+    /// and `b "hi"` is still two.
+    #[token("b\"", lex_byte_string)]
+    Bytes(Vec<u8>),
+
     #[token("'", lex_char)]
     Char(char),
 
@@ -189,6 +198,12 @@ pub enum LexErrorKind {
     InvalidEscape,
     #[error("invalid unicode escape")]
     InvalidUnicodeEscape,
+    #[error("a byte-string escape must name one byte: `\\u{{...}}` is not one")]
+    UnicodeEscapeInByteString,
+    #[error("a byte string may only contain ASCII; use `\\xNN` for other bytes")]
+    NonAsciiByteString,
+    #[error("invalid `\\xNN` escape")]
+    InvalidByteEscape,
     #[error("invalid numeric literal")]
     InvalidNumber,
 }
@@ -442,6 +457,64 @@ fn lex_string(lex: &mut logos::Lexer<TokenKind>) -> Result<String, LexErrorKind>
     Err(LexErrorKind::UnterminatedString)
 }
 
+/// Decode the body of a `b"..."` byte string. Called with the cursor just past
+/// the opening `b"`.
+///
+/// Deliberately *not* `lex_string` plus a conversion: a byte string is not text
+/// that happens to be stored as bytes. `\xNN` names any octet, including ones
+/// no UTF-8 sequence can produce, which is the whole reason the form exists —
+/// and `\u{...}` is refused for the mirror-image reason, since a code point
+/// above 127 is more than one byte and the literal would silently mean
+/// something other than it says.
+fn lex_byte_string(lex: &mut logos::Lexer<TokenKind>) -> Result<Vec<u8>, LexErrorKind> {
+    let rest = lex.remainder();
+    let mut chars = rest.char_indices();
+    let mut out: Vec<u8> = Vec::new();
+
+    while let Some((idx, c)) = chars.next() {
+        match c {
+            '"' => {
+                lex.bump(idx + 1);
+                return Ok(out);
+            }
+            '\n' => return Err(LexErrorKind::UnterminatedString),
+            '\\' => match chars.next() {
+                None => return Err(LexErrorKind::InvalidEscape),
+                Some((_, 'x')) => out.push(byte_escape(&mut chars)?),
+                Some((_, 'u')) => return Err(LexErrorKind::UnicodeEscapeInByteString),
+                Some((_, 'n')) => out.push(b'\n'),
+                Some((_, 't')) => out.push(b'\t'),
+                Some((_, 'r')) => out.push(b'\r'),
+                Some((_, '0')) => out.push(0),
+                Some((_, '\\')) => out.push(b'\\'),
+                Some((_, '"')) => out.push(b'"'),
+                Some((_, '\'')) => out.push(b'\''),
+                Some(_) => return Err(LexErrorKind::InvalidEscape),
+            },
+            c if c.is_ascii() => out.push(c as u8),
+            // A non-ASCII character in the source would be several bytes, and
+            // which ones depends on an encoding the literal never states.
+            // Writing them out is what `\xNN` is for.
+            _ => return Err(LexErrorKind::NonAsciiByteString),
+        }
+    }
+
+    Err(LexErrorKind::UnterminatedString)
+}
+
+/// Resolve the two hex digits of a `\xNN` escape. The `\x` has already been
+/// consumed.
+fn byte_escape(chars: &mut std::str::CharIndices<'_>) -> Result<u8, LexErrorKind> {
+    let mut hex = String::new();
+    for _ in 0..2 {
+        match chars.next() {
+            Some((_, c)) => hex.push(c),
+            None => return Err(LexErrorKind::InvalidByteEscape),
+        }
+    }
+    u8::from_str_radix(&hex, 16).map_err(|_| LexErrorKind::InvalidByteEscape)
+}
+
 /// Decode a `'c'` character literal. Called with the cursor just past the
 /// opening quote.
 fn lex_char(lex: &mut logos::Lexer<TokenKind>) -> Result<char, LexErrorKind> {
@@ -603,6 +676,46 @@ mod tests {
                 TokenKind::Char('\n'),
                 TokenKind::Char('\u{1F600}'),
             ]
+        );
+    }
+
+    #[test]
+    fn byte_strings() {
+        assert_eq!(
+            kinds(r#"b"GET " b"\x00\xff\n""#),
+            vec![
+                TokenKind::Bytes(b"GET ".to_vec()),
+                TokenKind::Bytes(vec![0x00, 0xff, b'\n']),
+            ]
+        );
+        // `b` on its own is still an identifier; only `b"` opens a byte string.
+        assert_eq!(
+            kinds(r#"b "hi""#),
+            vec![
+                TokenKind::Ident(Symbol::new("b")),
+                TokenKind::Str("hi".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn byte_strings_reject_what_is_not_one_byte() {
+        // A code point above 127 is more than one byte, so neither the escape
+        // nor the character itself may stand for it.
+        let uni = LogosLexer::new(r#"b"\u{41}""#);
+        assert_eq!(
+            uni.as_slice()[0].as_ref().unwrap_err().kind,
+            LexErrorKind::UnicodeEscapeInByteString
+        );
+        let raw = LogosLexer::new("b\"é\"");
+        assert_eq!(
+            raw.as_slice()[0].as_ref().unwrap_err().kind,
+            LexErrorKind::NonAsciiByteString
+        );
+        let hex = LogosLexer::new(r#"b"\xZZ""#);
+        assert_eq!(
+            hex.as_slice()[0].as_ref().unwrap_err().kind,
+            LexErrorKind::InvalidByteEscape
         );
     }
 

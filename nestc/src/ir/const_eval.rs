@@ -61,6 +61,7 @@ use num_traits::{ToPrimitive, Zero};
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::symbol::Symbol;
+use crate::common::target::Target;
 use crate::parser::ast::{BinOp, Lit, UnOp};
 use crate::sema::builtins::BuiltinOp;
 use crate::sema::def::{DefId, DefKind, DefTable};
@@ -100,6 +101,14 @@ pub enum ConstValue {
     Char(char),
     /// The unit value — what a `#const` function with no result returns.
     Void,
+    /// A `comptime_str` or a `str`: UTF-8 text, held as text because that is
+    /// what the literal is. It is *data*, not a heap value — a string literal
+    /// lives in the program's read-only section, so unlike a pointer it has
+    /// something to point at in the compiled program (§1.5).
+    Str(String),
+    /// A `[]u8`: bytes with no UTF-8 promise, from a `b"..."` literal or from a
+    /// string literal that settled on `[]u8`.
+    Bytes(Vec<u8>),
     /// A tuple, a struct, or a fixed-size array, in declaration order.
     Aggregate(Vec<ConstValue>),
     /// An enum variant and its payload.
@@ -126,6 +135,8 @@ impl ConstValue {
             ConstValue::Bool(b) => b.to_string(),
             ConstValue::Char(c) => format!("'{c}'"),
             ConstValue::Void => "void".to_string(),
+            ConstValue::Str(s) => format!("{s:?}"),
+            ConstValue::Bytes(b) => crate::parser::ast::bytes_repr(b),
             ConstValue::Aggregate(items) => {
                 let inner: Vec<String> = items.iter().map(|v| v.display()).collect();
                 format!("{{ {} }}", inner.join(", "))
@@ -201,6 +212,9 @@ pub struct ConstEval<'a> {
     in_progress: Vec<DefId>,
     steps: u32,
     depth: u32,
+    /// The machine being compiled for, which fixes the width of `isize` /
+    /// `usize` and so decides whether a constant of one of those types fits.
+    target: Target,
     /// A `return` / `break` / `continue` that is unwinding.
     ///
     /// `if`, `match` and a bare block are **expressions** in Nest, so control
@@ -213,7 +227,7 @@ pub struct ConstEval<'a> {
 }
 
 impl<'a> ConstEval<'a> {
-    pub fn new(defs: &'a DefTable, meta: &'a Meta, linked: &'a Linked) -> Self {
+    pub fn new(defs: &'a DefTable, meta: &'a Meta, linked: &'a Linked, target: Target) -> Self {
         ConstEval {
             defs,
             meta,
@@ -222,6 +236,7 @@ impl<'a> ConstEval<'a> {
             in_progress: Vec::new(),
             steps: 0,
             depth: 0,
+            target,
             flow: None,
         }
     }
@@ -310,7 +325,7 @@ impl<'a> ConstEval<'a> {
             ));
         }
         match &e.kind {
-            ExprKind::Lit(l) => self.lit(e.id, l),
+            ExprKind::Lit(l) => self.lit(l),
 
             ExprKind::Local(def) => self.lookup(e.id, *def),
 
@@ -493,19 +508,14 @@ impl<'a> ConstEval<'a> {
         }
     }
 
-    fn lit(&self, at: IrId, l: &Lit) -> EvalResult {
+    fn lit(&self, l: &Lit) -> EvalResult {
         match l {
             Lit::Int(n) => Ok(ConstValue::Int(n.clone())),
             Lit::Float(f) => Ok(ConstValue::Float(*f)),
             Lit::Bool(b) => Ok(ConstValue::Bool(*b)),
             Lit::Char(c) => Ok(ConstValue::Char(*c)),
-            // A string is a slice of bytes with a *runtime* representation the
-            // evaluator has no model for. Reporting it plainly is better than
-            // inventing one; see the `comptime_str` work in `HANDOFF.md`.
-            Lit::Str(_) => Err(ConstError::new(
-                at,
-                "a string literal is not part of the const-evaluable subset yet",
-            )),
+            Lit::Str(s) => Ok(ConstValue::Str(s.clone())),
+            Lit::Bytes(b) => Ok(ConstValue::Bytes(b.clone())),
         }
     }
 
@@ -670,10 +680,7 @@ impl<'a> ConstEval<'a> {
         // of scope. Refusing is the honest answer rather than running them in the
         // wrong order.
         if !b.defers.is_empty() {
-            return Err(ConstError::new(
-                b.id,
-                "`defer` has no compile-time meaning",
-            ));
+            return Err(ConstError::new(b.id, "`defer` has no compile-time meaning"));
         }
         for s in &b.stmts {
             let flow = self.stmt(s)?;
@@ -847,13 +854,13 @@ impl<'a> ConstEval<'a> {
                 _ => false,
             },
             PatternKind::Variant { name, sub } => match value {
-                ConstValue::Variant {
-                    name: got,
-                    payload,
-                } if got == name && payload.len() >= sub.len() => sub
-                    .iter()
-                    .zip(payload)
-                    .all(|(p, v)| self.bind_pattern(p, &v.clone())),
+                ConstValue::Variant { name: got, payload }
+                    if got == name && payload.len() >= sub.len() =>
+                {
+                    sub.iter()
+                        .zip(payload)
+                        .all(|(p, v)| self.bind_pattern(p, &v.clone()))
+                }
                 _ => false,
             },
             PatternKind::Struct { def, fields, .. } => {
@@ -904,7 +911,10 @@ impl<'a> ConstEval<'a> {
                         return false;
                     }
                 }
-                for (p, v) in suffix.iter().zip(items[items.len() - suffix.len()..].iter()) {
+                for (p, v) in suffix
+                    .iter()
+                    .zip(items[items.len() - suffix.len()..].iter())
+                {
                     if !self.bind_pattern(p, v) {
                         return false;
                     }
@@ -969,14 +979,10 @@ impl<'a> ConstEval<'a> {
         // guarded `&&` may be the one that would fail to evaluate.
         match op {
             BinOp::And => {
-                return Ok(ConstValue::Bool(
-                    self.truth(lhs)? && self.truth(rhs)?,
-                ));
+                return Ok(ConstValue::Bool(self.truth(lhs)? && self.truth(rhs)?));
             }
             BinOp::Or => {
-                return Ok(ConstValue::Bool(
-                    self.truth(lhs)? || self.truth(rhs)?,
-                ));
+                return Ok(ConstValue::Bool(self.truth(lhs)? || self.truth(rhs)?));
             }
             _ => {}
         }
@@ -1002,7 +1008,10 @@ impl<'a> ConstEval<'a> {
                 BinOp::Le => Ok(ConstValue::Bool(x <= y)),
                 BinOp::Gt => Ok(ConstValue::Bool(x > y)),
                 BinOp::Ge => Ok(ConstValue::Bool(x >= y)),
-                _ => Err(ConstError::new(at, "this operator does not apply to `char`")),
+                _ => Err(ConstError::new(
+                    at,
+                    "this operator does not apply to `char`",
+                )),
             };
         }
         Err(ConstError::new(
@@ -1071,7 +1080,12 @@ impl<'a> ConstEval<'a> {
             BinOp::Le => ConstValue::Bool(x <= y),
             BinOp::Gt => ConstValue::Bool(x > y),
             BinOp::Ge => ConstValue::Bool(x >= y),
-            _ => return Err(ConstError::new(at, "this operator does not apply to floats")),
+            _ => {
+                return Err(ConstError::new(
+                    at,
+                    "this operator does not apply to floats",
+                ));
+            }
         };
         Ok(v)
     }
@@ -1105,13 +1119,8 @@ impl<'a> ConstEval<'a> {
             };
             match (a, b) {
                 (ConstValue::Int(x), ConstValue::Int(y)) => Self::int_binary(at, o, x, y),
-                (ConstValue::Float(x), ConstValue::Float(y)) => {
-                    Self::float_binary(at, o, *x, *y)
-                }
-                _ => Err(ConstError::new(
-                    at,
-                    "this operator applies to numbers only",
-                )),
+                (ConstValue::Float(x), ConstValue::Float(y)) => Self::float_binary(at, o, *x, *y),
+                _ => Err(ConstError::new(at, "this operator applies to numbers only")),
             }
         };
         match op {
@@ -1171,7 +1180,7 @@ impl<'a> ConstEval<'a> {
         match (&value, to) {
             (_, Ty::Error) => Ok(value),
             (ConstValue::Int(n), Ty::Int { signed, width }) => {
-                if !int_fits(n, *signed, *width) {
+                if !int_fits(n, *signed, *width, self.target) {
                     return Err(ConstError::new(
                         at,
                         format!("`{n}` does not fit in `{}`", to.display(self.defs)),
@@ -1180,18 +1189,32 @@ impl<'a> ConstEval<'a> {
                 Ok(ConstValue::Int(n.clone()))
             }
             (ConstValue::Int(_), Ty::ComptimeInt) => Ok(value),
-            (ConstValue::Int(n), Ty::Float(_)) => Ok(ConstValue::Float(
-                n.to_f64()
-                    .ok_or_else(|| ConstError::new(at, "this integer is not representable as a float"))?,
-            )),
+            (ConstValue::Int(n), Ty::Float(_)) => {
+                Ok(ConstValue::Float(n.to_f64().ok_or_else(|| {
+                    ConstError::new(at, "this integer is not representable as a float")
+                })?))
+            }
             (ConstValue::Float(_), Ty::Float(_) | Ty::ComptimeFloat) => Ok(value),
             (ConstValue::Char(c), Ty::Int { signed, width }) => {
                 let n = BigInt::from(*c as u32);
-                if !int_fits(&n, *signed, *width) {
+                if !int_fits(&n, *signed, *width, self.target) {
                     return Err(ConstError::new(at, "this `char` does not fit"));
                 }
                 Ok(ConstValue::Int(n))
             }
+            // A `comptime_str` materializing as one of the three types §1.5
+            // lets it become. `str` is a `distinct []u8` and falls to the
+            // nominal case below, keeping the text; `[]u8` is those same bytes;
+            // `[]char` is a real transcoding, and this is the compile time the
+            // spec says it happens at.
+            (ConstValue::Str(_), Ty::ComptimeStr) => Ok(value),
+            (ConstValue::Str(s), Ty::Slice { inner, .. }) => match **inner {
+                Ty::Char => Ok(ConstValue::Aggregate(
+                    s.chars().map(ConstValue::Char).collect(),
+                )),
+                _ => Ok(ConstValue::Bytes(s.clone().into_bytes())),
+            },
+            (ConstValue::Bytes(_), Ty::Slice { .. }) => Ok(value),
             // A `distinct` type is a newtype over its representation (§2.4), so
             // the value passes through unchanged.
             (_, Ty::Nominal { .. }) => Ok(value),
@@ -1270,13 +1293,12 @@ impl<'a> ConstEval<'a> {
 
 /// Whether `n` is representable in the given integer type.
 ///
-/// `IntWidth::Ptr` is the pointer-sized case, checked against 64 bits: the
-/// compiler has no target description yet, and 64 is both the common case and
-/// the *permissive* direction — a constant accepted here that would not fit a
-/// 32-bit target is caught when the target exists, whereas rejecting it now
-/// would refuse a correct program.
-fn int_fits(n: &BigInt, signed: bool, width: IntWidth) -> bool {
-    let bits = width.bits();
+/// `IntWidth::Ptr` is the pointer-sized case, and its width comes from the
+/// [`Target`] rather than from an assumption made here — the bootstrap targets
+/// 64-bit machines, but the question "does this constant fit a `usize`" has no
+/// answer that is independent of the machine, so the answer is a parameter.
+fn int_fits(n: &BigInt, signed: bool, width: IntWidth, target: Target) -> bool {
+    let bits = width.bits(target);
     if bits == 0 {
         return n.is_zero();
     }

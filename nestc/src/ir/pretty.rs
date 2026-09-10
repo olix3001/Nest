@@ -600,6 +600,7 @@ fn lit_str(l: &Lit) -> String {
         Lit::Int(n) => n.to_string(),
         Lit::Float(x) => x.to_string(),
         Lit::Str(s) => format!("{s:?}"),
+        Lit::Bytes(b) => crate::parser::ast::bytes_repr(b),
         Lit::Char(c) => format!("{c:?}"),
         Lit::Bool(b) => b.to_string(),
     }
