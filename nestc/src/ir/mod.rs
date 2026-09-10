@@ -2,42 +2,54 @@
 //!
 //! The IR is what the AST becomes once name resolution, desugaring, and type
 //! inference are done: a **typed, structured, much smaller tree** built by
-//! [`super::lower`]. It keeps the AST's structured control flow — `if`, `match`,
-//! and a single infinite [`Expr::Loop`] with `break` — because the code
-//! generator and the analyses that run on the IR want that shape, but it drops
-//! everything the earlier stages resolved away:
+//! [`super::sema::lower`]. It keeps the AST's structured control flow — `if`,
+//! `match`, and a single infinite [`ExprKind::Loop`] with `break` — because the
+//! code generator and the analyses that run on the IR want that shape, but it
+//! drops everything the earlier stages resolved away:
 //!
 //! - Surface sugar is gone (`for`, `while`, `.?`/`.!`, compound assignment) —
 //!   `for`/`.?`/`.!` were desugared on the AST; `while` becomes a `loop` with a
 //!   leading `if !cond { break }` here.
-//! - Names are **bound**: every leaf is an [`Expr::Local`] / [`Expr::Global`]
-//!   carrying the [`DefId`] it refers to, never a string path to re-resolve.
+//! - Names are **bound**: every leaf is an [`ExprKind::Local`] /
+//!   [`ExprKind::Global`] carrying the [`DefId`] it refers to, never a string
+//!   path to re-resolve.
 //! - Every node carries its [`Ty`] (see [`Expr::ty`]); nothing is left to infer.
 //! - Auto-deref is **explicit**: a field/index access through a pointer gets an
-//!   [`Expr::Deref`] inserted.
+//!   [`ExprKind::Deref`] inserted.
 //! - `defer` is **scoped, not duplicated**: each block records its defer bodies
 //!   once in [`Block::defers`]; every exit from that block runs them in reverse,
 //!   which the CFG stage emits as one epilogue per scope.
 //! - implicit coercions are **explicit**: an `@using` upcast is the field access
-//!   it stands for, and a `*T` → `*dyn Trait` unsizing is an [`Expr::DynCast`]
-//!   carrying the erased pointee.
+//!   it stands for, and a `*T` → `*dyn Trait` unsizing is an
+//!   [`ExprKind::DynCast`] carrying the erased pointee.
 //!
 //! Three things the surface language hides behind one syntax become one node
 //! with a tag, so a consumer that does not care about the distinction can ignore
 //! it and one that does gets the answer in O(1):
 //!
-//! - **Every call is [`Expr::Call`]** — a free call, an operator, and a method
-//!   call alike. A method's receiver is `args[0]`, already adjusted (the `&` /
-//!   `&mut` / `.*` the call site implied is written out), and
+//! - **Every call is [`ExprKind::Call`]** — a free call, an operator, and a
+//!   method call alike. A method's receiver is `args[0]`, already adjusted (the
+//!   `&` / `&mut` / `.*` the call site implied is written out), and
 //!   [`Dispatch`] says how the callee is reached: directly, through a trait
 //!   object's vtable, or through a bound that monomorphization will resolve.
 //! - **Every operator is a call too** (§6.13), with [`BuiltinOp`] marking the
 //!   ones that are machine instructions. `&&` / `||`, `!`, and comparisons on
 //!   the numeric core are the exceptions: they dispatch on nothing and stay
-//!   [`Expr::Binary`] / [`Expr::Unary`].
+//!   [`ExprKind::Binary`] / [`ExprKind::Unary`].
 //! - **Pointers keep their permission in the type**: `*T` and `*mut T` are one
 //!   [`Ty::Ptr`] with a `mutable` flag, and [`Function::recv`] /
 //!   [`Function::mutating`] say what a callee may write through.
+//!
+//! # Node identity and metadata
+//!
+//! Every node — [`Function`], [`Param`], [`Block`], [`Stmt`], [`Expr`], [`Arm`],
+//! [`Pattern`], [`Binding`] — carries an [`IrId`], and per-node facts live in a
+//! type-indexed [`Meta`] side table keyed by it, exactly as the AST keys its own
+//! store by `NodeId`. That is where **spans** live, and where every later pass
+//! puts what it computes instead of growing a field the producer's neighbours
+//! have to carry. See [`meta`] for why identity is a field here rather than an
+//! arena slot, and why ids are unique across the whole compilation rather than
+//! per [`Program`].
 //!
 //! What is deliberately *not* done here — each a documented next layer:
 //! generic monomorphization, `match` exhaustiveness and decision trees (arms
@@ -60,7 +72,10 @@ use crate::sema::ty::Ty;
 
 pub use crate::sema::builtins::BuiltinOp;
 
+pub mod meta;
 pub mod pretty;
+
+pub use meta::{IrId, Meta};
 
 /// A whole lowered program: every function that had a body.
 #[derive(Debug, Clone)]
@@ -71,6 +86,7 @@ pub struct Program {
 /// One lowered function.
 #[derive(Debug, Clone)]
 pub struct Function {
+    pub id: IrId,
     /// The function's definition id (its canonical name lives in the def table).
     pub def: DefId,
     pub name: Symbol,
@@ -131,19 +147,19 @@ impl Recv {
     }
 }
 
-/// How a [`Expr::Call`] finds the code it runs.
+/// How a [`ExprKind::Call`] finds the code it runs.
 ///
-/// Every call is one `Expr::Call`; this tag is the *only* thing that separates a
-/// direct jump from a vtable load, so a consumer that does not care about
-/// dispatch can ignore it entirely. Neither non-static form is resolved here on
-/// purpose: picking the vtable slot (and generating the vtable) belongs to the
-/// IR → LIR lowering, and picking the impl for a generic belongs to
+/// Every call is one `ExprKind::Call`; this tag is the *only* thing that
+/// separates a direct jump from a vtable load, so a consumer that does not care
+/// about dispatch can ignore it entirely. Neither non-static form is resolved
+/// here on purpose: picking the vtable slot (and generating the vtable) belongs
+/// to the IR → LIR lowering, and picking the impl for a generic belongs to
 /// monomorphization. What this stage owes them is the *inputs* to those choices,
 /// which is exactly what each variant carries.
 #[derive(Debug, Clone)]
 pub enum Dispatch {
-    /// A direct call: [`callee`](Expr::Call::callee) is the function itself — a
-    /// [`Expr::Global`] naming it, or any expression of function type.
+    /// A direct call: [`callee`](ExprKind::Call::callee) is the function itself
+    /// — a [`ExprKind::Global`] naming it, or any expression of function type.
     Static,
     /// A **virtual** call through a trait object's vtable. The receiver
     /// (`args[0]`) is the `*dyn Trait` fat pointer, `trait_def` is that trait,
@@ -166,6 +182,7 @@ pub enum Dispatch {
 /// A bound function parameter.
 #[derive(Debug, Clone)]
 pub struct Param {
+    pub id: IrId,
     pub def: DefId,
     pub name: Symbol,
     pub ty: Ty,
@@ -175,6 +192,7 @@ pub struct Param {
 /// block's type is the tail's type, or `void`.
 #[derive(Debug, Clone)]
 pub struct Block {
+    pub id: IrId,
     pub stmts: Vec<Stmt>,
     pub tail: Option<Box<Expr>>,
     pub ty: Ty,
@@ -188,9 +206,16 @@ pub struct Block {
 
 /// A statement: an effect with no value contribution to its block.
 #[derive(Debug, Clone)]
-pub enum Stmt {
-    /// A `let` / `const` binding. The bound name is a [`Pattern::Binding`] in
-    /// the common case; a destructuring `let (a, b) := p` keeps its whole
+pub struct Stmt {
+    pub id: IrId,
+    pub kind: StmtKind,
+}
+
+/// What a [`Stmt`] does.
+#[derive(Debug, Clone)]
+pub enum StmtKind {
+    /// A `let` / `const` binding. The bound name is a [`PatternKind::Binding`]
+    /// in the common case; a destructuring `let (a, b) := p` keeps its whole
     /// pattern here, so the bindings it introduces survive into the IR instead
     /// of collapsing into an expression evaluated for effect.
     ///
@@ -219,6 +244,7 @@ pub enum Stmt {
 /// One `match` arm; patterns stay structured (no decision tree yet).
 #[derive(Debug, Clone)]
 pub struct Arm {
+    pub id: IrId,
     pub pattern: Pattern,
     pub guard: Option<Expr>,
     pub body: Expr,
@@ -227,7 +253,14 @@ pub struct Arm {
 /// A (simplified) pattern. Field/slice-rest details the AST carried are dropped;
 /// what remains is enough for a later decision-tree pass and for binding.
 #[derive(Debug, Clone)]
-pub enum Pattern {
+pub struct Pattern {
+    pub id: IrId,
+    pub kind: PatternKind,
+}
+
+/// What a [`Pattern`] tests and binds.
+#[derive(Debug, Clone)]
+pub enum PatternKind {
     /// `_`, and any pattern that binds and tests nothing.
     Wildcard,
     /// A name binding.
@@ -273,7 +306,10 @@ pub enum Pattern {
         inclusive: bool,
     },
     /// `name @ pattern` — bind the whole value *and* keep testing it.
-    At { binding: Binding, pattern: Box<Pattern> },
+    At {
+        binding: Binding,
+        pattern: Box<Pattern>,
+    },
     /// `&pattern` — match through a reference.
     Deref(Box<Pattern>),
 }
@@ -281,37 +317,51 @@ pub enum Pattern {
 /// A name a pattern binds, and the definition it introduces.
 #[derive(Debug, Clone)]
 pub struct Binding {
+    pub id: IrId,
     pub def: DefId,
     pub name: Symbol,
 }
 
-/// A typed expression. Every variant ends in its [`Ty`]; read it via
-/// [`Expr::ty`].
+/// A typed expression: its identity, its [`Ty`], and what it does.
+///
+/// The type sits on the expression rather than inside each variant because
+/// *every* expression has one and nothing may be left uninferred by this stage —
+/// making it a field turns "what is this expression's type" from a match into a
+/// field read.
 #[derive(Debug, Clone)]
-pub enum Expr {
+pub struct Expr {
+    pub id: IrId,
+    pub ty: Ty,
+    pub kind: ExprKind,
+}
+
+/// What an [`Expr`] computes.
+#[derive(Debug, Clone)]
+pub enum ExprKind {
     /// A scalar literal.
-    Lit(Lit, Ty),
+    Lit(Lit),
     /// A reference to a local or parameter.
-    Local(DefId, Ty),
+    Local(DefId),
     /// A reference to a top-level item (function / const / type used as a value).
-    Global(DefId, Ty),
+    Global(DefId),
     /// A `<const N: usize>` generic parameter used as a value. It has no
     /// storage: monomorphization replaces it with the literal the instantiation
-    /// chose, which is why it cannot be a [`Expr::Global`].
-    ConstParam(DefId, Ty),
+    /// chose, which is why it cannot be a [`ExprKind::Global`].
+    ConstParam(DefId),
     /// `callee(args...)`.
     ///
     /// Operators lower to a `Call` too (§6: "int+int and Vec3+Vec3 are the same
     /// construct"), so both a primitive `i32 + i32` and a user `impl Add for
     /// Vec3` reach codegen as a call to the trait method they resolved to. The
-    /// [`builtin`](Expr::Call::builtin) tag lets codegen recognize a primitive
-    /// intrinsic op in **O(1)** — when it is `Some`, the call *is* the machine
-    /// instruction and needs no function lookup; when `None`, it is an ordinary
-    /// user call.
+    /// [`builtin`](ExprKind::Call::builtin) tag lets codegen recognize a
+    /// primitive intrinsic op in **O(1)** — when it is `Some`, the call *is* the
+    /// machine instruction and needs no function lookup; when `None`, it is an
+    /// ordinary user call.
     /// A method call is this same node: the receiver is `args[0]` (adjusted to
     /// what the `self` parameter wants — lowering inserts the `&` or the `.*`),
-    /// and [`dispatch`](Expr::Call::dispatch) says whether the callee is reached
-    /// directly, through a vtable, or through a bound awaiting monomorphization.
+    /// and [`dispatch`](ExprKind::Call::dispatch) says whether the callee is
+    /// reached directly, through a vtable, or through a bound awaiting
+    /// monomorphization.
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
@@ -321,7 +371,6 @@ pub enum Expr {
         builtin: Option<BuiltinOp>,
         /// How the callee is reached (see [`Dispatch`]).
         dispatch: Dispatch,
-        ty: Ty,
     },
     /// A primitive binary operation (numeric / boolean core). Operator-trait
     /// dispatch is a later pass.
@@ -329,43 +378,29 @@ pub enum Expr {
         op: BinOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
-        ty: Ty,
     },
     /// A primitive prefix unary operation.
-    Unary {
-        op: UnOp,
-        operand: Box<Expr>,
-        ty: Ty,
-    },
+    Unary { op: UnOp, operand: Box<Expr> },
     /// `&place` / `&mut place`.
-    Ref {
-        mutable: bool,
-        place: Box<Expr>,
-        ty: Ty,
-    },
+    Ref { mutable: bool, place: Box<Expr> },
     /// `base.*` — an **explicit** pointer dereference (inserted by lowering for
     /// auto-deref sites too).
-    Deref { base: Box<Expr>, ty: Ty },
+    Deref { base: Box<Expr> },
     /// `base.name` — a struct field access (base is a value, never a pointer:
-    /// lowering inserts a [`Expr::Deref`] first).
+    /// lowering inserts a [`ExprKind::Deref`] first).
     Field {
         base: Box<Expr>,
         name: Symbol,
         /// The field this names, bound by [`crate::sema::fields`]. `None` only
         /// when the base type was already in error.
         def: Option<DefId>,
-        ty: Ty,
     },
     /// `base.N` — tuple element access.
-    TupleIndex { base: Box<Expr>, index: u64, ty: Ty },
+    TupleIndex { base: Box<Expr>, index: u64 },
     /// `base[index]`.
-    Index {
-        base: Box<Expr>,
-        index: Box<Expr>,
-        ty: Ty,
-    },
+    Index { base: Box<Expr>, index: Box<Expr> },
     /// `(a, b, ...)`.
-    Tuple { elems: Vec<Expr>, ty: Ty },
+    Tuple { elems: Vec<Expr> },
     /// A nested block expression.
     Block(Block),
     /// `if cond { then } else { els }`.
@@ -373,76 +408,31 @@ pub enum Expr {
         cond: Box<Expr>,
         then: Block,
         els: Option<Block>,
-        ty: Ty,
     },
     /// `match scrutinee { arms }`.
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<Arm>,
-        ty: Ty,
     },
     /// An infinite loop; exits only through a `break`.
-    Loop { body: Block, ty: Ty },
+    Loop { body: Block },
     /// A struct / record construction `Type { field: value, ... }`.
     Construct {
         def: DefId,
         fields: Vec<(Symbol, Expr)>,
-        ty: Ty,
     },
     /// An enum-variant value `.variant(args...)`.
-    Variant {
-        name: Symbol,
-        args: Vec<Expr>,
-        ty: Ty,
-    },
+    Variant { name: Symbol, args: Vec<Expr> },
     /// A compiler `$`-intrinsic call.
-    Intrinsic {
-        name: Symbol,
-        args: Vec<Expr>,
-        ty: Ty,
-    },
+    Intrinsic { name: Symbol, args: Vec<Expr> },
     /// `*T` unsized to `*dyn Trait` — a fat pointer pairing `value` with `T`'s
-    /// vtable for the trait `ty` names. `concrete` is the erased pointee, kept
-    /// because picking the vtable is exactly what the coerced type can no longer
-    /// say.
-    DynCast {
-        value: Box<Expr>,
-        concrete: Ty,
-        ty: Ty,
-    },
+    /// vtable for the trait the expression's type names. `concrete` is the
+    /// erased pointee, kept because picking the vtable is exactly what the
+    /// coerced type can no longer say.
+    DynCast { value: Box<Expr>, concrete: Ty },
     /// A placeholder for an expression that could not be lowered (an error was
-    /// already reported); carries its (usually error) type.
-    Error(Ty),
-}
-
-impl Expr {
-    /// This expression's type.
-    pub fn ty(&self) -> &Ty {
-        match self {
-            Expr::Lit(_, ty)
-            | Expr::Local(_, ty)
-            | Expr::Global(_, ty)
-            | Expr::ConstParam(_, ty)
-            | Expr::Call { ty, .. }
-            | Expr::Binary { ty, .. }
-            | Expr::Unary { ty, .. }
-            | Expr::Ref { ty, .. }
-            | Expr::Deref { ty, .. }
-            | Expr::Field { ty, .. }
-            | Expr::TupleIndex { ty, .. }
-            | Expr::Index { ty, .. }
-            | Expr::Tuple { ty, .. }
-            | Expr::If { ty, .. }
-            | Expr::Match { ty, .. }
-            | Expr::Loop { ty, .. }
-            | Expr::Construct { ty, .. }
-            | Expr::Variant { ty, .. }
-            | Expr::Intrinsic { ty, .. }
-            | Expr::DynCast { ty, .. }
-            | Expr::Error(ty) => ty,
-            Expr::Block(b) => &b.ty,
-        }
-    }
+    /// already reported); its type is usually the error type.
+    Error,
 }
 
 // ===< Visitors >===
@@ -467,6 +457,9 @@ pub trait Visitor: Sized {
     fn visit_arm(&mut self, arm: &Arm) {
         walk_arm(self, arm);
     }
+    fn visit_pattern(&mut self, pattern: &Pattern) {
+        walk_pattern(self, pattern);
+    }
 }
 
 pub fn walk_function<V: Visitor>(v: &mut V, func: &Function) {
@@ -488,91 +481,119 @@ pub fn walk_block<V: Visitor>(v: &mut V, block: &Block) {
 }
 
 pub fn walk_stmt<V: Visitor>(v: &mut V, stmt: &Stmt) {
-    match stmt {
-        Stmt::Let { init, .. } => v.visit_expr(init),
-        Stmt::Assign { place, value } => {
+    match &stmt.kind {
+        StmtKind::Let { pattern, init, .. } => {
+            v.visit_pattern(pattern);
+            v.visit_expr(init);
+        }
+        StmtKind::Assign { place, value } => {
             v.visit_expr(place);
             v.visit_expr(value);
         }
-        Stmt::Expr(e) => v.visit_expr(e),
-        Stmt::Return(e) | Stmt::Break(e) => {
+        StmtKind::Expr(e) => v.visit_expr(e),
+        StmtKind::Return(e) | StmtKind::Break(e) => {
             if let Some(e) = e {
                 v.visit_expr(e);
             }
         }
-        Stmt::Continue => {}
+        StmtKind::Continue => {}
     }
 }
 
 pub fn walk_expr<V: Visitor>(v: &mut V, expr: &Expr) {
-    match expr {
-        Expr::Lit(..)
-        | Expr::Local(..)
-        | Expr::Global(..)
-        | Expr::ConstParam(..)
-        | Expr::Error(_) => {}
-        Expr::Call { callee, args, .. } => {
+    match &expr.kind {
+        ExprKind::Lit(_)
+        | ExprKind::Local(_)
+        | ExprKind::Global(_)
+        | ExprKind::ConstParam(_)
+        | ExprKind::Error => {}
+        ExprKind::Call { callee, args, .. } => {
             v.visit_expr(callee);
             for a in args {
                 v.visit_expr(a);
             }
         }
-        Expr::Binary { lhs, rhs, .. } => {
+        ExprKind::Binary { lhs, rhs, .. } => {
             v.visit_expr(lhs);
             v.visit_expr(rhs);
         }
-        Expr::Unary { operand, .. } => v.visit_expr(operand),
-        Expr::Ref { place, .. } => v.visit_expr(place),
-        Expr::Deref { base, .. } | Expr::Field { base, .. } | Expr::TupleIndex { base, .. } => {
-            v.visit_expr(base)
-        }
-        Expr::Index { base, index, .. } => {
+        ExprKind::Unary { operand, .. } => v.visit_expr(operand),
+        ExprKind::Ref { place, .. } => v.visit_expr(place),
+        ExprKind::Deref { base }
+        | ExprKind::Field { base, .. }
+        | ExprKind::TupleIndex { base, .. } => v.visit_expr(base),
+        ExprKind::Index { base, index } => {
             v.visit_expr(base);
             v.visit_expr(index);
         }
-        Expr::Tuple { elems, .. } => {
+        ExprKind::Tuple { elems } => {
             for e in elems {
                 v.visit_expr(e);
             }
         }
-        Expr::Block(b) => v.visit_block(b),
-        Expr::If {
-            cond, then, els, ..
-        } => {
+        ExprKind::Block(b) => v.visit_block(b),
+        ExprKind::If { cond, then, els } => {
             v.visit_expr(cond);
             v.visit_block(then);
             if let Some(e) = els {
                 v.visit_block(e);
             }
         }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
+        ExprKind::Match { scrutinee, arms } => {
             v.visit_expr(scrutinee);
             for a in arms {
                 v.visit_arm(a);
             }
         }
-        Expr::Loop { body, .. } => v.visit_block(body),
-        Expr::Construct { fields, .. } => {
+        ExprKind::Loop { body } => v.visit_block(body),
+        ExprKind::Construct { fields, .. } => {
             for (_, e) in fields {
                 v.visit_expr(e);
             }
         }
-        Expr::Variant { args, .. } | Expr::Intrinsic { args, .. } => {
+        ExprKind::Variant { args, .. } | ExprKind::Intrinsic { args, .. } => {
             for a in args {
                 v.visit_expr(a);
             }
         }
-        Expr::DynCast { value, .. } => v.visit_expr(value),
+        ExprKind::DynCast { value, .. } => v.visit_expr(value),
     }
 }
 
 pub fn walk_arm<V: Visitor>(v: &mut V, arm: &Arm) {
+    v.visit_pattern(&arm.pattern);
     if let Some(g) = &arm.guard {
         v.visit_expr(g);
     }
     v.visit_expr(&arm.body);
+}
+
+pub fn walk_pattern<V: Visitor>(v: &mut V, pattern: &Pattern) {
+    match &pattern.kind {
+        PatternKind::Wildcard
+        | PatternKind::Binding { .. }
+        | PatternKind::Lit(_)
+        | PatternKind::Range { .. } => {}
+        PatternKind::Variant { sub: ps, .. }
+        | PatternKind::Tuple(ps)
+        | PatternKind::Or(ps)
+        | PatternKind::TupleStruct { elems: ps, .. } => {
+            for p in ps {
+                v.visit_pattern(p);
+            }
+        }
+        PatternKind::Struct { fields, .. } => {
+            for (_, p) in fields {
+                v.visit_pattern(p);
+            }
+        }
+        PatternKind::Slice { prefix, suffix, .. } => {
+            for p in prefix.iter().chain(suffix) {
+                v.visit_pattern(p);
+            }
+        }
+        PatternKind::At { pattern, .. } | PatternKind::Deref(pattern) => v.visit_pattern(pattern),
+    }
 }
 
 /// A mutating IR walk, mirroring [`Visitor`].
@@ -592,6 +613,9 @@ pub trait VisitorMut: Sized {
     }
     fn visit_arm(&mut self, arm: &mut Arm) {
         walk_arm_mut(self, arm);
+    }
+    fn visit_pattern(&mut self, pattern: &mut Pattern) {
+        walk_pattern_mut(self, pattern);
     }
 }
 
@@ -614,89 +638,117 @@ pub fn walk_block_mut<V: VisitorMut>(v: &mut V, block: &mut Block) {
 }
 
 pub fn walk_stmt_mut<V: VisitorMut>(v: &mut V, stmt: &mut Stmt) {
-    match stmt {
-        Stmt::Let { init, .. } => v.visit_expr(init),
-        Stmt::Assign { place, value } => {
+    match &mut stmt.kind {
+        StmtKind::Let { pattern, init, .. } => {
+            v.visit_pattern(pattern);
+            v.visit_expr(init);
+        }
+        StmtKind::Assign { place, value } => {
             v.visit_expr(place);
             v.visit_expr(value);
         }
-        Stmt::Expr(e) => v.visit_expr(e),
-        Stmt::Return(e) | Stmt::Break(e) => {
+        StmtKind::Expr(e) => v.visit_expr(e),
+        StmtKind::Return(e) | StmtKind::Break(e) => {
             if let Some(e) = e {
                 v.visit_expr(e);
             }
         }
-        Stmt::Continue => {}
+        StmtKind::Continue => {}
     }
 }
 
 pub fn walk_expr_mut<V: VisitorMut>(v: &mut V, expr: &mut Expr) {
-    match expr {
-        Expr::Lit(..)
-        | Expr::Local(..)
-        | Expr::Global(..)
-        | Expr::ConstParam(..)
-        | Expr::Error(_) => {}
-        Expr::Call { callee, args, .. } => {
+    match &mut expr.kind {
+        ExprKind::Lit(_)
+        | ExprKind::Local(_)
+        | ExprKind::Global(_)
+        | ExprKind::ConstParam(_)
+        | ExprKind::Error => {}
+        ExprKind::Call { callee, args, .. } => {
             v.visit_expr(callee);
             for a in args {
                 v.visit_expr(a);
             }
         }
-        Expr::Binary { lhs, rhs, .. } => {
+        ExprKind::Binary { lhs, rhs, .. } => {
             v.visit_expr(lhs);
             v.visit_expr(rhs);
         }
-        Expr::Unary { operand, .. } => v.visit_expr(operand),
-        Expr::Ref { place, .. } => v.visit_expr(place),
-        Expr::Deref { base, .. } | Expr::Field { base, .. } | Expr::TupleIndex { base, .. } => {
-            v.visit_expr(base)
-        }
-        Expr::Index { base, index, .. } => {
+        ExprKind::Unary { operand, .. } => v.visit_expr(operand),
+        ExprKind::Ref { place, .. } => v.visit_expr(place),
+        ExprKind::Deref { base }
+        | ExprKind::Field { base, .. }
+        | ExprKind::TupleIndex { base, .. } => v.visit_expr(base),
+        ExprKind::Index { base, index } => {
             v.visit_expr(base);
             v.visit_expr(index);
         }
-        Expr::Tuple { elems, .. } => {
+        ExprKind::Tuple { elems } => {
             for e in elems {
                 v.visit_expr(e);
             }
         }
-        Expr::Block(b) => v.visit_block(b),
-        Expr::If {
-            cond, then, els, ..
-        } => {
+        ExprKind::Block(b) => v.visit_block(b),
+        ExprKind::If { cond, then, els } => {
             v.visit_expr(cond);
             v.visit_block(then);
             if let Some(e) = els {
                 v.visit_block(e);
             }
         }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
+        ExprKind::Match { scrutinee, arms } => {
             v.visit_expr(scrutinee);
             for a in arms {
                 v.visit_arm(a);
             }
         }
-        Expr::Loop { body, .. } => v.visit_block(body),
-        Expr::Construct { fields, .. } => {
+        ExprKind::Loop { body } => v.visit_block(body),
+        ExprKind::Construct { fields, .. } => {
             for (_, e) in fields {
                 v.visit_expr(e);
             }
         }
-        Expr::Variant { args, .. } | Expr::Intrinsic { args, .. } => {
+        ExprKind::Variant { args, .. } | ExprKind::Intrinsic { args, .. } => {
             for a in args {
                 v.visit_expr(a);
             }
         }
-        Expr::DynCast { value, .. } => v.visit_expr(value),
+        ExprKind::DynCast { value, .. } => v.visit_expr(value),
     }
 }
 
 pub fn walk_arm_mut<V: VisitorMut>(v: &mut V, arm: &mut Arm) {
+    v.visit_pattern(&mut arm.pattern);
     if let Some(g) = &mut arm.guard {
         v.visit_expr(g);
     }
     v.visit_expr(&mut arm.body);
+}
+
+pub fn walk_pattern_mut<V: VisitorMut>(v: &mut V, pattern: &mut Pattern) {
+    match &mut pattern.kind {
+        PatternKind::Wildcard
+        | PatternKind::Binding { .. }
+        | PatternKind::Lit(_)
+        | PatternKind::Range { .. } => {}
+        PatternKind::Variant { sub: ps, .. }
+        | PatternKind::Tuple(ps)
+        | PatternKind::Or(ps)
+        | PatternKind::TupleStruct { elems: ps, .. } => {
+            for p in ps {
+                v.visit_pattern(p);
+            }
+        }
+        PatternKind::Struct { fields, .. } => {
+            for (_, p) in fields {
+                v.visit_pattern(p);
+            }
+        }
+        PatternKind::Slice { prefix, suffix, .. } => {
+            for p in prefix.iter_mut().chain(suffix) {
+                v.visit_pattern(p);
+            }
+        }
+        PatternKind::At { pattern, .. } | PatternKind::Deref(pattern) => v.visit_pattern(pattern),
+    }
 }

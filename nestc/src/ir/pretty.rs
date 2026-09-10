@@ -5,7 +5,10 @@ use std::fmt::Write;
 
 use crate::parser::ast::Lit;
 
-use super::{Arm, Block, Dispatch, Expr, Function, Pattern, Program, Recv, Stmt};
+use super::{
+    Arm, Block, Dispatch, Expr, ExprKind, Function, Pattern, PatternKind, Program, Recv, Stmt,
+    StmtKind,
+};
 use crate::sema::def::{DefTable, Directive, DirectiveArg};
 
 /// Render a whole [`Program`].
@@ -98,8 +101,8 @@ impl Printer<'_> {
     }
 
     fn stmt(&mut self, s: &Stmt) {
-        match s {
-            Stmt::Let { pattern, ty, init } => {
+        match &s.kind {
+            StmtKind::Let { pattern, ty, init } => {
                 let e = self.expr(init);
                 self.line(&format!(
                     "let {}: {} = {e}",
@@ -107,24 +110,24 @@ impl Printer<'_> {
                     ty.display(self.defs)
                 ));
             }
-            Stmt::Assign { place, value } => {
+            StmtKind::Assign { place, value } => {
                 let p = self.expr(place);
                 let v = self.expr(value);
                 self.line(&format!("{p} = {v}"));
             }
-            Stmt::Expr(e) => {
+            StmtKind::Expr(e) => {
                 let e = self.expr(e);
                 self.line(&e);
             }
-            Stmt::Return(e) => {
+            StmtKind::Return(e) => {
                 let e = e.as_ref().map(|e| self.expr(e)).unwrap_or_default();
                 self.line(&format!("return {e}"));
             }
-            Stmt::Break(e) => {
+            StmtKind::Break(e) => {
                 let e = e.as_ref().map(|e| self.expr(e)).unwrap_or_default();
                 self.line(&format!("break {e}"));
             }
-            Stmt::Continue => self.line("continue"),
+            StmtKind::Continue => self.line("continue"),
         }
     }
 
@@ -132,13 +135,13 @@ impl Printer<'_> {
     /// their bodies inline via nested lines instead, so those emit through
     /// `self.line` and return a short header.
     fn expr(&mut self, e: &Expr) -> String {
-        let ty = e.ty().display(self.defs);
-        match e {
-            Expr::Lit(l, _) => format!("{}: {ty}", lit_str(l)),
-            Expr::Local(d, _) => format!("{}: {ty}", self.defs.get(*d).name),
-            Expr::Global(d, _) => format!("{}: {ty}", self.defs.canonical_string(*d)),
-            Expr::ConstParam(d, _) => format!("const {}: {ty}", self.defs.get(*d).name),
-            Expr::Call {
+        let ty = e.ty.display(self.defs);
+        match &e.kind {
+            ExprKind::Lit(l) => format!("{}: {ty}", lit_str(l)),
+            ExprKind::Local(d) => format!("{}: {ty}", self.defs.get(*d).name),
+            ExprKind::Global(d) => format!("{}: {ty}", self.defs.canonical_string(*d)),
+            ExprKind::ConstParam(d) => format!("const {}: {ty}", self.defs.get(*d).name),
+            ExprKind::Call {
                 callee,
                 args,
                 builtin,
@@ -180,37 +183,37 @@ impl Printer<'_> {
                 }
                 format!("{prefix}({c})({a}): {ty}")
             }
-            Expr::Binary { op, lhs, rhs, .. } => {
+            ExprKind::Binary { op, lhs, rhs, .. } => {
                 let l = self.expr(lhs);
                 let r = self.expr(rhs);
                 format!("({l} {op:?} {r}): {ty}")
             }
-            Expr::Unary { op, operand, .. } => {
+            ExprKind::Unary { op, operand, .. } => {
                 let o = self.expr(operand);
                 format!("({op:?} {o}): {ty}")
             }
-            Expr::Ref { mutable, place, .. } => {
+            ExprKind::Ref { mutable, place, .. } => {
                 let p = self.expr(place);
                 format!("(&{}{p}): {ty}", if *mutable { "mut " } else { "" })
             }
-            Expr::Deref { base, .. } => {
+            ExprKind::Deref { base, .. } => {
                 let b = self.expr(base);
                 format!("({b}.*): {ty}")
             }
-            Expr::Field { base, name, .. } => {
+            ExprKind::Field { base, name, .. } => {
                 let b = self.expr(base);
                 format!("({b}.{name}): {ty}")
             }
-            Expr::TupleIndex { base, index, .. } => {
+            ExprKind::TupleIndex { base, index, .. } => {
                 let b = self.expr(base);
                 format!("({b}.{index}): {ty}")
             }
-            Expr::Index { base, index, .. } => {
+            ExprKind::Index { base, index, .. } => {
                 let b = self.expr(base);
                 let i = self.expr(index);
                 format!("({b}[{i}]): {ty}")
             }
-            Expr::Tuple { elems, .. } => {
+            ExprKind::Tuple { elems, .. } => {
                 let es = elems
                     .iter()
                     .map(|e| self.expr(e))
@@ -218,7 +221,7 @@ impl Printer<'_> {
                     .join(", ");
                 format!("({es}): {ty}")
             }
-            Expr::Construct { def, fields, .. } => {
+            ExprKind::Construct { def, fields, .. } => {
                 let fs = fields
                     .iter()
                     .map(|(n, e)| format!("{n}: {}", self.expr(e)))
@@ -226,8 +229,8 @@ impl Printer<'_> {
                     .join(", ");
                 format!("{} {{ {fs} }}: {ty}", self.defs.canonical_string(*def))
             }
-            Expr::Variant { name, args, .. } if args.is_empty() => format!(".{name}: {ty}"),
-            Expr::Variant { name, args, .. } => {
+            ExprKind::Variant { name, args, .. } if args.is_empty() => format!(".{name}: {ty}"),
+            ExprKind::Variant { name, args, .. } => {
                 let a = args
                     .iter()
                     .map(|a| self.expr(a))
@@ -235,13 +238,13 @@ impl Printer<'_> {
                     .join(", ");
                 format!(".{name}({a}): {ty}")
             }
-            Expr::DynCast {
+            ExprKind::DynCast {
                 value, concrete, ..
             } => {
                 let v = self.expr(value);
                 format!("({v} as {ty} from {})", concrete.display(self.defs))
             }
-            Expr::Intrinsic { name, args, .. } => {
+            ExprKind::Intrinsic { name, args, .. } => {
                 let a = args
                     .iter()
                     .map(|a| self.expr(a))
@@ -249,7 +252,7 @@ impl Printer<'_> {
                     .join(", ");
                 format!("${name}({a}): {ty}")
             }
-            Expr::Block(b) => {
+            ExprKind::Block(b) => {
                 self.line(&format!("block: {ty} {{"));
                 self.indent += 1;
                 self.block(b);
@@ -257,7 +260,7 @@ impl Printer<'_> {
                 self.line("}");
                 format!("<block: {ty}>")
             }
-            Expr::If {
+            ExprKind::If {
                 cond, then, els, ..
             } => {
                 let c = self.expr(cond);
@@ -274,7 +277,7 @@ impl Printer<'_> {
                 self.line("}");
                 format!("<if: {ty}>")
             }
-            Expr::Match {
+            ExprKind::Match {
                 scrutinee, arms, ..
             } => {
                 let s = self.expr(scrutinee);
@@ -287,7 +290,7 @@ impl Printer<'_> {
                 self.line("}");
                 format!("<match: {ty}>")
             }
-            Expr::Loop { body, .. } => {
+            ExprKind::Loop { body, .. } => {
                 self.line("loop {");
                 self.indent += 1;
                 self.block(body);
@@ -295,7 +298,7 @@ impl Printer<'_> {
                 self.line("}");
                 format!("<loop: {ty}>")
             }
-            Expr::Error(_) => format!("<error: {ty}>"),
+            ExprKind::Error => format!("<error: {ty}>"),
         }
     }
 
@@ -311,24 +314,36 @@ impl Printer<'_> {
 }
 
 fn pattern_str(defs: &DefTable, p: &Pattern) -> String {
-    match p {
-        Pattern::Wildcard => "_".into(),
-        Pattern::Binding { name, .. } => name.to_string(),
-        Pattern::Lit(l) => lit_str(l),
-        Pattern::Variant { name, sub } => {
+    match &p.kind {
+        PatternKind::Wildcard => "_".into(),
+        PatternKind::Binding { name, .. } => name.to_string(),
+        PatternKind::Lit(l) => lit_str(l),
+        PatternKind::Variant { name, sub } => {
             if sub.is_empty() {
                 format!(".{name}")
             } else {
-                let s = sub.iter().map(|p| pattern_str(defs, p)).collect::<Vec<_>>().join(", ");
+                let s = sub
+                    .iter()
+                    .map(|p| pattern_str(defs, p))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(".{name}({s})")
             }
         }
-        Pattern::Tuple(ps) => {
-            let s = ps.iter().map(|p| pattern_str(defs, p)).collect::<Vec<_>>().join(", ");
+        PatternKind::Tuple(ps) => {
+            let s = ps
+                .iter()
+                .map(|p| pattern_str(defs, p))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("({s})")
         }
-        Pattern::Or(ps) => ps.iter().map(|p| pattern_str(defs, p)).collect::<Vec<_>>().join(" | "),
-        Pattern::Struct { def, fields, rest } => {
+        PatternKind::Or(ps) => ps
+            .iter()
+            .map(|p| pattern_str(defs, p))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        PatternKind::Struct { def, fields, rest } => {
             let mut parts: Vec<String> = fields
                 .iter()
                 .map(|(n, p)| format!("{n}: {}", pattern_str(defs, p)))
@@ -336,10 +351,13 @@ fn pattern_str(defs: &DefTable, p: &Pattern) -> String {
             if *rest {
                 parts.push("..".into());
             }
-            let head = def.map_or_else(|| ".".to_string(), |d| format!("{} ", defs.canonical_string(d)));
+            let head = def.map_or_else(
+                || ".".to_string(),
+                |d| format!("{} ", defs.canonical_string(d)),
+            );
             format!("{head}{{ {} }}", parts.join(", "))
         }
-        Pattern::TupleStruct { def, elems, rest } => {
+        PatternKind::TupleStruct { def, elems, rest } => {
             let mut parts: Vec<String> = elems.iter().map(|p| pattern_str(defs, p)).collect();
             if *rest {
                 parts.push("..".into());
@@ -347,7 +365,7 @@ fn pattern_str(defs: &DefTable, p: &Pattern) -> String {
             let head = def.map_or_else(String::new, |d| defs.canonical_string(d));
             format!("{head}({})", parts.join(", "))
         }
-        Pattern::Slice {
+        PatternKind::Slice {
             prefix,
             rest,
             suffix,
@@ -362,7 +380,7 @@ fn pattern_str(defs: &DefTable, p: &Pattern) -> String {
             parts.extend(suffix.iter().map(|p| pattern_str(defs, p)));
             format!("[{}]", parts.join(", "))
         }
-        Pattern::Range {
+        PatternKind::Range {
             start,
             end,
             inclusive,
@@ -372,10 +390,10 @@ fn pattern_str(defs: &DefTable, p: &Pattern) -> String {
             let e = end.as_ref().map(lit_str).unwrap_or_default();
             format!("{s}{op}{e}")
         }
-        Pattern::At { binding, pattern } => {
+        PatternKind::At { binding, pattern } => {
             format!("{} @ {}", binding.name, pattern_str(defs, pattern))
         }
-        Pattern::Deref(p) => format!("&{}", pattern_str(defs, p)),
+        PatternKind::Deref(p) => format!("&{}", pattern_str(defs, p)),
     }
 }
 

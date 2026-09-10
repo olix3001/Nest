@@ -330,7 +330,13 @@ fn resolve_fields_one(session: &mut Session, file: FileId) {
 }
 
 fn lower_one(session: &mut Session, file: FileId) {
-    let program = lower::lower_file(&session.defs, &session.lang_items, &session.asts, file);
+    let program = lower::lower_file(
+        &session.defs,
+        &session.lang_items,
+        &session.asts,
+        &session.ir_meta,
+        file,
+    );
     session.ir.insert(file, program);
 }
 

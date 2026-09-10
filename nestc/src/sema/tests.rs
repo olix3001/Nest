@@ -185,11 +185,10 @@ main :: func () { const x := mp.triple(3) }
 ";
     // A package is registered by the *path* of its root file, which the session's
     // loader resolves — so an in-memory package root is as valid as an on-disk one.
-    let mut session = Session::with_loader(Box::new(
-        MemLoader::new()
-            .with("main", mainsrc)
-            .with("mathpkg", "@public triple :: func (n: isize) -> isize { return n }\n"),
-    ));
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", mainsrc).with(
+        "mathpkg",
+        "@public triple :: func (n: isize) -> isize { return n }\n",
+    )));
     session.register_package("mathpkg", "mathpkg");
     let file = session.load_entry("main").unwrap();
     analyze(&mut session, file);
@@ -341,9 +340,11 @@ fn literal_defaults_to_isize_without_context() {
     let session = analyze_mem(&[("main", "f :: func () { const x := 7 }")], "main");
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     let file = entry_file(&session);
-    let ty = node_ty(&session, file, |k| {
-        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 7.into())
-    });
+    let ty = node_ty(
+        &session,
+        file,
+        |k| matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 7.into()),
+    );
     assert_eq!(ty, Ty::isize());
 }
 
@@ -352,9 +353,11 @@ fn literal_takes_annotated_type() {
     let session = analyze_mem(&[("main", "f :: func () { const x: i32 := 7 }")], "main");
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     let file = entry_file(&session);
-    let ty = node_ty(&session, file, |k| {
-        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 7.into())
-    });
+    let ty = node_ty(
+        &session,
+        file,
+        |k| matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 7.into()),
+    );
     assert_eq!(
         ty,
         Ty::Int {
@@ -428,9 +431,11 @@ f :: func () { const y := g(3) }
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     let file = entry_file(&session);
     // The literal `3` is constrained to the parameter type `i16`.
-    let ty = node_ty(&session, file, |k| {
-        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 3.into())
-    });
+    let ty = node_ty(
+        &session,
+        file,
+        |k| matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 3.into()),
+    );
     assert_eq!(
         ty,
         Ty::Int {
@@ -442,7 +447,7 @@ f :: func () { const y := g(3) }
 
 // ===< IR lowering >===
 
-use crate::ir::{Expr, Stmt};
+use crate::ir::{Expr, ExprKind, StmtKind};
 
 #[test]
 fn while_lowers_to_loop_with_break() {
@@ -465,14 +470,15 @@ f :: func (n: i32) {
     // that `break`s (the desugared `while` guard). It may be a statement or the
     // block's tail expression.
     let is_guarded_loop = |e: &Expr| {
-        matches!(e, Expr::Loop { body, .. }
-            if matches!(body.stmts.first(), Some(Stmt::Expr(Expr::If { .. }))))
+        matches!(&e.kind, ExprKind::Loop { body }
+            if matches!(body.stmts.first().map(|s| &s.kind),
+                        Some(StmtKind::Expr(Expr { kind: ExprKind::If { .. }, .. }))))
     };
     let body = body_of(func);
     let in_stmts = body
         .stmts
         .iter()
-        .any(|s| matches!(s, Stmt::Expr(e) if is_guarded_loop(e)));
+        .any(|s| matches!(&s.kind, StmtKind::Expr(e) if is_guarded_loop(e)));
     let in_tail = body.tail.as_deref().is_some_and(is_guarded_loop);
     assert!(
         in_stmts || in_tail,
@@ -503,16 +509,19 @@ f :: func () -> i32 {
     let body = body_of(func);
     assert_eq!(body.defers.len(), 1, "{body:#?}");
     assert!(
-        matches!(&body.defers[0], Expr::Call { .. }),
+        matches!(&body.defers[0].kind, ExprKind::Call { .. }),
         "defer body is not the call: {:#?}",
         body.defers
     );
     // ...and is not copied ahead of either `return`, even though there are two.
     assert!(
-        !body
-            .stmts
-            .iter()
-            .any(|s| matches!(s, Stmt::Expr(Expr::Call { .. }))),
+        !body.stmts.iter().any(|s| matches!(
+            &s.kind,
+            StmtKind::Expr(Expr {
+                kind: ExprKind::Call { .. },
+                ..
+            })
+        )),
         "deferred call was duplicated into the statement list: {:#?}",
         body.stmts
     );
@@ -534,18 +543,257 @@ get :: func (p: *P) -> i32 { return p.x }
         .find(|f| f.name.as_str() == "get")
         .expect("func get");
     // The returned `p.x` is `(p.*).x` — a Field over an explicit Deref.
-    let ret = body_of(func).stmts.iter().find_map(|s| match s {
-        Stmt::Return(Some(e)) => Some(e),
+    let ret = body_of(func).stmts.iter().find_map(|s| match &s.kind {
+        StmtKind::Return(Some(e)) => Some(e),
         _ => None,
     });
     let is_deref_field = matches!(
-        ret,
-        Some(Expr::Field { base, .. }) if matches!(**base, Expr::Deref { .. })
+        ret.map(|e| &e.kind),
+        Some(ExprKind::Field { base, .. }) if matches!(base.kind, ExprKind::Deref { .. })
     );
     assert!(
         is_deref_field,
         "field access not lowered to deref+field: {ret:#?}"
     );
+}
+
+// ===< IR node identity and metadata >===
+
+/// Every [`IrId`] a program's nodes carry, in traversal order. Params and the
+/// bindings inside patterns are not reachable through [`ir::Visitor`], so they
+/// are collected explicitly — the guarantee under test is that *every* node
+/// shape has an id and a span, with no exceptions.
+fn ids_of(program: &crate::ir::Program) -> Vec<crate::ir::IrId> {
+    use crate::ir::{Arm, Binding, Block, Expr, IrId, Pattern, PatternKind, Stmt};
+
+    struct Collect(Vec<IrId>);
+    impl Collect {
+        fn binding(&mut self, b: &Binding) {
+            self.0.push(b.id);
+        }
+    }
+    impl crate::ir::Visitor for Collect {
+        fn visit_block(&mut self, b: &Block) {
+            self.0.push(b.id);
+            crate::ir::walk_block(self, b);
+        }
+        fn visit_stmt(&mut self, s: &Stmt) {
+            self.0.push(s.id);
+            crate::ir::walk_stmt(self, s);
+        }
+        fn visit_expr(&mut self, e: &Expr) {
+            self.0.push(e.id);
+            crate::ir::walk_expr(self, e);
+        }
+        fn visit_arm(&mut self, a: &Arm) {
+            self.0.push(a.id);
+            crate::ir::walk_arm(self, a);
+        }
+        fn visit_pattern(&mut self, p: &Pattern) {
+            self.0.push(p.id);
+            match &p.kind {
+                PatternKind::At { binding, .. } => self.binding(binding),
+                PatternKind::Slice {
+                    rest: Some(Some(b)),
+                    ..
+                } => self.binding(b),
+                _ => {}
+            }
+            crate::ir::walk_pattern(self, p);
+        }
+    }
+
+    let mut c = Collect(Vec::new());
+    for f in &program.funcs {
+        c.0.push(f.id);
+        for p in &f.params {
+            c.0.push(p.id);
+        }
+        crate::ir::Visitor::visit_function(&mut c, f);
+    }
+    c.0
+}
+
+/// The source text a node's span covers.
+fn span_text(session: &Session, id: crate::ir::IrId) -> String {
+    let fs = session.ir_meta.span(id).expect("node has a span");
+    let file = session
+        .sources
+        .file(fs.file)
+        .expect("span names a real file");
+    file.src[fs.span.start..fs.span.end].to_string()
+}
+
+#[test]
+fn every_lowered_node_has_an_id_and_a_span() {
+    // The guarantee LIR is built on: a span is recorded when the node is
+    // allocated, so nothing downstream has to reconstruct one. This walks a
+    // program exercising every node shape at once.
+    let src = "\
+P :: struct { x: i32, y: i32 }
+E :: enum { a, b(i32) }
+cleanup :: func () {}
+f :: func (p: *P, n: i32, k: i32 := 3) -> i32 {
+  defer cleanup()
+  let acc := p.x + p.y
+  let t := (acc, n)
+  let arr: []i32 := .{ 1, 2, 3 }
+  let sl := arr[0..<2]
+  let e: E := .b(n)
+  let r := e.match {
+    .b(v) if v > 0 => v,
+    whole @ .a => 0,
+    _ => k,
+  }
+  while acc < n { acc = acc + 1 }
+  if acc > 0 { return acc } else { return r }
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let ids = ids_of(&session.ir[&file]);
+    assert!(
+        ids.len() > 40,
+        "expected a substantial program, got {ids:#?}"
+    );
+
+    for id in &ids {
+        let fs = session
+            .ir_meta
+            .span(*id)
+            .unwrap_or_else(|| panic!("node {id} has no span"));
+        let f = session
+            .sources
+            .file(fs.file)
+            .expect("span names a real file");
+        assert!(
+            fs.span.start <= fs.span.end && fs.span.end <= f.src.len(),
+            "node {id} has an out-of-range span {fs:?}"
+        );
+    }
+}
+
+#[test]
+fn every_node_id_is_allocated_once() {
+    // Ids key the side table, so a duplicate would silently make two nodes share
+    // one fact — the kind of bug that surfaces as a wrong span in a diagnostic
+    // long after the pass that caused it.
+    let src = "\
+g :: func (a: i32) -> i32 { return a + 1 }
+f :: func (a: i32, b: i32) -> i32 { return g(a) + g(b) }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+
+    // Across *every* file, core included: the allocator is session-wide.
+    let mut all: Vec<crate::ir::IrId> = Vec::new();
+    for program in session.ir.values() {
+        all.extend(ids_of(program));
+    }
+    let unique: std::collections::HashSet<_> = all.iter().copied().collect();
+    assert_eq!(unique.len(), all.len(), "an IrId was handed out twice");
+    assert!(
+        all.iter().all(|i| i.0 < session.ir_meta.allocated()),
+        "an id outside the allocated range"
+    );
+}
+
+#[test]
+fn a_spans_text_is_the_expression_it_came_from() {
+    // Not merely present, but *right*: the span has to slice back to the syntax
+    // the node was lowered from.
+    let src = "f :: func (a: i32, b: i32) -> i32 { return a + b }\n";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let func = session.ir[&file]
+        .funcs
+        .iter()
+        .find(|f| f.name.as_str() == "f")
+        .expect("func f");
+
+    // The `return` statement, and the `a + b` call it returns.
+    let ret = &body_of(func).stmts[0];
+    assert_eq!(span_text(&session, ret.id), "return a + b");
+    let StmtKind::Return(Some(value)) = &ret.kind else {
+        panic!("expected a return with a value");
+    };
+    assert_eq!(span_text(&session, value.id), "a + b");
+    let ExprKind::Call { args, .. } = &value.kind else {
+        panic!("`a + b` should lower to a call: {:#?}", value.kind);
+    };
+    assert_eq!(span_text(&session, args[0].id), "a");
+    assert_eq!(span_text(&session, args[1].id), "b");
+
+    // The parameters keep their own declarations, not the function's.
+    assert_eq!(span_text(&session, func.params[0].id), "a: i32");
+    assert_eq!(span_text(&session, func.params[1].id), "b: i32");
+}
+
+#[test]
+fn a_synthetic_node_borrows_the_span_of_what_it_wraps() {
+    // `p.x` on a pointer lowers to `(p.*).x`. The `.*` is not written anywhere,
+    // so it takes `p`'s span: blanking it would lose the debug metadata for an
+    // instruction that really does execute.
+    let src = "P :: struct { x: i32 }\nget :: func (p: *P) -> i32 { return p.x }\n";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let func = session.ir[&file]
+        .funcs
+        .iter()
+        .find(|f| f.name.as_str() == "get")
+        .expect("func get");
+    let StmtKind::Return(Some(field)) = &body_of(func).stmts[0].kind else {
+        panic!("expected a return with a value");
+    };
+    assert_eq!(span_text(&session, field.id), "p.x");
+    let ExprKind::Field { base: deref, .. } = &field.kind else {
+        panic!("expected a field access: {:#?}", field.kind);
+    };
+    let ExprKind::Deref { base } = &deref.kind else {
+        panic!("expected an inserted deref: {:#?}", deref.kind);
+    };
+    assert_eq!(span_text(&session, deref.id), "p");
+    assert_eq!(span_text(&session, base.id), "p");
+}
+
+#[test]
+fn a_cross_file_defaults_span_points_into_its_own_file() {
+    // The counterpart to `a_default_argument_is_lowered_in_its_own_file`. The
+    // default is lowered against the *declaring* file's arena, so its span must
+    // name that file — a span carrying the caller's `FileId` would point a
+    // diagnostic at whatever text happens to sit at those offsets in the
+    // caller, which is worse than having no span at all.
+    let lib = "@public scaled :: func (x: i32, by: i32 := 7) -> i32 { return x * by }\n";
+    let main = "lib :: import \"lib.nest\"\nmain :: func () -> i32 { return lib.scaled(2) }\n";
+    let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let main_func = session.ir[&file]
+        .funcs
+        .iter()
+        .find(|f| f.name.as_str() == "main")
+        .expect("func main");
+    let StmtKind::Return(Some(call)) = &body_of(main_func).stmts[0].kind else {
+        panic!("expected a return with a value");
+    };
+    let ExprKind::Call { args, .. } = &call.kind else {
+        panic!("expected a call: {:#?}", call.kind);
+    };
+    assert_eq!(args.len(), 2, "the omitted argument was not filled");
+
+    // The written argument is the caller's; the filled default is the library's.
+    let written = session.ir_meta.span(args[0].id).expect("a span");
+    let filled = session.ir_meta.span(args[1].id).expect("a span");
+    assert_eq!(written.file, file, "the written argument is in the caller");
+    assert_ne!(
+        filled.file, file,
+        "the default was given the caller's file: {filled:?}"
+    );
+    assert_eq!(span_text(&session, args[0].id), "2");
+    assert_eq!(span_text(&session, args[1].id), "7");
 }
 
 // ===< IR snapshots (insta) >===
@@ -751,7 +999,9 @@ fn ir_snap_if_else_and_if_no_else() {
 
 #[test]
 fn ir_snap_loop_break_value() {
-    insta::assert_snapshot!(ir_text("lp :: func () -> i32 { return loop { break 5 } }\n"));
+    insta::assert_snapshot!(ir_text(
+        "lp :: func () -> i32 { return loop { break 5 } }\n"
+    ));
 }
 
 #[test]
@@ -1045,7 +1295,8 @@ fn two_impls_on_one_type_may_each_bind_output() {
 fn a_destructuring_let_keeps_its_pattern_in_the_ir() {
     // `let (a, b) := t` binds two names; the IR keeps the whole pattern rather
     // than dropping to an initializer evaluated for effect.
-    let s = analyze_clean("f :: func (t: (i32, i32)) -> i32 {\n  const (a, b) := t\n  return a\n}\n");
+    let s =
+        analyze_clean("f :: func (t: (i32, i32)) -> i32 {\n  const (a, b) := t\n  return a\n}\n");
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
     assert!(ir.contains("let (a, b): (i32, i32)"), "{ir}");
@@ -1126,8 +1377,7 @@ fn a_trait_object_is_only_a_type_behind_a_pointer() {
 #[test]
 fn dyn_needs_a_trait() {
     assert!(
-        first_error("f :: func (x: *dyn i32) -> i32 { return 0 }\n")
-            .contains("is not a trait"),
+        first_error("f :: func (x: *dyn i32) -> i32 { return 0 }\n").contains("is not a trait"),
     );
 }
 
@@ -1256,12 +1506,12 @@ fn calls_of(program: &Program) -> Vec<(Option<BuiltinOp>, Option<DefId>)> {
     struct C(Vec<(Option<BuiltinOp>, Option<DefId>)>);
     impl crate::ir::Visitor for C {
         fn visit_expr(&mut self, e: &Expr) {
-            if let Expr::Call {
+            if let ExprKind::Call {
                 builtin, callee, ..
-            } = e
+            } = &e.kind
             {
-                let def = match callee.as_ref() {
-                    Expr::Global(d, _) => Some(*d),
+                let def = match &callee.kind {
+                    ExprKind::Global(d) => Some(*d),
                     _ => None,
                 };
                 self.0.push((*builtin, def));
@@ -1318,9 +1568,11 @@ fn operator_mixed_widths() {
     assert!(!s.has_errors(), "{:#?}", s.diagnostics);
     let file = entry_file(&s);
     // The literal `1` was pinned to `i64` by its operand.
-    let ty = node_ty(&s, file, |k| {
-        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 1.into())
-    });
+    let ty = node_ty(
+        &s,
+        file,
+        |k| matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 1.into()),
+    );
     assert_eq!(
         ty,
         Ty::Int {
@@ -1430,9 +1682,7 @@ f :: func (a: Foo) -> i32 { return a.tag() }
     // The call targets the concrete impl's `tag`, not the blanket one — the
     // body that returns `1`.
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
-    let concrete = ir
-        .lines()
-        .any(|l| l.contains("func tag(self: Foo)"));
+    let concrete = ir.lines().any(|l| l.contains("func tag(self: Foo)"));
     assert!(concrete, "{ir}");
     assert!(ir.contains("(Foo.tag: func(Foo) -> i32)"), "{ir}");
 }
@@ -1533,7 +1783,11 @@ f :: func (a: Id, b: Id) -> bool { return a == b }
 ";
     let s = analyze1(bad);
     assert!(s.has_errors());
-    assert!(diag_contains(&s, "does not implement"), "{:#?}", s.diagnostics);
+    assert!(
+        diag_contains(&s, "does not implement"),
+        "{:#?}",
+        s.diagnostics
+    );
 }
 
 // --- fulfillment / diagnostics ---
@@ -1727,7 +1981,8 @@ fn first_error(src: &str) -> String {
 #[test]
 fn namespace_constant_is_comptime_and_types_each_use_on_its_own() {
     // `A :: 42` has no single runtime type: it settles per use site.
-    let session = analyze_clean("A :: 42\nf :: func () {\n  const a: i8 := A\n  const b: i64 := A\n}\n");
+    let session =
+        analyze_clean("A :: 42\nf :: func () {\n  const a: i8 := A\n  const b: i64 := A\n}\n");
     let file = entry_file(&session);
     let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
     assert!(text.contains("let a: i8"), "{text}");
@@ -1757,16 +2012,22 @@ f :: func () -> i32 {
 
 #[test]
 fn composite_literal_fields_are_checked_against_the_struct() {
-    assert!(first_error("P :: struct { x: i32, y: i32 }\nf :: func () { const p := P { x: 1 } }\n")
-        .contains("missing field `y`"));
-    assert!(first_error("P :: struct { x: i32 }\nf :: func () { const p := P { x: 1, z: 2 } }\n")
-        .contains("has no field `z`"));
+    assert!(
+        first_error("P :: struct { x: i32, y: i32 }\nf :: func () { const p := P { x: 1 } }\n")
+            .contains("missing field `y`")
+    );
+    assert!(
+        first_error("P :: struct { x: i32 }\nf :: func () { const p := P { x: 1, z: 2 } }\n")
+            .contains("has no field `z`")
+    );
     assert!(
         first_error("P :: struct { x: i32 }\nf :: func () { const p := P { x: 1, x: 2 } }\n")
             .contains("more than once")
     );
-    assert!(first_error("f :: func () { const a: [3]i32 := .{ 1, 2 } }\n")
-        .contains("2 element(s) but `[3]i32` needs 3"));
+    assert!(
+        first_error("f :: func () { const a: [3]i32 := .{ 1, 2 } }\n")
+            .contains("2 element(s) but `[3]i32` needs 3")
+    );
 }
 
 #[test]
@@ -1817,10 +2078,13 @@ fn an_impl_inherits_the_traits_default_method_body() {
 
 #[test]
 fn an_unknown_field_or_method_is_reported_not_silently_erased() {
-    assert!(first_error("P :: struct { x: i32 }\nf :: func (p: P) -> i32 { return p.y }\n")
-        .contains("no field `y`"));
-    assert!(first_error("f :: func (a: i32) { const u := a.nope() }\n")
-        .contains("no method `nope`"));
+    assert!(
+        first_error("P :: struct { x: i32 }\nf :: func (p: P) -> i32 { return p.y }\n")
+            .contains("no field `y`")
+    );
+    assert!(
+        first_error("f :: func (a: i32) { const u := a.nope() }\n").contains("no method `nope`")
+    );
 }
 
 #[test]
@@ -1849,13 +2113,17 @@ fn a_comptime_int_must_fit_the_type_it_settles_on() {
     assert!(first_error("A :: 300\nf :: func () { const a: i8 := A }\n").contains("does not fit"));
     // The exact value survives however large it was written, and the minimum of
     // a signed type is not mistaken for its magnitude.
-    analyze_clean("f :: func () {\n  const a: i8 := -128\n  const b: i256 := 99999999999999999999999999999999999999999999\n}\n");
+    analyze_clean(
+        "f :: func () {\n  const a: i8 := -128\n  const b: i256 := 99999999999999999999999999999999999999999999\n}\n",
+    );
 }
 
 #[test]
 fn an_unknown_enum_variant_or_wrong_payload_is_reported() {
-    assert!(first_error("E :: enum { a }\nf :: func () { const x: E := .nope }\n")
-        .contains("has no variant `.nope`"));
+    assert!(
+        first_error("E :: enum { a }\nf :: func () { const x: E := .nope }\n")
+            .contains("has no variant `.nope`")
+    );
     assert!(
         first_error("E :: enum { a(i32) }\nf :: func () { const x: E := .a(1, 2) }\n")
             .contains("takes 1 value(s) but 2")
@@ -1867,7 +2135,9 @@ fn break_and_continue_require_an_enclosing_loop() {
     assert!(first_error("f :: func () { break }\n").contains("`break` outside of a loop"));
     assert!(first_error("f :: func () { continue }\n").contains("`continue` outside of a loop"));
     // A `while` counts as one.
-    analyze_clean("f :: func (n: i32) {\n  let i := 0\n  while i < n { i += 1\n    if i == 2 { break }\n    continue }\n}\n");
+    analyze_clean(
+        "f :: func (n: i32) {\n  let i := 0\n  while i < n { i += 1\n    if i == 2 { break }\n    continue }\n}\n",
+    );
 }
 
 #[test]
@@ -1915,8 +2185,10 @@ fn field_uses_are_bound_to_their_definitions() {
 #[test]
 fn an_array_length_is_part_of_the_type() {
     assert!(
-        first_error("f :: func () {\n  const a: [3]i32 := .{ 1, 2, 3 }\n  const b: [4]i32 := a\n}\n")
-            .contains("expected `[4]i32`, found `[3]i32`"),
+        first_error(
+            "f :: func () {\n  const a: [3]i32 := .{ 1, 2, 3 }\n  const b: [4]i32 := a\n}\n"
+        )
+        .contains("expected `[4]i32`, found `[3]i32`"),
     );
 }
 
@@ -1940,7 +2212,8 @@ fn a_repeat_literals_count_is_the_arrays_length() {
             .contains("repeats 5 time(s) but the array is `[3]`"),
     );
     // …and it decides the length when nothing else did.
-    let s = analyze_clean("f :: func () {\n  const a := [_]i32 { 0; 4 }\n  const b: [4]i32 := a\n}\n");
+    let s =
+        analyze_clean("f :: func () {\n  const a := [_]i32 { 0; 4 }\n  const b: [4]i32 := a\n}\n");
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir[&file]);
     assert!(ir.contains("let a: [4]i32"), "{ir}");
@@ -2396,7 +2669,11 @@ fn distinct_method_inheritance_is_one_way() {
         )],
         "main",
     );
-    assert!(diag_contains(&s, "no method `shout` on `[]u8`"), "{:#?}", s.diagnostics);
+    assert!(
+        diag_contains(&s, "no method `shout` on `[]u8`"),
+        "{:#?}",
+        s.diagnostics
+    );
 }
 
 #[test]
@@ -2404,9 +2681,8 @@ fn a_string_literal_is_the_core_str_lang_item() {
     // `str` is not a compiler primitive: it is `#lang("str") distinct []u8` in
     // core, found by tag like every other language item. A literal therefore
     // types as a nominal `core.str`, and inherits `[]T`'s methods.
-    let session = analyze_clean(
-        "f :: func () -> usize {\n  const s := \"héllo\"\n  return s.len()\n}\n",
-    );
+    let session =
+        analyze_clean("f :: func () -> usize {\n  const s := \"héllo\"\n  return s.len()\n}\n");
     let file = entry_file(&session);
     let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
     assert!(text.contains("core.str"), "{text}");
@@ -2504,20 +2780,22 @@ fn named_argument_rules_are_enforced() {
             "mk(port: 80, \"h\", 5)",
             "a positional argument cannot follow a named one",
         ),
-        ("mk(\"h\", prot: 80, backlog: 5)", "`mk` has no parameter named `prot`"),
+        (
+            "mk(\"h\", prot: 80, backlog: 5)",
+            "`mk` has no parameter named `prot`",
+        ),
         (
             "mk(\"h\", port: 80, port: 81)",
             "argument for parameter `port` supplied twice",
         ),
-        ("mk(host: \"h\", port: 80)", "missing argument for parameter `backlog`"),
+        (
+            "mk(host: \"h\", port: 80)",
+            "missing argument for parameter `backlog`",
+        ),
     ] {
         let src = format!("{MK}f :: func () -> i32 {{ return {call} }}\n");
         let s = analyze_mem(&[("main", &src)], "main");
-        let errors: Vec<&str> = s
-            .diagnostics
-            .iter()
-            .map(|d| d.message.as_str())
-            .collect();
+        let errors: Vec<&str> = s.diagnostics.iter().map(|d| d.message.as_str()).collect();
         assert!(
             errors.iter().any(|m| m.contains(needle)),
             "expected {needle:?} in {errors:#?}"
@@ -2526,7 +2804,10 @@ fn named_argument_rules_are_enforced() {
     }
     // A callee with no parameter *names* to bind to: a function-typed value.
     let s = analyze_mem(
-        &[("main", "f :: func (g: func (i32) -> i32) -> i32 { return g(x: 1) }\n")],
+        &[(
+            "main",
+            "f :: func (g: func (i32) -> i32) -> i32 { return g(x: 1) }\n",
+        )],
         "main",
     );
     assert!(

@@ -170,6 +170,15 @@ pub struct Session {
     /// The lowered IR of each file, keyed by [`FileId`] (populated by the lower
     /// stage after inference).
     pub ir: HashMap<FileId, crate::ir::Program>,
+    /// The IR's id allocator and per-node side table (spans above all), shared
+    /// by every lowered file.
+    ///
+    /// It sits on the session rather than on each
+    /// [`Program`](crate::ir::Program) because [`IrId`](crate::ir::IrId)s are
+    /// unique across the whole compilation: lowering is per file, but every pass
+    /// after it is whole-program and must be able to ask for a node's span
+    /// without first working out which file the node came from.
+    pub ir_meta: crate::ir::Meta,
     /// The synthetic builtins namespace (primitives) that backs the prelude.
     pub builtins: DefId,
     /// Namespaces globbed into every file's outermost scope (the prelude:
@@ -241,6 +250,7 @@ impl Session {
             asts: HashMap::new(),
             files: HashMap::new(),
             ir: HashMap::new(),
+            ir_meta: crate::ir::Meta::new(),
             builtins,
             prelude_globs: vec![builtins],
             packages: HashMap::new(),

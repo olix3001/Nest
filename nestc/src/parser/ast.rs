@@ -18,14 +18,13 @@
 //! latter matters because `import` pulls nodes in from other files, so a span
 //! alone is ambiguous.
 
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::cell::{Ref, RefCell, RefMut};
-use std::collections::HashMap;
-use std::fmt;
 
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
+use crate::common::meta::MetaStore;
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 
@@ -903,35 +902,13 @@ fn push_opt(out: &mut Vec<NodeId>, id: &Option<NodeId>) {
 }
 
 // ===< Side-table metadata >===
-
-/// A type-indexed side table mapping [`NodeId`] to at most one value **per Rust
-/// type**. Later passes (name resolution, type checking, …) stash their own
-/// results here — e.g. a `Resolution` for name resolution, a `Type` for the
-/// checker — without the AST node ever having to know those types exist.
-///
-/// Access goes through the arena: [`Ast::set_meta`], [`Ast::meta`],
-/// [`Ast::with_meta`], [`Ast::has_meta`], [`Ast::take_meta`]. The store lives
-/// behind interior mutability so a shared `&Ast` can annotate during a walk,
-/// mirroring the per-node [`RefCell`] design.
-///
-/// Metadata is **derived state**: it is skipped by `serde` and dropped on
-/// `clone` (a cloned arena starts with an empty table). Re-run the pass that
-/// produced it if you need it on the copy.
-#[derive(Default)]
-struct MetaStore(RefCell<HashMap<TypeId, HashMap<NodeId, Box<dyn Any>>>>);
-
-impl Clone for MetaStore {
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
-impl fmt::Debug for MetaStore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let count: usize = self.0.borrow().values().map(HashMap::len).sum();
-        write!(f, "MetaStore({count} entries)")
-    }
-}
+//
+// The store itself is [`crate::common::meta::MetaStore`], shared with the IR,
+// which keys the same structure by `IrId`. Access goes through the arena —
+// [`Ast::set_meta`], [`Ast::meta`], [`Ast::with_meta`], [`Ast::has_meta`],
+// [`Ast::take_meta`] — so a caller never names the store type, and it lives
+// behind interior mutability so a shared `&Ast` can annotate during a walk,
+// mirroring the per-node [`RefCell`] design.
 
 // ===< Arena >===
 
@@ -946,7 +923,7 @@ pub struct Ast {
     nodes: Vec<RefCell<Node>>,
     root: Option<NodeId>,
     #[serde(skip)]
-    meta: MetaStore,
+    meta: MetaStore<NodeId>,
 }
 
 impl Ast {
@@ -1028,13 +1005,7 @@ impl Ast {
     /// ast.set_meta(node, ty);                           // in the type checker
     /// ```
     pub fn set_meta<T: Any>(&self, id: NodeId, value: T) -> Option<T> {
-        self.meta
-            .0
-            .borrow_mut()
-            .entry(TypeId::of::<T>())
-            .or_default()
-            .insert(id, Box::new(value))
-            .and_then(|old| old.downcast::<T>().ok().map(|b| *b))
+        self.meta.set(id, value)
     }
 
     /// Clone out the `T` metadata attached to `id`, if present. Convenient for
@@ -1047,30 +1018,17 @@ impl Ast {
     /// `f`'s result (or `None` when no `T` is attached). The borrow of the store
     /// is released before `f`'s result is returned.
     pub fn with_meta<T: Any, R>(&self, id: NodeId, f: impl FnOnce(&T) -> R) -> Option<R> {
-        let store = self.meta.0.borrow();
-        let value = store.get(&TypeId::of::<T>())?.get(&id)?;
-        Some(f(value
-            .downcast_ref::<T>()
-            .expect("TypeId keys the value type")))
+        self.meta.with(&id, f)
     }
 
     /// Whether any `T` metadata is attached to `id`.
     pub fn has_meta<T: Any>(&self, id: NodeId) -> bool {
-        self.meta
-            .0
-            .borrow()
-            .get(&TypeId::of::<T>())
-            .is_some_and(|m| m.contains_key(&id))
+        self.meta.has::<T>(&id)
     }
 
     /// Remove and return the `T` metadata attached to `id`, if present.
     pub fn take_meta<T: Any>(&self, id: NodeId) -> Option<T> {
-        self.meta
-            .0
-            .borrow_mut()
-            .get_mut(&TypeId::of::<T>())?
-            .remove(&id)
-            .and_then(|b| b.downcast::<T>().ok().map(|b| *b))
+        self.meta.take::<T>(&id)
     }
 }
 

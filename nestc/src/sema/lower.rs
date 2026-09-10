@@ -37,7 +37,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::source::FileId;
+use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{
     Ast, BinOp, CompositeBody, Lit, NodeId, NodeKind, RangeKind, UnOp, VariantArgs, VariantPatArgs,
@@ -52,7 +52,8 @@ use super::infer::{
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
 use crate::ir::{
-    Arm, Binding, Block, Dispatch, Expr, Function, Param, Pattern, Program, Recv, Stmt,
+    Arm, Binding, Block, Dispatch, Expr, ExprKind, Function, IrId, Meta, Param, Pattern,
+    PatternKind, Program, Recv, Stmt, StmtKind,
 };
 
 /// Lower every function body in `file` to IR.
@@ -60,6 +61,7 @@ pub fn lower_file(
     defs: &DefTable,
     lang: &LangItems,
     asts: &HashMap<FileId, Ast>,
+    meta: &Meta,
     file: FileId,
 ) -> Program {
     let ast = &asts[&file];
@@ -68,6 +70,7 @@ pub fn lower_file(
         lang,
         ast,
         asts,
+        meta,
         defaults: HashMap::new(),
         defers: Vec::new(),
     };
@@ -115,6 +118,10 @@ struct Lowerer<'a> {
     /// in another file to lower its defaults (a call into `core` is the common
     /// case).
     asts: &'a HashMap<FileId, Ast>,
+    /// The IR's id allocator and side table. Every node built below is
+    /// allocated through it and gets its span recorded in the same breath, so
+    /// there is no path that produces a node with no source position.
+    meta: &'a Meta,
     /// Lowered default arguments, per callee, in **value-parameter** order.
     ///
     /// Each default is lowered exactly once and cloned into the call sites that
@@ -127,6 +134,72 @@ struct Lowerer<'a> {
 }
 
 impl Lowerer<'_> {
+    // ===< node construction >===
+    //
+    // Every IR node is built through one of these four, which is what makes the
+    // span guarantee hold: an id is never allocated without recording where it
+    // came from, so no later stage has to reconstruct a position — and a span
+    // reconstructed at the end is a span that is wrong.
+
+    /// Allocate an id for a node lowered out of `node`, recording its source
+    /// position. The [`FileSpan`] comes off the AST node itself rather than
+    /// from the file being lowered, which is what keeps a **default argument**
+    /// honest: `param_default` swaps in the declaring file's arena, and the
+    /// span has to follow it there.
+    fn id(&self, node: NodeId) -> IrId {
+        let id = self.meta.fresh();
+        let n = self.ast.node(node);
+        self.meta.set_span(id, FileSpan::new(n.file, n.span));
+        id
+    }
+
+    fn expr(&self, node: NodeId, ty: Ty, kind: ExprKind) -> Expr {
+        Expr {
+            id: self.id(node),
+            ty,
+            kind,
+        }
+    }
+
+    fn stmt(&self, node: NodeId, kind: StmtKind) -> Stmt {
+        Stmt {
+            id: self.id(node),
+            kind,
+        }
+    }
+
+    fn pat(&self, node: NodeId, kind: PatternKind) -> Pattern {
+        Pattern {
+            id: self.id(node),
+            kind,
+        }
+    }
+
+    /// Allocate an id for a node the source never wrote, borrowing the span of
+    /// the expression it is derived from — the `.*` of an auto-deref, the `&` of
+    /// a receiver adjustment, the `break` of a `while`'s guard. Pointing a
+    /// synthetic node at its operand is what a reader stepping through the
+    /// lowered code expects; leaving it span-less would blank the debug
+    /// metadata for code that really does execute.
+    fn derived(&self, from: IrId) -> IrId {
+        let id = self.meta.fresh();
+        if let Some(span) = self.meta.span(from) {
+            self.meta.set_span(id, span);
+        }
+        id
+    }
+
+    /// [`Lowerer::derived`], packaged as a whole expression. Takes the source
+    /// node's id rather than a borrow of it, so a caller can hand the node
+    /// itself to `kind` in the same expression.
+    fn derived_expr(&self, from: IrId, ty: Ty, kind: ExprKind) -> Expr {
+        Expr {
+            id: self.derived(from),
+            ty,
+            kind,
+        }
+    }
+
     fn lower_function(&mut self, def: DefId, func: NodeId) -> Option<Function> {
         let NodeKind::FuncExpr {
             params,
@@ -144,6 +217,7 @@ impl Lowerer<'_> {
         let mutating = params.iter().any(|p| grants_mutation(&p.ty));
         let body = body.map(|b| self.lower_block(b));
         Some(Function {
+            id: self.id(func),
             def,
             name,
             params,
@@ -162,6 +236,7 @@ impl Lowerer<'_> {
         };
         let def = self.def_of(param)?;
         Some(Param {
+            id: self.id(param),
             def,
             name,
             ty: self.ty(param),
@@ -183,8 +258,9 @@ impl Lowerer<'_> {
         }
         let tail = tail.map(|t| Box::new(self.lower_expr(t)));
         let defers = self.defers.pop().unwrap_or_default();
-        let ty = tail.as_ref().map(|t| t.ty().clone()).unwrap_or(Ty::Void);
+        let ty = tail.as_ref().map(|t| t.ty.clone()).unwrap_or(Ty::Void);
         Block {
+            id: self.id(node),
             stmts: out,
             tail,
             ty,
@@ -199,13 +275,11 @@ impl Lowerer<'_> {
     /// [`Pattern::Binding`], and a destructuring `let (a, b) := p` keeps its
     /// tuple/struct shape so the names it introduces survive. A `let` pattern is
     /// irrefutable, so unlike a `match` arm there is nothing to fall back to.
-    fn lower_binding(&mut self, pattern: NodeId, value: NodeId, out: &mut Vec<Stmt>) {
+    fn lower_binding(&mut self, node: NodeId, pattern: NodeId, value: NodeId, out: &mut Vec<Stmt>) {
         let init = self.lower_expr(value);
-        out.push(Stmt::Let {
-            pattern: self.lower_pattern(pattern),
-            ty: init.ty().clone(),
-            init,
-        });
+        let pattern = self.lower_pattern(pattern);
+        let ty = init.ty.clone();
+        out.push(self.stmt(node, StmtKind::Let { pattern, ty, init }));
     }
 
     fn lower_stmt(&mut self, node: NodeId, out: &mut Vec<Stmt>) {
@@ -213,27 +287,29 @@ impl Lowerer<'_> {
             // A `let`/`const` local, or a `::` binding the desugarer introduced
             // in statement position (`__it`, `__try`): both bind a pattern to an
             // initializer and lower to an IR `Let`.
-            NodeKind::LocalDecl { pattern, value, .. } => self.lower_binding(pattern, value, out),
-            NodeKind::ConstBind { pattern, rhs } => self.lower_binding(pattern, rhs, out),
+            NodeKind::LocalDecl { pattern, value, .. } => {
+                self.lower_binding(node, pattern, value, out)
+            }
+            NodeKind::ConstBind { pattern, rhs } => self.lower_binding(node, pattern, rhs, out),
             NodeKind::Assign { place, value, op } => {
                 let place = self.lower_expr(place);
                 let value = self.lower_expr(value);
                 // Compound assignment was desugared to simple `=` already; `op`
                 // is `Assign` here (defensive: fall back to plain assign).
                 let _ = op;
-                out.push(Stmt::Assign { place, value });
+                out.push(self.stmt(node, StmtKind::Assign { place, value }));
             }
             // Control-flow exits carry no defer copies: the block that owns the
             // defers records them, and the CFG stage runs them on each way out.
             NodeKind::Return { value } => {
                 let value = value.map(|v| self.lower_expr(v));
-                out.push(Stmt::Return(value));
+                out.push(self.stmt(node, StmtKind::Return(value)));
             }
             NodeKind::Break { value } => {
                 let value = value.map(|v| self.lower_expr(v));
-                out.push(Stmt::Break(value));
+                out.push(self.stmt(node, StmtKind::Break(value)));
             }
-            NodeKind::Continue => out.push(Stmt::Continue),
+            NodeKind::Continue => out.push(self.stmt(node, StmtKind::Continue)),
             NodeKind::Defer { body } => {
                 let d = self.lower_expr(body);
                 if let Some(frame) = self.defers.last_mut() {
@@ -242,7 +318,7 @@ impl Lowerer<'_> {
             }
             _ => {
                 let e = self.lower_expr(node);
-                out.push(Stmt::Expr(e));
+                out.push(self.stmt(node, StmtKind::Expr(e)));
             }
         }
     }
@@ -260,39 +336,52 @@ impl Lowerer<'_> {
         // the surface syntax left implicit.
         if let Some(c) = self.ast.meta::<Coercion>(node) {
             let value = self.lower_expr_inner(node);
-            return Expr::Intrinsic {
-                name: Symbol::new("cast"),
-                args: vec![value],
-                ty: c.to,
-            };
+            return self.expr(
+                node,
+                c.to,
+                ExprKind::Intrinsic {
+                    name: Symbol::new("cast"),
+                    args: vec![value],
+                },
+            );
         }
         // A `[N]T` reaching a `[]T`: the view is the whole sub-slice, so emit
         // exactly what `a[..]` emits.
         if let Some(sc) = self.ast.meta::<SliceCoerce>(node) {
             let value = self.lower_expr_inner(node);
-            let full = Expr::Variant {
-                name: Symbol::new("full"),
-                args: Vec::new(),
-                ty: sc.range,
-            };
-            return Expr::Intrinsic {
-                name: Symbol::new("slice"),
-                args: vec![value, full],
-                ty: sc.to,
-            };
+            let full = self.expr(
+                node,
+                sc.range,
+                ExprKind::Variant {
+                    name: Symbol::new("full"),
+                    args: Vec::new(),
+                },
+            );
+            return self.expr(
+                node,
+                sc.to,
+                ExprKind::Intrinsic {
+                    name: Symbol::new("slice"),
+                    args: vec![value, full],
+                },
+            );
         }
         // Likewise a `*T` → `*dyn Trait` unsizing: the fat pointer is built here,
         // not written anywhere in the source.
         if let Some(dc) = self.ast.meta::<DynCoerce>(node) {
             let value = self.lower_expr_inner(node);
-            return Expr::DynCast {
-                value: Box::new(value),
-                concrete: dc.concrete,
-                ty: Ty::Ptr {
-                    mutable: matches!(self.ty(node), Ty::Ptr { mutable: true, .. }),
-                    inner: Box::new(Ty::Dyn(dc.trait_def)),
-                },
+            let ty = Ty::Ptr {
+                mutable: matches!(self.ty(node), Ty::Ptr { mutable: true, .. }),
+                inner: Box::new(Ty::Dyn(dc.trait_def)),
             };
+            return self.expr(
+                node,
+                ty,
+                ExprKind::DynCast {
+                    value: Box::new(value),
+                    concrete: dc.concrete,
+                },
+            );
         }
         self.lower_expr_inner(node)
     }
@@ -303,13 +392,17 @@ impl Lowerer<'_> {
         let ty = up.target.clone();
         let name = self.defs.get(up.field).name.clone();
         let base = self.lower_expr_inner(node);
+        let base = self.autoderef(base);
         if !up.through_ptr {
-            return Expr::Field {
-                base: Box::new(autoderef(base)),
-                name,
-                def: Some(up.field),
+            return self.expr(
+                node,
                 ty,
-            };
+                ExprKind::Field {
+                    base: Box::new(base),
+                    name,
+                    def: Some(up.field),
+                },
+            );
         }
         // Through a pointer the sub-object's address is what coerces, so the
         // field is read off the pointee and re-addressed.
@@ -317,28 +410,50 @@ impl Lowerer<'_> {
             Ty::Ptr { mutable, inner } => (*mutable, (**inner).clone()),
             _ => (false, ty.clone()),
         };
-        Expr::Ref {
-            mutable,
-            place: Box::new(Expr::Field {
-                base: Box::new(autoderef(base)),
-                name: name.clone(),
+        let field = self.expr(
+            node,
+            inner,
+            ExprKind::Field {
+                base: Box::new(base),
+                name,
                 def: Some(up.field),
-                ty: inner,
-            }),
+            },
+        );
+        self.expr(
+            node,
             ty,
-        }
+            ExprKind::Ref {
+                mutable,
+                place: Box::new(field),
+            },
+        )
     }
 
     fn lower_expr_inner(&mut self, node: NodeId) -> Expr {
         let ty = self.ty(node);
         match self.ast.node(node).kind.clone() {
-            NodeKind::Block { .. } => Expr::Block(self.lower_block(node)),
-            NodeKind::Lit(lit) => Expr::Lit(lit, ty),
-            NodeKind::InterpolatedStr { parts } => Expr::Intrinsic {
-                name: Symbol::new("format"),
-                args: parts.iter().map(|&p| self.lower_expr(p)).collect(),
-                ty,
-            },
+            NodeKind::Block { .. } => {
+                // The block expression's type is the block's own — the tail's,
+                // or `void`. Not the type inference stamped on the node: a
+                // block ending in `return` is typed `never` there, and taking
+                // that here would make `Expr::ty` and the `Block::ty` inside it
+                // disagree for the same node.
+                let b = self.lower_block(node);
+                let ty = b.ty.clone();
+                self.expr(node, ty, ExprKind::Block(b))
+            }
+            NodeKind::Lit(lit) => self.expr(node, ty, ExprKind::Lit(lit)),
+            NodeKind::InterpolatedStr { parts } => {
+                let args = parts.iter().map(|&p| self.lower_expr(p)).collect();
+                self.expr(
+                    node,
+                    ty,
+                    ExprKind::Intrinsic {
+                        name: Symbol::new("format"),
+                        args,
+                    },
+                )
+            }
             NodeKind::Path { .. } => self.lower_name(node, ty),
             NodeKind::FieldAccess { base, name } => {
                 // A resolved namespace member is a global reference; a resolved
@@ -349,36 +464,47 @@ impl Lowerer<'_> {
                     Some(DefKind::Field) | None => {}
                     Some(_) => return self.lower_name(node, ty),
                 }
-                let base = autoderef(self.lower_expr(base));
-                Expr::Field {
-                    base: Box::new(base),
-                    name,
-                    def,
+                let base = self.lower_expr(base);
+                let base = self.autoderef(base);
+                self.expr(
+                    node,
                     ty,
-                }
+                    ExprKind::Field {
+                        base: Box::new(base),
+                        name,
+                        def,
+                    },
+                )
             }
             NodeKind::TupleIndex { base, index } => {
-                let base = autoderef(self.lower_expr(base));
+                let base = self.lower_expr(base);
+                let base = self.autoderef(base);
                 // On a tuple struct this is a field projection out of a nominal
                 // type, and `fields` bound it to the field's def: emit the same
                 // `Expr::Field` a named access does, so every later stage reads
                 // the offset off the struct's own definition (directives
                 // included) rather than re-deriving it positionally.
                 if let Some(def) = self.resolved_def(node) {
-                    return Expr::Field {
-                        base: Box::new(base),
-                        name: Symbol::new(&index.to_string()),
-                        def: Some(def),
+                    return self.expr(
+                        node,
                         ty,
-                    };
+                        ExprKind::Field {
+                            base: Box::new(base),
+                            name: Symbol::new(&index.to_string()),
+                            def: Some(def),
+                        },
+                    );
                 }
-                Expr::TupleIndex {
-                    base: Box::new(base),
-                    index,
+                self.expr(
+                    node,
                     ty,
-                }
+                    ExprKind::TupleIndex {
+                        base: Box::new(base),
+                        index,
+                    },
+                )
             }
-            NodeKind::Call { callee, args } => self.lower_call(callee, &args, ty),
+            NodeKind::Call { callee, args } => self.lower_call(node, callee, &args, ty),
             NodeKind::GenericApply { base, .. } => self.lower_expr(base),
             // An arithmetic operator that resolved through an operator trait
             // lowers to a **uniform** call to the chosen method — the same shape
@@ -387,64 +513,100 @@ impl Lowerer<'_> {
             NodeKind::Binary { op, lhs, rhs } => match self.ast.meta::<OpResolution>(node) {
                 // A comparison resolves to `Eq.eq` / `Ord.cmp`, whose results
                 // are not the comparison's own — they need the test around them.
-                Some(res) if is_comparison(op) => self.lower_cmp(res, op, lhs, rhs),
+                Some(res) if is_comparison(op) => self.lower_cmp(node, res, op, lhs, rhs),
                 Some(res) => {
                     let args = vec![self.lower_expr(lhs), self.lower_expr(rhs)];
-                    self.op_call(res, args, ty)
+                    self.op_call(node, res, args, ty)
                 }
                 // `&&` / `||` and the comparisons of the numeric core dispatch
                 // on nothing: they stay primitive (§6.13).
-                None => Expr::Binary {
-                    op,
-                    lhs: Box::new(self.lower_expr(lhs)),
-                    rhs: Box::new(self.lower_expr(rhs)),
-                    ty,
-                },
+                None => {
+                    let lhs = self.lower_expr(lhs);
+                    let rhs = self.lower_expr(rhs);
+                    self.expr(
+                        node,
+                        ty,
+                        ExprKind::Binary {
+                            op,
+                            lhs: Box::new(lhs),
+                            rhs: Box::new(rhs),
+                        },
+                    )
+                }
             },
             // `&x` / `&mut x` are the built-in pointer operations, not trait
             // calls (§6.13); `-x` and `~x` are, and lower to the same uniform
             // call shape a binary operator does.
             NodeKind::Unary { op, operand } => match op {
-                UnOp::Ref | UnOp::RefMut => Expr::Ref {
-                    mutable: matches!(op, UnOp::RefMut),
-                    place: Box::new(self.lower_expr(operand)),
-                    ty,
-                },
+                UnOp::Ref | UnOp::RefMut => {
+                    let place = self.lower_expr(operand);
+                    self.expr(
+                        node,
+                        ty,
+                        ExprKind::Ref {
+                            mutable: matches!(op, UnOp::RefMut),
+                            place: Box::new(place),
+                        },
+                    )
+                }
                 _ => match self.ast.meta::<OpResolution>(node) {
                     Some(res) => {
                         let args = vec![self.lower_expr(operand)];
-                        self.op_call(res, args, ty)
+                        self.op_call(node, res, args, ty)
                     }
-                    None => Expr::Unary {
-                        op,
-                        operand: Box::new(self.lower_expr(operand)),
-                        ty,
-                    },
+                    None => {
+                        let operand = self.lower_expr(operand);
+                        self.expr(
+                            node,
+                            ty,
+                            ExprKind::Unary {
+                                op,
+                                operand: Box::new(operand),
+                            },
+                        )
+                    }
                 },
             },
-            NodeKind::Deref { base } => Expr::Deref {
-                base: Box::new(self.lower_expr(base)),
-                ty,
-            },
+            NodeKind::Deref { base } => {
+                let base = self.lower_expr(base);
+                self.expr(
+                    node,
+                    ty,
+                    ExprKind::Deref {
+                        base: Box::new(base),
+                    },
+                )
+            }
             NodeKind::Index { base, index } => match self.ast.meta::<OpResolution>(node) {
                 // A user type indexes through `Index` / `IndexMut`, which hand
                 // back a *pointer* to the element: `a[i]` is `index(&a, i).*`.
-                Some(res) => self.lower_index_call(res, base, index, ty),
+                Some(res) => self.lower_index_call(node, res, base, index, ty),
                 // Arrays and slices index directly.
                 None => {
-                    let base = autoderef(self.lower_expr(base));
-                    Expr::Index {
-                        base: Box::new(base),
-                        index: Box::new(self.lower_expr(index)),
+                    let b = self.lower_expr(base);
+                    let b = self.autoderef(b);
+                    let index = self.lower_expr(index);
+                    self.expr(
+                        node,
                         ty,
-                    }
+                        ExprKind::Index {
+                            base: Box::new(b),
+                            index: Box::new(index),
+                        },
+                    )
                 }
             },
-            NodeKind::Slice { base, range } => Expr::Intrinsic {
-                name: Symbol::new("slice"),
-                args: vec![self.lower_expr(base), self.lower_expr(range)],
-                ty,
-            },
+            NodeKind::Slice { base, range } => {
+                let args = vec![self.lower_expr(base), self.lower_expr(range)];
+                self.expr(
+                    node,
+                    ty,
+                    ExprKind::Intrinsic {
+                        name: Symbol::new("slice"),
+                        args,
+                    },
+                )
+            }
             // A range is not an intrinsic: it is a value of the `#lang("range")`
             // enum, one variant per surface form so the bound count and the
             // `..<` / `..=` distinction survive lowering.
@@ -462,22 +624,33 @@ impl Lowerer<'_> {
                         vec![self.lower_expr(s), self.lower_expr(e)],
                     ),
                 };
-                Expr::Variant {
-                    name: Symbol::new(name),
-                    args,
+                self.expr(
+                    node,
                     ty,
-                }
+                    ExprKind::Variant {
+                        name: Symbol::new(name),
+                        args,
+                    },
+                )
             }
-            NodeKind::Tuple { elems } => Expr::Tuple {
-                elems: elems.iter().map(|&e| self.lower_expr(e)).collect(),
-                ty,
-            },
-            NodeKind::If { cond, then, els } => Expr::If {
-                cond: Box::new(self.lower_expr(cond)),
-                then: self.lower_block(then),
-                els: els.map(|e| self.lower_block(e)),
-                ty,
-            },
+            NodeKind::Tuple { elems } => {
+                let elems = elems.iter().map(|&e| self.lower_expr(e)).collect();
+                self.expr(node, ty, ExprKind::Tuple { elems })
+            }
+            NodeKind::If { cond, then, els } => {
+                let cond = self.lower_expr(cond);
+                let then = self.lower_block(then);
+                let els = els.map(|e| self.lower_block(e));
+                self.expr(
+                    node,
+                    ty,
+                    ExprKind::If {
+                        cond: Box::new(cond),
+                        then,
+                        els,
+                    },
+                )
+            }
             NodeKind::IfMatch {
                 pattern,
                 value,
@@ -488,72 +661,76 @@ impl Lowerer<'_> {
                 let scrutinee = Box::new(self.lower_expr(value));
                 let then_block = self.lower_block(then);
                 let then_ty = then_block.ty.clone();
+                let pattern = self.lower_pattern(pattern);
+                let body = self.expr(then, then_ty.clone(), ExprKind::Block(then_block));
                 let mut arms = vec![Arm {
-                    pattern: self.lower_pattern(pattern),
+                    id: self.id(then),
+                    pattern,
                     guard: None,
-                    body: Expr::Block(then_block),
+                    body,
                 }];
                 let else_body = match els {
-                    Some(e) => Expr::Block(self.lower_block(e)),
-                    None => Expr::Tuple {
-                        elems: vec![],
-                        ty: Ty::Void,
-                    },
+                    Some(e) => {
+                        let b = self.lower_block(e);
+                        let bty = b.ty.clone();
+                        self.expr(e, bty, ExprKind::Block(b))
+                    }
+                    None => self.expr(node, Ty::Void, ExprKind::Tuple { elems: vec![] }),
                 };
                 arms.push(Arm {
-                    pattern: Pattern::Wildcard,
+                    id: self.id(els.unwrap_or(node)),
+                    pattern: self.pat(node, PatternKind::Wildcard),
                     guard: None,
                     body: else_body,
                 });
                 let _ = then_ty;
-                Expr::Match {
-                    scrutinee,
-                    arms,
-                    ty,
-                }
+                self.expr(node, ty, ExprKind::Match { scrutinee, arms })
             }
-            NodeKind::MatchExpr { scrutinee, arms } => Expr::Match {
-                scrutinee: Box::new(self.lower_expr(scrutinee)),
-                arms: arms
+            NodeKind::MatchExpr { scrutinee, arms } => {
+                let scrutinee = Box::new(self.lower_expr(scrutinee));
+                let arms = arms
                     .iter()
                     .filter_map(|&a| self.lower_match_arm(a))
-                    .collect(),
-                ty,
-            },
-            NodeKind::Loop { body } => Expr::Loop {
-                body: self.lower_block(body),
-                ty,
-            },
-            NodeKind::While { cond, body } => self.lower_while(cond, body, ty),
-            NodeKind::VariantLit { name, args } => Expr::Variant {
-                name,
-                args: self.lower_variant_args(&args),
-                ty,
-            },
-            NodeKind::CompositeLit { body, .. } => self.lower_composite(&body, ty),
+                    .collect();
+                self.expr(node, ty, ExprKind::Match { scrutinee, arms })
+            }
+            NodeKind::Loop { body } => {
+                let body = self.lower_block(body);
+                self.expr(node, ty, ExprKind::Loop { body })
+            }
+            NodeKind::While { cond, body } => self.lower_while(node, cond, body, ty),
+            NodeKind::VariantLit { name, args } => {
+                let args = self.lower_variant_args(&args);
+                self.expr(node, ty, ExprKind::Variant { name, args })
+            }
+            NodeKind::CompositeLit { body, .. } => self.lower_composite(node, &body, ty),
             NodeKind::IntrinsicCall { name, args, .. } => {
-                let mut lowered: Vec<Expr> =
-                    args.iter().map(|&a| self.lower_expr(a)).collect();
+                let mut lowered: Vec<Expr> = args.iter().map(|&a| self.lower_expr(a)).collect();
                 // `$len(a)` folds on a fixed array — the length is part of the
                 // type, so there is nothing left to compute at run time. This is
                 // the whole of `core`'s `Len` impls once they are inlined.
                 if name.as_str() == "len" && lowered.len() == 1 {
-                    return len_expr(autoderef(lowered.remove(0)), ty);
+                    let base = lowered.remove(0);
+                    let base = self.autoderef(base);
+                    return self.len_expr(base, ty);
                 }
                 // An explicit `$cast.<*dyn Trait>(p)` builds the same fat
                 // pointer the implicit coercion does; it is a spelling of the
                 // unsizing, not a reinterpretation of bits, so it lowers to the
                 // same node (§3.4).
                 if name.as_str() == "cast" && lowered.len() == 1 {
-                    if let Some(cast) = dyn_cast(lowered[0].clone(), &ty) {
+                    if let Some(cast) = self.dyn_cast(lowered[0].clone(), &ty) {
                         return cast;
                     }
                 }
-                Expr::Intrinsic {
-                    name,
-                    args: lowered,
+                self.expr(
+                    node,
                     ty,
-                }
+                    ExprKind::Intrinsic {
+                        name,
+                        args: lowered,
+                    },
+                )
             }
             NodeKind::Arg { value, .. } => self.lower_expr(value),
             // A nested item — a local `func`, `struct`, or `import` written
@@ -565,14 +742,13 @@ impl Lowerer<'_> {
             | NodeKind::ConstBind { .. }
             | NodeKind::NamespaceExpr { .. }
             | NodeKind::ImplBlock { .. }
-            | NodeKind::Import { .. } => Expr::Tuple {
-                elems: Vec::new(),
-                ty: Ty::Void,
-            },
+            | NodeKind::Import { .. } => {
+                self.expr(node, Ty::Void, ExprKind::Tuple { elems: Vec::new() })
+            }
             // Closures and nested-function *values* are the one expression form
             // that has no IR yet: they need a captured environment, which is a
             // representation decision the IR does not make (see the module doc).
-            _ => Expr::Error(ty),
+            _ => self.expr(node, ty, ExprKind::Error),
         }
     }
 
@@ -582,7 +758,7 @@ impl Lowerer<'_> {
     /// (`f(args)`) become the **same** [`Expr::Call`]: the difference is that
     /// the method's receiver is `args[0]`, adjusted to what its `self` parameter
     /// wants, and that its [`Dispatch`] may be virtual or generic.
-    fn lower_call(&mut self, callee: NodeId, args: &[NodeId], ty: Ty) -> Expr {
+    fn lower_call(&mut self, node: NodeId, callee: NodeId, args: &[NodeId], ty: Ty) -> Expr {
         // `recv.m.<T>(x)` — the resolution sits on the field access the
         // turbofish wraps.
         let head = match self.ast.node(callee).kind.clone() {
@@ -590,7 +766,7 @@ impl Lowerer<'_> {
             _ => callee,
         };
         if let Some(res) = self.ast.meta::<MethodRes>(head) {
-            return self.lower_method_call(head, res, args, ty);
+            return self.lower_method_call(node, head, res, args, ty);
         }
         // `Pair(1, 2)` is not a call at all: a callee naming a type constructs
         // it (§3.3). It builds the same `Expr::Construct` the positional
@@ -621,18 +797,21 @@ impl Lowerer<'_> {
                 .enumerate()
                 .map(|(i, e)| (Symbol::new(&i.to_string()), e))
                 .collect();
-            return Expr::Construct { def, fields, ty };
+            return self.expr(node, ty, ExprKind::Construct { def, fields });
         }
         let target = self.resolved_def(head);
         let callee = Box::new(self.lower_expr(callee));
         let args = self.lower_args(target, slots);
-        Expr::Call {
-            callee,
-            args,
-            builtin: None,
-            dispatch: Dispatch::Static,
+        self.expr(
+            node,
             ty,
-        }
+            ExprKind::Call {
+                callee,
+                args,
+                builtin: None,
+                dispatch: Dispatch::Static,
+            },
+        )
     }
 
     /// Lower a call's argument slots, filling each `None` — a parameter the call
@@ -654,8 +833,13 @@ impl Lowerer<'_> {
                     // A hole with no default behind it means inference and
                     // lowering disagree about the signature; a typed `Error`
                     // keeps the IR well-formed rather than dropping an argument
-                    // and silently changing the call's arity.
-                    out.push(d.unwrap_or(Expr::Error(Ty::Error)));
+                    // and silently changing the call's arity. It has no syntax
+                    // anywhere, so it is the one node with no span to record.
+                    out.push(d.unwrap_or_else(|| Expr {
+                        id: self.meta.fresh(),
+                        ty: Ty::Error,
+                        kind: ExprKind::Error,
+                    }));
                 }
             }
         }
@@ -729,13 +913,14 @@ impl Lowerer<'_> {
     /// nothing downstream has to re-derive an implicit adjustment.
     fn lower_method_call(
         &mut self,
+        node: NodeId,
         callee: NodeId,
         res: MethodRes,
         args: &[NodeId],
         ty: Ty,
     ) -> Expr {
         let NodeKind::FieldAccess { base, .. } = self.ast.node(callee).kind.clone() else {
-            return Expr::Error(ty);
+            return self.expr(node, ty, ExprKind::Error);
         };
         let mut recv = self.lower_expr(base);
         // The method was found on the type this `distinct` type is distinct from
@@ -743,11 +928,14 @@ impl Lowerer<'_> {
         // reinterpretation — but the method's `self` is typed as the
         // representation, so say so before the `&` / `.*` adjustment runs.
         if let Some(d) = self.ast.meta::<DistinctRecv>(base) {
-            recv = Expr::Intrinsic {
-                name: Symbol::new("cast"),
-                args: vec![recv],
-                ty: d.repr.clone(),
-            };
+            recv = self.expr(
+                base,
+                d.repr.clone(),
+                ExprKind::Intrinsic {
+                    name: Symbol::new("cast"),
+                    args: vec![recv],
+                },
+            );
         }
         let written: Vec<Option<NodeId>>;
         let slots: &[Option<NodeId>] = match self.ast.meta::<ArgOrder>(callee) {
@@ -760,7 +948,7 @@ impl Lowerer<'_> {
                 &written
             }
         };
-        let mut call_args = vec![adjust_recv(recv, res.adjust, &res.self_ty)];
+        let mut call_args = vec![self.adjust_recv(recv, res.adjust, &res.self_ty)];
         let lowered = self.lower_args(Some(res.method), slots);
         call_args.extend(lowered);
         // Inference recorded the instantiated signature on this node; falling
@@ -768,7 +956,7 @@ impl Lowerer<'_> {
         let callee_ty = match self.ty(callee) {
             f @ Ty::Func { .. } => f,
             _ => Ty::Func {
-                params: call_args.iter().map(|a| a.ty().clone()).collect(),
+                params: call_args.iter().map(|a| a.ty.clone()).collect(),
                 ret: Box::new(ty.clone()),
             },
         };
@@ -784,13 +972,17 @@ impl Lowerer<'_> {
                 self_ty: res.self_ty.clone(),
             },
         };
-        Expr::Call {
-            callee: Box::new(Expr::Global(res.method, callee_ty)),
-            args: call_args,
-            builtin: None,
-            dispatch,
+        let callee = self.expr(callee, callee_ty, ExprKind::Global(res.method));
+        self.expr(
+            node,
             ty,
-        }
+            ExprKind::Call {
+                callee: Box::new(callee),
+                args: call_args,
+                builtin: None,
+                dispatch,
+            },
+        )
     }
 
     /// Lower an operator to a uniform call to its resolved method. The callee is
@@ -801,18 +993,22 @@ impl Lowerer<'_> {
     /// Operands are lowered by the caller on purpose: one that coerces (a
     /// `comptime_int` literal, say) presents its *converted* type to the call,
     /// so the reconstructed signature has to come from the lowered arguments.
-    fn op_call(&mut self, res: OpResolution, args: Vec<Expr>, ty: Ty) -> Expr {
+    fn op_call(&mut self, node: NodeId, res: OpResolution, args: Vec<Expr>, ty: Ty) -> Expr {
         let callee_ty = Ty::Func {
-            params: args.iter().map(|a| a.ty().clone()).collect(),
+            params: args.iter().map(|a| a.ty.clone()).collect(),
             ret: Box::new(ty.clone()),
         };
-        Expr::Call {
-            callee: Box::new(Expr::Global(res.method, callee_ty)),
-            args,
-            builtin: res.builtin,
-            dispatch: Dispatch::Static,
+        let callee = self.expr(node, callee_ty, ExprKind::Global(res.method));
+        self.expr(
+            node,
             ty,
-        }
+            ExprKind::Call {
+                callee: Box::new(callee),
+                args,
+                builtin: res.builtin,
+                dispatch: Dispatch::Static,
+            },
+        )
     }
 
     /// Lower a comparison that resolved to a user impl (§6.13).
@@ -822,16 +1018,26 @@ impl Lowerer<'_> {
     /// test is a `match`, not a primitive compare on the enum: the arms are what
     /// say which orderings count, and a decision-tree pass turns them into the
     /// discriminant check later.
-    fn lower_cmp(&mut self, res: OpResolution, op: BinOp, lhs: NodeId, rhs: NodeId) -> Expr {
+    fn lower_cmp(
+        &mut self,
+        node: NodeId,
+        res: OpResolution,
+        op: BinOp,
+        lhs: NodeId,
+        rhs: NodeId,
+    ) -> Expr {
         let args = vec![self.lower_expr(lhs), self.lower_expr(rhs)];
         if matches!(op, BinOp::Eq | BinOp::Ne) {
-            let call = self.op_call(res, args, Ty::Bool);
+            let call = self.op_call(node, res, args, Ty::Bool);
             return match op {
-                BinOp::Ne => Expr::Unary {
-                    op: UnOp::Not,
-                    operand: Box::new(call),
-                    ty: Ty::Bool,
-                },
+                BinOp::Ne => self.expr(
+                    node,
+                    Ty::Bool,
+                    ExprKind::Unary {
+                        op: UnOp::Not,
+                        operand: Box::new(call),
+                    },
+                ),
                 _ => call,
             };
         }
@@ -842,7 +1048,7 @@ impl Lowerer<'_> {
             },
             None => Ty::Error,
         };
-        let call = self.op_call(res, args, ordering);
+        let call = self.op_call(node, res, args, ordering);
         // Which single `Ordering` answers the relation, and whether landing on
         // it means `true`: `a < b` is "`.less`, yes"; `a >= b` is "`.less`, no".
         let (variant, hit) = match op {
@@ -851,25 +1057,34 @@ impl Lowerer<'_> {
             BinOp::Gt => ("greater", true),
             _ => ("greater", false),
         };
-        Expr::Match {
-            scrutinee: Box::new(call),
-            arms: vec![
-                Arm {
-                    pattern: Pattern::Variant {
+        let arms = vec![
+            Arm {
+                id: self.id(node),
+                pattern: self.pat(
+                    node,
+                    PatternKind::Variant {
                         name: Symbol::new(variant),
                         sub: Vec::new(),
                     },
-                    guard: None,
-                    body: Expr::Lit(Lit::Bool(hit), Ty::Bool),
-                },
-                Arm {
-                    pattern: Pattern::Wildcard,
-                    guard: None,
-                    body: Expr::Lit(Lit::Bool(!hit), Ty::Bool),
-                },
-            ],
-            ty: Ty::Bool,
-        }
+                ),
+                guard: None,
+                body: self.expr(node, Ty::Bool, ExprKind::Lit(Lit::Bool(hit))),
+            },
+            Arm {
+                id: self.id(node),
+                pattern: self.pat(node, PatternKind::Wildcard),
+                guard: None,
+                body: self.expr(node, Ty::Bool, ExprKind::Lit(Lit::Bool(!hit))),
+            },
+        ];
+        self.expr(
+            node,
+            Ty::Bool,
+            ExprKind::Match {
+                scrutinee: Box::new(call),
+                arms,
+            },
+        )
     }
 
     /// Lower `a[i]` on a type that indexes through `Index` / `IndexMut`: the
@@ -877,6 +1092,7 @@ impl Lowerer<'_> {
     /// the element, so the surface `a[i]` is `index(&a, i).*` (§6.13).
     fn lower_index_call(
         &mut self,
+        node: NodeId,
         res: OpResolution,
         base: NodeId,
         index: NodeId,
@@ -888,62 +1104,84 @@ impl Lowerer<'_> {
             .get("index_mut")
             .map(|t| self.defs.resolve_alias(t))
             == Some(res.trait_def);
+        let base_node = base;
         let base = self.lower_expr(base);
-        let recv = match base.ty() {
+        let recv = match &base.ty {
             // Already a pointer (an auto-deref site): pass it straight through.
             Ty::Ptr { .. } => base,
-            other => Expr::Ref {
-                mutable,
-                place: Box::new(base.clone()),
-                ty: Ty::Ptr {
+            other => {
+                let ptr = Ty::Ptr {
                     mutable,
                     inner: Box::new(other.clone()),
-                },
-            },
+                };
+                self.expr(
+                    base_node,
+                    ptr,
+                    ExprKind::Ref {
+                        mutable,
+                        place: Box::new(base.clone()),
+                    },
+                )
+            }
         };
         let index = self.lower_expr(index);
         let elem_ptr = Ty::Ptr {
             mutable,
             inner: Box::new(ty.clone()),
         };
-        let call = self.op_call(res, vec![recv, index], elem_ptr);
-        Expr::Deref {
-            base: Box::new(call),
+        let call = self.op_call(node, res, vec![recv, index], elem_ptr);
+        self.expr(
+            node,
             ty,
-        }
+            ExprKind::Deref {
+                base: Box::new(call),
+            },
+        )
     }
 
     /// `while cond { body }` -> `loop { if <not cond> { break }; <body...> }`.
-    fn lower_while(&mut self, cond: NodeId, body: NodeId, ty: Ty) -> Expr {
+    fn lower_while(&mut self, node: NodeId, cond: NodeId, body: NodeId, ty: Ty) -> Expr {
         let cond_expr = self.lower_expr(cond);
-        let not_cond = Expr::Unary {
-            op: UnOp::Not,
-            operand: Box::new(cond_expr),
-            ty: Ty::Bool,
-        };
+        let not_cond = self.expr(
+            cond,
+            Ty::Bool,
+            ExprKind::Unary {
+                op: UnOp::Not,
+                operand: Box::new(cond_expr),
+            },
+        );
+        // The guard and its `break` are synthetic — nothing in the source is
+        // spelled `break` — so they take the condition's span: that is the
+        // expression whose value decides whether the jump happens.
         let break_block = Block {
-            stmts: vec![Stmt::Break(None)],
+            id: self.id(cond),
+            stmts: vec![self.stmt(cond, StmtKind::Break(None))],
             tail: None,
             ty: Ty::Void,
             defers: Vec::new(),
         };
-        let guard = Stmt::Expr(Expr::If {
-            cond: Box::new(not_cond),
-            then: break_block,
-            els: None,
-            ty: Ty::Void,
-        });
+        let guard_if = self.expr(
+            cond,
+            Ty::Void,
+            ExprKind::If {
+                cond: Box::new(not_cond),
+                then: break_block,
+                els: None,
+            },
+        );
+        let guard = self.stmt(cond, StmtKind::Expr(guard_if));
         let mut body_block = self.lower_block(body);
         body_block.stmts.insert(0, guard);
         // A loop body yields nothing.
         if let Some(tail) = body_block.tail.take() {
-            body_block.stmts.push(Stmt::Expr(*tail));
+            let id = self.derived(tail.id);
+            body_block.stmts.push(Stmt {
+                id,
+                kind: StmtKind::Expr(*tail),
+            });
         }
         body_block.ty = Ty::Void;
-        Expr::Loop {
-            body: body_block,
-            ty,
-        }
+        self.expr(node, ty, ExprKind::Loop { body: body_block })
     }
 
     fn lower_variant_args(&mut self, args: &VariantArgs) -> Vec<Expr> {
@@ -965,7 +1203,7 @@ impl Lowerer<'_> {
     /// `Expr::Construct` for a struct, an `Expr::Tuple` for a tuple, `$array`
     /// for an array or slice. Inference has already checked the body fits, so
     /// the type is the authority here.
-    fn lower_composite(&mut self, body: &CompositeBody, ty: Ty) -> Expr {
+    fn lower_composite(&mut self, node: NodeId, body: &CompositeBody, ty: Ty) -> Expr {
         match body {
             CompositeBody::Named(fields) => {
                 let fields = fields
@@ -976,43 +1214,51 @@ impl Lowerer<'_> {
                     })
                     .collect();
                 match &ty {
-                    Ty::Nominal { def, .. } => Expr::Construct {
-                        def: *def,
-                        fields,
-                        ty,
-                    },
+                    Ty::Nominal { def, .. } => {
+                        let def = *def;
+                        self.expr(node, ty, ExprKind::Construct { def, fields })
+                    }
                     // Named fields on a non-struct: already diagnosed.
-                    _ => Expr::Error(ty),
+                    _ => self.expr(node, ty, ExprKind::Error),
                 }
             }
             CompositeBody::Positional(elems) => {
                 let elems: Vec<Expr> = elems.iter().map(|&e| self.lower_expr(e)).collect();
                 match &ty {
-                    Ty::Tuple(_) => Expr::Tuple { elems, ty },
+                    Ty::Tuple(_) => self.expr(node, ty, ExprKind::Tuple { elems }),
                     // A tuple struct's members are positional but it is still a
                     // nominal construction; name the fields by their index.
-                    Ty::Nominal { def, .. } => Expr::Construct {
-                        def: *def,
-                        fields: elems
+                    Ty::Nominal { def, .. } => {
+                        let def = *def;
+                        let fields = elems
                             .into_iter()
                             .enumerate()
                             .map(|(i, e)| (Symbol::new(&i.to_string()), e))
-                            .collect(),
+                            .collect();
+                        self.expr(node, ty, ExprKind::Construct { def, fields })
+                    }
+                    Ty::Array { .. } | Ty::Slice { .. } => self.expr(
+                        node,
                         ty,
-                    },
-                    Ty::Array { .. } | Ty::Slice { .. } => Expr::Intrinsic {
-                        name: Symbol::new("array"),
-                        args: elems,
-                        ty,
-                    },
-                    _ => Expr::Error(ty),
+                        ExprKind::Intrinsic {
+                            name: Symbol::new("array"),
+                            args: elems,
+                        },
+                    ),
+                    _ => self.expr(node, ty, ExprKind::Error),
                 }
             }
-            CompositeBody::Repeat { value, count } => Expr::Intrinsic {
-                name: Symbol::new("repeat"),
-                args: vec![self.lower_expr(*value), self.lower_expr(*count)],
-                ty,
-            },
+            CompositeBody::Repeat { value, count } => {
+                let args = vec![self.lower_expr(*value), self.lower_expr(*count)];
+                self.expr(
+                    node,
+                    ty,
+                    ExprKind::Intrinsic {
+                        name: Symbol::new("repeat"),
+                        args,
+                    },
+                )
+            }
         }
     }
 
@@ -1028,6 +1274,7 @@ impl Lowerer<'_> {
             return None;
         };
         Some(Arm {
+            id: self.id(node),
             pattern: self.lower_pattern(pattern),
             guard: guard.map(|g| self.lower_expr(g)),
             body: self.lower_expr(body),
@@ -1035,42 +1282,49 @@ impl Lowerer<'_> {
     }
 
     fn lower_pattern(&mut self, node: NodeId) -> Pattern {
-        match self.ast.node(node).kind.clone() {
-            NodeKind::WildcardPat => Pattern::Wildcard,
+        let kind = match self.ast.node(node).kind.clone() {
+            NodeKind::WildcardPat => PatternKind::Wildcard,
             NodeKind::BindingPat { name, .. } => match self.def_of(node) {
-                Some(def) => Pattern::Binding { def, name },
-                None => Pattern::Wildcard,
+                Some(def) => PatternKind::Binding { def, name },
+                None => PatternKind::Wildcard,
             },
-            NodeKind::LitPat(lit) => Pattern::Lit(lit),
-            NodeKind::VariantPat { name, args } => Pattern::Variant {
+            NodeKind::LitPat(lit) => PatternKind::Lit(lit),
+            NodeKind::VariantPat { name, args } => PatternKind::Variant {
                 name,
                 sub: self.lower_variant_pat_args(&args),
             },
             NodeKind::TuplePat { elems } => {
-                Pattern::Tuple(elems.iter().map(|&e| self.lower_pattern(e)).collect())
+                PatternKind::Tuple(elems.iter().map(|&e| self.lower_pattern(e)).collect())
             }
-            NodeKind::OrPat { alternatives } => Pattern::Or(
+            NodeKind::OrPat { alternatives } => PatternKind::Or(
                 alternatives
                     .iter()
                     .map(|&a| self.lower_pattern(a))
                     .collect(),
             ),
             NodeKind::AtPat { name, pattern } => match self.def_of(node) {
-                Some(def) => Pattern::At {
-                    binding: Binding { def, name },
+                Some(def) => PatternKind::At {
+                    binding: Binding {
+                        id: self.id(node),
+                        def,
+                        name,
+                    },
                     pattern: Box::new(self.lower_pattern(pattern)),
                 },
-                None => self.lower_pattern(pattern),
+                None => return self.lower_pattern(pattern),
             },
             NodeKind::RefPat { pattern } => {
-                Pattern::Deref(Box::new(self.lower_pattern(pattern)))
+                PatternKind::Deref(Box::new(self.lower_pattern(pattern)))
             }
-            NodeKind::StructPat { path, fields, rest } => Pattern::Struct {
+            NodeKind::StructPat { path, fields, rest } => PatternKind::Struct {
                 def: path.and_then(|p| self.resolved_def(p)),
-                fields: fields.iter().filter_map(|&f| self.lower_field_pat(f)).collect(),
+                fields: fields
+                    .iter()
+                    .filter_map(|&f| self.lower_field_pat(f))
+                    .collect(),
                 rest,
             },
-            NodeKind::TupleStructPat { path, elems, rest } => Pattern::TupleStruct {
+            NodeKind::TupleStructPat { path, elems, rest } => PatternKind::TupleStruct {
                 def: self.resolved_def(path),
                 elems: elems.iter().map(|&e| self.lower_pattern(e)).collect(),
                 rest,
@@ -1079,28 +1333,30 @@ impl Lowerer<'_> {
                 // The `..` splits the element patterns: those before it match
                 // from the front, those after it from the back.
                 let split = rest.as_ref().map_or(elems.len(), |r| r.at.min(elems.len()));
-                let lowered: Vec<Pattern> =
-                    elems.iter().map(|&e| self.lower_pattern(e)).collect();
+                let lowered: Vec<Pattern> = elems.iter().map(|&e| self.lower_pattern(e)).collect();
                 let (prefix, suffix) = lowered.split_at(split);
-                Pattern::Slice {
+                PatternKind::Slice {
                     prefix: prefix.to_vec(),
                     // The rest's own binding lives on the `SlicePat` node.
                     rest: rest.map(|r| {
-                        r.name
-                            .zip(self.def_of(node))
-                            .map(|(name, def)| Binding { def, name })
+                        r.name.zip(self.def_of(node)).map(|(name, def)| Binding {
+                            id: self.id(node),
+                            def,
+                            name,
+                        })
                     }),
                     suffix: suffix.to_vec(),
                 }
             }
-            NodeKind::RangePat { start, end, kind } => Pattern::Range {
+            NodeKind::RangePat { start, end, kind } => PatternKind::Range {
                 start: start.and_then(|s| self.lit_of(s)),
                 end: end.and_then(|e| self.lit_of(e)),
                 inclusive: kind == RangeKind::Closed,
             },
             // A glob pattern is an import form, not a value test.
-            _ => Pattern::Wildcard,
-        }
+            _ => PatternKind::Wildcard,
+        };
+        self.pat(node, kind)
     }
 
     /// Lower one `FieldPat` of a struct pattern to its `name → sub-pattern`
@@ -1111,13 +1367,16 @@ impl Lowerer<'_> {
         };
         let sub = match pattern {
             Some(p) => self.lower_pattern(p),
-            None => match self.def_of(f) {
-                Some(def) => Pattern::Binding {
-                    def,
-                    name: name.clone(),
-                },
-                None => Pattern::Wildcard,
-            },
+            None => {
+                let kind = match self.def_of(f) {
+                    Some(def) => PatternKind::Binding {
+                        def,
+                        name: name.clone(),
+                    },
+                    None => PatternKind::Wildcard,
+                };
+                self.pat(f, kind)
+            }
         };
         Some((name, sub))
     }
@@ -1144,11 +1403,14 @@ impl Lowerer<'_> {
                         name,
                         pattern: None,
                         ..
-                    } => match self.def_of(f) {
-                        Some(def) => Pattern::Binding { def, name },
-                        None => Pattern::Wildcard,
-                    },
-                    _ => Pattern::Wildcard,
+                    } => {
+                        let kind = match self.def_of(f) {
+                            Some(def) => PatternKind::Binding { def, name },
+                            None => PatternKind::Wildcard,
+                        };
+                        self.pat(f, kind)
+                    }
+                    _ => self.pat(f, PatternKind::Wildcard),
                 })
                 .collect(),
         }
@@ -1161,20 +1423,21 @@ impl Lowerer<'_> {
         // trait's bodyless *declaration*; the solver stamped which impl won, so
         // point at that impl's member instead (see `infer::open_trait_self`).
         match (self.ast.meta::<OpResolution>(node), self.resolved_def(node)) {
-            (Some(res), _) => self.global_or_local(res.method, ty),
-            (None, Some(def)) => self.global_or_local(def, ty),
-            (None, None) => Expr::Error(ty),
+            (Some(res), _) => self.global_or_local(node, res.method, ty),
+            (None, Some(def)) => self.global_or_local(node, def, ty),
+            (None, None) => self.expr(node, ty, ExprKind::Error),
         }
     }
 
-    fn global_or_local(&self, def: DefId, ty: Ty) -> Expr {
-        match self.defs.get(def).kind {
-            DefKind::Local | DefKind::Param => Expr::Local(def, ty),
+    fn global_or_local(&self, node: NodeId, def: DefId, ty: Ty) -> Expr {
+        let kind = match self.defs.get(def).kind {
+            DefKind::Local | DefKind::Param => ExprKind::Local(def),
             // A `<const N>` parameter has no storage to load from; it stands for
             // whatever value monomorphization substitutes.
-            DefKind::ConstParam => Expr::ConstParam(def, ty),
-            _ => Expr::Global(def, ty),
-        }
+            DefKind::ConstParam => ExprKind::ConstParam(def),
+            _ => ExprKind::Global(def),
+        };
+        self.expr(node, ty, kind)
     }
 
     /// The type def a `TypePath`/`Path` type node names, if it is a struct/enum.
@@ -1192,64 +1455,103 @@ impl Lowerer<'_> {
             _ => None,
         }
     }
-}
 
-/// The element count of an array or slice, however it was spelled (`a.len` or
-/// `$len(a)`).
-///
-/// A fixed `[N]T` whose `N` is already known folds to the literal right here —
-/// the length is part of the type, so there is nothing to compute. Everything
-/// else keeps the `$len` intrinsic for a later stage to read (a slice header's
-/// length) or substitute (`[N]T` still generic in `N`, resolved at
-/// monomorphization).
-fn len_expr(base: Expr, ty: Ty) -> Expr {
-    if let Ty::Array { len, .. } = base.ty()
-        && let Some(n) = len.value()
-    {
-        return Expr::Lit(Lit::Int(n.into()), ty);
-    }
-    Expr::Intrinsic {
-        name: Symbol::new("len"),
-        args: vec![base],
-        ty,
-    }
-}
+    // ===< synthetic nodes >===
+    //
+    // These four build IR the source never wrote, so there is no AST node to
+    // take a span from; each borrows its operand's, via
+    // [`Lowerer::derived_expr`].
 
-/// Apply the receiver adjustment a method call implies, spelling out in the IR
-/// what the surface `x.m()` left to the type checker (§3.4).
-fn adjust_recv(recv: Expr, adjust: RecvAdjust, self_ty: &Ty) -> Expr {
-    match adjust {
-        RecvAdjust::None => recv,
-        RecvAdjust::Ref { mutable } => Expr::Ref {
-            mutable,
-            place: Box::new(recv),
-            ty: self_ty.clone(),
-        },
-        RecvAdjust::Deref => Expr::Deref {
-            base: Box::new(recv),
-            ty: self_ty.clone(),
-        },
+    /// The element count of an array or slice, however it was spelled (`a.len`
+    /// or `$len(a)`).
+    ///
+    /// A fixed `[N]T` whose `N` is already known folds to the literal right here
+    /// — the length is part of the type, so there is nothing to compute.
+    /// Everything else keeps the `$len` intrinsic for a later stage to read (a
+    /// slice header's length) or substitute (`[N]T` still generic in `N`,
+    /// resolved at monomorphization).
+    fn len_expr(&self, base: Expr, ty: Ty) -> Expr {
+        let from = base.id;
+        if let Ty::Array { len, .. } = &base.ty
+            && let Some(n) = len.value()
+        {
+            return self.derived_expr(from, ty, ExprKind::Lit(Lit::Int(n.into())));
+        }
+        self.derived_expr(
+            from,
+            ty,
+            ExprKind::Intrinsic {
+                name: Symbol::new("len"),
+                args: vec![base],
+            },
+        )
     }
-}
 
-/// The [`Expr::DynCast`] an explicit `$cast.<*dyn Trait>(p)` denotes, when that
-/// is what it is: a pointer value reaching a pointer-to-trait-object type. Any
-/// other `$cast` is a real conversion and stays an intrinsic.
-fn dyn_cast(value: Expr, to: &Ty) -> Option<Expr> {
-    let Ty::Ptr { inner, .. } = to else {
-        return None;
-    };
-    if !matches!(**inner, Ty::Dyn(_)) {
-        return None;
+    /// Apply the receiver adjustment a method call implies, spelling out in the
+    /// IR what the surface `x.m()` left to the type checker (§3.4).
+    fn adjust_recv(&self, recv: Expr, adjust: RecvAdjust, self_ty: &Ty) -> Expr {
+        let from = recv.id;
+        match adjust {
+            RecvAdjust::None => recv,
+            RecvAdjust::Ref { mutable } => self.derived_expr(
+                from,
+                self_ty.clone(),
+                ExprKind::Ref {
+                    mutable,
+                    place: Box::new(recv),
+                },
+            ),
+            RecvAdjust::Deref => self.derived_expr(
+                from,
+                self_ty.clone(),
+                ExprKind::Deref {
+                    base: Box::new(recv),
+                },
+            ),
+        }
     }
-    let Ty::Ptr { inner: from, .. } = value.ty().clone() else {
-        return None;
-    };
-    Some(Expr::DynCast {
-        value: Box::new(value),
-        concrete: *from,
-        ty: to.clone(),
-    })
+
+    /// The [`ExprKind::DynCast`] an explicit `$cast.<*dyn Trait>(p)` denotes,
+    /// when that is what it is: a pointer value reaching a
+    /// pointer-to-trait-object type. Any other `$cast` is a real conversion and
+    /// stays an intrinsic.
+    fn dyn_cast(&self, value: Expr, to: &Ty) -> Option<Expr> {
+        let Ty::Ptr { inner, .. } = to else {
+            return None;
+        };
+        if !matches!(**inner, Ty::Dyn(_)) {
+            return None;
+        }
+        let Ty::Ptr {
+            inner: concrete, ..
+        } = value.ty.clone()
+        else {
+            return None;
+        };
+        Some(self.derived_expr(
+            value.id,
+            to.clone(),
+            ExprKind::DynCast {
+                value: Box::new(value),
+                concrete: *concrete,
+            },
+        ))
+    }
+
+    /// Wrap `base` in an explicit [`ExprKind::Deref`] if its type is a pointer,
+    /// so auto-deref field/index access is spelled out in the IR (§3.2).
+    fn autoderef(&self, base: Expr) -> Expr {
+        let Ty::Ptr { inner, .. } = base.ty.clone() else {
+            return base;
+        };
+        self.derived_expr(
+            base.id,
+            *inner,
+            ExprKind::Deref {
+                base: Box::new(base),
+            },
+        )
+    }
 }
 
 /// How a lowered parameter list takes its receiver: the first parameter, if it
@@ -1290,17 +1592,4 @@ fn is_comparison(op: BinOp) -> bool {
         op,
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
     )
-}
-
-/// Wrap `base` in an explicit [`Expr::Deref`] if its type is a pointer, so
-/// auto-deref field/index access is spelled out in the IR (§3.2).
-fn autoderef(base: Expr) -> Expr {
-    if let Ty::Ptr { inner, .. } = base.ty().clone() {
-        Expr::Deref {
-            base: Box::new(base),
-            ty: *inner,
-        }
-    } else {
-        base
-    }
 }
