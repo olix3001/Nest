@@ -53,10 +53,11 @@
 //! The dividing line: **a node holds what is particular to its own shape;
 //! anything that recurs across shapes is metadata.** A `Call`'s [`Dispatch`] and
 //! a `Field`'s name belong to those nodes and nowhere else, so they are fields.
-//! A **span** and a **type** are the same fact on an expression, a block, a
-//! parameter and a function alike, so they are metadata — four fields to keep
-//! in step would be four places to get it wrong, and "what is this node's type"
-//! would be a different question depending on which node you were holding.
+//! A **span**, a **type** and a node's **directives** are the same fact on an
+//! expression, a block, a parameter, a type and a function alike, so they are
+//! metadata — a field per node type would be several places to keep in step,
+//! and "what is this node's type" would be a different question depending on
+//! which node you were holding.
 //! Every pass that computes a new per-node fact — layout, const-safety, escape,
 //! liveness — adds it the same way, without touching these definitions.
 //!
@@ -76,7 +77,7 @@
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{BinOp, Lit, UnOp};
 
-use crate::sema::def::{DefId, Directive};
+use crate::sema::def::DefId;
 use crate::sema::ty::Ty;
 
 pub use crate::sema::builtins::BuiltinOp;
@@ -88,6 +89,24 @@ pub mod pretty;
 
 pub use link::{Linked, link};
 pub use meta::{IrId, Meta};
+
+/// A parameter's lowered **default** (§5.2), attached to the [`Param`] as
+/// metadata.
+///
+/// The default belongs to the parameter, not to any call. It is lowered once —
+/// against its own declaration, in its own file — and the finished expression is
+/// *cloned* into each call site that omits it, so by the time a call reaches the
+/// IR its filled-in arguments are indistinguishable from written ones. Keeping
+/// the original here is what lets a pass talk about the default itself: the
+/// `#const` check has to reject `y: i32 := read_config()` **once, at the
+/// declaration**, including for a function nothing calls yet.
+///
+/// Note the clones share their [`IrId`]s with the original, which is right for
+/// everything the side table holds about a default: its span, its type and its
+/// const-safety are properties of the one expression that was written, not of
+/// the places it was pasted.
+#[derive(Debug, Clone)]
+pub struct DefaultValue(pub Expr);
 
 /// A whole lowered program: the type definitions it declares, and every
 /// function that had a body.
@@ -117,9 +136,6 @@ pub struct TypeDef {
     pub id: IrId,
     pub def: DefId,
     pub name: Symbol,
-    /// The `#...` directives written on the type (§9) — `#packed`, `#align(N)`,
-    /// `#soa`. Carried, not interpreted; layout is the pass that reads them.
-    pub directives: Vec<Directive>,
     pub kind: TypeDefKind,
 }
 
@@ -185,12 +201,6 @@ pub struct Function {
     /// on definitions too: `extern("c") func f() { … }` is a Nest body that is
     /// *emitted* with the C ABI and calling convention (§11.3).
     pub extern_abi: Option<Symbol>,
-    /// The `#...` directives written on this function, in source order (§9).
-    /// They are carried, not interpreted: `#inline` is a codegen decision,
-    /// `#unsafe` a check-suppression, and both belong to a later stage. The
-    /// same list is on the function's [`Def`](crate::sema::def::Def), which is
-    /// how directives on *types* (`#soa`, `#packed`) are reached.
-    pub directives: Vec<Directive>,
     /// How this function takes its receiver, if it is a method (§3.4). This is
     /// what a vtable slot needs to know about a `dyn` call and what the later
     /// mutability check reads to decide whether `x.m()` requires a mutable `x`.

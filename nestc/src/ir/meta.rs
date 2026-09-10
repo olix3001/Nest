@@ -34,6 +34,7 @@ use std::fmt;
 
 use crate::common::meta::MetaStore;
 use crate::common::source::FileSpan;
+use crate::sema::def::Directive;
 use crate::sema::ty::Ty;
 
 /// The identity of one IR node, unique across the whole compilation.
@@ -184,6 +185,34 @@ impl Meta {
     /// reporting an unrelated diagnostic.
     pub fn ty_or_error(&self, id: IrId) -> Ty {
         self.ty(id).unwrap_or(Ty::Error)
+    }
+
+    // ===< Directives >===
+    //
+    // Directives are written on functions, on types, and on fields, so by the
+    // same rule that put spans and types here they belong here too. They are
+    // also the clearest case for a side table: the front end deliberately
+    // *carries* directives it has no opinion about, and every stage that does
+    // have one — layout for `#packed` / `#align` / `#soa`, codegen for
+    // `#inline` / `#section` / `#offset`, the `#const` checker — is a different
+    // stage from the one that wrote them down (§9).
+
+    /// Record the `#...` directives written on `id`, in source order.
+    pub fn set_directives(&self, id: IrId, directives: Vec<Directive>) {
+        if !directives.is_empty() {
+            self.set(id, directives);
+        }
+    }
+
+    /// The directives written on `id`, in source order; empty if none were.
+    pub fn directives(&self, id: IrId) -> Vec<Directive> {
+        self.get::<Vec<Directive>>(id).unwrap_or_default()
+    }
+
+    /// Whether `id` carries `#name`.
+    pub fn has_directive(&self, id: IrId, name: &str) -> bool {
+        self.with::<Vec<Directive>, _>(id, |ds| ds.iter().any(|d| d.name.as_str() == name))
+            .unwrap_or(false)
     }
 }
 

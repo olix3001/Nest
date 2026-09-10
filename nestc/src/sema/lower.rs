@@ -282,11 +282,11 @@ impl Lowerer<'_> {
             })
             .collect();
         self.meta.set_ty(id, Ty::Nominal { def, args });
+        self.meta.set_directives(id, directives);
         Some(TypeDef {
             id,
             def,
             name,
-            directives,
             kind,
         })
     }
@@ -382,6 +382,22 @@ impl Lowerer<'_> {
         let param_tys: Vec<Ty> = params.iter().map(|p| self.meta.ty_or_error(p.id)).collect();
         let recv = recv_of(&param_tys, &params);
         let mutating = param_tys.iter().any(grants_mutation);
+        // Lower every default now, whether or not anything calls this function.
+        // A default is part of the declaration: `y: i32 := read_config()` is
+        // wrong the moment it is written, and leaving it to the first call site
+        // would mean an uncalled function's defaults were never checked at all.
+        // Each is stashed on its own parameter (see [`DefaultValue`]).
+        let value_params: Vec<(usize, IrId)> = params
+            .iter()
+            .filter(|p| p.name.as_str() != "self")
+            .enumerate()
+            .map(|(i, p)| (i, p.id))
+            .collect();
+        for (i, param_id) in value_params {
+            if let Some(d) = self.param_default(def, i) {
+                self.meta.set(param_id, crate::ir::DefaultValue(d));
+            }
+        }
         let body = body.map(|b| self.lower_block(b));
         // A function's own type is its whole signature. Keeping only the return
         // type here would have made `meta.ty` mean something different for a
@@ -394,6 +410,8 @@ impl Lowerer<'_> {
                 ret: Box::new(ret),
             },
         );
+        self.meta
+            .set_directives(id, self.defs.get(def).directives.clone());
         Some(Function {
             id,
             def,
@@ -401,7 +419,6 @@ impl Lowerer<'_> {
             params,
             body,
             extern_abi,
-            directives: self.defs.get(def).directives.clone(),
             recv,
             mutating,
         })
@@ -1058,6 +1075,7 @@ impl Lowerer<'_> {
             .map(|s| s.map(|n| self.lower_expr(n)))
             .collect();
         self.ast = saved;
+
         let out = lowered.get(i).cloned().flatten();
         self.defaults.insert(def, lowered);
         out

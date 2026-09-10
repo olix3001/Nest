@@ -1729,6 +1729,147 @@ f :: func (b: Box.<E>) -> i32 { return b.match { { value: .a } => 0 } }
     );
 }
 
+// ===< The `#const` check >===
+
+const CONST_PRELUDE: &str = "\
+K :: 7
+P :: struct { x: i32 }
+#const
+pure :: func (n: i32) -> i32 { return n + 1 }
+runtime :: func () -> i32 { return 1 }
+";
+
+#[test]
+fn every_admissible_default_is_accepted() {
+    // The list §5.2 admits, all at once. The rejections below only mean
+    // something if these pass.
+    let src = format!(
+        "{CONST_PRELUDE}\
+f :: func (
+  a: i32 := 1,
+  b: i32 := K,
+  c: P := P {{ x: 2 }},
+  d: i32 := pure(3),
+  e: i32 := $cast.<i32>(K),
+  g: i32 := K + 1,
+) -> i32 {{ return a }}
+"
+    );
+    assert!(messages(&src).is_empty(), "{:#?}", messages(&src));
+}
+
+#[test]
+fn a_default_that_is_not_constant_is_rejected() {
+    for (tail, needle) in [
+        (
+            "f :: func (a: i32 := runtime()) -> i32 { return a }\n",
+            "`runtime` is not `#const`",
+        ),
+        // A runtime call buried inside a composite literal: the *call* is named,
+        // not the literal around it.
+        (
+            "f :: func (a: P := P { x: runtime() }) -> i32 { return a.x }\n",
+            "`runtime` is not `#const`",
+        ),
+    ] {
+        let src = format!("{CONST_PRELUDE}{tail}");
+        let msgs = messages(&src);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected exactly one diagnostic for {tail:?}: {msgs:#?}"
+        );
+        assert!(
+            msgs[0].contains("must be a constant expression") && msgs[0].contains(needle),
+            "wrong diagnostic for {tail:?}: {}",
+            msgs[0]
+        );
+    }
+}
+
+#[test]
+fn a_default_is_checked_even_when_nothing_calls_it() {
+    // The mistake is in the declaration. Leaving it to the first call site would
+    // mean an uncalled function's defaults were never checked at all — which is
+    // why the lowered default lives on its parameter rather than only in the
+    // arguments it was pasted into.
+    let src = format!(
+        "{CONST_PRELUDE}never_called :: func (a: i32 := runtime()) -> i32 {{ return a }}\n"
+    );
+    assert_eq!(messages(&src).len(), 1, "{:#?}", messages(&src));
+}
+
+#[test]
+fn a_bad_default_is_reported_once_however_many_calls_there_are() {
+    // One wrong default is one mistake. Checking it per call site would turn it
+    // into a wall of identical diagnostics.
+    let src = format!(
+        "{CONST_PRELUDE}\
+f :: func (a: i32 := runtime()) -> i32 {{ return a }}
+g :: func () -> i32 {{ return f() + f() + f() }}
+"
+    );
+    assert_eq!(messages(&src).len(), 1, "{:#?}", messages(&src));
+}
+
+#[test]
+fn a_parameter_reference_in_a_default_reports_only_its_own_rule() {
+    // §5.2's rule gives a much better message than "not a constant expression"
+    // would, and it fires even where a parameter reference might otherwise look
+    // admissible. This check must therefore stay quiet about it — exactly one
+    // diagnostic, and it is the good one.
+    let src = "f :: func (a: i32, b: i32 := a) -> i32 { return b }\n";
+    let msgs = messages(src);
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(
+        msgs[0].contains("cannot name the parameter"),
+        "the weaker diagnostic won: {}",
+        msgs[0]
+    );
+}
+
+#[test]
+fn a_const_function_may_only_call_const_functions() {
+    let src = format!("{CONST_PRELUDE}#const\nbad :: func () -> i32 {{ return runtime() }}\n");
+    let msgs = messages(&src);
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(
+        msgs[0].contains("is `#const`, but calls `runtime`"),
+        "{}",
+        msgs[0]
+    );
+}
+
+#[test]
+fn a_const_function_may_use_ordinary_control_flow() {
+    // §5.1 restricts *calls* and run-time effects, not the language. Locals,
+    // branches, loops and arithmetic are all evaluable at compile time, and a
+    // rule that banned them would leave `#const` able to express almost nothing.
+    let src = format!(
+        "{CONST_PRELUDE}\
+#const
+ok :: func (n: i32) -> i32 {{
+  let t := n * 2
+  if t > 3 {{ return pure(t) }}
+  let mut i := 0
+  while i < 3 {{ i = i + 1 }}
+  return t + i
+}}
+"
+    );
+    assert!(messages(&src).is_empty(), "{:#?}", messages(&src));
+}
+
+#[test]
+fn an_operator_in_a_const_function_is_not_a_call_to_check() {
+    // Operators lower to calls to trait methods that are not themselves
+    // `#const`. The `builtin` tag is what says "this one is a machine
+    // instruction" in O(1) — without reading it, every `#const` function doing
+    // arithmetic would be rejected for calling `core.Add.add`.
+    let src = "#const\nadd :: func (a: i32, b: i32) -> i32 { return a + b * 2 - 1 }\n";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
 // ===< Linking the per-file programs >===
 
 #[test]

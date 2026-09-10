@@ -69,7 +69,7 @@ impl Printer<'_> {
 
     fn type_def(&mut self, t: &TypeDef) {
         let mut tags = String::new();
-        for d in &t.directives {
+        for d in &self.meta.directives(t.id) {
             let _ = write!(tags, " {}", directive_str(d));
         }
         match &t.kind {
@@ -141,7 +141,7 @@ impl Printer<'_> {
         // The receiver / mutation tags print only when they say something: an
         // unannotated `func` is a non-method that cannot write through anything.
         let mut tags = String::new();
-        for d in &f.directives {
+        for d in &self.meta.directives(f.id) {
             let _ = write!(tags, " {}", directive_str(d));
         }
         match f.recv {
