@@ -1,0 +1,59 @@
+// use_packages.nest — a program importing two packages, and the coherence rules
+// that decide what it may write about them.
+//
+// `shapes` owns the types; `render` owns the trait. The program owns neither,
+// which is exactly the interesting case. Run it with both packages registered
+// (see `the_two_package_example_analyzes_cleanly` in the compiler's tests).
+
+shapes :: import <shapes>
+render :: import <render>
+
+// ALLOWED — a **local trait** implemented for a foreign type. The trait is this
+// program's, so this impl is this program's business and nobody else can write
+// it.
+Area :: trait {
+  area_of :: func (self: *Self) -> f64
+}
+
+impl Area for shapes.Circle {
+  area_of :: func (self: *shapes.Circle) -> f64 { return self.area() }
+}
+
+// ALLOWED — a **foreign trait** implemented for a local type, the mirror image.
+Rect :: struct { w: f64, h: f64 }
+
+impl render.Describe for Rect {
+  SIDES :: 4
+  describe :: func (self: *Rect) -> i32 { return 1 }
+}
+
+// REJECTED, were it uncommented — an inherent impl may only live where its type
+// is defined. `Circle` belongs to `shapes`, so only `shapes` may add methods to
+// it: two packages both adding a `scale` would be an unresolvable clash at every
+// call site, and unlike a trait impl there is no name to qualify it with.
+//
+// impl shapes.Circle {
+//   scale :: func (self: *shapes.Circle) -> f64 { return self.radius * 2.0 }
+// }
+
+// REJECTED, were it uncommented — a trait impl needs something of its own in it.
+// Both `Describe` and `Circle` are foreign, so this is the impl two libraries
+// could write identically with neither preferred. Wrap the type or own the
+// trait, as above.
+//
+// impl render.Describe for shapes.Circle {
+//   describe :: func (self: *shapes.Circle) -> i32 { return 1 }
+// }
+
+@public
+main :: func () -> i32 {
+  const c := shapes.Circle { radius: 2.0 }
+  const s := shapes.Square { side: 3.0 }
+  // Inherent methods, from the package that owns the types.
+  const total: f64 := c.area() + s.area()
+  // The local trait, implemented here for a foreign type.
+  const a: f64 := c.area_of()
+  // The foreign trait, implemented here for a local type.
+  const r := Rect { w: 1.0, h: 2.0 }
+  return r.describe()
+}

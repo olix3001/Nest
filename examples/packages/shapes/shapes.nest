@@ -1,0 +1,24 @@
+// shapes.nest — the root of package `shapes`, imported as `import <shapes>`.
+//
+// This package owns a type. It is one half of the two-package coherence example:
+// see `render/render.nest` for the other, and `use_packages.nest` for what a
+// program may and may not write about both of them.
+
+@public
+Circle :: struct { radius: f64 }
+
+@public
+Square :: struct { side: f64 }
+
+// An **inherent** impl on a type this package owns: always allowed, and the only
+// place it is allowed. Another package adding its own `area` to `Circle` would
+// be an unresolvable clash at every call site, with no name to qualify it with.
+impl Circle {
+  @public
+  area :: func (self: *Circle) -> f64 { return 3.14159 * self.radius * self.radius }
+}
+
+impl Square {
+  @public
+  area :: func (self: *Square) -> f64 { return self.side * self.side }
+}

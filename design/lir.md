@@ -419,10 +419,49 @@ has no opinion about). These are the ones LIR and codegen must still see:
 `#section` and `#offset` are the two that do not exist yet anywhere — see the
 plan.
 
+## 7b. Type definitions, and aggregates flattened to structs
+
+**LIR carries the program's type definitions, and by the time it does there is
+only one aggregate shape left: the struct.** A tuple, an enum and a slice are all
+lowered into plain structs during IR → LIR.
+
+The IR already carries type definitions — `ir::TypeDef`, with structs, enums and
+`distinct`s, member types in the side table — because a `Ty::Nominal` is only a
+*name*: it says which type, never what is in it, and layout, exhaustiveness and
+codegen all need the contents. What LIR adds is the flattening:
+
+| Source shape | LIR |
+|---|---|
+| `struct { a: T, b: U }` | itself |
+| tuple struct, `(A, B)` | a struct with positional members `0`, `1` |
+| `distinct T` | a struct with one member — already its IR shape |
+| `[]T` / `[]mut T` | `struct { ptr: *T, len: usize }` |
+| `enum { a, b(T) }` | `struct { tag: uN, payload: <union of the variants> }` |
+| `dyn Trait` | `struct { data: *void, vtable: *void }` |
+
+The reason to do it here rather than in codegen is that every LIR pass after this
+point asks structural questions — what is at this offset, is this field a
+pointer, how big is this local — and each aggregate that keeps its own shape is
+one more case every one of those passes has to learn. Flattened, a place
+projection is *always* "member `n` of a struct", and the drop, root and layout
+passes each have one rule instead of five.
+
+The enum row is the one with a real decision in it: the tag's width and whether
+the payload is laid out as an overlapping union or as the widest variant are
+layout's to make, not the lowering's. What the lowering fixes is only the
+*shape* — a tag member and a payload member — so `(e as Some).0` becomes an
+ordinary two-step projection.
+
+Note this is a change of representation, not of information: the enum's variants
+and their names stay reachable through the type's definition, which is what a
+LIR dump prints and what debug info is emitted from.
+
 ## 8. What LIR still carries
 
-- **Types.** Every local and every instruction is typed. Codegen needs layout,
-  and the drop/root passes need to know what is a pointer.
+- **Types**, and the **definitions** behind them. Every local and every
+  instruction is typed; every nominal type's contents are reachable from its
+  `DefId`. Codegen needs layout, and the drop/root passes need to know what is a
+  pointer.
 - **Spans.** On every instruction, for debug metadata.
 - **Def ids.** So a diagnostic raised in a LIR pass can name a source item.
 
@@ -432,7 +471,8 @@ Generics and `const` generic parameters (monomorphization runs before lowering,
 so LIR is fully concrete), traits and dynamic dispatch as *concepts* (a `dyn`
 call is an indirect call through a vtable slot), `defer` as a construct,
 structured control flow, the distinction between a `match`, an `if` and a
-`while`, and **`impl` blocks** — a method is just a function with a name.
+`while`, **`impl` blocks** — a method is just a function with a name — and every
+aggregate shape except the struct (§7b).
 
 `distinct` types are also gone. A `distinct T` has exactly `T`'s representation,
 so the `$cast` the IR emits when a distinct type reaches an inherited method is a

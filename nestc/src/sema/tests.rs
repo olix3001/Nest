@@ -2227,6 +2227,154 @@ fn a_layout_directive_on_a_function_is_rejected() {
     );
 }
 
+// ===< Two packages, and coherence between them >===
+
+/// Analyze `examples/packages/use_packages.nest` with both example packages
+/// registered, the way a build system would.
+fn analyze_example_packages() -> Session {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/packages");
+    let mut session = Session::new();
+    session.register_package("shapes", &format!("{dir}/shapes/shapes.nest"));
+    session.register_package("render", &format!("{dir}/render/render.nest"));
+    let path = format!("{dir}/use_packages.nest");
+    let src = std::fs::read_to_string(&path).expect("the example exists");
+    let file = session.sources.add(path, src.clone());
+    let (ast, errors) = crate::parser::parse::Parser::parse_file(&src, file);
+    for err in errors {
+        session.error(file, err.span, err.message);
+    }
+    session.asts.insert(file, ast);
+    analyze(&mut session, file);
+    session
+}
+
+#[test]
+fn the_two_package_example_analyzes_cleanly() {
+    // The shipped example is the readable statement of these rules, so it has to
+    // keep working: a program importing two packages, using the inherent methods
+    // of one and the trait of the other, plus its own impl joining them.
+    let session = analyze_example_packages();
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    // Both packages really were linked in, not silently skipped.
+    let names: Vec<String> = session.linked.types().map(|t| t.name.to_string()).collect();
+    for want in ["Circle", "Square", "Describe"] {
+        assert!(
+            names.contains(&want.to_string()),
+            "{want} is not linked: {names:?}"
+        );
+    }
+}
+
+/// Build a two-package program in memory: `shapes` owns a type, `render` owns a
+/// trait, and `main` is the program that imports both.
+fn two_packages(program: &str) -> Session {
+    let loader = MemLoader::new()
+        .with(
+            "shapes",
+            "@public Circle :: struct { radius: f64 }\n\
+             impl Circle { @public area :: func (self: *Circle) -> f64 { return self.radius } }\n",
+        )
+        .with(
+            "render",
+            "@public Describe :: trait { describe :: func (self: *Self) -> i32 }\n",
+        )
+        .with("main", program);
+    let mut session = Session::with_loader(Box::new(loader));
+    session.register_package("shapes", "shapes");
+    session.register_package("render", "render");
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
+    session
+}
+
+#[test]
+fn a_package_may_not_add_inherent_methods_to_another_packages_type() {
+    // Rule 1: an inherent impl only where its type is defined. Two packages both
+    // adding a `scale` to `Circle` would be an unresolvable clash at every call
+    // site, and unlike a trait impl there is no name to qualify it with.
+    let session = two_packages(
+        "shapes :: import <shapes>\n\
+         impl shapes.Circle { scale :: func (self: *shapes.Circle) -> f64 { return 1.0 } }\n",
+    );
+    let msgs: Vec<String> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("inherent") && m.contains("must live")),
+        "{msgs:#?}"
+    );
+}
+
+#[test]
+fn a_trait_impl_needs_something_of_its_own_in_it() {
+    // Rule 2: either the trait or the self type must be local. With both halves
+    // foreign this is the impl two libraries could write identically with
+    // neither preferred, so it is refused where it is written rather than
+    // discovered as an ambiguity by whoever imports both. A program is no
+    // exception: the rule is about the impl, not about who wrote it.
+    let session = two_packages(
+        "shapes :: import <shapes>\n\
+         render :: import <render>\n\
+         impl render.Describe for shapes.Circle {\n\
+           describe :: func (self: *shapes.Circle) -> i32 { return 1 }\n\
+         }\n",
+    );
+    let msgs: Vec<String> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("both belong to other packages")),
+        "{msgs:#?}"
+    );
+}
+
+#[test]
+fn a_local_half_is_enough_for_a_trait_impl() {
+    // The two ways out, both of which the shipped example shows: own the trait,
+    // or own the type.
+    for program in [
+        // A local trait, for a foreign type.
+        "shapes :: import <shapes>\n\
+         Area :: trait { area_of :: func (self: *Self) -> f64 }\n\
+         impl Area for shapes.Circle {\n\
+           area_of :: func (self: *shapes.Circle) -> f64 { return self.area() }\n\
+         }\n",
+        // A foreign trait, for a local type.
+        "render :: import <render>\n\
+         Rect :: struct { w: f64 }\n\
+         impl render.Describe for Rect {\n\
+           describe :: func (self: *Rect) -> i32 { return 1 }\n\
+         }\n",
+    ] {
+        let session = two_packages(program);
+        assert!(
+            !session.has_errors(),
+            "rejected {program:?}: {:#?}",
+            session.diagnostics
+        );
+    }
+}
+
+#[test]
+fn a_packages_own_type_reaches_its_own_methods_across_the_boundary() {
+    // The positive case the rules exist to protect: `area` is declared in
+    // `shapes` and called from the program, through the package import.
+    let session = two_packages(
+        "shapes :: import <shapes>\n\
+         f :: func () -> f64 {\n\
+           const c := shapes.Circle { radius: 2.0 }\n\
+           return c.area()\n\
+         }\n",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
 // ===< Object safety >===
 
 #[test]

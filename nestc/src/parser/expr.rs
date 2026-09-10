@@ -906,9 +906,20 @@ impl Parser {
 
     /// Whether `id` is a [`NodeKind::Path`] or a generic application of one — the
     /// shapes that can head a struct literal.
+    /// Whether `id` could name a **type**, and so could be the head of a
+    /// `Type { ... }` composite literal.
+    ///
+    /// A dotted path through a namespace — `shapes.Circle` — parses as a
+    /// [`NodeKind::FieldAccess`], not a `Path`: whether a segment is a namespace
+    /// hop or a field access is resolution's answer, not the parser's. So a
+    /// field-access chain rooted in a path counts too. Without it, an imported
+    /// type could not be constructed by name at all: the `{` was left dangling
+    /// and reported as "expected an expression".
     fn node_is_pathlike(&self, id: NodeId) -> bool {
-        self.with_kind(id, |k| {
-            matches!(k, NodeKind::Path { .. } | NodeKind::GenericApply { .. })
+        self.with_kind(id, |k| match k {
+            NodeKind::Path { .. } | NodeKind::GenericApply { .. } => true,
+            NodeKind::FieldAccess { base, .. } => self.node_is_pathlike(*base),
+            _ => false,
         })
     }
 
