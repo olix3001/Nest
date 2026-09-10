@@ -307,9 +307,15 @@ impl Parser {
         params
     }
 
-    /// `ident [ ':' type ]` — one parameter. The receiver `self` is just the
-    /// parameter named `self`; its type is optional (defaulting to `Self`), as it
-    /// is for inferred closure parameters.
+    /// `ident [ ':' type ] [ ':=' expr ]` — one parameter. The receiver `self` is
+    /// just the parameter named `self`; its type is optional (defaulting to
+    /// `Self`), as it is for inferred closure parameters.
+    ///
+    /// The trailing `:= expr` is a default value (§5.2), which makes the
+    /// parameter optional at the call site. Whether the default is a legal
+    /// compile-time expression, and whether defaulted parameters trail the
+    /// required ones, are checked later — the parser only records what was
+    /// written.
     fn parse_param(&mut self) -> NodeId {
         let start = self.cur_span();
         let name = self.expect_ident();
@@ -321,7 +327,14 @@ impl Parser {
         } else {
             None
         };
-        self.alloc(span, NodeKind::Param { name, ty })
+        let default = if self.eat(&TokenKind::ColonEq) {
+            let d = self.parse_expr();
+            span = span.to(self.node_span(d));
+            Some(d)
+        } else {
+            None
+        };
+        self.alloc(span, NodeKind::Param { name, ty, default })
     }
 
     // ===< struct / enum / trait literals >===

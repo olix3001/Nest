@@ -494,9 +494,20 @@ pub enum NodeKind {
     GenericConstParam { name: Symbol, ty: NodeId },
     /// `T + U + ...` — a `+`-separated list of trait bounds; ids are type nodes.
     Bounds { bounds: Vec<NodeId> },
-    /// `name: ty` — a function parameter (`ty` optional for inferred closures and
-    /// for a bare `self` receiver, whose type defaults to `Self`).
-    Param { name: Symbol, ty: Option<NodeId> },
+    /// `name: ty [':=' default]` — a function parameter (`ty` optional for
+    /// inferred closures and for a bare `self` receiver, whose type defaults to
+    /// `Self`).
+    ///
+    /// A `default` makes the parameter optional at the call site (§5.2). It is
+    /// `:=`, not `=`, because it *introduces* what the binding holds and is
+    /// evaluated per call — the same role `:=` plays for a local — where every
+    /// `=` in the grammar is either assignment to an existing place or an
+    /// associated-type constraint.
+    Param {
+        name: Symbol,
+        ty: Option<NodeId>,
+        default: Option<NodeId>,
+    },
 
     // ===< Namespaces / impls / imports >===
     /// `[directives] namespace { items }` — directives select repr (e.g. `#c`).
@@ -783,7 +794,10 @@ impl NodeKind {
             }
             GenericTypeParam { constraint, .. } => push_opt(out, constraint),
             GenericConstParam { ty, .. } => out.push(*ty),
-            Param { ty, .. } => push_opt(out, ty),
+            Param { ty, default, .. } => {
+                push_opt(out, ty);
+                push_opt(out, default);
+            }
 
             NamespaceExpr { directives, items } => {
                 out.extend_from_slice(directives);

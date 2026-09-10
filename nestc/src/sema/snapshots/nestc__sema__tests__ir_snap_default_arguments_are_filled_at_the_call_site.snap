@@ -1,0 +1,22 @@
+---
+source: src/sema/tests.rs
+expression: ir_text(src)
+---
+func g(x: i32, y: i32) -> i32 {
+  return #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(x: i32, y: i32): i32
+}
+func pad(s: string, width: usize, fill: char) -> usize {
+  return width: usize
+}
+func f(r: *Router) -> i32 {
+  let a: i32 = (g: func(i32, i32) -> i32)($cast(1: comptime_int): i32, $cast(0: comptime_int): i32): i32
+  let b: i32 = (g: func(i32, i32) -> i32)($cast(1: comptime_int): i32, $cast(2: comptime_int): i32): i32
+  let c: i32 = (g: func(i32, i32) -> i32)($cast(1: comptime_int): i32, $cast(5: comptime_int): i32): i32
+  let d: usize = (pad: func(string, usize, char) -> usize)("h": string, $cast(8: comptime_int): usize, 'x': char): usize
+  let e: usize = (pad: func(string, usize, char) -> usize)("h": string, $cast(8: comptime_int): usize, '-': char): usize
+  let m: i32 = (Router.listen: func(*Router, string, i32) -> i32)(r: *Router, "h": string, $cast(80: comptime_int): i32): i32
+  return #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.Add.add: func(i32, i32) -> i32)(a: i32, b: i32): i32, c: i32): i32, m: i32): i32
+}
+func listen(self: *Router, host: string, port: i32) -> i32 #recv(ptr) {
+  return port: i32
+}

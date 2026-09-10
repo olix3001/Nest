@@ -36,8 +36,9 @@ pub fn default_core_path() -> String {
     if let Ok(p) = std::env::var("NEST_CORE") {
         return p;
     }
-    // `nestc/` sits next to `core/` in the repository.
-    format!("{}/../core/core.nest", env!("CARGO_MANIFEST_DIR"))
+    // `nestc/` sits next to `packages/` in the repository, which is where
+    // every shipped package (`core`, and later `std`, `c`, ...) lives.
+    format!("{}/../packages/core/core.nest", env!("CARGO_MANIFEST_DIR"))
 }
 
 /// The fixed-name primitive types the prelude makes available without an import

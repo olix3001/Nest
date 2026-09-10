@@ -223,16 +223,19 @@ pub struct Upcast {
 /// The arguments of a call in **parameter** order, once any named argument has
 /// been bound to the parameter it names (§5.3).
 ///
-/// Only stamped on calls that actually use a named argument, so a purely
-/// positional call — the overwhelming majority — carries nothing and lowering
-/// takes its arguments as written. Binding happens here, during inference,
-/// because this is the one stage that has both the written arguments and the
-/// callee's parameter *names*; every later stage then talks about arguments by
-/// position alone.
+/// Only stamped on calls that need it — one that names an argument, or one that
+/// leaves a defaulted parameter out. A purely positional call supplying every
+/// parameter — the overwhelming majority — carries nothing and lowering takes
+/// its arguments as written. Binding happens here, during inference, because
+/// this is the one stage that has both the written arguments and the callee's
+/// parameter *names*; every later stage then talks about arguments by position
+/// alone.
 #[derive(Debug, Clone)]
 pub struct ArgOrder {
-    /// One entry per parameter, in declaration order.
-    pub args: Vec<NodeId>,
+    /// One entry per parameter, in declaration order. A `None` is a parameter
+    /// the call left out and whose **default** fills the slot; lowering supplies
+    /// it, since only there does the default exist as an `Expr` to clone.
+    pub args: Vec<Option<NodeId>>,
 }
 
 /// What binding a call's arguments to its parameters produced.
@@ -240,8 +243,9 @@ enum ArgBinding {
     /// A purely positional call: use the arguments exactly as written, and let
     /// the ordinary positional checks do the rest.
     AsWritten,
-    /// Bound, in parameter order.
-    Bound(Vec<NodeId>),
+    /// Bound, in parameter order, with a `None` for each defaulted parameter
+    /// the call left out.
+    Bound(Vec<Option<NodeId>>),
     /// Did not bind, and a diagnostic said why. The arguments must **not** be
     /// checked against the signature afterwards — every such check would be a
     /// second complaint about the same mistake.
@@ -418,13 +422,37 @@ impl Inferer<'_> {
         else {
             return;
         };
+        // A defaulted parameter must trail the required ones (§5.2): a call
+        // supplies its positional arguments left to right, so a hole in the
+        // middle could never be filled without naming the ones after it — which
+        // would make the default reachable only by a call that names arguments.
+        let mut defaulted: Option<Symbol> = None;
         for p in &params {
-            if let NodeKind::Param { ty, .. } = self.ast.node(*p).kind.clone() {
+            if let NodeKind::Param { name, ty, default } = self.ast.node(*p).kind.clone() {
                 let pty = match ty {
                     Some(t) => self.ty_from_node(t),
                     // A bare `self` (or an inferred closure param) gets a var.
                     None => self.cx.fresh(),
                 };
+                match (&default, &defaulted) {
+                    (Some(_), _) => defaulted = Some(name.clone()),
+                    (None, Some(prev)) => {
+                        let msg = format!(
+                            "parameter `{name}` has no default but follows `{prev}`, which does                              — every parameter after a defaulted one must be defaulted too"
+                        );
+                        self.report(*p, msg);
+                    }
+                    (None, None) => {}
+                }
+                // The default is checked here, at the declaration, **once** —
+                // not at each call site, which is why a call can fill the hole
+                // without re-inferring anything. It is expected against the
+                // parameter's own type, so `y: i32 := 0` types the literal as
+                // `i32` exactly as a written argument would.
+                if let Some(d) = default {
+                    let dty = self.infer_expr(d);
+                    self.expect(d, &dty, &pty);
+                }
                 if let Some(def) = self.def_of(*p) {
                     self.env.insert(def, pty.clone());
                 }
@@ -2005,7 +2033,7 @@ impl Inferer<'_> {
                 // `apply_call` — and every stage after it — sees one positional
                 // list in declaration order.
                 let args = match self.bind_args(callee, def, args) {
-                    ArgBinding::AsWritten => args.to_vec(),
+                    ArgBinding::AsWritten => args.iter().copied().map(Some).collect(),
                     ArgBinding::Bound(a) => a,
                     ArgBinding::Failed => {
                         self.infer_args_only(args);
@@ -2023,7 +2051,8 @@ impl Inferer<'_> {
             args,
             "this call goes through a function value, which has parameter types but no parameter names",
         );
-        self.apply_call(callee, &cty, args)
+        let slots: Vec<Option<NodeId>> = args.iter().copied().map(Some).collect();
+        self.apply_call(callee, &cty, &slots)
     }
 
     /// `Pair(1, 2)` — a call whose callee names a type builds a value of it
@@ -2107,6 +2136,48 @@ impl Inferer<'_> {
         )
     }
 
+    /// Which of `def`'s **value** parameters carry a default, in declaration
+    /// order — the same order and filtering as [`Self::func_param_names`], so
+    /// the two zip.
+    ///
+    /// Only presence is reported, not the default expression: a call site never
+    /// looks at the default itself. It was type-checked once at the declaration
+    /// and is filled in by lowering, so all inference needs to know is that the
+    /// slot may legally be left empty.
+    fn func_param_defaults(&self, def: DefId) -> Option<Vec<bool>> {
+        let d = self.defs.get(def);
+        let (file, node) = (d.file?, d.node?);
+        let ast = &self.asts[&file];
+        let rhs = match &ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let NodeKind::FuncExpr { params, .. } = &ast.node(rhs).kind else {
+            return None;
+        };
+        Some(
+            params
+                .iter()
+                .filter_map(|&p| match &ast.node(p).kind {
+                    NodeKind::Param { name, default, .. } if name.as_str() != "self" => {
+                        Some(default.is_some())
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// How many arguments a call to `def` must supply — its parameter count
+    /// minus the defaulted tail (§5.2). Falls back to "all of them" for a callee
+    /// with no reachable declaration, which is the pre-defaults behaviour.
+    fn required_arity(&self, def: DefId, total: usize) -> usize {
+        match self.func_param_defaults(def) {
+            Some(d) => total - d.iter().rev().take_while(|has| **has).count(),
+            None => total,
+        }
+    }
+
     /// Bind a call's arguments to `def`'s parameters and return them in
     /// **parameter** order, stamping the result on `callee` for lowering (§5.3).
     ///
@@ -2119,12 +2190,41 @@ impl Inferer<'_> {
     /// nothing the positional path does not already check, and for a call that
     /// does not bind, having reported why.
     fn bind_args(&mut self, callee: NodeId, def: DefId, args: &[NodeId]) -> ArgBinding {
-        if !args.iter().any(|&a| self.arg_name(a).is_some()) {
-            return ArgBinding::AsWritten;
-        }
+        let named = args.iter().any(|&a| self.arg_name(a).is_some());
         let Some(names) = self.func_param_names(def) else {
             return ArgBinding::AsWritten;
         };
+        let has_default = self.func_param_defaults(def).unwrap_or_default();
+        let required = self.required_arity(def, names.len());
+        // Nothing to bind and nothing to fill: the call is already in parameter
+        // order, so it takes the untouched path it took before either feature
+        // existed and `apply_call` words any arity error.
+        if !named && (args.len() == names.len() || required == names.len()) {
+            return ArgBinding::AsWritten;
+        }
+        if !named {
+            // Positional, but short or long against a signature that has
+            // defaults — so the legal count is a *range* and the plain equality
+            // message would name the wrong number.
+            if args.len() > names.len() || args.len() < required {
+                let msg = format!(
+                    "this function takes {required} to {} argument(s) but {} were supplied",
+                    names.len(),
+                    args.len()
+                );
+                self.report(callee, msg);
+                return ArgBinding::Failed;
+            }
+            let mut slots: Vec<Option<NodeId>> = args.iter().copied().map(Some).collect();
+            slots.resize(names.len(), None);
+            self.ast.set_meta(
+                callee,
+                ArgOrder {
+                    args: slots.clone(),
+                },
+            );
+            return ArgBinding::Bound(slots);
+        }
         let mut slots: Vec<Option<NodeId>> = vec![None; names.len()];
         let mut seen_named = false;
         for (i, &a) in args.iter().enumerate() {
@@ -2164,26 +2264,28 @@ impl Inferer<'_> {
                 }
             }
         }
-        // Naming arguments makes "3 of 4 supplied" unhelpful — say which.
+        // Naming arguments makes "3 of 4 supplied" unhelpful — say which. A slot
+        // left empty for a **defaulted** parameter is not missing: that is the
+        // whole point of the default, and it stays a `None` for lowering to fill.
         let missing: Vec<String> = slots
             .iter()
             .zip(&names)
-            .filter(|(s, _)| s.is_none())
-            .map(|(_, n)| format!("`{n}`"))
+            .enumerate()
+            .filter(|(i, (s, _))| s.is_none() && !has_default.get(*i).copied().unwrap_or(false))
+            .map(|(_, (_, n))| format!("`{n}`"))
             .collect();
         if !missing.is_empty() {
             let msg = format!("missing argument for parameter {}", missing.join(", "));
             self.report(callee, msg);
             return ArgBinding::Failed;
         }
-        let ordered: Vec<NodeId> = slots.into_iter().flatten().collect();
         self.ast.set_meta(
             callee,
             ArgOrder {
-                args: ordered.clone(),
+                args: slots.clone(),
             },
         );
-        ArgBinding::Bound(ordered)
+        ArgBinding::Bound(slots)
     }
 
     /// Infer every argument for its own sake, without checking any of them
@@ -2210,13 +2312,21 @@ impl Inferer<'_> {
 
     /// Infer the arguments and unify them against a (already-instantiated) callee
     /// function type, returning its result type.
-    fn apply_call(&mut self, callee: NodeId, callee_ty: &Ty, args: &[NodeId]) -> Ty {
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_expr(*a)).collect();
+    /// A slot is `None` where the call left a **defaulted** parameter out. There
+    /// is nothing to infer or check there: the default was type-checked against
+    /// this very parameter once, at the declaration, and lowering fills it in.
+    fn apply_call(&mut self, callee: NodeId, callee_ty: &Ty, args: &[Option<NodeId>]) -> Ty {
+        let arg_tys: Vec<Option<Ty>> = args
+            .iter()
+            .map(|a| a.map(|n| self.infer_expr(n)))
+            .collect();
         match self.cx.shallow(callee_ty) {
             Ty::Func { params, ret } => {
                 if params.len() == arg_tys.len() {
                     for (a, (arg_node, aty)) in params.iter().zip(args.iter().zip(&arg_tys)) {
-                        self.expect(*arg_node, aty, a);
+                        if let (Some(node), Some(aty)) = (arg_node, aty) {
+                            self.expect(*node, aty, a);
+                        }
                     }
                 } else {
                     self.report(
@@ -2618,7 +2728,7 @@ impl Inferer<'_> {
         // Unify the remaining parameters with the call arguments.
         let value_params = &params[params.len().min(1)..];
         let args = match self.bind_args(callee, method, args) {
-            ArgBinding::AsWritten => args.to_vec(),
+            ArgBinding::AsWritten => args.iter().copied().map(Some).collect::<Vec<_>>(),
             ArgBinding::Bound(a) => a,
             ArgBinding::Failed => {
                 self.infer_args_only(args);
@@ -2626,16 +2736,28 @@ impl Inferer<'_> {
             }
         };
         let args = &args[..];
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer_expr(*a)).collect();
+        // A `None` slot is a defaulted parameter the call left out: checked once
+        // at the declaration, filled in by lowering, nothing to do here.
+        let arg_tys: Vec<Option<Ty>> = args
+            .iter()
+            .map(|a| a.map(|n| self.infer_expr(n)))
+            .collect();
         if value_params.len() == arg_tys.len() {
             for (p, (arg_node, aty)) in value_params.iter().zip(args.iter().zip(&arg_tys)) {
-                self.expect(*arg_node, aty, p);
+                if let (Some(node), Some(aty)) = (arg_node, aty) {
+                    self.expect(*node, aty, p);
+                }
             }
         } else {
+            let required = self.required_arity(method, value_params.len());
+            let takes = if required == value_params.len() {
+                value_params.len().to_string()
+            } else {
+                format!("{required} to {}", value_params.len())
+            };
             let msg = format!(
-                "`{}` takes {} argument(s) but {} were supplied",
+                "`{}` takes {takes} argument(s) but {} were supplied",
                 self.defs.get(method).name,
-                value_params.len(),
                 arg_tys.len()
             );
             self.report(callee, msg);

@@ -2218,6 +2218,91 @@ f :: func (r: *Router) -> i32 {
 }
 
 #[test]
+fn ir_snap_default_arguments_are_filled_at_the_call_site() {
+    // A default is lowered against its declaration and *cloned* into every call
+    // that omits it (§5.2), so the IR is a plain positional call with no notion
+    // that anything was left out. The literal `0` picks up the parameter's `i32`
+    // exactly as a written argument would, and `pad`'s two calls each get their
+    // own copy of the same lowered default.
+    let src = "\
+g :: func (x: i32, y: i32 := 0) -> i32 { return x + y }
+
+pad :: func (s: string, width: usize := 8, fill: char := \'x\') -> usize { return width }
+
+Router :: struct { port: i32 }
+impl Router {
+  listen :: func (self: *Router, host: string, port: i32 := 80) -> i32 { return port }
+}
+
+f :: func (r: *Router) -> i32 {
+  const a := g(1)
+  const b := g(1, 2)
+  const c := g(y: 5, x: 1)
+  const d := pad(\"h\")
+  const e := pad(\"h\", fill: \'-\')
+  const m := r.listen(\"h\")
+  return a + b + c + m
+}
+";
+    insta::assert_snapshot!(ir_text(src));
+}
+
+#[test]
+fn a_default_argument_is_lowered_in_its_own_file() {
+    // The default belongs to the file that *declares* the parameter, and so do
+    // the types inference stamped on it — but it is filled in at a call site
+    // that may be in another file entirely (every call into `core` is). Lowering
+    // therefore reads the default out of the declaring file's arena, not the
+    // caller's; if it read the caller's, the node ids would land on unrelated
+    // expressions and the argument would come out silently wrong.
+    let lib = "\
+@public scaled :: func (x: i32, by: i32 := 7) -> i32 { return x * by }
+";
+    let main = "\
+lib :: import \"lib.nest\"
+main :: func () -> i32 { return lib.scaled(2) }
+";
+    let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    // The cross-file default reached the call site with its own value and type.
+    assert!(text.contains("$cast(7: comptime_int): i32"), "{text}");
+}
+
+#[test]
+fn default_argument_rules_are_enforced() {
+    // Each case reports exactly one diagnostic: a defaulted signature must not
+    // also draw the plain equality-arity complaint, or one mistake reads as two.
+    for (src, needle) in [
+        (
+            "g :: func (x: i32 := 0, y: i32) -> i32 { return x + y }\nf :: func () { const a := g(1, 2) }\n",
+            "parameter `y` has no default but follows `x`, which does",
+        ),
+        (
+            "g :: func (x: i32, y: i32 := 0) -> i32 { return x + y }\nf :: func () { const a := g() }\n",
+            "this function takes 1 to 2 argument(s) but 0 were supplied",
+        ),
+        (
+            "g :: func (x: i32, y: i32 := 0) -> i32 { return x + y }\nf :: func () { const a := g(1, 2, 3) }\n",
+            "this function takes 1 to 2 argument(s) but 3 were supplied",
+        ),
+        (
+            "g :: func (x: i32, y: i32 := true) -> i32 { return x }\nf :: func () { const a := g(1) }\n",
+            "type mismatch: expected `i32`, found `bool`",
+        ),
+        (
+            "g :: func (x: i32, y: i32 := 0, z: i32 := 0) -> i32 { return x }\nf :: func () { const a := g(z: 1) }\n",
+            "missing argument for parameter `x`",
+        ),
+    ] {
+        let s = analyze_mem(&[("main", src)], "main");
+        assert!(diag_contains(&s, needle), "{:#?}", s.diagnostics);
+        assert_eq!(s.diagnostics.len(), 1, "{:#?}", s.diagnostics);
+    }
+}
+
+#[test]
 fn named_argument_rules_are_enforced() {
     // Each of these reports exactly one diagnostic: a failed binding must not
     // then be re-checked positionally, or one mistake reads as several.

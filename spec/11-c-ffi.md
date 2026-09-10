@@ -27,9 +27,19 @@ c.ptr.<T>                       // a raw, nullable, non-GC C pointer to T
 c.func                          // a C function-pointer type constructor
 ```
 
-These are distinct nominal types (their exact widths follow the target C ABI),
-kept separate from the language's own `int8`/`uint`/… so that ABI-sized types are
-never confused with language types.
+These are distinct nominal types, kept separate from the language's own
+`i8`/`usize`/… because they carry a guarantee the language types do not.
+
+**`core/c` types are ABI-compatible with the target's C compiler; the language's
+own primitives are not guaranteed to be.** A `core/c` type's width, alignment,
+and argument-passing convention are *defined* to be whatever the target C ABI
+says they are — which is why `c.int` cannot be written as a fixed width at all,
+and why `c.long` is 32-bit on Windows and 64-bit elsewhere. A language primitive
+means the opposite thing: `i32` is exactly 32 bits on every target, chosen by the
+language and owed nothing to the platform. That a language primitive happens to
+match a C type on mainstream targets is a property of those targets, not a
+promise — so a type crossing the C boundary is spelled with a `core/c` name, and
+the coercions of §11.4 are what carry a language value into one.
 
 ## 11.2 C pointers (`c.ptr.<T>`)
 

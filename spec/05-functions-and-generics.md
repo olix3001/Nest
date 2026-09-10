@@ -52,7 +52,7 @@ SERVER_PORT :: to_port(8080)     // evaluated at compile time
 ```
 params = param { ',' param }
 param  = 'self' [ ':' type ]
-       | identifier ':' type
+       | identifier ':' type [ ':=' expr ]
 ```
 
 ```
@@ -63,8 +63,42 @@ listen :: func (self: *Router, host: string, port: HttpPort) { ... }
 Parameters are immutable bindings inside the body (rebind locally with `let` if
 you need a mutable copy). A parameter's *type* still carries its own mutability:
 `s: []mut int` is an immutable binding to a mutable slice, so `s[i] = x` is
-allowed but `s = other` is not. There are no default parameter values in this
-version.
+allowed but `s = other` is not.
+
+### Default values (`:=`)
+
+A parameter may carry a **default**, which makes it optional at the call site:
+
+```
+pad :: func (s: string, width: usize := 8, fill: char := ' ') -> string { ... }
+
+pad("hi")                  // width = 8,  fill = ' '
+pad("hi", 4)               // width = 4,  fill = ' '
+pad("hi", fill: '-')       // width = 8,  fill = '-'
+```
+
+It is `:=` and not `=` because a default *introduces* what the binding holds,
+which is the job `:=` already does for a local — every `=` in the grammar is
+either assignment to an existing place or an associated-type constraint. It is
+not `::` either: a `::` item is fixed once, whereas a default is evaluated **per
+call**, so `.{}` as a default builds a fresh value at each site rather than
+sharing one.
+
+Rules:
+
+- **Defaulted parameters trail the required ones.** Positional arguments bind
+  left to right, so a hole in the middle could only ever be filled by naming the
+  arguments after it.
+- The default is type-checked **once**, against its own parameter, where it is
+  written — not at each call site.
+- A default must be **compile-time known at the call site** (§5.1): a literal, a
+  path to a `const` item or `const` generic parameter, a composite literal whose
+  elements are all constant, a `$cast` of a constant, a location directive
+  (`#caller_location`), or a call to a `#const` function. Note that this is not the same as
+  "a single fixed value" — `#caller_location` differs at every call site and is
+  still admissible, because each site knows its own.
+- An omitted argument is filled in during lowering, so the compiled call is
+  ordinary and positional; nothing after that stage knows a default was involved.
 
 ### The receiver (`self`)
 
@@ -115,8 +149,13 @@ router.listen(host: config.SERVER_ADDR, port: port)
 ```
 
 Named and positional may be mixed, but once a named argument appears the rest of
-the call must also be named. Names must match parameters, each supplied exactly
-once.
+the call must also be named. Names must match parameters, each supplied at most
+once, and every parameter without a default (§5.2) must be supplied. A call may
+therefore pass anywhere from the required count up to the full parameter count.
+
+Naming an argument is what makes a default in the *middle* of the trailing
+defaults reachable: `pad("hi", fill: '-')` skips `width`, which no positional
+call could do.
 
 ### Trailing block sugar
 

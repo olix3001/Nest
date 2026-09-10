@@ -172,10 +172,13 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         GenericTypeParam { name, .. } => format!("GenericTypeParam {name}"),
         GenericConstParam { name, .. } => format!("GenericConstParam const {name}"),
         Bounds { .. } => "Bounds +".into(),
-        Param { name, ty } => {
+        Param { name, ty, default } => {
+            // Children print in `ty, default` order; the tag says which are there
+            // so a lone child is never ambiguous.
             format!(
-                "Param {name}{}",
-                if ty.is_some() { ":" } else { " (inferred)" }
+                "Param {name}{}{}",
+                if ty.is_some() { ":" } else { " (inferred)" },
+                if default.is_some() { " (default :=)" } else { "" }
             )
         }
         NamespaceExpr { .. } => "NamespaceExpr".into(),

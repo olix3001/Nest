@@ -66,6 +66,8 @@ pub fn lower_file(
         defs,
         lang,
         ast,
+        asts,
+        defaults: HashMap::new(),
         defers: Vec::new(),
     };
     // Iterate the `Func` defs of this file: each carries the name/DefId and its
@@ -104,7 +106,21 @@ struct Lowerer<'a> {
     /// mentions but the surface syntax never wrote — `Ordering`, for the `cmp`
     /// a user-type comparison lowers to.
     lang: &'a LangItems,
+    /// The file currently being lowered. Swapped, briefly, while a **default
+    /// argument** declared in another file is lowered — the default's nodes and
+    /// their inferred types live in that file's arena, not this one.
     ast: &'a Ast,
+    /// The whole parsed program, so a call can reach the declaration of a callee
+    /// in another file to lower its defaults (a call into `core` is the common
+    /// case).
+    asts: &'a HashMap<FileId, Ast>,
+    /// Lowered default arguments, per callee, in **value-parameter** order.
+    ///
+    /// Each default is lowered exactly once and cloned into the call sites that
+    /// omit it, rather than re-lowered per site: the default is one expression
+    /// written in one place, and anything later that walks it — the `#const`
+    /// check above all — should see it once.
+    defaults: HashMap<DefId, Vec<Option<Expr>>>,
     /// Stack of pending `defer` bodies, one frame per open block (innermost last).
     defers: Vec<Vec<Expr>>,
 }
@@ -581,18 +597,34 @@ impl Lowerer<'_> {
         // representation in the IR regardless of which syntax reached it.
         // Named arguments were bound to their parameters during inference; take
         // the order it recorded so the IR is positional, always.
-        let reordered = self.ast.meta::<ArgOrder>(head).map(|o| o.args);
-        let args = reordered.as_deref().unwrap_or(args);
+        // Named arguments were bound and omitted defaults left as holes during
+        // inference; take the slots it recorded, or the arguments as written when
+        // the call needed neither.
+        let written: Vec<Option<NodeId>>;
+        let slots: &[Option<NodeId>] = match self.ast.meta::<ArgOrder>(head) {
+            Some(o) => {
+                written = o.args;
+                &written
+            }
+            None => {
+                written = args.iter().copied().map(Some).collect();
+                &written
+            }
+        };
         if let Some(def) = self.construct_target(head, &ty) {
-            let fields = args
-                .iter()
+            // A tuple struct's fields are positions, not parameters: they take no
+            // defaults and reject named arguments, so every slot is written.
+            let fields = self
+                .lower_args(None, slots)
+                .into_iter()
                 .enumerate()
-                .map(|(i, &a)| (Symbol::new(&i.to_string()), self.lower_expr(a)))
+                .map(|(i, e)| (Symbol::new(&i.to_string()), e))
                 .collect();
             return Expr::Construct { def, fields, ty };
         }
+        let target = self.resolved_def(head);
         let callee = Box::new(self.lower_expr(callee));
-        let args = args.iter().map(|&a| self.lower_expr(a)).collect();
+        let args = self.lower_args(target, slots);
         Expr::Call {
             callee,
             args,
@@ -600,6 +632,73 @@ impl Lowerer<'_> {
             dispatch: Dispatch::Static,
             ty,
         }
+    }
+
+    /// Lower a call's argument slots, filling each `None` — a parameter the call
+    /// left out — with the callee's default for that position (§5.2).
+    ///
+    /// This is where a default becomes real. Inference deliberately left the
+    /// hole: filling it there would mean inferring the default expression once
+    /// per call site, stamping conflicting types on the one set of AST nodes the
+    /// declaration owns. Here there is no such conflict — the default is lowered
+    /// once against its declaration and the result is *cloned* into each site,
+    /// so a default like `.{}` still builds a fresh value per call.
+    fn lower_args(&mut self, callee: Option<DefId>, slots: &[Option<NodeId>]) -> Vec<Expr> {
+        let mut out = Vec::with_capacity(slots.len());
+        for (i, slot) in slots.iter().enumerate() {
+            match slot {
+                Some(a) => out.push(self.lower_expr(*a)),
+                None => {
+                    let d = callee.and_then(|c| self.param_default(c, i));
+                    // A hole with no default behind it means inference and
+                    // lowering disagree about the signature; a typed `Error`
+                    // keeps the IR well-formed rather than dropping an argument
+                    // and silently changing the call's arity.
+                    out.push(d.unwrap_or(Expr::Error(Ty::Error)));
+                }
+            }
+        }
+        out
+    }
+
+    /// The lowered default of `def`'s `i`-th **value** parameter, if it has one.
+    ///
+    /// `self` is excluded from the numbering, matching how inference counts the
+    /// arguments of a method call.
+    fn param_default(&mut self, def: DefId, i: usize) -> Option<Expr> {
+        if let Some(cached) = self.defaults.get(&def) {
+            return cached.get(i).cloned().flatten();
+        }
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return None;
+        };
+        let ast = self.asts.get(&file)?;
+        let rhs = match &ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let NodeKind::FuncExpr { params, .. } = ast.node(rhs).kind.clone() else {
+            return None;
+        };
+        let slots: Vec<Option<NodeId>> = params
+            .iter()
+            .filter_map(|&p| match &ast.node(p).kind {
+                NodeKind::Param { name, default, .. } if name.as_str() != "self" => Some(*default),
+                _ => None,
+            })
+            .collect();
+        // Lower in the *declaring* file's context: the default's nodes, and the
+        // types inference stamped on them, live in that arena.
+        let saved = std::mem::replace(&mut self.ast, ast);
+        let lowered: Vec<Option<Expr>> = slots
+            .into_iter()
+            .map(|s| s.map(|n| self.lower_expr(n)))
+            .collect();
+        self.ast = saved;
+        let out = lowered.get(i).cloned().flatten();
+        self.defaults.insert(def, lowered);
+        out
     }
 
     /// The struct a call's callee names, when the callee is a type rather than a
@@ -638,10 +737,20 @@ impl Lowerer<'_> {
             return Expr::Error(ty);
         };
         let recv = self.lower_expr(base);
-        let reordered = self.ast.meta::<ArgOrder>(callee).map(|o| o.args);
-        let args = reordered.as_deref().unwrap_or(args);
+        let written: Vec<Option<NodeId>>;
+        let slots: &[Option<NodeId>] = match self.ast.meta::<ArgOrder>(callee) {
+            Some(o) => {
+                written = o.args;
+                &written
+            }
+            None => {
+                written = args.iter().copied().map(Some).collect();
+                &written
+            }
+        };
         let mut call_args = vec![adjust_recv(recv, res.adjust, &res.self_ty)];
-        call_args.extend(args.iter().map(|&a| self.lower_expr(a)));
+        let lowered = self.lower_args(Some(res.method), slots);
+        call_args.extend(lowered);
         // Inference recorded the instantiated signature on this node; falling
         // back to a reconstruction keeps the IR typed if it did not.
         let callee_ty = match self.ty(callee) {
