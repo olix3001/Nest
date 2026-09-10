@@ -150,6 +150,28 @@ particles: #soa []Particle          // stored column-wise
   shared, unsynchronized state — see
   [02-declarations-and-bindings.md](02-declarations-and-bindings.md) §2.6.
 
+- **`#section("name")`** — on a **function or constant**, place the symbol it
+  becomes in the named object-file section rather than the default one. What the
+  names mean is the target's business, not the language's (`.text`, `.rodata`,
+  `.init_array`, a linker script's own).
+
+- **`#offset(N)`** — on a **function or constant**, fix the symbol at position
+  `N` in the generated binary. For interrupt vectors, boot headers, and anything
+  else a piece of hardware or a loader expects at a known address.
+
+Both apply only to the things that *become symbols*. On a local, a field or a
+type there is no symbol for them to describe, and they are rejected rather than
+ignored:
+
+```
+@public
+#section(".init_array")
+register :: func () { ... }
+
+#offset(0x0000)
+RESET_VECTOR :: reset_handler
+```
+
 ### Language items (`#lang`)
 
 - **`#lang("tag")`** — mark the item it precedes as a **language item**: a

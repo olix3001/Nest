@@ -2169,6 +2169,64 @@ fn reachable_code_after_a_branch_is_not_reported() {
     assert!(warnings(src).is_empty(), "{:#?}", warnings(src));
 }
 
+// ===< GC intrinsics and symbol directives >===
+
+#[test]
+fn the_gc_intrinsics_are_known_and_yield_nothing() {
+    // All three are statements, not values: what they do is change what the
+    // collector may do next (§6.4.1).
+    let src = "\
+S :: struct { n: i32 }
+f :: func (p: *S) {
+  $gc_collect()
+  $gc_keep_alive(p)
+  $gc_pin(p)
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let text =
+        crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
+    for name in [
+        "$gc_collect(): void",
+        "$gc_keep_alive(p: *S): void",
+        "$gc_pin(p: *S): void",
+    ] {
+        assert!(text.contains(name), "missing {name}:\n{text}");
+    }
+}
+
+#[test]
+fn section_and_offset_need_the_right_arguments() {
+    // Both name a place in the object file, so both apply to the things that
+    // become symbols — and both are useless without the argument that says
+    // which place.
+    assert!(
+        messages("#section\nf :: func () { }\n")[0].contains("`#section` needs a string"),
+        "{:#?}",
+        messages("#section\nf :: func () { }\n")
+    );
+    assert!(
+        messages("#offset\nf :: func () { }\n")[0].contains("`#offset` needs an integer"),
+        "{:#?}",
+        messages("#offset\nf :: func () { }\n")
+    );
+    // Written properly, they are carried without complaint.
+    assert!(messages("#section(\".init_array\")\n#offset(16)\nf :: func () { }\n").is_empty());
+}
+
+#[test]
+fn a_layout_directive_on_a_function_is_rejected() {
+    let msgs = messages("#packed\nf :: func () { }\n");
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(
+        msgs[0].contains("does not apply to a function"),
+        "{}",
+        msgs[0]
+    );
+}
+
 // ===< Object safety >===
 
 #[test]

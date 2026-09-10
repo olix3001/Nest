@@ -95,6 +95,12 @@ const INTRINSIC_RESULTS: &[(&str, IntrinsicResult)] = &[
     ("name", IntrinsicResult::Str),
     ("embed_file", IntrinsicResult::Str),
     ("assert", IntrinsicResult::Void),
+    // The three the collector exposes (§6). Each is a statement, not a value:
+    // what they do is change what the collector may do next, which is why none
+    // of them hands anything back.
+    ("gc_collect", IntrinsicResult::Void),
+    ("gc_keep_alive", IntrinsicResult::Void),
+    ("gc_pin", IntrinsicResult::Void),
 ];
 
 /// How an operator (or other trait-dispatched) node resolved, stamped onto the

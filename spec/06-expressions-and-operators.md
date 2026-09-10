@@ -142,6 +142,9 @@ Core intrinsics (extensible; not a closed list):
 | `$assert(cond[, msg])` | compile-time assertion (§6.10) |
 | `$panic(msg)` | abort the program with a message |
 | `$embed_file("path")` | splice a file's bytes as a compile-time `[]uint8` |
+| `$gc_collect()` | request a collection now (§6.4.1) |
+| `$gc_keep_alive(x)` | keep `x` reachable up to this point (§6.4.1) |
+| `$gc_pin(x)` | make `x`'s object immortal and immovable (§6.4.1) |
 
 ```
 const bits := $transmute.<uint32>(3.14f32)
@@ -152,6 +155,38 @@ DATA :: $embed_file("logo.png")           // []uint8 baked into the binary
 
 Many intrinsics are usable at compile time (they behave as `#const`), which is
 why `$cast(8080)` and `$embed_file(...)` may appear on the RHS of `::`.
+
+### 6.4.1 Garbage-collector intrinsics
+
+Memory is collected automatically and none of these is needed by ordinary code.
+They exist because two things the collector cannot see from the outside — a
+pointer that has escaped to C, and a pointer C will hold for longer than one call
+— have no other expression. All three return `void`: what they do is change what
+the collector may do next.
+
+| Intrinsic | Meaning |
+|---|---|
+| `$gc_collect()` | Request a collection now. A hint, not a guarantee. |
+| `$gc_keep_alive(x)` | A no-op that **counts as a use**, so `x` stays reachable up to this point. |
+| `$gc_pin(x)` | Make the object immortal and immovable. |
+
+`$gc_keep_alive` exists for one specific failure. A value's live range ends at
+its last **read**, so this is wrong:
+
+```
+let buf := $make.<[]u8>(1024)
+let p   := &buf[0]
+c_write(p)                 // `buf` is already dead here — nothing reads it again
+```
+
+The collector may move or free `buf` during the call even though C is using its
+address. `$gc_keep_alive(buf)` **after** the call extends the live range across
+it.
+
+`$gc_pin` is for handing a pointer to C for longer than one call — a callback
+registration, a buffer the other side keeps. A pinned object is never moved and
+never collected, which is a leak by construction. That is the trade, and it is
+why the intrinsic is explicit rather than something the compiler infers.
 
 ## 6.5 `$cast`
 
