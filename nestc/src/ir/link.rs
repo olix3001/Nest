@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use crate::common::source::FileId;
 use crate::sema::def::DefId;
 
-use super::{Function, Program, TypeDef};
+use super::{Function, Global, Program, TypeDef};
 
 /// Every lowered function in the compilation, keyed by its [`DefId`].
 ///
@@ -43,6 +43,11 @@ pub struct Linked {
     /// turns "which type is this" into "what is in it" for layout,
     /// exhaustiveness and the LIR aggregate flattening.
     types: HashMap<DefId, TypeDef>,
+    /// Every constant and static region the compilation declares, keyed by the
+    /// [`DefId`] an [`ExprKind::Global`](super::ExprKind::Global) names it with.
+    /// This is what turns "which constant is this" into "what is its value" for
+    /// the const evaluator, and what codegen reads to emit a `.data` region.
+    globals: HashMap<DefId, Global>,
     funcs: HashMap<DefId, Function>,
     /// The file each function was lowered from, so a whole-program pass can
     /// still raise a diagnostic against the right source. A function's *nodes*
@@ -61,6 +66,10 @@ pub struct Linked {
     order: Vec<DefId>,
     /// Declaration order for [`Linked::types`], for the same reason.
     type_order: Vec<DefId>,
+    /// Declaration order for [`Linked::globals`], for the same reason. It is
+    /// also the order a static's initializer would run in, which is why it has
+    /// to be the source order rather than a map's.
+    global_order: Vec<DefId>,
 }
 
 /// Merge every per-file [`Program`] into one whole-program view.
@@ -74,6 +83,11 @@ pub fn link(ir: &HashMap<FileId, Program>) -> Linked {
             linked.type_order.push(ty.def);
             linked.file_of.insert(ty.def, file);
             linked.types.insert(ty.def, ty.clone());
+        }
+        for g in &ir[&file].globals {
+            linked.global_order.push(g.def);
+            linked.file_of.insert(g.def, file);
+            linked.globals.insert(g.def, g.clone());
         }
         for func in &ir[&file].funcs {
             linked.order.push(func.def);
@@ -137,6 +151,21 @@ impl Linked {
     /// How many types the program declares.
     pub fn type_count(&self) -> usize {
         self.types.len()
+    }
+
+    /// The constant or static region `def` names, if the program declares one.
+    ///
+    /// `None` for a def that names no value — a function, a type, a local — and
+    /// for a **trait's** associated constant, which is a requirement an impl
+    /// must satisfy rather than a definition with a value of its own; those ride
+    /// on the trait's [`TypeDef`].
+    pub fn global(&self, def: DefId) -> Option<&Global> {
+        self.globals.get(&def)
+    }
+
+    /// Every constant and static region, in declaration order.
+    pub fn globals(&self) -> impl Iterator<Item = &Global> {
+        self.global_order.iter().map(|d| &self.globals[d])
     }
 
     /// Every function, in definition order (see [`Linked::order`]).

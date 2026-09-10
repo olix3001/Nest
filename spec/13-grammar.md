@@ -33,7 +33,7 @@ comptime_item = intrinsic_call                     // e.g. $assert(...)  (return
 
 const_bind  = pattern '::' const_rhs
 const_rhs   = expr
-            | type_expr
+            | type_expr [ ':=' expr ]     // typed: constant, assoc const, static
             | func_expr
             | trait_expr
             | namespace_expr
@@ -47,11 +47,15 @@ tags a core-library item as a language item (see
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.13).
 
 `const_bind` is the single `::` binding form; the RHS category (value, type,
-func, trait, namespace, import) determines what is bound. A `field_item` inside a
+func, trait, namespace, import) determines what is bound. Its `type ':=' expr`
+form is a **typed** binding — a pinned constant (§2.5), an associated constant
+(§3.4), or, under `#static`, a program-lifetime mutable region (§2.6); under
+`#static` the RHS is *always* read this way, so `#static s :: [4]u8` declares a
+zeroed region rather than a type alias. A `field_item` inside a
 struct/enum/trait/namespace body may also be a `comptime_item` (e.g.
-`$assert(...)`). At namespace scope a `local_decl` is only well-formed as
-`#static let ...` (a program-lifetime mutable region); a bare `let` / `const`
-there is rejected — use `::` for immutable namespace bindings. See
+`$assert(...)`). A `local_decl` at namespace scope is rejected outright: `let`
+binds a stack slot and there is no call there — use `::`, with `#static` for a
+mutable region. See
 [02-declarations-and-bindings.md](02-declarations-and-bindings.md).
 
 ## 13.2 Imports
@@ -216,7 +220,7 @@ postfix_op   = '.' identifier
              | '.*'                             // dereference
              | '.?'                             // Try: unwrap-or-return   (see 08)
              | '.!'                             // Try: unwrap-or-abort     (see 08)
-             | '.match' match_block
+             | '.match' match_block          // sugar for `match_expr`
 
 primary = literal
         | qualified_name
@@ -229,6 +233,7 @@ primary = literal
         | func_expr                            // closure
         | if_expr
         | if_match_expr
+        | match_expr
         | block
         | import_expr                           // '<pkg>' or "file"; see 13.2
 
@@ -252,6 +257,7 @@ range_expr = expr '..<' expr | expr '..=' expr | expr '..'
            | '..<' expr | '..=' expr | '..'
 
 if_expr       = 'if' expr block [ 'else' ( if_expr | block ) ]
+match_expr    = 'match' expr match_block
 if_match_expr = 'if' 'match' pattern ':=' expr block [ 'else' block ]
 
 match_block = '{' arm { ',' arm } '}'

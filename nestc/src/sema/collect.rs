@@ -135,19 +135,21 @@ impl Collector<'_> {
         }
     }
 
-    /// At namespace scope only `#static let ...` is a well-formed `let`/`const`
-    /// (§13.1): a bare one there has no home to live in, and an immutable
-    /// namespace binding is spelled `::`.
-    fn check_namespace_binding(&mut self, item: NodeId, directives: &[NodeId]) {
+    /// A `let` / `const` at namespace scope is always an error (§13.1).
+    ///
+    /// There is nothing for it to live in: `let` binds a name to a stack slot
+    /// that belongs to an enclosing call, and at namespace scope there is no
+    /// call. Every namespace binding is `::` — immutable by default, and a
+    /// program-lifetime **mutable region** when `#static` decorates it
+    /// (`#static count :: uint := 0`, §2.6).
+    fn check_namespace_binding(&mut self, item: NodeId, _directives: &[NodeId]) {
         if !matches!(self.ast.node(item).kind, NodeKind::LocalDecl { .. }) {
-            return;
-        }
-        if directives.iter().any(|&d| self.is_directive(d, "static")) {
             return;
         }
         self.report(
             item,
-            "a `let` / `const` at namespace scope must be `#static`;              use `::` for an immutable binding",
+            "a `let` / `const` has no meaning at namespace scope; use `::` for a constant, \
+             or `#static name :: T := value` for a mutable region",
         );
     }
 
@@ -197,7 +199,15 @@ impl Collector<'_> {
         // re-walking the AST.
         let mut directives = std::mem::take(&mut self.pending);
         directives.extend(self.rhs_directives(&rhs_kind));
+        // A `#static` binding names a mutable region, which is the whole point
+        // of it (§2.6): it is the only way to declare mutable state that is not
+        // a local. Every other `::` stays immutable, so the write check reads
+        // this flag and needs no notion of "is this one special".
+        let is_static = directives.iter().any(|d| d.name.as_str() == "static");
         self.defs.get_mut(def).directives = directives;
+        if is_static {
+            self.defs.get_mut(def).mutable = true;
+        }
 
         // A namespace-like RHS is where the resolver looks for this def when it
         // descends into the body (to set the current namespace / `Self`), so mark

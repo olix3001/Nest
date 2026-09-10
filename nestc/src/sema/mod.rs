@@ -59,6 +59,7 @@ mod tests;
 
 use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
+use crate::parser::ast::{Ast, NodeId, NodeKind};
 
 use def::{DefId, DefKind, Visibility};
 use imports::{ImportDecl, ImportTarget, RawImport, RawTarget};
@@ -107,6 +108,105 @@ pub struct PathRes(pub Vec<Resolution>);
 
 /// Convenience: create a session, register `packages`, load `src` as the entry
 /// file named `name`, run the whole pipeline, and return the session.
+/// Whether the right-hand side of a `::` binding defines a **value** rather than
+/// a type.
+///
+/// A `::` RHS holds either one, and only its shape says which — which is why
+/// [`DefKind::Const`] alone is not the answer. It is wrong in both directions:
+///
+/// - An associated type written with generic arguments (`Iter :: SliceIter.<T>`)
+///   is a [`NodeKind::GenericApply`], which collection cannot tell from a call,
+///   so it files under `Const`.
+/// - A type alias to a *named* type (`A :: u8`) has a bare path for a RHS, which
+///   collection cannot tell from a reference to another constant, so it files
+///   under `Const` too — and then `B :: A` inherits the confusion.
+///
+/// So a bare path is answered by following it: `A :: B` is a type alias when `B`
+/// names a type, a constant when it names one, and a chain of such bindings is
+/// whatever it bottoms out at. Resolution has already done the hard part.
+pub(crate) fn is_value_rhs(
+    defs: &def::DefTable,
+    asts: &std::collections::HashMap<FileId, Ast>,
+    ast: &Ast,
+    rhs: NodeId,
+) -> bool {
+    is_value_rhs_depth(defs, asts, ast, rhs, 0)
+}
+
+fn is_value_rhs_depth(
+    defs: &def::DefTable,
+    asts: &std::collections::HashMap<FileId, Ast>,
+    ast: &Ast,
+    rhs: NodeId,
+    depth: u32,
+) -> bool {
+    // A binding that names itself would otherwise loop forever. The cycle is a
+    // separate error; this pass must not hang on one.
+    if depth > 16 {
+        return false;
+    }
+    match &ast.node(rhs).kind {
+        // `T [ ':=' init ]` — a declared type with a value under it: a typed
+        // constant (§2.5), a `#static` region (§2.6), or an associated constant
+        // (§3.4).
+        NodeKind::AssocConst { .. } => true,
+        // Written type syntax, and the declaration forms that define something
+        // other than a value.
+        NodeKind::PtrType { .. }
+        | NodeKind::SliceType { .. }
+        | NodeKind::ArrayType { .. }
+        | NodeKind::TupleType { .. }
+        | NodeKind::FuncType { .. }
+        | NodeKind::DynType { .. }
+        | NodeKind::DistinctType { .. }
+        | NodeKind::AssocType { .. }
+        | NodeKind::GenericApply { .. }
+        | NodeKind::TypePath { .. }
+        | NodeKind::FuncExpr { .. }
+        | NodeKind::NamespaceExpr { .. }
+        | NodeKind::StructType { .. }
+        | NodeKind::EnumType { .. }
+        | NodeKind::TraitType { .. }
+        | NodeKind::Import { .. } => false,
+        NodeKind::Path { .. } => match ast.meta::<Resolution>(rhs) {
+            Some(Resolution::Def(d)) => {
+                let d = defs.resolve_alias(d);
+                let target = defs.get(d);
+                match target.kind {
+                    DefKind::Struct
+                    | DefKind::Enum
+                    | DefKind::Trait
+                    | DefKind::TypeAlias
+                    | DefKind::TypeParam
+                    | DefKind::Primitive
+                    | DefKind::Namespace => false,
+                    // Another `::` binding, which may itself be either. Follow
+                    // it, in the file it was written in.
+                    DefKind::Const => match (target.file, target.node) {
+                        (Some(f), Some(n)) => match asts.get(&f) {
+                            Some(a) => match &a.node(n).kind {
+                                NodeKind::ConstBind { rhs, .. } => {
+                                    is_value_rhs_depth(defs, asts, a, *rhs, depth + 1)
+                                }
+                                _ => false,
+                            },
+                            None => false,
+                        },
+                        _ => false,
+                    },
+                    // A function or a local used as a value.
+                    _ => true,
+                }
+            }
+            // Unresolved: something else already reported it, and treating it as
+            // a value would type-check a name that does not exist.
+            _ => false,
+        },
+        // Everything else is an expression: a literal, a call, an operator.
+        _ => true,
+    }
+}
+
 pub fn analyze_source(name: &str, src: &str, packages: &[(&str, &str)]) -> Session {
     let mut session = Session::new();
     for (pkg, root) in packages {

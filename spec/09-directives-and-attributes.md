@@ -142,13 +142,16 @@ particles: #soa []Particle          // stored column-wise
 
 ### Storage
 
-- **`#static`** — on a `let` binding, place it in a single **program-lifetime**
-  memory region rather than on the stack. At namespace scope this is the only way
-  to declare a mutable global (`#static let count: uint := 0`); inside a function
-  it makes a local persist across calls. The initializer must be `#const` and may
-  be omitted (the region is zeroed, unless the type is `#raw`). `#static let` is
-  shared, unsynchronized state — see
-  [02-declarations-and-bindings.md](02-declarations-and-bindings.md) §2.6.
+- **`#static`** — on a `::` binding, make it a single **program-lifetime**
+  memory region rather than a constant. The RHS is then read as the region's
+  **type**, with the initial contents after `:=`
+  (`#static count :: uint := 0`); the type is required, and the initializer may
+  be omitted, in which case the region is zeroed (unless the type is `#raw`).
+  At namespace scope this is the only way to declare a mutable global; inside a
+  function the same form makes a local persist across calls. The initializer
+  must be a constant expression, and reading a static is a run-time operation,
+  so a static may not appear in one. `#static` is shared, unsynchronized state —
+  see [02-declarations-and-bindings.md](02-declarations-and-bindings.md) §2.6.
 
 - **`#section("name")`** — on a **function or constant**, place the symbol it
   becomes in the named object-file section rather than the default one. What the

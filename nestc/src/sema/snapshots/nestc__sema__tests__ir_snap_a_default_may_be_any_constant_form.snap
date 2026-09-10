@@ -6,6 +6,7 @@ struct Cfg {
   a: i32
   b: i32
 }
+const PORT :: comptime_int = 8080: comptime_int  // = 8080
 func g(x: i32, p: i32, c: Cfg, w: u8) -> i32 {
   return x: i32
 }

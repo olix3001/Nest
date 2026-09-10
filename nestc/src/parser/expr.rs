@@ -375,6 +375,7 @@ impl Parser {
             }
             Some(TokenKind::FuncKw | TokenKind::ExternKw) => self.parse_func_expr(Vec::new()),
             Some(TokenKind::IfKw) => self.parse_if(),
+            Some(TokenKind::MatchKw) => self.parse_match(),
             Some(TokenKind::LBrace) => self.parse_block(),
             Some(TokenKind::LoopKw) => self.parse_loop(),
             Some(TokenKind::WhileKw) => self.parse_while(),
@@ -784,6 +785,24 @@ impl Parser {
     }
 
     /// `{ arm { ',' arm } }` — a match block; returns arms and closing span.
+    /// `match scrutinee { arms }` — the prefix form.
+    ///
+    /// The postfix `scrutinee.match { arms }` is sugar for this: both build the
+    /// same [`NodeKind::MatchExpr`], so nothing after the parser knows which one
+    /// was written. Prefix reads better when the scrutinee is short (`match c {`)
+    /// and postfix when it is the tail of a chain (`xs.first().match {`).
+    ///
+    /// The scrutinee is parsed with struct literals suppressed, exactly as an
+    /// `if` condition is: otherwise `match p { ... }` would read `p { ... }` as a
+    /// struct literal and then find no match block.
+    fn parse_match(&mut self) -> NodeId {
+        let start = self.cur_span();
+        self.bump();
+        let scrutinee = self.suppressing_struct_lit(|p| p.parse_expr());
+        let (arms, end) = self.parse_match_block();
+        self.alloc(start.to(end), NodeKind::MatchExpr { scrutinee, arms })
+    }
+
     fn parse_match_block(&mut self) -> (Vec<NodeId>, Span) {
         self.expect(&TokenKind::LBrace);
         let mut arms = Vec::new();

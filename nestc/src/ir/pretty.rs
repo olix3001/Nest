@@ -6,8 +6,8 @@ use std::fmt::Write;
 use crate::parser::ast::Lit;
 
 use super::{
-    Arm, Block, DefaultValue, Dispatch, Expr, ExprKind, Function, IrId, Member, Meta, Pattern,
-    PatternKind, Program, Recv, Stmt, StmtKind, TypeDef, TypeDefKind, Variant,
+    Arm, Block, DefaultValue, Dispatch, Expr, ExprKind, Function, Global, IrId, Member, Meta,
+    Pattern, PatternKind, Program, Recv, Stmt, StmtKind, TypeDef, TypeDefKind, Variant,
 };
 use crate::sema::def::{DefTable, Directive, DirectiveArg};
 
@@ -26,6 +26,11 @@ pub fn program_to_string(defs: &DefTable, meta: &Meta, program: &Program) -> Str
     // what its types are made of.
     for t in &program.types {
         p.type_def(t);
+    }
+    // Then constants and static regions: a function body may name one, and
+    // seeing what it holds first is the same courtesy the types get.
+    for g in &program.globals {
+        p.global(g);
     }
     for f in &program.funcs {
         p.function(f);
@@ -65,6 +70,43 @@ impl Printer<'_> {
         }
         self.out.push_str(s);
         self.out.push('\n');
+    }
+
+    /// A constant or a static region. The `static` tag comes from the
+    /// directives like any other, so the line reads as it was written.
+    fn global(&mut self, g: &Global) {
+        // `#static` is what makes this a region rather than a constant, and the
+        // head word already says so; printing the directive too would say it
+        // twice. Every other directive is shown as written.
+        let mut tags = String::new();
+        for d in &self.meta.directives(g.id) {
+            if d.name.as_str() == "static" {
+                continue;
+            }
+            let _ = write!(tags, " {}", directive_str(d));
+        }
+        let head = format!(
+            "{}{tags} {} :: {}",
+            if g.mutable { "static" } else { "const" },
+            g.name,
+            self.ty(g.id)
+        );
+        // The evaluated value, when the const evaluator produced one. Showing it
+        // next to the expression is what makes compile-time evaluation legible:
+        // a reader can see that `factorial(5)` really did become `120`.
+        let folded = self
+            .meta
+            .get::<crate::ir::ConstValue>(g.id)
+            .map(|v| format!("  // = {}", v.display()))
+            .unwrap_or_default();
+        match &g.init {
+            // A `#static` with no initializer: the region is zeroed (§2.6).
+            None => self.line(&format!("{head} = zeroed")),
+            Some(init) => {
+                let value = self.expr(init);
+                self.line(&format!("{head} = {value}{folded}"));
+            }
+        }
     }
 
     fn type_def(&mut self, t: &TypeDef) {

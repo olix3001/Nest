@@ -186,7 +186,7 @@ impl Cx<'_> {
 
             // A path to an item. `::` and `const` items have a compile-time
             // value by definition; a function used as a value is a symbol, which
-            // is equally fixed. Anything else — a `#static let`, say — is not.
+            // is equally fixed. Anything else — a `#static` region, say — is not.
             ExprKind::Global(def) => {
                 let d = self.defs.get(self.defs.resolve_alias(*def));
                 match d.kind {

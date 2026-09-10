@@ -4011,9 +4011,31 @@ fn an_using_field_must_be_a_struct() {
 }
 
 #[test]
-fn a_namespace_scope_let_must_be_static() {
-    assert!(first_error("let G: i32 := 0\n").contains("must be `#static`"));
-    analyze_clean("#static let G: i32 := 0\n");
+fn a_namespace_scope_let_is_rejected() {
+    assert!(first_error("let G: i32 := 0\n").contains("no meaning at namespace scope"));
+    analyze_clean("#static G :: i32 := 0\n");
+}
+
+/// `#static` decorates a `::` binding, not a `let` — the one form works at
+/// namespace scope and inside a function alike (§2.6).
+#[test]
+fn static_decorates_a_const_binding_not_a_let() {
+    assert!(
+        first_error("#static let G: i32 := 0\n").contains("decorates a `::` binding, not a `let`")
+    );
+    assert!(
+        first_error("f :: func () {\n  #static let n: i32 := 0\n}\n")
+            .contains("decorates a `::` binding, not a `let`")
+    );
+    analyze_clean("f :: func () {\n  #static n :: i32 := 0\n  n = n + 1\n}\n");
+}
+
+/// The directive is what decides how a `::` RHS reads. Without it `[4]u8` is a
+/// type alias; with it, it is the region's type and the region is zeroed.
+#[test]
+fn a_static_rhs_is_a_type_not_a_value() {
+    analyze_clean("#static scratch :: [4]u8\n");
+    analyze_clean("#static count :: u32 := 0\n");
 }
 
 #[test]
@@ -4796,4 +4818,238 @@ fn try_abort_is_the_try_unwrap_call() {
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("unwrap"), "{ir}");
+}
+
+// ===< The const evaluator (§2.5, §2.6, §5.1) >===
+//
+// The structural `#const` check and the evaluator answer different questions —
+// "may this run at compile time" and "what does it produce" — so these tests are
+// about *values*, and about the cases where there is honestly no value.
+
+/// The point of an interpreter rather than a folder: a constant may be the
+/// result of running a `#const` function, loops and all.
+#[test]
+fn a_constant_may_be_the_result_of_a_const_function() {
+    let src = "\
+#const factorial :: func (n: u32) -> u32 {
+  let acc: u32 := 1
+  let i: u32 := 2
+  while i <= n {
+    acc = acc * i
+    i = i + 1
+  }
+  return acc
+}
+FACT5 :: u32 := factorial(5)
+main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    assert!(
+        ir_text(src).contains("// = 120"),
+        "{}",
+        ir_text(src)
+    );
+}
+
+/// `#const` restricts calls and run-time effects, not control flow (§5.1), so
+/// the evaluator has to run `if` and `match` too.
+#[test]
+fn the_evaluator_runs_branches_and_matches() {
+    let src = "\
+Color :: enum { red, green }
+#const pick :: func (c: Color) -> i32 {
+  return c.match {
+    .red => 1,
+    .green => 2,
+  }
+}
+#const clamp :: func (n: i32) -> i32 {
+  if n > 10 { return 10 }
+  return n
+}
+A :: i32 := pick(.green)
+B :: i32 := clamp(42)
+main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    let ir = ir_text(src);
+    assert!(ir.contains("// = 2"), "{ir}");
+    assert!(ir.contains("// = 10"), "{ir}");
+}
+
+/// A `#static` region's initializer is baked into the program's data, so it must
+/// be computable now (§2.6) — and one with no initializer is simply zeroed.
+#[test]
+fn a_static_initializer_is_evaluated_and_a_missing_one_is_zeroed() {
+    let src = "\
+#static count :: u32 := 6 * 7
+#static scratch :: [4]u8
+main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    let ir = ir_text(src);
+    assert!(ir.contains("// = 42"), "{ir}");
+    assert!(ir.contains("scratch :: [4]u8 = zeroed"), "{ir}");
+}
+
+/// A constant is its value, so a callee that is not `#const` has no moment at
+/// which it could run.
+#[test]
+fn a_constant_may_not_call_a_runtime_function() {
+    let src = "\
+read :: func () -> i32 { return 1 }
+A :: i32 := read()
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("is not `#const`")),
+        "{msgs:#?}"
+    );
+}
+
+/// A `#static` region's *contents* are a run-time value however constant its
+/// initializer was: code may have written to it since.
+#[test]
+fn a_constant_may_not_read_a_static_region() {
+    let src = "\
+#static count :: u32 := 1
+A :: u32 := count
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("`#static` region")),
+        "{msgs:#?}"
+    );
+}
+
+/// A cycle has no value, and following it would not terminate.
+#[test]
+fn a_constant_defined_in_terms_of_itself_is_reported() {
+    let src = "\
+A :: i32 := B
+B :: i32 := A
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("in terms of itself")),
+        "{msgs:#?}"
+    );
+}
+
+/// The halting problem is not solved by a compiler pass; a budget turns "the
+/// build hangs" into a diagnostic.
+#[test]
+fn a_const_evaluation_that_does_not_finish_is_reported() {
+    let src = "\
+#const spin :: func () -> i32 {
+  let i: i32 := 0
+  while true { i = i + 1 }
+  return i
+}
+A :: i32 := spin()
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("step budget")),
+        "{msgs:#?}"
+    );
+}
+
+/// Arithmetic is exact and the range check happens where the number is still in
+/// hand, so a constant that does not fit its declared type is caught with the
+/// value named.
+#[test]
+fn a_typed_constant_that_does_not_fit_is_reported() {
+    let msgs = messages("A :: u8 := 300\nmain :: func () {}\n");
+    assert!(
+        msgs.iter().any(|m| m.contains("does not fit")),
+        "{msgs:#?}"
+    );
+}
+
+/// Division by zero traps at run time; at compile time there is nothing to trap.
+#[test]
+fn a_constant_division_by_zero_is_reported() {
+    let msgs = messages("A :: i32 := 1 / 0\nmain :: func () {}\n");
+    assert!(
+        msgs.iter().any(|m| m.contains("division by zero")),
+        "{msgs:#?}"
+    );
+}
+
+/// A compile-time address has nothing to point at in the compiled program.
+#[test]
+fn a_constant_may_not_take_an_address() {
+    let src = "\
+X :: i32 := 1
+A :: *i32 := &X
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert!(!msgs.is_empty(), "expected a diagnostic");
+}
+
+/// A struct constant is stored in **declaration** order, so two literals that
+/// named the same fields differently are the same value.
+#[test]
+fn a_struct_constant_is_stored_in_declaration_order() {
+    let src = "\
+P :: struct { x: i32, y: i32 }
+A :: P := .{ y: 2, x: 1 }
+main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    assert!(ir_text(src).contains("// = { 1, 2 }"), "{}", ir_text(src));
+}
+
+/// §2.5: a constant with no declared type keeps its literal's comptime-ness, and
+/// writing the type pins it instead.
+#[test]
+fn a_constant_is_comptime_unless_its_type_is_written() {
+    assert!(ir_text("A :: 42\nmain :: func () {}\n").contains("const A :: comptime_int"));
+    assert!(ir_text("A :: u8 := 42\nmain :: func () {}\n").contains("const A :: u8"));
+    // Pinned means pinned: a `u8` constant is not silently an `i32`.
+    let msgs = messages("A :: u8 := 5\nmain :: func () { const x: i32 := A }\n");
+    assert!(
+        msgs.iter().any(|m| m.contains("type mismatch")),
+        "{msgs:#?}"
+    );
+}
+
+/// A `::` RHS holds either a value or a type, and a chain of them is whatever it
+/// bottoms out at — which is why the classifier follows the path rather than
+/// guessing from syntax.
+#[test]
+fn a_binding_chain_stays_a_type_or_a_value_all_the_way_down() {
+    // `A :: u8` is a type alias, so `B :: A` is one too.
+    analyze_clean("A :: u8\nB :: A\nf :: func (x: B) -> B { return x }\nmain :: func () {}\n");
+    // `A :: 8` is a constant, so `B :: A` is one too.
+    analyze_clean("A :: 8\nB :: A\nmain :: func () { const x: i32 := B }\n");
+}
+
+/// `x.match { … }` is sugar for `match x { … }`: both build the same node, so
+/// nothing after the parser can tell which was written.
+#[test]
+fn prefix_and_postfix_match_are_the_same_construct() {
+    let src = "\
+Color :: enum { red, green }
+pick :: func (c: Color) -> i32 {
+  const x: i32 := match c { .red => 1, .green => 2, }
+  const y: i32 := c.match { .red => 1, .green => 2, }
+  return x + y
+}
+main :: func () { const r: i32 := pick(.red) }
+";
+    analyze_clean(src);
+    // The scrutinee is parsed with struct literals suppressed, exactly as an
+    // `if` condition is, or `match p { … }` would read `p { … }` as a literal.
+    analyze_clean(
+        "P :: struct { a: i32 }\n\
+         f :: func (p: P) -> i32 { return match p.a { 0 => 1, _ => 2, } }\n\
+         main :: func () { const r: i32 := f(.{ a: 0 }) }\n",
+    );
 }

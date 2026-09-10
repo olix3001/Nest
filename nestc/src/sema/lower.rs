@@ -53,7 +53,7 @@ use super::infer::{
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
 use crate::ir::{
-    Arm, AssocConst, Binding, Block, DefaultValue, Dispatch, Expr, ExprKind, Function, IrId,
+    Arm, AssocConst, Binding, Block, DefaultValue, Dispatch, Expr, ExprKind, Function, Global, IrId,
     Member, Meta, Param, Pattern, PatternKind, Program, Recv, Stmt, StmtKind, TraitMethod, TypeDef,
     TypeDefKind, Variant,
 };
@@ -104,7 +104,12 @@ pub fn lower_file(
         }
     }
     let types = lo.lower_types(file);
-    Program { types, funcs }
+    let globals = lo.lower_globals(file);
+    Program {
+        types,
+        globals,
+        funcs,
+    }
 }
 
 struct Lowerer<'a> {
@@ -232,6 +237,75 @@ impl Lowerer<'_> {
         defs.into_iter()
             .filter_map(|d| self.lower_type(d))
             .collect()
+    }
+
+    // ===< globals >===
+
+    /// Lower every constant and static region this file declares (§2.6, §2.5).
+    ///
+    /// A **trait's** associated constants are excluded: they are declarations of
+    /// what an impl must supply rather than definitions with a value, and they
+    /// already ride on the trait's [`TypeDef`] as `AssocConst`s, in vtable
+    /// order. An impl's are included — those *are* definitions, and nothing
+    /// evaluated them before.
+    fn lower_globals(&mut self, file: FileId) -> Vec<Global> {
+        let defs: Vec<DefId> = self
+            .defs
+            .iter()
+            .filter(|d| d.file == Some(file) && d.kind == DefKind::Const)
+            .filter(|d| {
+                d.parent
+                    .map(|p| self.defs.get(p).kind != DefKind::Trait)
+                    .unwrap_or(false)
+            })
+            // A `::` RHS holds either a value or a type, and `DefKind::Const`
+            // cannot tell them apart on its own — `Iter :: SliceIter.<T>` is an
+            // associated *type* that lands there too.
+            .filter(|d| {
+                d.node.is_some_and(|n| match &self.ast.node(n).kind {
+                    NodeKind::ConstBind { rhs, .. } => {
+                        super::is_value_rhs(self.defs, self.asts, self.ast, *rhs)
+                    }
+                    _ => false,
+                })
+            })
+            .map(|d| d.id)
+            .collect();
+        defs.into_iter()
+            .filter_map(|d| self.lower_global(d))
+            .collect()
+    }
+
+    fn lower_global(&mut self, def: DefId) -> Option<Global> {
+        let d = self.defs.get(def);
+        let (name, mutable) = (d.name.clone(), d.mutable);
+        let directives = d.directives.clone();
+        let node = d.node?;
+        let NodeKind::ConstBind { rhs, .. } = self.ast.node(node).kind.clone() else {
+            return None;
+        };
+        // Two RHS shapes reach here. `A :: 5` is the value itself. `#static c ::
+        // u32 := 0` and an impl's `MAX :: i32 := 100` write the *type* first and
+        // the value after `:=` — and a static may write no value at all, in
+        // which case the region is zeroed and there is nothing to lower.
+        let init = match self.ast.node(rhs).kind.clone() {
+            NodeKind::AssocConst { default, .. } => default,
+            _ => Some(rhs),
+        };
+        let id = self.id(node);
+        // The type inference stamped on the *binding*, not the initializer's:
+        // `#static c :: u32 := 0` is a `u32` region however the literal on the
+        // right would have defaulted on its own.
+        self.meta.set_ty(id, self.ty(node));
+        self.meta.set_directives(id, directives);
+        let init = init.map(|e| self.lower_expr(e));
+        Some(Global {
+            id,
+            def,
+            name,
+            init,
+            mutable,
+        })
     }
 
     fn lower_type(&mut self, def: DefId) -> Option<TypeDef> {

@@ -583,7 +583,7 @@ impl Parser {
     }
 
     /// The `T [ ':=' default ]` RHS of an associated-constant binding.
-    fn parse_assoc_const(&mut self) -> NodeId {
+    pub(crate) fn parse_assoc_const(&mut self) -> NodeId {
         let start = self.cur_span();
         let ty = self.parse_type();
         let mut end = self.node_span(ty);

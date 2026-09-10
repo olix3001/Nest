@@ -82,6 +82,7 @@ impl Parser {
                 self.parse_extern_block(out);
             }
             Some(TokenKind::LetKw | TokenKind::ConstKw) => {
+                self.reject_static_let(&directives, start);
                 let ld = self.parse_local_decl();
                 out.push(self.finish_decl(attrs, directives, ld, start));
             }
@@ -97,7 +98,8 @@ impl Parser {
                 out.push(e);
             }
             _ => {
-                let cb = self.parse_const_bind();
+                let is_static = self.has_directive(&directives, "static");
+                let cb = self.parse_const_bind(is_static);
                 out.push(self.finish_decl(attrs, directives, cb, start));
             }
         }
@@ -190,6 +192,7 @@ impl Parser {
 
         match self.peek() {
             Some(TokenKind::LetKw | TokenKind::ConstKw) => {
+                self.reject_static_let(&directives, start);
                 let ld = self.parse_local_decl();
                 (self.finish_decl(attrs, directives, ld, start), false)
             }
@@ -202,13 +205,15 @@ impl Parser {
                 (self.alloc(span, NodeKind::Continue), false)
             }
             _ if decorated => {
-                // A decorated binding inside a block, e.g. `#static let ...`
-                // handled above; anything else decorated is a `::` binding.
-                let cb = self.parse_const_bind();
+                // Any decorated statement that is not a `let`/`const` is a `::`
+                // binding — `#static calls :: uint := 0`, the function-local form
+                // of §2.6, among them.
+                let is_static = self.has_directive(&directives, "static");
+                let cb = self.parse_const_bind(is_static);
                 (self.finish_decl(attrs, directives, cb, start), false)
             }
             _ => match self.scan_binding_kind() {
-                BindingKind::Const => (self.parse_const_bind(), false),
+                BindingKind::Const => (self.parse_const_bind(false), false),
                 BindingKind::Assign => (self.parse_assign(), false),
                 BindingKind::Expr => (self.parse_expr(), true),
             },
@@ -345,15 +350,81 @@ impl Parser {
     // ===< `::` bindings and their RHS >===
 
     /// `pattern '::' const_rhs`.
-    fn parse_const_bind(&mut self) -> NodeId {
+    fn parse_const_bind(&mut self, static_storage: bool) -> NodeId {
         let start = self.cur_span();
         let pattern = self.parse_pattern();
         self.expect(&TokenKind::ColonColon);
-        let rhs = self.parse_const_rhs();
+        // `#static name :: T [ ':=' init ]` (§2.6). The directive is what decides
+        // how to read the RHS: without it `name :: [4096]u8` is a *type alias*
+        // and `name :: 0` is a value, because a `::` RHS holds either and only
+        // its shape says which. A static declares neither — it declares a
+        // **region**, so the RHS is its type and the value, if any, comes after
+        // `:=`. That is exactly the associated-constant shape (`MAX :: i32 :=
+        // 100`), and it reuses the same parse.
+        let rhs = if static_storage {
+            self.parse_assoc_const()
+        } else {
+            self.typed_const_rhs()
+        };
         self.alloc(
             start.to(self.node_span(rhs)),
             NodeKind::ConstBind { pattern, rhs },
         )
+    }
+
+    /// The RHS of an ordinary `::` binding, admitting the **typed constant**
+    /// form `A :: u8 := 5` (§2.5).
+    ///
+    /// A constant with no declared type keeps its literal's comptime-ness and
+    /// settles per use site, which is usually what is wanted; writing the type
+    /// pins it instead. The two are told apart by what follows: `A :: u8` is a
+    /// type alias, and `A :: u8 := 5` is a `u8` constant. So the RHS is parsed
+    /// first and only *then* re-read as a type, when a `:=` turns out to follow
+    /// it — the same `T := value` shape an associated constant and a `#static`
+    /// region already use, so there is one rule for where a written type goes.
+    fn typed_const_rhs(&mut self) -> NodeId {
+        let rhs = self.parse_const_rhs();
+        if !self.at(&TokenKind::ColonEq) {
+            return rhs;
+        }
+        self.bump();
+        let value = self.parse_expr();
+        let span = self.node_span(rhs).to(self.node_span(value));
+        self.alloc(
+            span,
+            NodeKind::AssocConst {
+                ty: rhs,
+                default: Some(value),
+            },
+        )
+    }
+
+    /// `#static` decorates a `::` binding, never a `let` (§2.6).
+    ///
+    /// A static declares a **region**, not a binding: its RHS is a type and its
+    /// value, if any, follows `:=`. That is the `::` shape, and it is the same
+    /// one everywhere — at namespace scope, where `let` has no home at all, and
+    /// inside a function, where `#static let` was once the only form that
+    /// spelled a program-lifetime local differently from the global it behaves
+    /// exactly like.
+    fn reject_static_let(&mut self, directives: &[NodeId], start: Span) {
+        if self.has_directive(directives, "static") {
+            self.error(
+                start,
+                "`#static` decorates a `::` binding, not a `let`: write \
+                 `#static name :: T := value`",
+            );
+        }
+    }
+
+    /// Whether `directives` — already parsed, sitting in front of a binding —
+    /// contains `#name`.
+    pub(crate) fn has_directive(&self, directives: &[NodeId], name: &str) -> bool {
+        directives.iter().any(|&d| {
+            self.with_kind(d, |k| {
+                matches!(k, NodeKind::Directive { name: n, .. } if n.as_str() == name)
+            })
+        })
     }
 
     /// The RHS of a `::` binding: an `import`, a directive-led / keyword-led type
@@ -474,7 +545,7 @@ impl Parser {
             }
             let start = self.cur_span();
             let attrs = self.parse_attributes();
-            let member = self.parse_const_bind();
+            let member = self.parse_const_bind(false);
             self.set_extern_abi(member, &abi);
             out.push(self.finish_decl(attrs, Vec::new(), member, start));
             self.skip_newlines();

@@ -45,6 +45,7 @@ pub fn resolve_file(
         ns_stack: vec![file_ns],
         self_ty: Vec::new(),
         dyn_ok: HashSet::new(),
+        decl_static: false,
     };
     if let Some(root) = ast.root() {
         r.resolve_node(root);
@@ -69,6 +70,13 @@ struct Resolver<'a> {
     /// Type nodes that sit directly under a pointer, and may therefore be a
     /// `dyn Trait` (§3.4). Filled in on the way down, so the `dyn` sees it.
     dyn_ok: HashSet<NodeId>,
+    /// Whether the `::` binding currently being walked carries `#static`.
+    ///
+    /// Set by the enclosing [`NodeKind::Decl`] on the way down. A block-local
+    /// `::` is immutable; a `#static` one names a program-lifetime region and is
+    /// the only `::` form that is assignable (§2.6), and the binding is
+    /// introduced one level below where the directive is written.
+    decl_static: bool,
 }
 
 impl Resolver<'_> {
@@ -233,6 +241,40 @@ impl Resolver<'_> {
                 // (§2.3). Everywhere else a binding is immutable unless the
                 // pattern wrote `mut`.
                 self.bind_pattern(pattern, !is_const);
+            }
+            // A `::` binding. At namespace scope, in a trait, and in an `impl`,
+            // collection has already made a def for this node and put the name
+            // in a namespace — there is nothing to introduce and the name is
+            // found by path resolution, so only the RHS is walked.
+            //
+            // Inside a block there is no namespace to collect into, so the name
+            // is introduced *here*, as a scoped binding like any local. Without
+            // this the pattern reached the generic child walk and was resolved
+            // as if it were a use of the name it declares, which reported
+            // `cannot resolve name` on the declaration itself.
+            NodeKind::ConstBind { pattern, rhs } => {
+                self.resolve_node(rhs);
+                if self.def_of(id).is_some() {
+                    return;
+                }
+                // `#static` is the one `::` form that names assignable storage
+                // (§2.6): a program-lifetime region that outlives the call. The
+                // directive sits on the enclosing `Decl`, which is why the walk
+                // records it on the way down.
+                self.bind_pattern(pattern, self.decl_static);
+            }
+            // A decorated item. The directives are carried by collection, but
+            // `#static` changes what the binding underneath *is*, so it has to
+            // be visible while that binding is resolved.
+            NodeKind::Decl {
+                directives, item, ..
+            } => {
+                // Attributes and directives are compiler vocabulary, never
+                // program names, so neither is walked (see below).
+                let is_static = directives.iter().any(|&d| self.is_static_directive(d));
+                let outer = std::mem::replace(&mut self.decl_static, is_static);
+                self.resolve_node(item);
+                self.decl_static = outer;
             }
             NodeKind::For {
                 pattern,
@@ -709,6 +751,11 @@ impl Resolver<'_> {
 
     fn def_of(&self, node: NodeId) -> Option<DefId> {
         self.ast.meta::<DefMeta>(node).map(|m| m.0)
+    }
+
+    fn is_static_directive(&self, node: NodeId) -> bool {
+        matches!(&self.ast.node(node).kind,
+            NodeKind::Directive { name, .. } if name.as_str() == "static")
     }
 
     /// The def a type expression's head names, resolved through the current

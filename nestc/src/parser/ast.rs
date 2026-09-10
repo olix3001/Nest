@@ -252,7 +252,7 @@ pub enum NodeKind {
     /// Only emitted when at least one attribute or declaration-level directive is
     /// present; an undecorated binding is stored as the bare `item` node. The
     /// directives here are the ones written *before* the bound name (e.g.
-    /// `#static let ...`); directives written before a `func`/`struct`/`enum`/
+    /// `#static name :: T`); directives written before a `func`/`struct`/`enum`/
     /// `trait`/`namespace` keyword on the RHS live on that literal node instead.
     Decl {
         attrs: Vec<NodeId>,

@@ -386,26 +386,41 @@ pub fn infer_file(
         cx.infer_func(func);
         cx.finish();
     }
-    // An associated constant's **default** is an expression with a declared
-    // type, so it is its own little inference problem — and it needs `finish()`
-    // for the same reason a function body does: a literal in it has to be
-    // defaulted and every node stamped before lowering reads them back.
-    let assoc_defaults: Vec<(NodeId, NodeId)> = ast
-        .ids()
-        .filter_map(|id| match &ast.node(id).kind {
-            NodeKind::AssocConst {
-                ty,
-                default: Some(d),
-            } => Some((*ty, *d)),
-            _ => None,
-        })
+    // Every **value definition** this file declares: a namespace constant
+    // `A :: 5`, a `#static` region (§2.6), an impl's associated constant, and a
+    // trait's associated-constant default. Each is its own little inference
+    // problem, and each needs `finish()` for the same reason a function body
+    // does — a literal in it has to be defaulted and every node stamped before
+    // lowering reads them back.
+    //
+    // They are checked whether or not anything *uses* them. `def_ty` types a
+    // constant lazily, on demand at a use site, which is what gives `A :: 42`
+    // its per-use comptime-ness; but a constant nothing mentions would then
+    // never be looked at, and the mistake in it is in the declaration.
+    let globals: Vec<DefId> = defs
+        .iter()
+        .filter(|d| d.file == Some(file) && d.kind == DefKind::Const)
+        .filter(|d| d.node.is_some_and(|n| binds_a_value(defs, asts, ast, n)))
+        .map(|d| d.id)
         .collect();
-    for (ty_node, default) in assoc_defaults {
+    for def in globals {
         let mut cx = fresh!();
-        let want = cx.ty_from_node(ty_node);
-        let got = cx.infer_expr(default);
-        cx.expect(default, &got, &want);
+        cx.infer_global(def);
         cx.finish();
+    }
+}
+
+/// Whether the `::` binding at `node` defines a value (see
+/// [`super::is_value_rhs`]).
+fn binds_a_value(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    ast: &Ast,
+    node: NodeId,
+) -> bool {
+    match &ast.node(node).kind {
+        NodeKind::ConstBind { rhs, .. } => super::is_value_rhs(defs, asts, ast, *rhs),
+        _ => false,
     }
 }
 
@@ -3436,6 +3451,74 @@ impl Inferer<'_> {
     /// numeric variable and settles independently — `A :: 42` may be an `i8` in
     /// one place and an `i64` in another. Anything else has one concrete type,
     /// inferred from the right-hand side.
+    /// Type one value definition at its **declaration**, and stamp the answer on
+    /// the binding node so lowering can read it back.
+    ///
+    /// Two right-hand-side shapes reach here, and the difference is which side
+    /// says what the type is:
+    ///
+    /// - `A :: 5` — the initializer decides, and a numeric literal stays
+    ///   `comptime_int` so each use site can settle it for itself (§2.5).
+    /// - `#static c :: u32 := 0`, `MAX :: i32 := 100` — the **type is declared**
+    ///   and the initializer is checked against it. A static must be typed this
+    ///   way: it is storage, and storage cannot be `comptime_int`. Its
+    ///   initializer may also be absent, the region being zeroed (§2.6).
+    fn infer_global(&mut self, def: DefId) {
+        let Some(node) = self.defs.get(def).node else {
+            return;
+        };
+        let NodeKind::ConstBind { rhs, .. } = self.ast.node(node).kind.clone() else {
+            return;
+        };
+        let ty = match self.ast.node(rhs).kind.clone() {
+            NodeKind::AssocConst { ty, default } => {
+                let want = self.ty_from_node(ty);
+                if let Some(d) = default {
+                    let got = self.infer_expr(d);
+                    self.expect(d, &got, &want);
+                }
+                want
+            }
+            _ => match self.comptime_rhs_ty(rhs) {
+                Some(ty) => ty,
+                None => self.infer_expr(rhs),
+            },
+        };
+        self.types.insert(node, ty);
+    }
+
+    /// The `comptime_int` / `comptime_float` type of a constant whose RHS is a
+    /// bare numeric literal, stamping every node of it on the way.
+    ///
+    /// §2.5: such a constant has **no single runtime type**. `A :: 42` is a
+    /// `comptime_int`, and each use site settles it for itself — which is what
+    /// lets one `A` be an `i8` here and an `i64` there. Running the literal
+    /// through ordinary inference instead would leave an unconstrained numeric
+    /// variable that `finish` defaults to `isize`, stamping a `$cast` onto the
+    /// declaration and making the IR claim a width the source never chose. The
+    /// const evaluator would then read that width back as if it meant
+    /// something.
+    ///
+    /// A numeric variable cannot simply be *unified* with `comptime_int` to say
+    /// this: [`TyVarKind::Int`] admits only runtime integers by design (see
+    /// [`InferCtxt::bind_raw`]), because at every other site a literal really
+    /// does have to become one. The declaration is the one place that is not
+    /// true, so it takes the type directly rather than inferring it.
+    ///
+    /// Returns `None` for any other RHS — `A :: f()` has a concrete type and is
+    /// inferred normally.
+    fn comptime_rhs_ty(&mut self, rhs: NodeId) -> Option<Ty> {
+        let ty = match self.ast.node(rhs).kind.clone() {
+            NodeKind::Lit(Lit::Int(_)) => Ty::ComptimeInt,
+            NodeKind::Lit(Lit::Float(_)) => Ty::ComptimeFloat,
+            // `-1` / `+1` are still literals for this purpose.
+            NodeKind::Unary { operand, .. } => self.comptime_rhs_ty(operand)?,
+            _ => return None,
+        };
+        self.types.insert(rhs, ty.clone());
+        Some(ty)
+    }
+
     fn const_def_ty(&mut self, def: DefId) -> Ty {
         // A constant defined in terms of itself has no type; break the cycle
         // rather than recursing forever.
@@ -3470,6 +3553,14 @@ impl Inferer<'_> {
                 Some(d) => self.def_ty(d),
                 None => Ty::Error,
             },
+            // `#static count :: u32 := 0` (§2.6) and an associated constant
+            // share this RHS shape: a **declared type** with an optional `:=`
+            // initializer. The type is written, so there is nothing to infer
+            // from the initializer — and for a static there may be no
+            // initializer at all, the region being zeroed. Reading the
+            // annotation is also what keeps a static's type concrete: a global
+            // is storage, and storage cannot be `comptime_int`.
+            NodeKind::AssocConst { ty, .. } => self.ty_from_node_in(file, ty),
             // Anything else has a concrete type; infer it where it is written.
             _ if file == self.file => self.infer_expr(rhs),
             _ => self.cx.fresh(),

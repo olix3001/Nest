@@ -23,6 +23,7 @@ use crate::sema::def::DefTable;
 
 use super::{Arm, Block, Expr, ExprKind, Linked, Meta, Stmt, StmtKind};
 
+pub mod constants;
 pub mod constness;
 pub mod declarations;
 pub mod divergence;
@@ -39,6 +40,7 @@ pub fn run(defs: &DefTable, meta: &Meta, linked: &Linked) -> Vec<Diagnostic> {
     mutability::check(defs, meta, linked, &mut out);
     exhaustive::check(defs, meta, linked, &mut out);
     constness::check(defs, meta, linked, &mut out);
+    constants::check(defs, meta, linked, &mut out);
     object_safety::check(defs, meta, linked, &mut out);
     reachability::check(defs, meta, linked, &mut out);
     declarations::check(defs, meta, linked, &mut out);

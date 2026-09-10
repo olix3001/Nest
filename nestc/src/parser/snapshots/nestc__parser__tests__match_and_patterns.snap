@@ -17,7 +17,7 @@ File
         Path `string`
       Block
         Return
-          MatchExpr .match
+          MatchExpr
             Path `code`
             MatchArm
               LitPat Int(200)

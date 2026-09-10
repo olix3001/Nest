@@ -83,10 +83,12 @@ use crate::sema::ty::Ty;
 pub use crate::sema::builtins::BuiltinOp;
 
 pub mod check;
+pub mod const_eval;
 pub mod link;
 pub mod meta;
 pub mod pretty;
 
+pub use const_eval::{ConstEval, ConstValue};
 pub use link::{Linked, link};
 pub use meta::{IrId, Meta};
 
@@ -108,12 +110,45 @@ pub use meta::{IrId, Meta};
 #[derive(Debug, Clone)]
 pub struct DefaultValue(pub Expr);
 
-/// A whole lowered program: the type definitions it declares, and every
-/// function that had a body.
+/// A whole lowered program: the type definitions it declares, the constants and
+/// static regions it declares, and every function that had a body.
 #[derive(Debug, Clone)]
 pub struct Program {
     pub types: Vec<TypeDef>,
+    pub globals: Vec<Global>,
     pub funcs: Vec<Function>,
+}
+
+/// One namespace- or impl-scope value definition: a constant `A :: 5`, or the
+/// program-lifetime region `#static count :: u32 := 0` (§2.6).
+///
+/// These reach the IR for the same reason [`TypeDef`]s do: a use of one lowers
+/// to an [`ExprKind::Global`], which is only a *name*. Everything downstream
+/// needs the value behind it — the const evaluator has to run the initializer,
+/// and codegen has to emit an initialized `.data` region or fold the constant
+/// into its uses — and reaching back into the AST for the initializer would mean
+/// re-deriving a lowering that has already been done once.
+///
+/// The type is `meta.ty(id)`; the span and the directives are read the same way
+/// as on every other node. Its evaluated value, once the const evaluator has
+/// run, is `meta.get::<ConstValue>(id)`.
+#[derive(Debug, Clone)]
+pub struct Global {
+    pub id: IrId,
+    pub def: DefId,
+    pub name: Symbol,
+    /// The lowered initializer.
+    ///
+    /// `None` only for a `#static` with no `:=`, whose region is zeroed — the
+    /// one binding form in the language that needs no initializer, because
+    /// static storage is zeroed anyway (§2.6). A constant always has one.
+    pub init: Option<Expr>,
+    /// Whether this names a **mutable region** (`#static`) rather than a
+    /// constant. The two are one node because they are one declaration form and
+    /// every consumer wants both: the const evaluator runs either initializer,
+    /// and only the flag decides whether the result is a value to fold into use
+    /// sites or the initial contents of a region that code may then write.
+    pub mutable: bool,
 }
 
 /// One lowered type definition.

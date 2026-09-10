@@ -82,7 +82,7 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         Slice { .. } => "Slice".into(),
         Deref { .. } => "Deref .*".into(),
         Try { kind, .. } => format!("Try {kind:?}"),
-        MatchExpr { .. } => "MatchExpr .match".into(),
+        MatchExpr { .. } => "MatchExpr".into(),
         Arg { name, .. } => match name {
             Some(n) => format!("Arg {n}:"),
             None => "Arg".into(),

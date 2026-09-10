@@ -13,7 +13,7 @@ File
         Path `int`
       Block
         Return
-          MatchExpr .match
+          MatchExpr
             Path `b`
             MatchArm
               LitPat Bool(true)
