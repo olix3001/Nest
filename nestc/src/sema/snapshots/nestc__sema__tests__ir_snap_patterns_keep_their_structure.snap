@@ -14,6 +14,7 @@ func ps(p: Point, xs: []i32, n: i32, r: *i32) -> i32 {
   let a: i32 = <match: i32>
   match xs: []i32 {
     [first, .. rest, last] => first: i32
+    [only] => only: i32
     [] => $cast(0: comptime_int): i32
   }
   let c: i32 = <match: i32>

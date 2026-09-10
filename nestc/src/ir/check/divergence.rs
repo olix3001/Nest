@@ -202,7 +202,7 @@ impl Reachable<'_> {
                     self.expr(&a.body);
                 }
             }
-            _ => children(e, &mut |c| self.expr(c)),
+            _ => super::children_of(e, &mut |c| self.expr(c)),
         }
     }
 }
@@ -272,7 +272,7 @@ pub fn diverges_expr(meta: &Meta, e: &Expr) -> bool {
         // exactly when one of them does.
         _ => {
             let mut any = false;
-            children(e, &mut |c| any |= diverges_expr(meta, c));
+            super::children_of(e, &mut |c| any |= diverges_expr(meta, c));
             any
         }
     }
@@ -321,92 +321,10 @@ fn has_break(body: &Block) -> bool {
             }
             _ => {
                 let mut any = false;
-                children(e, &mut |c| any |= in_expr(c));
+                super::children_of(e, &mut |c| any |= in_expr(c));
                 any
             }
         }
     }
     in_block(body)
-}
-
-/// The direct sub-expressions of `e`, in evaluation order.
-///
-/// Each walk above handles the control-flow forms — block, loop, `if`, `match` —
-/// itself and reaches this only for the rest, because for those four "visit the
-/// children" and "does control pass through" are different questions. They are
-/// still covered here so that this stays a complete traversal on its own rather
-/// than one that depends on its callers to be correct.
-fn children(e: &Expr, f: &mut impl FnMut(&Expr)) {
-    match &e.kind {
-        ExprKind::Lit(_)
-        | ExprKind::Local(_)
-        | ExprKind::Global(_)
-        | ExprKind::ConstParam(_)
-        | ExprKind::Error => {}
-        ExprKind::Call { callee, args, .. } => {
-            f(callee);
-            args.iter().for_each(f);
-        }
-        ExprKind::Binary { lhs, rhs, .. } => {
-            f(lhs);
-            f(rhs);
-        }
-        ExprKind::Unary { operand, .. } => f(operand),
-        ExprKind::Ref { place, .. } => f(place),
-        ExprKind::Deref { base }
-        | ExprKind::Field { base, .. }
-        | ExprKind::TupleIndex { base, .. } => f(base),
-        ExprKind::Index { base, index } => {
-            f(base);
-            f(index);
-        }
-        ExprKind::Tuple { elems } => elems.iter().for_each(f),
-        ExprKind::Construct { fields, .. } => fields.iter().for_each(|(_, e)| f(e)),
-        ExprKind::Variant { args, .. } | ExprKind::Intrinsic { args, .. } => {
-            args.iter().for_each(f)
-        }
-        ExprKind::DynCast { value, .. } => f(value),
-        ExprKind::Block(b) | ExprKind::Loop { body: b } => block_children(b, f),
-        ExprKind::If { cond, then, els } => {
-            f(cond);
-            block_children(then, f);
-            if let Some(els) = els {
-                block_children(els, f);
-            }
-        }
-        ExprKind::Match { scrutinee, arms } => {
-            f(scrutinee);
-            for Arm { guard, body, .. } in arms {
-                if let Some(g) = guard {
-                    f(g);
-                }
-                f(body);
-            }
-        }
-    }
-}
-
-fn block_children(b: &Block, f: &mut impl FnMut(&Expr)) {
-    b.stmts.iter().for_each(|s| stmt_children(s, f));
-    if let Some(t) = &b.tail {
-        f(t);
-    }
-    b.defers.iter().for_each(|d| f(d));
-}
-
-fn stmt_children(s: &Stmt, f: &mut impl FnMut(&Expr)) {
-    match &s.kind {
-        StmtKind::Return(v) | StmtKind::Break(v) => {
-            if let Some(v) = v {
-                f(v);
-            }
-        }
-        StmtKind::Continue => {}
-        StmtKind::Let { init, .. } => f(init),
-        StmtKind::Assign { place, value } => {
-            f(place);
-            f(value);
-        }
-        StmtKind::Expr(e) => f(e),
-    }
 }

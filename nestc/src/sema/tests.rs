@@ -1537,6 +1537,198 @@ fn linking_collects_every_types_definition() {
     );
 }
 
+// ===< Exhaustiveness and arm reachability >===
+
+/// The one diagnostic `src` produces, asserting there is exactly one.
+fn only_message(src: &str) -> String {
+    let msgs = messages(src);
+    assert_eq!(
+        msgs.len(),
+        1,
+        "expected exactly one diagnostic for {src:?}: {msgs:#?}"
+    );
+    msgs.into_iter().next().unwrap()
+}
+
+const SHAPES: &str = "E :: enum { a, b(i32), c }\n";
+
+#[test]
+fn an_exhaustive_match_is_accepted() {
+    // Everything the rule admits, so the rejections below mean something. Each
+    // line is a different reason the `match` is complete.
+    for src in [
+        // Every variant, one arm each.
+        "E :: enum { a, b(i32), c }\n\
+         f :: func (e: E) -> i32 { return e.match { .a => 0, .b(n) => n, .c => 2 } }\n",
+        // An or-pattern covering two of them.
+        "E :: enum { a, b(i32), c }\n\
+         f :: func (e: E) -> i32 { return e.match { .a | .c => 0, .b(n) => n } }\n",
+        // Integer ranges meeting end to end over the whole type.
+        "f :: func (n: u8) -> i32 { return n.match { 0..<10 => 1, 10..=255 => 2 } }\n",
+        // Both booleans.
+        "f :: func (b: bool) -> i32 { return b.match { true => 1, false => 0 } }\n",
+        // A guard, rescued by a later catch-all.
+        "f :: func (n: i32) -> i32 { return n.match { x if x > 0 => 1, _ => 0 } }\n",
+        // Nested: every combination of the two fields.
+        "N :: enum { x, y }\nP :: struct { u: N, v: bool }\n\
+         f :: func (p: P) -> i32 {\n\
+           return p.match { { u: .x, v } => 0, { u: .y, v: true } => 1, { u: .y, v: false } => 2 }\n\
+         }\n",
+        // Matching *through a pointer* — §3.2 auto-deref, which is how every
+        // method that matches on its own receiver is written.
+        "E :: enum { a, b(i32), c }\n\
+         impl E { f :: func (self: *E) -> i32 { return self.match { .a => 0, .b(n) => n, .c => 2 } } }\n",
+        // Slices: every length, by way of a rest.
+        "f :: func (s: []i32) -> i32 { return s.match { [] => 0, [x] => x, [a, .. r] => a } }\n",
+        // A fixed array has one length, so listing it is enough.
+        "f :: func (a: [2]i32) -> i32 { return a.match { [x, y] => x + y } }\n",
+    ] {
+        let msgs = messages(src);
+        assert!(msgs.is_empty(), "rejected {src:?}: {msgs:#?}");
+    }
+}
+
+#[test]
+fn a_non_exhaustive_match_names_a_witness() {
+    // "not exhaustive" alone sends the reader back to enumerate the variants by
+    // hand. The witness is the extra work that makes the diagnostic actionable.
+    let cases = [
+        (
+            format!(
+                "{SHAPES}f :: func (e: E) -> i32 {{ return e.match {{ .a => 0, .b(n) => n }} }}\n"
+            ),
+            "`.c` is not covered",
+        ),
+        // Nested, so the witness has to be built back up through two levels.
+        (
+            "N :: enum { x, y }\nP :: struct { u: N, v: bool }\n\
+             f :: func (p: P) -> i32 {\n\
+               return p.match { { u: .x, v } => 0, { u: .y, v: true } => 1 }\n\
+             }\n"
+            .to_string(),
+            "`P { u: .y, v: false }` is not covered",
+        ),
+        // A guard covers nothing: the arm may match and still fall through.
+        (
+            "f :: func (n: i32) -> i32 { return n.match { x if x > 0 => 1 } }\n".to_string(),
+            "is not covered",
+        ),
+        // A gap between two ranges.
+        (
+            "f :: func (n: u8) -> i32 { return n.match { 0..<10 => 1, 11..=255 => 2 } }\n"
+                .to_string(),
+            "`10` is not covered",
+        ),
+        // One boolean.
+        (
+            "f :: func (b: bool) -> i32 { return b.match { true => 1 } }\n".to_string(),
+            "`false` is not covered",
+        ),
+        // A slice length no arm admits: `[a, .. r, z]` needs two or more.
+        (
+            "f :: func (s: []i32) -> i32 { return s.match { [] => 0, [a, .. r, z] => a } }\n"
+                .to_string(),
+            "`[_]` is not covered",
+        ),
+    ];
+    for (src, needle) in cases {
+        let msg = only_message(&src);
+        assert!(
+            msg.contains("not exhaustive") && msg.contains(needle),
+            "wrong diagnostic for {src:?}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn an_arm_no_value_can_reach_is_reported() {
+    for src in [
+        // After a catch-all.
+        format!("{SHAPES}f :: func (e: E) -> i32 {{ return e.match {{ _ => 0, .a => 1 }} }}\n"),
+        // A duplicated variant.
+        format!(
+            "{SHAPES}f :: func (e: E) -> i32 {{ return e.match {{ .a => 0, .a => 1, .b(n) => n, .c => 2 }} }}\n"
+        ),
+        // A range already inside an earlier one.
+        "f :: func (n: u8) -> i32 { return n.match { 0..=100 => 1, 5..=9 => 2, _ => 0 } }\n"
+            .to_string(),
+    ] {
+        let msg = only_message(&src);
+        assert!(
+            msg.contains("unreachable `match` arm"),
+            "wrong diagnostic for {src:?}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn a_dead_alternative_inside_a_live_arm_is_reported() {
+    // `.a | .c` after an arm for `.a` still reaches this arm through `.c`, so
+    // the arm is useful and the mistake hides behind it. The alternatives are
+    // therefore checked one by one as well.
+    let src = format!(
+        "{SHAPES}f :: func (e: E) -> i32 {{ return e.match {{ .a => 0, .a | .c => 1, .b(n) => n }} }}\n"
+    );
+    let msg = only_message(&src);
+    assert!(
+        msg.contains("unreachable alternative in an or-pattern"),
+        "wrong diagnostic: {msg}"
+    );
+}
+
+#[test]
+fn a_guard_does_not_make_a_later_arm_unreachable() {
+    // The mirror of the coverage rule: an arm after a guarded one is reachable
+    // *because* the guard may fail, so repeating the same pattern is fine.
+    let src = "f :: func (n: i32) -> i32 { return n.match { x if x > 0 => 1, x => x } }\n";
+    let msgs = messages(src);
+    assert!(msgs.is_empty(), "{msgs:#?}");
+}
+
+#[test]
+fn the_exhaustiveness_diagnostic_points_at_the_match() {
+    let src = "E :: enum { a, b }\nf :: func (e: E) -> i32 { return e.match { .a => 0 } }\n";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert_eq!(session.diagnostics.len(), 1, "{:#?}", session.diagnostics);
+    let d = &session.diagnostics[0];
+    let label = d.primary_label().expect("a primary label");
+    let file = session.sources.file(label.span.file).expect("a real file");
+    let text = &file.src[label.span.span.start..label.span.span.end];
+    assert!(
+        text.starts_with("e.match"),
+        "the diagnostic points at {text:?} rather than the match"
+    );
+}
+
+#[test]
+fn a_generic_types_members_are_substituted_before_matching() {
+    // A member is recorded definition-relative, so a `match` on `Box.<E>` has to
+    // substitute before it can decide what the sub-patterns are matching
+    // against. Without that, the inner column would be typed `T` — a type
+    // parameter, which has no constructors — and every such match would be
+    // called non-exhaustive.
+    let ok = "\
+E :: enum { a, b }
+Box :: struct <T> { value: T }
+f :: func (b: Box.<E>) -> i32 { return b.match { { value: .a } => 0, { value: .b } => 1 } }
+";
+    assert!(messages(ok).is_empty(), "{:#?}", messages(ok));
+
+    let bad = "\
+E :: enum { a, b }
+Box :: struct <T> { value: T }
+f :: func (b: Box.<E>) -> i32 { return b.match { { value: .a } => 0 } }
+";
+    // The witness is built from the outside in, so it names the whole value
+    // rather than only the part that was missed — which is what the reader has
+    // to write an arm for.
+    assert!(
+        only_message(bad).contains("`Box { value: .b }` is not covered"),
+        "{}",
+        only_message(bad)
+    );
+}
+
 // ===< Linking the per-file programs >===
 
 #[test]
@@ -1956,6 +2148,7 @@ ps :: func (p: Point, xs: []i32, n: i32, r: *i32) -> i32 {
   }
   let c := xs.match {
     [first, .. rest, last] => first,
+    [only] => only,
     [] => 0,
   }
   let d := n.match {
