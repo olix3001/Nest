@@ -129,7 +129,7 @@ impl Desugar<'_> {
 
         // __it :: (iter).into_iter()
         let into = self.method_call(span, iter, "into_iter", vec![]);
-        let (it_pat, it_local) = self.binding_pat(span, &it_name);
+        let (it_pat, it_local) = self.binding_pat(span, &it_name, true);
         let it_bind = self.alloc(
             span,
             NodeKind::ConstBind {
@@ -226,7 +226,7 @@ impl Desugar<'_> {
 
         // __try :: Try.branch(base)
         let branch = self.method_call(span, base, "branch", vec![]);
-        let (tmp_pat, tmp_local) = self.binding_pat(span, &tmp);
+        let (tmp_pat, tmp_local) = self.binding_pat(span, &tmp, false);
         let tmp_bind = self.alloc(
             span,
             NodeKind::ConstBind {
@@ -236,13 +236,13 @@ impl Desugar<'_> {
         );
 
         // .proceed(__v) => __v
-        let (v_pat, v_local) = self.binding_pat(span, &v);
+        let (v_pat, v_local) = self.binding_pat(span, &v, false);
         let ok_pat = self.variant_pat(span, "proceed", vec![v_pat]);
         let v_ref = self.local_ref(span, &v, v_local);
         let ok_arm = self.match_arm(span, ok_pat, v_ref);
 
         // .stop(__r) => { return $from_residual(__r) }
-        let (r_pat, r_local) = self.binding_pat(span, &r);
+        let (r_pat, r_local) = self.binding_pat(span, &r, false);
         let stop_pat = self.variant_pat(span, "stop", vec![r_pat]);
         let r_ref = self.local_ref(span, &r, r_local);
         let rebuilt = self.static_call(span, rebuild, vec![r_ref]);
@@ -331,11 +331,18 @@ impl Desugar<'_> {
     }
 
     /// A fresh `BindingPat` plus its `Local` def; returns `(pattern, def)`.
-    fn binding_pat(&mut self, span: Span, name: &Symbol) -> (NodeId, DefId) {
+    /// A synthetic binding and the local def it introduces.
+    ///
+    /// `mutable` matters: a `for` loop's iterator is storage the loop writes
+    /// through — `Iterator.next` takes `*mut self`, so the desugaring's own
+    /// `next(&mut __it)` is a mutable borrow of it. Binding it immutably made
+    /// the IR mutability check reject every `for` loop in the language, which is
+    /// the check working: an immutable binding really cannot be lent that way.
+    fn binding_pat(&mut self, span: Span, name: &Symbol, mutable: bool) -> (NodeId, DefId) {
         let pat = self.alloc(
             span,
             NodeKind::BindingPat {
-                mutable: false,
+                mutable,
                 name: name.clone(),
             },
         );
@@ -349,6 +356,7 @@ impl Desugar<'_> {
             Some(pat),
             vec![name.clone()],
         );
+        self.defs.get_mut(def).mutable = mutable;
         self.ast.set_meta(pat, DefMeta(def));
         (pat, def)
     }
@@ -371,7 +379,12 @@ impl Desugar<'_> {
     /// function returns.
     fn static_call(&mut self, span: Span, member: DefId, args: Vec<NodeId>) -> NodeId {
         let name = self.defs.get(member).name.clone();
-        let callee = self.alloc(span, NodeKind::Path { segments: vec![name] });
+        let callee = self.alloc(
+            span,
+            NodeKind::Path {
+                segments: vec![name],
+            },
+        );
         self.ast.set_meta(callee, Resolution::Def(member));
         self.alloc(span, NodeKind::Call { callee, args })
     }

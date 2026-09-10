@@ -211,6 +211,19 @@ pub struct Def {
     /// implicitly upcasts to the field's type (§3.10). At most one field per
     /// struct may set this.
     pub using: bool,
+    /// Whether this binding may be **assigned to** (§2.3).
+    ///
+    /// True for a `let` local and for a pattern binding written `mut`; false for
+    /// `const`, for `::`, for a function parameter (§5.2: parameters are
+    /// immutable bindings — rebind with `let` for a mutable copy), and for a
+    /// plain pattern binding in a `match` arm.
+    ///
+    /// This is **binding** mutability, which §2.3 is careful to keep independent
+    /// of **reference** mutability: `const p := &mut x` is an immutable binding
+    /// holding a mutable pointer, so `p.* = 1` is legal and `p = &mut y` is not.
+    /// Whether a write *through* something is allowed comes from the `*mut` /
+    /// `[]mut` in its type, never from here.
+    pub mutable: bool,
 }
 
 impl Def {
@@ -274,6 +287,7 @@ impl DefTable {
             ns: Namespace::default(),
             alias: None,
             using: false,
+            mutable: false,
         });
         id
     }

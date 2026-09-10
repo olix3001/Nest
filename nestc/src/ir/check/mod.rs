@@ -24,11 +24,13 @@ use crate::sema::def::DefTable;
 use super::{Linked, Meta};
 
 pub mod divergence;
+pub mod mutability;
 
 /// Run every IR validation pass over `linked`, in order, collecting what they
 /// report.
 pub fn run(defs: &DefTable, meta: &Meta, linked: &Linked) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     divergence::check(defs, meta, linked, &mut out);
+    mutability::check(defs, meta, linked, &mut out);
     out
 }

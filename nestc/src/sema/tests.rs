@@ -1166,6 +1166,170 @@ f :: func (n: i32) {
     );
 }
 
+// ===< The mutability check >===
+
+#[test]
+fn every_permitted_write_is_accepted() {
+    // The negative cases below only mean something if the same programs with
+    // permission granted pass. Each line here is the mirror of one rejection.
+    let src = "\
+P :: struct { x: i32 }
+ok :: func (pm: *mut P, sm: []mut i32) {
+  let a := 0
+  a = 1                       // a `let` binding
+  let arr: [3]i32 := .{ 0 ; 3 }
+  arr[0] = 1                  // an array element, through a `let`
+  pm.x = 2                    // a field behind a `*mut`
+  sm[0] = 3                   // an element of a `[]mut`
+  const cp := &mut a          // §2.3: an immutable binding holding a mutable pointer
+  cp.* = 9                    // ...is still writable through
+  let r := &a                 // a read-only pointer to an immutable-ish place
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn a_write_without_permission_is_rejected() {
+    // Exactly one diagnostic each. A mutability error that cascades into three
+    // is worse than useless: the reader has to work out which one is the cause.
+    for (src, needle) in [
+        (
+            "f :: func () {\n  const a := 0\n  a = 1\n}\n",
+            "cannot assign to `a`",
+        ),
+        ("f :: func (n: i32) { n = 1 }\n", "cannot assign to `n`"),
+        (
+            "P :: struct { x: i32 }\nf :: func (p: *P) { p.x = 1 }\n",
+            "cannot assign to the pointee of a read-only pointer",
+        ),
+        (
+            "f :: func (s: []i32) { s[0] = 1 }\n",
+            "cannot assign to an element of a read-only slice",
+        ),
+        // The weakest link is the binding, several projections out.
+        (
+            "Q :: struct { y: i32 }\nP :: struct { q: Q }\n\
+             f :: func () {\n  const p := P { q: Q { y: 0 } }\n  p.q.y = 1\n}\n",
+            "cannot assign to `p`",
+        ),
+        // A `match` arm binds immutably unless it wrote `mut`.
+        (
+            "f :: func (n: i32) -> i32 {\n  return n.match { 0 => { let z := 0\n z }, _ => n }\n}\n\
+             g :: func (o: Option.<i32>) -> i32 {\n  return o.match { .some(v) => { v = 1\n v }, .none => 0 }\n}\n",
+            "cannot assign to `v`",
+        ),
+    ] {
+        let msgs = messages(src);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected exactly one diagnostic for {src:?}: {msgs:#?}"
+        );
+        assert!(
+            msgs[0].contains(needle),
+            "wrong diagnostic for {src:?}: {}",
+            msgs[0]
+        );
+    }
+}
+
+#[test]
+fn a_mutable_pointer_needs_a_mutable_place() {
+    // `&mut x` is a write permission being handed out, so it is checked exactly
+    // as an assignment is — including for the `&mut` lowering inserts for a
+    // `*mut self` method call, which the surface `x.m()` never spelled.
+    for (src, needle) in [
+        (
+            "f :: func (n: i32) {\n  let p := &mut n\n}\n",
+            "cannot take a mutable pointer to `n`",
+        ),
+        (
+            "f :: func () {\n  const a := 0\n  let p := &mut a\n}\n",
+            "cannot take a mutable pointer to `a`",
+        ),
+        // The implicit `&mut` of a `*mut self` receiver.
+        (
+            "C :: struct { n: i32 }\n\
+             impl C { bump :: func (self: *mut C) { self.n = 1 } }\n\
+             f :: func () {\n  const c := C { n: 0 }\n  c.bump()\n}\n",
+            "cannot take a mutable pointer to `c`",
+        ),
+    ] {
+        let msgs = messages(src);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected exactly one diagnostic for {src:?}: {msgs:#?}"
+        );
+        assert!(
+            msgs[0].contains(needle),
+            "wrong diagnostic for {src:?}: {}",
+            msgs[0]
+        );
+    }
+}
+
+#[test]
+fn a_mut_pattern_binding_is_writable() {
+    // §7.1's `[ 'mut' ] identifier`: a binding site that is immutable by default
+    // still yields a mutable binding when the pattern asks for one.
+    let src = "\
+f :: func (o: Option.<i32>) -> i32 {
+  return o.match {
+    .some(mut v) => { v = v + 1
+      v },
+    .none => 0,
+  }
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn a_for_loop_may_advance_its_iterator() {
+    // The `for` desugaring binds the iterator and then hands it to
+    // `Iterator.next`, which takes `*mut self`. That binding therefore has to be
+    // mutable storage — binding it with `::` made this check reject every `for`
+    // loop in the language, which was the check being right and the desugaring
+    // being wrong.
+    let src =
+        "f :: func (s: []i32) -> i32 {\n  let t := 0\n  for x in s { t = t + x }\n  return t\n}\n";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn the_mutability_diagnostic_names_the_link_that_denied_it() {
+    // `p.q.y = 1` is one error about `p`, not three about `p`, `p.q` and
+    // `p.q.y`. The label points at the binding, which is the thing to change.
+    let src = "\
+Q :: struct { y: i32 }
+P :: struct { q: Q }
+f :: func () {
+  const p := P { q: Q { y: 0 } }
+  p.q.y = 1
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert_eq!(session.diagnostics.len(), 1, "{:#?}", session.diagnostics);
+    let d = &session.diagnostics[0];
+    let label = d.primary_label().expect("a primary label");
+    let file = session.sources.file(label.span.file).expect("a real file");
+    let text = &file.src[label.span.span.start..label.span.span.end];
+    assert!(
+        text == "p" || text == "p.q.y",
+        "the diagnostic points at {text:?}, which names neither the write nor its cause"
+    );
+    assert!(
+        d.notes.iter().any(|n| n.contains("`let`")),
+        "no note saying how to fix it: {:#?}",
+        d.notes
+    );
+}
+
 // ===< Linking the per-file programs >===
 
 #[test]
@@ -1405,7 +1569,11 @@ fn ir_snap_ref_and_deref() {
     // written, the tag says who may write) is what the IR-level mutability check
     // reads, and it is why nothing has to re-derive it from the syntax.
     insta::assert_snapshot!(ir_text(
-        "rd :: func (p: *i32, q: *mut i32) -> i32 {\n  let r := &p\n  let w := &mut q\n  q.* = 1\n  return p.*\n}\n"
+        // `&mut v` needs a mutable *binding*; a parameter is not one (§5.2),
+        // so the mutable pointer is taken of a `let` local. `&mut q` — a
+        // mutable pointer to the parameter binding itself — is a different
+        // thing entirely, and the mutability check rejects it.
+        "rd :: func (p: *i32, q: *mut i32) -> i32 {\n  let v := 0\n  let r := &p\n  let w := &mut v\n  q.* = 1\n  return p.*\n}\n"
     ));
 }
 

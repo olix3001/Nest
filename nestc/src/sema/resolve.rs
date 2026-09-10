@@ -220,13 +220,19 @@ impl Resolver<'_> {
                 self.pop_scope();
             }
             NodeKind::LocalDecl {
-                pattern, ty, value, ..
+                is_const,
+                pattern,
+                ty,
+                value,
             } => {
                 if let Some(t) = ty {
                     self.resolve_node(t);
                 }
                 self.resolve_node(value);
-                self.bind_pattern(pattern);
+                // A `let` introduces assignable storage; a `const` does not
+                // (§2.3). Everywhere else a binding is immutable unless the
+                // pattern wrote `mut`.
+                self.bind_pattern(pattern, !is_const);
             }
             NodeKind::For {
                 pattern,
@@ -235,7 +241,7 @@ impl Resolver<'_> {
             } => {
                 self.resolve_node(iter);
                 self.push_scope();
-                self.bind_pattern(pattern);
+                self.bind_pattern(pattern, false);
                 self.resolve_node(body);
                 self.pop_scope();
             }
@@ -245,7 +251,7 @@ impl Resolver<'_> {
                 body,
             } => {
                 self.push_scope();
-                self.bind_pattern(pattern);
+                self.bind_pattern(pattern, false);
                 if let Some(g) = guard {
                     self.resolve_node(g);
                 }
@@ -260,7 +266,7 @@ impl Resolver<'_> {
             } => {
                 self.resolve_node(value);
                 self.push_scope();
-                self.bind_pattern(pattern);
+                self.bind_pattern(pattern, false);
                 self.resolve_node(then);
                 self.pop_scope();
                 if let Some(e) = els {
@@ -586,39 +592,47 @@ impl Resolver<'_> {
     }
 
     /// Bind every name a pattern introduces into the current scope frame.
-    fn bind_pattern(&mut self, pattern: NodeId) {
+    ///
+    /// `mutable` is the binding site's default: `true` under a `let`, `false`
+    /// under a `const`, a `match` arm or a `for`. A pattern binding written
+    /// `mut` is mutable regardless (§7.1's `[ 'mut' ] identifier`), so the two
+    /// combine rather than one overriding the other.
+    fn bind_pattern(&mut self, pattern: NodeId, mutable: bool) {
         match self.ast.node(pattern).kind.clone() {
-            NodeKind::BindingPat { name, .. } => {
-                self.introduce(name, DefKind::Local, pattern);
+            NodeKind::BindingPat {
+                name,
+                mutable: wrote_mut,
+            } => {
+                self.introduce_binding(name, DefKind::Local, pattern, mutable || wrote_mut);
             }
             NodeKind::AtPat {
                 name,
                 pattern: inner,
             } => {
-                self.introduce(name, DefKind::Local, pattern);
-                self.bind_pattern(inner);
+                self.introduce_binding(name, DefKind::Local, pattern, mutable);
+                self.bind_pattern(inner, mutable);
             }
             NodeKind::TuplePat { elems }
             | NodeKind::OrPat {
                 alternatives: elems,
             } => {
                 for e in elems {
-                    self.bind_pattern(e);
+                    self.bind_pattern(e, mutable);
                 }
             }
-            NodeKind::RefPat { pattern: inner } => self.bind_pattern(inner),
+            NodeKind::RefPat { pattern: inner } => self.bind_pattern(inner, mutable),
             NodeKind::StructPat { path, fields, .. } => {
                 if let Some(p) = path {
                     self.resolve_node(p);
                 }
                 for f in fields {
-                    self.bind_field_pat(f);
+                    self.bind_field_pat(f, mutable);
                 }
             }
             NodeKind::TupleStructPat { path, elems, .. } => {
                 self.resolve_node(path);
                 for e in elems {
-                    self.bind_pattern(e);
+                    self.bind_pattern(e, mutable);
                 }
             }
             NodeKind::VariantPat { args, .. } => {
@@ -626,14 +640,14 @@ impl Resolver<'_> {
                     // Tuple payload: each child is a sub-pattern.
                     crate::parser::ast::VariantPatArgs::Tuple(elems) => {
                         for e in elems {
-                            self.bind_pattern(e);
+                            self.bind_pattern(e, mutable);
                         }
                     }
                     // Record payload: each child is a `FieldPat` (`{ radius }` /
                     // `{ radius: p }`), bound like a struct pattern's fields.
                     crate::parser::ast::VariantPatArgs::Record { fields, .. } => {
                         for f in fields {
-                            self.bind_field_pat(f);
+                            self.bind_field_pat(f, mutable);
                         }
                     }
                     crate::parser::ast::VariantPatArgs::None => {}
@@ -641,10 +655,13 @@ impl Resolver<'_> {
             }
             NodeKind::SlicePat { elems, rest } => {
                 for e in elems {
-                    self.bind_pattern(e);
+                    self.bind_pattern(e, mutable);
                 }
-                if let Some(SliceRest { name: Some(name), .. }) = rest {
-                    self.introduce(name, DefKind::Local, pattern);
+                if let Some(SliceRest {
+                    name: Some(name), ..
+                }) = rest
+                {
+                    self.introduce_binding(name, DefKind::Local, pattern, mutable);
                 }
             }
             // Literals, ranges, wildcards, globs bind nothing.
@@ -652,11 +669,11 @@ impl Resolver<'_> {
         }
     }
 
-    fn bind_field_pat(&mut self, field: NodeId) {
+    fn bind_field_pat(&mut self, field: NodeId, mutable: bool) {
         if let NodeKind::FieldPat { name, pattern, .. } = self.ast.node(field).kind.clone() {
             match pattern {
-                Some(p) => self.bind_pattern(p),
-                None => self.introduce(name, DefKind::Local, field),
+                Some(p) => self.bind_pattern(p, mutable),
+                None => self.introduce_binding(name, DefKind::Local, field, mutable),
             }
         }
     }
@@ -664,6 +681,11 @@ impl Resolver<'_> {
     /// Allocate a local-ish def, add it to the current scope frame, and stamp
     /// [`DefMeta`] on its introducing node.
     fn introduce(&mut self, name: Symbol, kind: DefKind, node: NodeId) {
+        self.introduce_binding(name, kind, node, false);
+    }
+
+    /// [`Resolver::introduce`], recording whether the binding may be assigned to.
+    fn introduce_binding(&mut self, name: Symbol, kind: DefKind, node: NodeId, mutable: bool) {
         let scope = self.current_ns();
         let span = self.ast.node(node).span;
         let id = self.defs.alloc(
@@ -676,6 +698,7 @@ impl Resolver<'_> {
             Some(node),
             vec![name.clone()],
         );
+        self.defs.get_mut(id).mutable = mutable;
         self.ast.set_meta(node, DefMeta(id));
         if let Some(frame) = self.scopes.last_mut() {
             frame.insert(name, id);
