@@ -53,8 +53,9 @@ use super::infer::{
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
 use crate::ir::{
-    Arm, Binding, Block, Dispatch, Expr, ExprKind, Function, IrId, Member, Meta, Param, Pattern,
-    PatternKind, Program, Recv, Stmt, StmtKind, TraitMethod, TypeDef, TypeDefKind, Variant,
+    Arm, AssocConst, Binding, Block, DefaultValue, Dispatch, Expr, ExprKind, Function, IrId,
+    Member, Meta, Param, Pattern, PatternKind, Program, Recv, Stmt, StmtKind, TraitMethod, TypeDef,
+    TypeDefKind, Variant,
 };
 
 /// Lower every function body in `file` to IR.
@@ -305,7 +306,7 @@ impl Lowerer<'_> {
     /// namespace is a map, so the order comes from the member nodes.
     fn lower_trait(&mut self, trait_def: DefId, members: &[NodeId]) -> TypeDefKind {
         let mut methods = Vec::new();
-        let mut assoc_consts = Vec::new();
+        let mut consts = Vec::new();
         for &m in members {
             let NodeKind::ConstBind { pattern, rhs } = self.ast.node(m).kind.clone() else {
                 continue;
@@ -344,13 +345,19 @@ impl Lowerer<'_> {
                 }
                 // An associated type is a slot in the *impl*, not in the vtable.
                 NodeKind::AssocType { .. } => {}
-                _ => assoc_consts.push(name),
+                NodeKind::AssocConst { default, .. } => {
+                    let id = self.id(rhs);
+                    self.meta.set_ty(id, self.ty(rhs));
+                    if let Some(d) = default {
+                        let e = self.lower_expr(d);
+                        self.meta.set(id, DefaultValue(e));
+                    }
+                    consts.push(AssocConst { id, def, name });
+                }
+                _ => {}
             }
         }
-        TypeDefKind::Trait {
-            methods,
-            assoc_consts,
-        }
+        TypeDefKind::Trait { methods, consts }
     }
 
     /// How a **declared** function takes its receiver (§3.4).

@@ -479,6 +479,17 @@ pub enum NodeKind {
     /// choice must satisfy; empty means unconstrained.
     AssocType { bounds: Vec<NodeId> },
 
+    /// The RHS of an associated **constant** in a trait: `MAX :: i32 [:= 100]`.
+    /// Nameless — `MAX` is the enclosing [`NodeKind::ConstBind`] pattern.
+    ///
+    /// `ty` is the declared type every impl's value must have. `default` is the
+    /// value an impl may omit, exactly as a method may omit a body the trait
+    /// supplies; it uses `:=` rather than `=` for the same reason a parameter
+    /// default does — every `=` in the grammar is assignment to an existing
+    /// place or an associated-**type** constraint, and this *introduces* what a
+    /// binding holds (§2.3, §5.2).
+    AssocConst { ty: NodeId, default: Option<NodeId> },
+
     // ===< Functions / generics >===
     /// `[directives] [extern(abi)] func [<g>] (params) [-> ret] [block]`.
     /// A missing `body` is an external (bodyless) declaration.
@@ -607,6 +618,11 @@ impl NodeKind {
             | Error => {}
 
             AssocType { bounds } => out.extend_from_slice(bounds),
+
+            AssocConst { ty, default } => {
+                out.push(*ty);
+                push_opt(out, default);
+            }
 
             File { items: elems }
             | Tuple { elems }

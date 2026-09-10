@@ -279,18 +279,37 @@ A `trait` is a set of method signatures a type can implement. Traits serve as
 
 ```
 trait = [ directive ]* 'trait' '{' { trait_member } '}'
-trait_member = method_sig | assoc_type
-method_sig = identifier '::' 'func' [ generics ] '(' params ')' [ '->' type ]
-assoc_type = identifier '::' 'type' [ ':' type { '+' type } ]  // trait bounds on the impl's choice
+trait_member = method_sig | assoc_type | assoc_const
+method_sig  = identifier '::' 'func' [ generics ] '(' params ')' [ '->' type ]
+assoc_type  = identifier '::' 'type' [ ':' type { '+' type } ]  // trait bounds on the impl's choice
+assoc_const = identifier '::' type [ ':=' expr ]                // a constant every impl supplies
 ```
 
 ```
 ToJson :: trait {
   render :: func (self: *Self) -> str
 }
+
+Bounded :: trait {
+  MAX :: i32           // every impl must supply a value
+  MIN :: i32 := 0      // ...unless the trait supplies one
+  clamp :: func (self: *Self, n: i32) -> i32
+}
+
+impl Bounded for Volume {
+  MAX :: 100           // MIN is inherited
+  clamp :: func (self: *Volume, n: i32) -> i32 { ... }
+}
 ```
 
 - `Self` names the implementing type.
+- An **associated constant** is `Name :: T`, and reads as it looks: a constant of
+  type `T` that every impl supplies. A trait may give it a **default** with
+  `:=`, which an impl may then omit — exactly as a method may have a default
+  body. It is `:=` and not `=` for the reason §5.2 gives for parameter defaults:
+  every `=` in the grammar is assignment to an existing place or an
+  associated-*type* constraint, and this introduces what a binding holds.
+  A trait that declares one is **not object-safe** (see below).
 - A type implements a trait through an anonymous impl namespace introduced by the
   `impl` keyword: `impl ToJson for CatImage { ... }`. The target is written in the
   header, so a trait may be implemented for a type not in the current namespace,
@@ -316,6 +335,24 @@ io.println(j.render())              // virtual call
 
 render_all :: func (xs: []*dyn ToJson) { ... }
 ```
+
+### Object safety
+
+A trait can be made into a trait object only if a vtable could hold it. The
+following make it **not object-safe**, and each is reported *at the coercion*,
+not at the trait's declaration — a trait nobody erases is under no obligation,
+and most useful traits are not object-safe:
+
+| Not object-safe | Why there is no slot for it |
+|---|---|
+| a method with no `self` receiver | the table is reached *through* the receiver |
+| a generic method | one slot cannot stand for every instantiation |
+| a method taking or returning `Self` **by value** | the size of `Self` is erased, so the caller cannot lay out the argument or result |
+| an associated constant | a vtable holds code, not values |
+
+`self: *Self` and `self: *mut Self` are always fine: a pointer is one word
+whatever it points at. That is the whole rule — erasing the type erases the
+*size*, and every row above is a place the size was still needed.
 
 `dyn` is the **only** place a vtable appears; everything else is static.
 

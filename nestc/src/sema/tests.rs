@@ -1870,6 +1870,111 @@ fn an_operator_in_a_const_function_is_not_a_call_to_check() {
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
 }
 
+// ===< Associated constants >===
+
+#[test]
+fn a_trait_may_declare_associated_constants() {
+    // `MAX :: i32` reads as it looks: a constant of type `i32` that every impl
+    // supplies. It parses as a *type* on the right of `::`, not as a bodyless
+    // `func` — which is what it used to become, giving a signature with a
+    // parameter named `i32`.
+    use crate::ir::TypeDefKind;
+    let src = "\
+Bounded :: trait {
+  MAX :: i32
+  MIN :: i32 := 0
+  clamp :: func (self: *Self, n: i32) -> i32
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let t = session.ir[&file]
+        .types
+        .iter()
+        .find(|t| t.name.as_str() == "Bounded")
+        .expect("the trait is in the IR");
+    let TypeDefKind::Trait { methods, consts } = &t.kind else {
+        panic!("not a trait: {:#?}", t.kind);
+    };
+    // The constants are not methods: they occupy no vtable slot.
+    assert_eq!(methods.len(), 1, "{methods:#?}");
+    let names: Vec<_> = consts.iter().map(|c| c.name.to_string()).collect();
+    assert_eq!(names, vec!["MAX", "MIN"]);
+    // Each carries its declared type.
+    for c in consts {
+        assert_eq!(
+            session
+                .ir_meta
+                .ty(c.id)
+                .expect("an associated constant is typed")
+                .display(&session.defs),
+            "i32"
+        );
+    }
+    // And only the one written with `:=` has a default.
+    assert!(
+        session
+            .ir_meta
+            .get::<crate::ir::DefaultValue>(consts[0].id)
+            .is_none()
+    );
+    assert!(
+        session
+            .ir_meta
+            .get::<crate::ir::DefaultValue>(consts[1].id)
+            .is_some()
+    );
+}
+
+#[test]
+fn an_impl_supplies_an_associated_constant() {
+    let src = "\
+Bounded :: trait {
+  MAX :: i32
+  MIN :: i32 := 0
+  clamp :: func (self: *Self, n: i32) -> i32
+}
+S :: struct { v: i32 }
+impl Bounded for S {
+  MAX :: 100
+  clamp :: func (self: *S, n: i32) -> i32 { return n }
+}
+f :: func (s: *S) -> i32 { return s.clamp(5) }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn an_associated_constant_default_is_checked_against_its_type() {
+    // The default is an expression with a declared type, so it is its own little
+    // inference problem — and a mismatched one is a type error like any other.
+    let src = "T :: trait { MAX :: i32 := true }\n";
+    let msgs = messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("type mismatch")),
+        "{msgs:#?}"
+    );
+}
+
+#[test]
+fn a_trait_with_an_associated_constant_is_not_object_safe() {
+    // A vtable holds code, not values, and every impl would want a different
+    // one. Reported at the coercion, like every other object-safety rule.
+    let src = "\
+T :: trait { MAX :: i32
+  go :: func (self: *Self) -> i32 }
+S :: struct { n: i32 }
+impl T for S { MAX :: 1
+  go :: func (self: *S) -> i32 { return self.n } }
+f :: func (s: *S) { let d: *dyn T := s }
+";
+    let msgs = messages(src);
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(msgs[0].contains("associated constant `MAX`"), "{}", msgs[0]);
+}
+
 // ===< Object safety >===
 
 #[test]

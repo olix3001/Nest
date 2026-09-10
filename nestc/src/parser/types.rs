@@ -567,10 +567,34 @@ impl Parser {
             self.parse_assoc_type()
         } else {
             let directives = self.parse_directives();
-            self.parse_func_expr(directives)
+            // A trait member is a method signature, an associated type, or an
+            // associated constant. Only the first begins with `func` (or the
+            // `extern` that may precede it), so anything else is a *type* —
+            // `MAX :: i32` — and reading it as a bodyless `func` produced a
+            // signature with a parameter named `i32`.
+            if self.at(&TokenKind::FuncKw) || self.at(&TokenKind::ExternKw) {
+                self.parse_func_expr(directives)
+            } else {
+                self.parse_assoc_const()
+            }
         };
         let span = start.to(self.node_span(rhs));
         self.alloc(span, NodeKind::ConstBind { pattern, rhs })
+    }
+
+    /// The `T [ ':=' default ]` RHS of an associated-constant binding.
+    fn parse_assoc_const(&mut self) -> NodeId {
+        let start = self.cur_span();
+        let ty = self.parse_type();
+        let mut end = self.node_span(ty);
+        let default = if self.eat(&TokenKind::ColonEq) {
+            let d = self.parse_expr();
+            end = self.node_span(d);
+            Some(d)
+        } else {
+            None
+        };
+        self.alloc(start.to(end), NodeKind::AssocConst { ty, default })
     }
 
     /// The `type [ ':' bounds ]` RHS of an associated-type binding.

@@ -157,6 +157,13 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         }
         TraitType { .. } => "TraitType".into(),
         AssocType { .. } => "AssocType type".into(),
+        AssocConst { default, .. } => {
+            if default.is_some() {
+                "AssocConst (with default)".into()
+            } else {
+                "AssocConst".into()
+            }
+        }
         FuncExpr {
             extern_abi, body, ..
         } => {
@@ -178,7 +185,11 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
             format!(
                 "Param {name}{}{}",
                 if ty.is_some() { ":" } else { " (inferred)" },
-                if default.is_some() { " (default :=)" } else { "" }
+                if default.is_some() {
+                    " (default :=)"
+                } else {
+                    ""
+                }
             )
         }
         NamespaceExpr { .. } => "NamespaceExpr".into(),

@@ -158,10 +158,24 @@ pub enum TypeDefKind {
     /// have to survive to the stage that builds one.
     Trait {
         methods: Vec<TraitMethod>,
-        /// Associated `::` constants. They are kept because they are what makes
-        /// a trait *not* object-safe — a vtable has no place to put one.
-        assoc_consts: Vec<Symbol>,
+        /// Associated constants (`MAX :: i32`), in declaration order. They are
+        /// what an impl must supply and what makes a trait *not* object-safe —
+        /// a vtable holds code, not values.
+        consts: Vec<AssocConst>,
     },
+}
+
+/// One associated constant a trait declares: `MAX :: i32 [:= 100]`.
+///
+/// Its declared type is `meta.ty(id)`; the default the trait supplies, if any,
+/// is `meta.get::<DefaultValue>(id)` — the same place a parameter's default
+/// lives, for the same reason. An impl may omit a constant exactly when the
+/// trait gave it one, which is how a default method body already works.
+#[derive(Debug, Clone)]
+pub struct AssocConst {
+    pub id: IrId,
+    pub def: DefId,
+    pub name: Symbol,
 }
 
 /// One method a trait declares: a vtable slot.

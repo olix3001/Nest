@@ -84,9 +84,10 @@ enum_type     = { directive } 'enum' [ generics ] '{' { variant } '}'
 variant       = { attribute } snake_ident [ variant_payload ] ','
 variant_payload = '(' type { ',' type } ')' | '{' { field } '}'
 trait_expr    = { directive } 'trait' [ generics ] '{' { trait_member } '}'
-trait_member  = method_sig | assoc_type
+trait_member  = method_sig | assoc_type | assoc_const
 method_sig    = identifier '::' 'func' [ generics ] '(' [ params ] ')' [ '->' type ]
 assoc_type    = identifier '::' 'type' [ ':' bounds ]  // e.g. Item :: type: Iterator + Clone
+assoc_const   = identifier '::' type [ ':=' expr ]     // e.g. MAX :: i32 := 100
 bounds        = type { '+' type }                      // trait bounds only; bare `type` kind is not a bound
 
 type        = type_core

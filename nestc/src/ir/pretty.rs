@@ -6,8 +6,8 @@ use std::fmt::Write;
 use crate::parser::ast::Lit;
 
 use super::{
-    Arm, Block, Dispatch, Expr, ExprKind, Function, IrId, Member, Meta, Pattern, PatternKind,
-    Program, Recv, Stmt, StmtKind, TypeDef, TypeDefKind, Variant,
+    Arm, Block, DefaultValue, Dispatch, Expr, ExprKind, Function, IrId, Member, Meta, Pattern,
+    PatternKind, Program, Recv, Stmt, StmtKind, TypeDef, TypeDefKind, Variant,
 };
 use crate::sema::def::{DefTable, Directive, DirectiveArg};
 
@@ -99,10 +99,7 @@ impl Printer<'_> {
                 let ty = self.ty(repr.id);
                 self.line(&format!("distinct {}{tags} = {ty}", t.name));
             }
-            TypeDefKind::Trait {
-                methods,
-                assoc_consts,
-            } => {
+            TypeDefKind::Trait { methods, consts } => {
                 self.line(&format!("trait {}{tags} {{", t.name));
                 self.indent += 1;
                 // Slot order is the declaration order, and a dump is where a
@@ -125,8 +122,15 @@ impl Printer<'_> {
                     }
                     self.line(&format!("[{i}] {}: {ty}{tags}", m.name));
                 }
-                for c in assoc_consts {
-                    self.line(&format!("const {c}"));
+                for c in consts {
+                    let ty = self.ty(c.id);
+                    match self.meta.get::<DefaultValue>(c.id) {
+                        Some(DefaultValue(d)) => {
+                            let v = self.expr(&d);
+                            self.line(&format!("const {}: {ty} := {v}", c.name));
+                        }
+                        None => self.line(&format!("const {}: {ty}", c.name)),
+                    }
                 }
                 self.indent -= 1;
                 self.line("}");

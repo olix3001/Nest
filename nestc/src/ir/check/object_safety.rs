@@ -81,21 +81,21 @@ impl Cx<'_> {
         let Some(def) = self.linked.ty(trait_def) else {
             return;
         };
-        let TypeDefKind::Trait {
-            methods,
-            assoc_consts,
-        } = &def.kind
-        else {
+        let TypeDefKind::Trait { methods, consts } = &def.kind else {
             return;
         };
         let name = self.defs.canonical_string(trait_def);
 
         // One diagnostic per coercion, naming the first obstacle. A trait with
         // three unsafe methods is still one thing the program cannot do.
-        if let Some(c) = assoc_consts.first() {
+        if let Some(c) = consts.first() {
             self.report(
                 at,
-                format!("`{name}` cannot be made into a trait object: it declares `{c}`"),
+                format!(
+                    "`{name}` cannot be made into a trait object: it declares the associated \
+                     constant `{}`",
+                    c.name
+                ),
                 "a vtable holds code, not values — an associated constant has no slot",
                 out,
             );

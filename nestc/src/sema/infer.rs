@@ -380,6 +380,27 @@ pub fn infer_file(
         cx.infer_func(func);
         cx.finish();
     }
+    // An associated constant's **default** is an expression with a declared
+    // type, so it is its own little inference problem — and it needs `finish()`
+    // for the same reason a function body does: a literal in it has to be
+    // defaulted and every node stamped before lowering reads them back.
+    let assoc_defaults: Vec<(NodeId, NodeId)> = ast
+        .ids()
+        .filter_map(|id| match &ast.node(id).kind {
+            NodeKind::AssocConst {
+                ty,
+                default: Some(d),
+            } => Some((*ty, *d)),
+            _ => None,
+        })
+        .collect();
+    for (ty_node, default) in assoc_defaults {
+        let mut cx = fresh!();
+        let want = cx.ty_from_node(ty_node);
+        let got = cx.infer_expr(default);
+        cx.expect(default, &got, &want);
+        cx.finish();
+    }
 }
 
 /// Every `distinct` type in the program whose representation is numeric, and
@@ -3959,6 +3980,13 @@ impl Inferer<'_> {
                 NodeKind::DistinctType { inner, .. } => {
                     let ty = self.ty_from_node(inner);
                     self.ast.set_meta(inner, ty);
+                }
+                // An associated constant declares a type every impl's value
+                // must have. Stamped on the `AssocConst` node itself, which is
+                // what the member's def points at.
+                NodeKind::AssocConst { ty, .. } => {
+                    let t = self.ty_from_node(ty);
+                    self.ast.set_meta(n, t);
                 }
                 _ => {}
             }
