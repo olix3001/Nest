@@ -4,10 +4,10 @@ expression: "ir_text(\"ml :: func (n: i32) -> i32 {\\n  return n.match {\\n    0
 ---
 func ml(n: i32) -> i32 {
   match n: i32 {
-    0 => 10: i32
-    1 | 2 => 20: i32
-    x => if (x: i32 Gt 5: i32): bool 30: i32
-    _ => 0: i32
+    0 => $cast(10: comptime_int): i32
+    1 | 2 => $cast(20: comptime_int): i32
+    x => if (x: i32 Gt $cast(5: comptime_int): i32): bool $cast(30: comptime_int): i32
+    _ => $cast(0: comptime_int): i32
   }
   return <match: i32>
 }

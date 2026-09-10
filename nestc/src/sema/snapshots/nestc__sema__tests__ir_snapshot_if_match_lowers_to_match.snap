@@ -9,7 +9,7 @@ func choose(o: core.Option.<i32>) -> i32 {
     }
     .some(v) => <block: void>
     block: void {
-      return 0: i32
+      return $cast(0: comptime_int): i32
     }
     _ => <block: void>
   }

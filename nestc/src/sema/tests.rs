@@ -291,6 +291,12 @@ fn node_ty(
         .ids()
         .find(|&id| pred(&ast.node(id).kind))
         .expect("a matching node");
+    // A comptime literal keeps its own `comptime_int` / `comptime_float` type and
+    // records the conversion its context asked for; the type that matters to
+    // these tests is the one it converts *to*.
+    if let Some(c) = ast.meta::<crate::sema::infer::Coercion>(id) {
+        return c.to;
+    }
     ast.meta::<Ty>(id).expect("node has an inferred type")
 }
 
@@ -300,7 +306,7 @@ fn literal_defaults_to_isize_without_context() {
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     let file = entry_file(&session);
     let ty = node_ty(&session, file, |k| {
-        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(7)))
+        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 7.into())
     });
     assert_eq!(ty, Ty::isize());
 }
@@ -311,7 +317,7 @@ fn literal_takes_annotated_type() {
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     let file = entry_file(&session);
     let ty = node_ty(&session, file, |k| {
-        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(7)))
+        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 7.into())
     });
     assert_eq!(
         ty,
@@ -387,7 +393,7 @@ f :: func () { const y := g(3) }
     let file = entry_file(&session);
     // The literal `3` is constrained to the parameter type `i16`.
     let ty = node_ty(&session, file, |k| {
-        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(3)))
+        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 3.into())
     });
     assert_eq!(
         ty,
@@ -1017,7 +1023,7 @@ fn operator_mixed_widths() {
     let file = entry_file(&s);
     // The literal `1` was pinned to `i64` by its operand.
     let ty = node_ty(&s, file, |k| {
-        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(1)))
+        matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 1.into())
     });
     assert_eq!(
         ty,
@@ -1356,5 +1362,217 @@ build_strings :: func () {
     insta::assert_snapshot!(ir_text(src));
 }
 
+#[test]
+fn ir_snap_comptime_casts_are_explicit() {
+    // A literal is a `comptime_int` with no runtime representation; every point
+    // one becomes a runtime integer is an explicit `$cast` in the IR, so no
+    // conversion is left implicit for a later stage to rediscover.
+    insta::assert_snapshot!(ir_text(
+        "P :: struct { x: i32 }\ncc :: func (n: i32) -> i32 {\n  let a: i8 := 5\n  const p := P { x: 1 }\n  return n + 2\n}\n"
+    ));
+}
 
+// ===< regressions: bugs found by the language-wide audit >===
 
+/// Assert `src` analyzes with no diagnostics, returning the session.
+fn analyze_clean(src: &str) -> Session {
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    session
+}
+
+/// The first diagnostic message `src` produces.
+fn first_error(src: &str) -> String {
+    let session = analyze_mem(&[("main", src)], "main");
+    session
+        .diagnostics
+        .first()
+        .map(|d| d.message.clone())
+        .unwrap_or_else(|| panic!("expected a diagnostic, got none"))
+}
+
+#[test]
+fn namespace_constant_is_comptime_and_types_each_use_on_its_own() {
+    // `A :: 42` has no single runtime type: it settles per use site.
+    let session = analyze_clean("A :: 42\nf :: func () {\n  const a: i8 := A\n  const b: i64 := A\n}\n");
+    let file = entry_file(&session);
+    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    assert!(text.contains("let a: i8"), "{text}");
+    assert!(text.contains("let b: i64"), "{text}");
+}
+
+#[test]
+fn inferred_composite_literal_takes_its_type_from_context() {
+    // `.{ ... }` learns its type from the annotation, the parameter, or the
+    // return type — which unification only knows *after* the body is walked.
+    let src = "\
+P :: struct { x: i32, y: i32 }
+take :: func (p: P) -> i32 { return p.x }
+mk :: func () -> P { return .{ x: 1, y: 2 } }
+f :: func () -> i32 {
+  const p: P := .{ x: 1, y: 2 }
+  return take(.{ x: 3, y: 4 })
+}
+";
+    let session = analyze_clean(src);
+    let file = entry_file(&session);
+    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    // Every one is a real struct construction, not an untyped bag of values.
+    assert_eq!(text.matches("P { x:").count(), 3, "{text}");
+    assert!(!text.contains("aggregate"), "{text}");
+}
+
+#[test]
+fn composite_literal_fields_are_checked_against_the_struct() {
+    assert!(first_error("P :: struct { x: i32, y: i32 }\nf :: func () { const p := P { x: 1 } }\n")
+        .contains("missing field `y`"));
+    assert!(first_error("P :: struct { x: i32 }\nf :: func () { const p := P { x: 1, z: 2 } }\n")
+        .contains("has no field `z`"));
+    assert!(
+        first_error("P :: struct { x: i32 }\nf :: func () { const p := P { x: 1, x: 2 } }\n")
+            .contains("more than once")
+    );
+    assert!(first_error("f :: func () { const a: [3]i32 := .{ 1, 2 } }\n")
+        .contains("2 element(s) but `[3]i32` needs 3"));
+}
+
+#[test]
+fn explicit_type_arguments_instantiate_the_callee() {
+    let session = analyze_clean(
+        "id :: func <T> (x: T) -> T { return x }\nf :: func () { const a := id.<i32>(1) }\n",
+    );
+    let file = entry_file(&session);
+    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    assert!(text.contains("let a: i32"), "{text}");
+    assert!(
+        first_error("id :: func <T> (x: T) -> T { return x }\nf :: func () { const a := id.<i32, i64>(1) }\n")
+            .contains("takes 1 type argument(s) but 2")
+    );
+}
+
+#[test]
+fn a_generic_type_named_without_arguments_infers_them() {
+    let session = analyze_clean(
+        "Box :: struct <T> { item: T }\nf :: func () { const b: Box.<i64> := Box { item: 4 } }\n",
+    );
+    let file = entry_file(&session);
+    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    assert!(text.contains("Box.<i64>"), "{text}");
+}
+
+#[test]
+fn a_method_on_a_generic_impl_solves_the_impl_generics_from_the_receiver() {
+    // The receiver is already a pointer, so `*Self` lines up with it directly;
+    // going for the pointee instead left `T` unsolved.
+    let session = analyze_clean(
+        "Box :: struct <T> { it: T }\nimpl <T> Box.<T> { get :: func (self: *Box.<T>) -> T { return self.it } }\nf :: func (b: *Box.<i32>) { const x := b.get() }\n",
+    );
+    let file = entry_file(&session);
+    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    assert!(text.contains("let x: i32"), "{text}");
+}
+
+#[test]
+fn an_impl_inherits_the_traits_default_method_body() {
+    let session = analyze_clean(
+        "T :: trait { m :: func (self: *Self) -> i32 { return 7 } }\nS0 :: struct { v: i32 }\nimpl T for S0 {}\nf :: func (s: *S0) -> i32 { return s.m() }\n",
+    );
+    let file = entry_file(&session);
+    let text = crate::ir::pretty::program_to_string(&session.defs, &session.ir[&file]);
+    assert!(!text.contains("<error>"), "{text}");
+}
+
+#[test]
+fn an_unknown_field_or_method_is_reported_not_silently_erased() {
+    assert!(first_error("P :: struct { x: i32 }\nf :: func (p: P) -> i32 { return p.y }\n")
+        .contains("no field `y`"));
+    assert!(first_error("f :: func (a: i32) { const u := a.nope() }\n")
+        .contains("no method `nope`"));
+}
+
+#[test]
+fn intrinsics_have_their_own_result_types() {
+    // `$size_of` is a `usize` whatever `T` is, and `$new` allocates a `*mut T`.
+    analyze_clean(
+        "C :: struct { n: i32 }\nf :: func () {\n  const a: usize := $size_of.<i32>()\n  const b: *mut C := $new.<C>()\n  const c: []mut u8 := $make.<[]u8>(16)\n}\n",
+    );
+}
+
+#[test]
+fn a_distinct_type_does_not_convert_implicitly() {
+    assert!(
+        first_error("Meters :: distinct i32\nf :: func (m: Meters) -> i32 { return m }\n")
+            .contains("type mismatch")
+    );
+    // A plain alias still does.
+    analyze_clean("Alias :: i32\nf :: func (a: Alias) -> i32 { return a }\n");
+}
+
+#[test]
+fn a_comptime_int_must_fit_the_type_it_settles_on() {
+    assert!(first_error("f :: func () { const a: i8 := 300 }\n").contains("does not fit in `i8`"));
+    assert!(first_error("f :: func () { const a: u8 := -1 }\n").contains("does not fit in `u8`"));
+    // A constant is checked at each use, against that use's type.
+    assert!(first_error("A :: 300\nf :: func () { const a: i8 := A }\n").contains("does not fit"));
+    // The exact value survives however large it was written, and the minimum of
+    // a signed type is not mistaken for its magnitude.
+    analyze_clean("f :: func () {\n  const a: i8 := -128\n  const b: i256 := 99999999999999999999999999999999999999999999\n}\n");
+}
+
+#[test]
+fn an_unknown_enum_variant_or_wrong_payload_is_reported() {
+    assert!(first_error("E :: enum { a }\nf :: func () { const x: E := .nope }\n")
+        .contains("has no variant `.nope`"));
+    assert!(
+        first_error("E :: enum { a(i32) }\nf :: func () { const x: E := .a(1, 2) }\n")
+            .contains("takes 1 value(s) but 2")
+    );
+}
+
+#[test]
+fn break_and_continue_require_an_enclosing_loop() {
+    assert!(first_error("f :: func () { break }\n").contains("`break` outside of a loop"));
+    assert!(first_error("f :: func () { continue }\n").contains("`continue` outside of a loop"));
+    // A `while` counts as one.
+    analyze_clean("f :: func (n: i32) {\n  let i := 0\n  while i < n { i += 1\n    if i == 2 { break }\n    continue }\n}\n");
+}
+
+#[test]
+fn an_using_field_must_be_a_struct() {
+    assert!(first_error("P :: struct { @using n: i32 }\n").contains("must be a struct"));
+    analyze_clean("A :: struct { v: i32 }\nP :: struct { @using a: *A }\n");
+}
+
+#[test]
+fn a_namespace_scope_let_must_be_static() {
+    assert!(first_error("let G: i32 := 0\n").contains("must be `#static`"));
+    analyze_clean("#static let G: i32 := 0\n");
+}
+
+#[test]
+fn attribute_arguments_are_not_program_names() {
+    // `all` in `@public(all)` is compiler vocabulary, not something to resolve.
+    analyze_clean("@public(all) P :: struct { x: i32 }\nf :: func (p: P) -> i32 { return p.x }\n");
+}
+
+#[test]
+fn field_uses_are_bound_to_their_definitions() {
+    // Both literal forms and the access itself carry the field's def, so later
+    // stages can talk about a field without re-deriving it from a name.
+    let session = analyze_clean(
+        "P :: struct { x: i32, y: i32 }\nf :: func (p: *P) -> i32 {\n  const q: P := .{ x: 1, y: 2 }\n  return p.x\n}\n",
+    );
+    let file = entry_file(&session);
+    let ast = &session.asts[&file];
+    let bound = ast
+        .ids()
+        .filter(|&id| {
+            matches!(
+                ast.node(id).kind,
+                NodeKind::FieldInit { .. } | NodeKind::FieldAccess { .. }
+            ) && matches!(ast.meta::<Resolution>(id), Some(Resolution::Def(d))
+                if session.defs.get(d).kind == DefKind::Field)
+        })
+        .count();
+    assert_eq!(bound, 3, "expected both field inits and the access to bind");
+}

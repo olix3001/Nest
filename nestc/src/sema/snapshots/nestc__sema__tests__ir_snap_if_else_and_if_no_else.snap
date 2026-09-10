@@ -4,13 +4,13 @@ expression: "ir_text(\"br :: func (c: bool) -> i32 {\\n  if c { return 1 }\\n  l
 ---
 func br(c: bool) -> i32 {
   if c: bool {
-    return 1: i32
+    return $cast(1: comptime_int): i32
   }
   <if: void>
   if c: bool {
-    tail 10: i32
+    tail $cast(10: comptime_int): i32
   } else {
-    tail 20: i32
+    tail $cast(20: comptime_int): i32
   }
   let x: i32 = <if: i32>
   return x: i32

@@ -34,7 +34,7 @@ use crate::parser::ast::{
 };
 
 use super::def::{DefId, DefKind, DefTable};
-use super::infer::{DynCoerce, Upcast};
+use super::infer::{Coercion, DynCoerce, Upcast};
 use super::infer::OpResolution;
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
@@ -196,6 +196,16 @@ impl Lowerer<'_> {
         if let Some(up) = self.ast.meta::<Upcast>(node) {
             return self.lower_upcast(node, up);
         }
+        // A comptime literal converting into a runtime type: emit the `$cast`
+        // the surface syntax left implicit.
+        if let Some(c) = self.ast.meta::<Coercion>(node) {
+            let value = self.lower_expr_inner(node);
+            return Expr::Intrinsic {
+                name: Symbol::new("cast"),
+                args: vec![value],
+                ty: c.to,
+            };
+        }
         // Likewise a `*T` → `*dyn Trait` unsizing: the fat pointer is built here,
         // not written anywhere in the source.
         if let Some(dc) = self.ast.meta::<DynCoerce>(node) {
@@ -222,6 +232,7 @@ impl Lowerer<'_> {
             return Expr::Field {
                 base: Box::new(autoderef(base)),
                 name,
+                def: Some(up.field),
                 ty,
             };
         }
@@ -235,7 +246,8 @@ impl Lowerer<'_> {
             mutable,
             place: Box::new(Expr::Field {
                 base: Box::new(autoderef(base)),
-                name,
+                name: name.clone(),
+                def: Some(up.field),
                 ty: inner,
             }),
             ty,
@@ -254,14 +266,19 @@ impl Lowerer<'_> {
             },
             NodeKind::Path { .. } => self.lower_name(node, ty),
             NodeKind::FieldAccess { base, name } => {
-                // A resolved namespace member is a global reference.
-                if let Some(def) = self.resolved_def(node) {
-                    return self.global_or_local(def, ty);
+                // A resolved namespace member is a global reference; a resolved
+                // *field* is a projection out of the base value, and carries the
+                // field's own def (see [`crate::sema::fields`]).
+                let def = self.resolved_def(node);
+                match def.map(|d| self.defs.get(d).kind) {
+                    Some(DefKind::Field) | None => {}
+                    Some(_) => return self.global_or_local(def.unwrap(), ty),
                 }
                 let base = autoderef(self.lower_expr(base));
                 Expr::Field {
                     base: Box::new(base),
                     name,
+                    def,
                     ty,
                 }
             }
@@ -411,9 +428,7 @@ impl Lowerer<'_> {
                 args: self.lower_variant_args(&args),
                 ty,
             },
-            NodeKind::CompositeLit { ty: ty_node, body } => {
-                self.lower_composite(ty_node, &body, ty)
-            }
+            NodeKind::CompositeLit { body, .. } => self.lower_composite(&body, ty),
             NodeKind::IntrinsicCall { name, args, .. } => Expr::Intrinsic {
                 name,
                 args: args.iter().map(|&a| self.lower_expr(a)).collect(),
@@ -430,14 +445,15 @@ impl Lowerer<'_> {
     /// reconstructed from the operand and result types so the IR stays fully
     /// typed. `builtin` carries through the primitive-op tag for codegen.
     fn lower_op_call(&mut self, res: OpResolution, lhs: NodeId, rhs: NodeId, ty: Ty) -> Expr {
-        let lty = self.ty(lhs);
-        let rty = self.ty(rhs);
+        // Lower the operands first: an operand that coerces (a `comptime_int`
+        // literal, say) presents its *converted* type to the call, so the
+        // reconstructed signature has to come from the lowered arguments.
+        let args = vec![self.lower_expr(lhs), self.lower_expr(rhs)];
         let callee_ty = Ty::Func {
-            params: vec![lty, rty],
+            params: args.iter().map(|a| a.ty().clone()).collect(),
             ret: Box::new(ty.clone()),
         };
         let callee = Box::new(Expr::Global(res.method, callee_ty));
-        let args = vec![self.lower_expr(lhs), self.lower_expr(rhs)];
         Expr::Call {
             callee,
             args,
@@ -493,10 +509,14 @@ impl Lowerer<'_> {
         }
     }
 
-    fn lower_composite(&mut self, ty_node: Option<NodeId>, body: &CompositeBody, ty: Ty) -> Expr {
+    /// Lower a composite literal to the construct its **type** calls for, not
+    /// the syntax it was written with: `P { .. }` and `.{ .. }` both become an
+    /// `Expr::Construct` for a struct, an `Expr::Tuple` for a tuple, `$array`
+    /// for an array or slice. Inference has already checked the body fits, so
+    /// the type is the authority here.
+    fn lower_composite(&mut self, body: &CompositeBody, ty: Ty) -> Expr {
         match body {
             CompositeBody::Named(fields) => {
-                let def = ty_node.and_then(|t| self.type_def(t));
                 let fields = fields
                     .iter()
                     .filter_map(|&f| match self.ast.node(f).kind.clone() {
@@ -504,22 +524,39 @@ impl Lowerer<'_> {
                         _ => None,
                     })
                     .collect();
-                match def {
-                    Some(def) => Expr::Construct { def, fields, ty },
-                    // An inferred `.{ ... }` whose target type isn't a plain
-                    // nominal: keep the field values as an intrinsic aggregate.
-                    None => Expr::Intrinsic {
-                        name: Symbol::new("aggregate"),
-                        args: fields.into_iter().map(|(_, e)| e).collect(),
+                match &ty {
+                    Ty::Nominal { def, .. } => Expr::Construct {
+                        def: *def,
+                        fields,
                         ty,
                     },
+                    // Named fields on a non-struct: already diagnosed.
+                    _ => Expr::Error(ty),
                 }
             }
-            CompositeBody::Positional(elems) => Expr::Intrinsic {
-                name: Symbol::new("array"),
-                args: elems.iter().map(|&e| self.lower_expr(e)).collect(),
-                ty,
-            },
+            CompositeBody::Positional(elems) => {
+                let elems: Vec<Expr> = elems.iter().map(|&e| self.lower_expr(e)).collect();
+                match &ty {
+                    Ty::Tuple(_) => Expr::Tuple { elems, ty },
+                    // A tuple struct's members are positional but it is still a
+                    // nominal construction; name the fields by their index.
+                    Ty::Nominal { def, .. } => Expr::Construct {
+                        def: *def,
+                        fields: elems
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, e)| (Symbol::new(&i.to_string()), e))
+                            .collect(),
+                        ty,
+                    },
+                    Ty::Array { .. } | Ty::Slice { .. } => Expr::Intrinsic {
+                        name: Symbol::new("array"),
+                        args: elems,
+                        ty,
+                    },
+                    _ => Expr::Error(ty),
+                }
+            }
             CompositeBody::Repeat { value, count } => Expr::Intrinsic {
                 name: Symbol::new("repeat"),
                 args: vec![self.lower_expr(*value), self.lower_expr(*count)],
@@ -683,17 +720,6 @@ impl Lowerer<'_> {
     }
 
     /// The type def a `TypePath`/`Path` type node names, if it is a struct/enum.
-    fn type_def(&self, node: NodeId) -> Option<DefId> {
-        // A composite head may be `Type` (Path/TypePath) or `Type.<args>`
-        // (GenericApply); resolve through to the head's def either way.
-        let head = match self.ast.node(node).kind.clone() {
-            NodeKind::GenericApply { base, .. } => base,
-            _ => node,
-        };
-        let def = self.resolved_def(head)?;
-        matches!(self.defs.get(def).kind, DefKind::Struct | DefKind::Enum).then_some(def)
-    }
-
     fn ty(&self, node: NodeId) -> Ty {
         self.ast.meta::<Ty>(node).unwrap_or(Ty::Error)
     }

@@ -10,14 +10,14 @@ func ps(p: Point, xs: []i32, n: i32, r: *i32) -> i32 {
   let a: i32 = <match: i32>
   match xs: []i32 {
     [first, .. rest, last] => first: i32
-    [] => 0: i32
+    [] => $cast(0: comptime_int): i32
   }
   let c: i32 = <match: i32>
   match n: i32 {
-    0..<10 => 1: i32
-    10..=20 => 2: i32
+    0..<10 => $cast(1: comptime_int): i32
+    10..=20 => $cast(2: comptime_int): i32
     big @ 21 => big: i32
-    _ => 0: i32
+    _ => $cast(0: comptime_int): i32
   }
   let d: i32 = <match: i32>
   match r: *i32 {

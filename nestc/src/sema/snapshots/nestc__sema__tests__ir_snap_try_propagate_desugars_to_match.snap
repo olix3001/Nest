@@ -3,7 +3,7 @@ source: src/sema/tests.rs
 expression: "ir_text_lenient(\"fallible :: func () -> Result.<i32, i32> { return .ok(1) }\\ntp :: func () -> i32 {\\n  const x := fallible().?\\n  return x\\n}\\n\")"
 ---
 func fallible() -> core.Result.<i32, i32> {
-  return .ok(1: i32): core.Result.<i32, i32>
+  return .ok($cast(1: comptime_int): i32): core.Result.<i32, i32>
 }
 func tp() -> i32 {
   block: i32 {

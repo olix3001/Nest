@@ -137,8 +137,8 @@ mod tests {
         let mut ast = Ast::new();
         let sp = Span::new(0, 0);
         let file = FileId(0);
-        let l = ast.alloc(sp, file, NodeKind::Lit(Lit::Int(1)));
-        let r = ast.alloc(sp, file, NodeKind::Lit(Lit::Int(2)));
+        let l = ast.alloc(sp, file, NodeKind::Lit(Lit::Int(1.into())));
+        let r = ast.alloc(sp, file, NodeKind::Lit(Lit::Int(2.into())));
         let add = ast.alloc(
             sp,
             file,
@@ -195,7 +195,7 @@ mod tests {
         }
         let (ast, _add, l, r) = build();
         assert_eq!(Doubler.visit_ast(&ast), 2);
-        assert!(matches!(ast.node(l).kind, NodeKind::Lit(Lit::Int(2))));
-        assert!(matches!(ast.node(r).kind, NodeKind::Lit(Lit::Int(4))));
+        assert!(matches!(&ast.node(l).kind, NodeKind::Lit(Lit::Int(v)) if *v == 2.into()));
+        assert!(matches!(&ast.node(r).kind, NodeKind::Lit(Lit::Int(v)) if *v == 4.into()));
     }
 }

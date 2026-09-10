@@ -4,7 +4,7 @@ expression: "ir_text(\"lp :: func () -> i32 { return loop { break 5 } }\\n\")"
 ---
 func lp() -> i32 {
   loop {
-    break 5: i32
+    break $cast(5: comptime_int): i32
   }
   return <loop: i32>
 }

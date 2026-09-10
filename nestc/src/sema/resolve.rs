@@ -268,6 +268,11 @@ impl Resolver<'_> {
                 self.resolve_field(id, base, &name);
             }
 
+            // An attribute's / directive's arguments are drawn from a fixed
+            // compiler vocabulary — `@public(all)`, `#align(16)` — not from the
+            // program's names, so they are read by `collect`, never resolved.
+            NodeKind::Attribute { .. } | NodeKind::Directive { .. } => {}
+
             // ===< everything else: structural recursion >===
             _ => {
                 let children = self.ast.node(id).kind.children();

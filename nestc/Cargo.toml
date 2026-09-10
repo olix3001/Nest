@@ -12,6 +12,8 @@ lto = "thin"
 
 [dependencies]
 logos = "0.16.1"
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = "0.2"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 

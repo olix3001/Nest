@@ -233,6 +233,9 @@ pub enum Expr {
     Field {
         base: Box<Expr>,
         name: Symbol,
+        /// The field this names, bound by [`crate::sema::fields`]. `None` only
+        /// when the base type was already in error.
+        def: Option<DefId>,
         ty: Ty,
     },
     /// `base.N` — tuple element access.

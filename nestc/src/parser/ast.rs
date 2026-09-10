@@ -23,6 +23,7 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::fmt;
 
+use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
 use crate::common::span::Span;
@@ -62,7 +63,10 @@ pub struct WideFloat;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Lit {
-    Int(i128),
+    /// An integer literal, held at **arbitrary precision**: a literal is a
+    /// `comptime_int` and keeps its exact value until it is cast to a runtime
+    /// integer type, so nothing may truncate it on the way in.
+    Int(BigInt),
     Float(f64),
     Str(String),
     Char(char),
@@ -1052,8 +1056,8 @@ mod tests {
     #[test]
     fn alloc_assigns_sequential_ids() {
         let mut ast = Ast::new();
-        let a = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1)));
-        let b = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(2)));
+        let a = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1.into())));
+        let b = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(2.into())));
         assert_eq!(a, NodeId(0));
         assert_eq!(b, NodeId(1));
         assert_eq!(ast.node(a).id, a);
@@ -1063,8 +1067,8 @@ mod tests {
     #[test]
     fn children_are_collected_in_order() {
         let mut ast = Ast::new();
-        let l = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1)));
-        let r = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(2)));
+        let l = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1.into())));
+        let r = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(2.into())));
         let add = ast.alloc(
             sp(),
             f(),
@@ -1080,12 +1084,12 @@ mod tests {
     #[test]
     fn mutate_through_shared_ref() {
         let mut ast = Ast::new();
-        let n = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1)));
+        let n = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1.into())));
         // A shared &Ast still allows rewriting a node — the RefCell property a
         // MutVisitor relies on.
         let ast_ref = &ast;
-        ast_ref.node_mut(n).kind = NodeKind::Lit(Lit::Int(99));
-        assert!(matches!(ast.node(n).kind, NodeKind::Lit(Lit::Int(99))));
+        ast_ref.node_mut(n).kind = NodeKind::Lit(Lit::Int(99.into()));
+        assert!(matches!(&ast.node(n).kind, NodeKind::Lit(Lit::Int(v)) if *v == 99.into()));
     }
 
     #[test]
@@ -1097,7 +1101,7 @@ mod tests {
         struct Res(&'static str);
 
         let mut ast = Ast::new();
-        let n = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1)));
+        let n = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1.into())));
 
         assert!(!ast.has_meta::<Ty>(n));
         assert_eq!(ast.set_meta(n, Ty(7)), None);
@@ -1118,7 +1122,7 @@ mod tests {
     #[test]
     fn metadata_dropped_on_clone_and_serde() {
         let mut ast = Ast::new();
-        let n = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1)));
+        let n = ast.alloc(sp(), f(), NodeKind::Lit(Lit::Int(1.into())));
         ast.set_meta(n, 42u32);
         // Derived state: not carried by clone.
         assert_eq!(ast.clone().meta::<u32>(n), None);

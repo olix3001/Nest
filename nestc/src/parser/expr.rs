@@ -262,7 +262,7 @@ impl Parser {
                 self.alloc(base_span.to(end), NodeKind::FieldAccess { base, name })
             }
             Some(TokenKind::Int(i)) => {
-                let index = *i as u64;
+                let index = u64::try_from(i).unwrap_or(0);
                 let end = self.cur_span();
                 self.bump();
                 self.alloc(base_span.to(end), NodeKind::TupleIndex { base, index })
@@ -312,7 +312,7 @@ impl Parser {
         let span = self.cur_span();
         match self.peek() {
             Some(TokenKind::Int(n)) => {
-                let n = *n;
+                let n = n.clone();
                 self.bump();
                 self.alloc(span, NodeKind::Lit(Lit::Int(n)))
             }

@@ -100,12 +100,40 @@ impl Collector<'_> {
 
     fn collect_item(&mut self, node: NodeId, scope: DefId) {
         match self.ast.node(node).kind.clone() {
-            NodeKind::Decl { attrs, item, .. } => {
+            NodeKind::Decl {
+                attrs,
+                directives,
+                item,
+            } => {
                 let vis = self.visibility(&attrs);
+                self.check_namespace_binding(item, &directives);
                 self.collect_binding(item, vis, scope);
             }
-            _ => self.collect_binding(node, Vis::PRIVATE, scope),
+            _ => {
+                self.check_namespace_binding(node, &[]);
+                self.collect_binding(node, Vis::PRIVATE, scope)
+            }
         }
+    }
+
+    /// At namespace scope only `#static let ...` is a well-formed `let`/`const`
+    /// (§13.1): a bare one there has no home to live in, and an immutable
+    /// namespace binding is spelled `::`.
+    fn check_namespace_binding(&mut self, item: NodeId, directives: &[NodeId]) {
+        if !matches!(self.ast.node(item).kind, NodeKind::LocalDecl { .. }) {
+            return;
+        }
+        if directives.iter().any(|&d| self.is_directive(d, "static")) {
+            return;
+        }
+        self.report(
+            item,
+            "a `let` / `const` at namespace scope must be `#static`;              use `::` for an immutable binding",
+        );
+    }
+
+    fn is_directive(&self, node: NodeId, want: &str) -> bool {
+        matches!(&self.ast.node(node).kind, NodeKind::Directive { name, .. } if name.as_str() == want)
     }
 
     /// Collect a bare binding node (a `ConstBind`, `LocalDecl`, comptime item).

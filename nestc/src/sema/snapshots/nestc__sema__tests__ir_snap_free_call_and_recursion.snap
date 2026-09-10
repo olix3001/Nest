@@ -3,9 +3,9 @@ source: src/sema/tests.rs
 expression: "ir_text(\"fac :: func (n: isize) -> isize {\\n  if n < 2 { return 1 }\\n  return n * fac(n - 1)\\n}\\n\")"
 ---
 func fac(n: isize) -> isize {
-  if (n: isize Lt 2: isize): bool {
-    return 1: isize
+  if (n: isize Lt $cast(2: comptime_int): isize): bool {
+    return $cast(1: comptime_int): isize
   }
   <if: void>
-  return #builtin(Mul) (core.Mul.mul: func(isize, isize) -> isize)(n: isize, (fac: func(isize) -> isize)(#builtin(Sub) (core.Sub.sub: func(isize, isize) -> isize)(n: isize, 1: isize): isize): isize): isize
+  return #builtin(Mul) (core.Mul.mul: func(isize, isize) -> isize)(n: isize, (fac: func(isize) -> isize)(#builtin(Sub) (core.Sub.sub: func(isize, isize) -> isize)(n: isize, $cast(1: comptime_int): isize): isize): isize): isize
 }

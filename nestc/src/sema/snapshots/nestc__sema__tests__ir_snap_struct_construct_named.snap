@@ -3,5 +3,5 @@ source: src/sema/tests.rs
 expression: "ir_text(\"P :: struct { x: i32, y: i32 }\\nmk :: func () -> P { return P { x: 1, y: 2 } }\\n\")"
 ---
 func mk() -> P {
-  return P { x: 1: i32, y: 2: i32 }: P
+  return P { x: $cast(1: comptime_int): i32, y: $cast(2: comptime_int): i32 }: P
 }

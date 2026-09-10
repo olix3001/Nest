@@ -4,7 +4,7 @@ expression: ir_text(src)
 ---
 func build_ints() -> usize {
   let xs: Vector.<isize> = (Vector.new: func() -> Vector.<isize>)(): Vector.<isize>
-  ((xs: Vector.<isize>.push): func(*mut Vector.<isize>, isize) -> void)(1: isize): void
+  ((xs: Vector.<isize>.push): func(*mut Vector.<isize>, isize) -> void)($cast(1: comptime_int): isize): void
   return (xs: Vector.<isize>.len): usize
 }
 func build_strings() -> void {
@@ -12,8 +12,8 @@ func build_strings() -> void {
   tail ((ws: Vector.<string>.push): func(*mut Vector.<string>, string) -> void)("hi": string): void
 }
 func new() -> Vector.<T> {
-  return Vector { len: 0: usize }: Vector.<T>
+  return Vector { len: $cast(0: comptime_int): usize }: Vector.<T>
 }
 func push(self: *mut Vector.<T>, value: T) -> void {
-  ((self: *mut Vector.<T>.*): Vector.<T>.len): usize = #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(((self: *mut Vector.<T>.*): Vector.<T>.len): usize, 1: usize): usize
+  ((self: *mut Vector.<T>.*): Vector.<T>.len): usize = #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(((self: *mut Vector.<T>.*): Vector.<T>.len): usize, $cast(1: comptime_int): usize): usize
 }

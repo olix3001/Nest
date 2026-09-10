@@ -4,15 +4,15 @@ expression: ir_text(src)
 ---
 func pick(c: Color) -> i32 {
   match c: Color {
-    .red => 1: i32
-    .green => 2: i32
-    .blue => 3: i32
+    .red => $cast(1: comptime_int): i32
+    .green => $cast(2: comptime_int): i32
+    .blue => $cast(3: comptime_int): i32
   }
   return <match: i32>
 }
 func maybe(b: bool) -> core.Option.<i32> {
   if b: bool {
-    return .some(5: i32): core.Option.<i32>
+    return .some($cast(5: comptime_int): i32): core.Option.<i32>
   }
   <if: void>
   return .none: core.Option.<i32>

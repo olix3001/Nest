@@ -32,6 +32,7 @@ pub mod builtins;
 pub mod collect;
 pub mod def;
 pub mod desugar;
+pub mod fields;
 pub mod impls;
 pub mod imports;
 pub mod infer;
@@ -134,6 +135,11 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     let impls = impls::build(&session.defs, &session.asts, &files);
     for &file in &files {
         infer_one(session, &impls, file);
+    }
+    // Field uses can only be bound once their bases are typed, so this runs
+    // after inference and before lowering reads the links.
+    for &file in &files {
+        resolve_fields_one(session, file);
     }
     for &file in &files {
         lower_one(session, file);
@@ -278,6 +284,18 @@ fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
         file_ns,
         file,
     );
+}
+
+/// Bind every field use to its definition, now that inference has typed the
+/// bases those uses hang off.
+fn resolve_fields_one(session: &mut Session, file: FileId) {
+    let Session {
+        asts,
+        defs,
+        diagnostics,
+        ..
+    } = &mut *session;
+    fields::resolve_fields(defs, asts, diagnostics, file);
 }
 
 fn lower_one(session: &mut Session, file: FileId) {

@@ -8,8 +8,8 @@ func dm(c: bool) -> i32 {
   defer (cleanup: func() -> void)(): void
   defer (cleanup: func() -> void)(): void
   if c: bool {
-    return 1: i32
+    return $cast(1: comptime_int): i32
   }
   <if: void>
-  return 2: i32
+  return $cast(2: comptime_int): i32
 }

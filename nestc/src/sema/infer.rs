@@ -39,7 +39,43 @@ use super::{DefMeta, Resolution};
 /// Intrinsics that never return, so a call to one types as [`Ty::Never`] rather
 /// than a value: it absorbs into whatever position it appears in instead of
 /// leaving an unsolvable variable behind.
-const DIVERGING_INTRINSICS: &[&str] = &["abort"];
+const DIVERGING_INTRINSICS: &[&str] = &["abort", "panic"];
+
+/// What an intrinsic's result type is made of.
+///
+/// Most `$`-intrinsics are generic in one type argument, but only some of them
+/// *return* it: `$cast.<T>(x)` is a `T`, while `$new.<T>()` is a `*mut T` and
+/// `$size_of.<T>()` is a `usize` regardless of `T` (§6.9, §12).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum IntrinsicResult {
+    /// The first type argument, unchanged.
+    Arg,
+    /// `*mut` of the first type argument.
+    PtrToArg,
+    /// The first type argument, made mutable (`$make.<[]T>(n)` is `[]mut T`).
+    MutableArg,
+    /// Always `usize` — a size, an alignment, a count.
+    Usize,
+    /// Always `string`.
+    Str,
+    /// No value.
+    Void,
+}
+
+/// The result shape of each known `$`-intrinsic. An intrinsic missing from this
+/// table falls back to its first type argument, or to a context-inferred
+/// variable when it has none.
+const INTRINSIC_RESULTS: &[(&str, IntrinsicResult)] = &[
+    ("cast", IntrinsicResult::Arg),
+    ("transmute", IntrinsicResult::Arg),
+    ("new", IntrinsicResult::PtrToArg),
+    ("make", IntrinsicResult::MutableArg),
+    ("size_of", IntrinsicResult::Usize),
+    ("align_of", IntrinsicResult::Usize),
+    ("name", IntrinsicResult::Str),
+    ("embed_file", IntrinsicResult::Str),
+    ("assert", IntrinsicResult::Void),
+];
 
 /// How an operator (or other trait-dispatched) node resolved, stamped onto the
 /// operator's AST node by the trait solver so [`super::lower`] can emit a
@@ -56,6 +92,18 @@ pub struct OpResolution {
     pub method: DefId,
     /// The builtin-op tag, or `None` for a user impl.
     pub builtin: Option<BuiltinOp>,
+}
+
+/// Records that a node's value is converted on the way to the type the context
+/// wanted — a `comptime_int` literal settling into a runtime integer, say.
+///
+/// The node keeps its **own** type (`comptime_int`); `to` is what the context
+/// asked for. Lowering turns the pair into an explicit `$cast`, so no implicit
+/// conversion survives into the IR.
+#[derive(Debug, Clone)]
+pub struct Coercion {
+    /// The type the value is converted to.
+    pub to: Ty,
 }
 
 /// Records that a `*T` was unsized to a `*dyn Trait` at this node (§3.2): the
@@ -128,6 +176,8 @@ pub fn infer_file(
             ret: Ty::Void,
             breaks: Vec::new(),
             alias_stack: Vec::new(),
+            const_stack: Vec::new(),
+            int_values: HashMap::new(),
         };
         cx.infer_func(func);
         cx.finish();
@@ -202,6 +252,11 @@ struct Inferer<'a> {
     /// Type-alias / associated-type defs currently being expanded, to break
     /// cycles in [`Inferer::expand_alias`].
     alias_stack: Vec<DefId>,
+    /// Constants being typed, so a self-referential one cannot recurse forever.
+    const_stack: Vec<DefId>,
+    /// The exact `comptime_int` behind a node — a literal, or a use of a
+    /// constant that is one — so its settled runtime type can be range-checked.
+    int_values: HashMap<NodeId, num_bigint::BigInt>,
 }
 
 impl Inferer<'_> {
@@ -263,6 +318,8 @@ impl Inferer<'_> {
                 self.report(node, "type annotations needed");
             }
             self.check_float_width(node, &resolved);
+            self.check_int_range(node, &resolved);
+            let resolved = self.record_comptime_coercion(node, resolved);
             self.ast.set_meta(node, resolved);
         }
         self.finalize_upcasts();
@@ -296,8 +353,7 @@ impl Inferer<'_> {
             return;
         }
         let msg = format!(
-            "float literal is too large or too precise for `{}`; \
-             annotate it as `f80` or `f128`",
+            "float literal is too large or too precise for `{}`; annotate it as `f80` or `f128`",
             resolved.display(self.defs)
         );
         self.report(node, msg);
@@ -327,14 +383,29 @@ impl Inferer<'_> {
                     None => Ty::Void,
                 }
             }
-            NodeKind::Lit(lit) => self.lit_ty(&lit),
+            NodeKind::Lit(lit) => {
+                // Keep the literal's exact value so `finish` can check it fits
+                // whatever runtime integer type it settles on.
+                if let Lit::Int(n) = &lit {
+                    self.int_values.insert(node, n.clone());
+                }
+                self.lit_ty(&lit)
+            }
             NodeKind::InterpolatedStr { parts } => {
                 for p in parts {
                     self.infer_expr(p);
                 }
                 Ty::Str
             }
-            NodeKind::Path { .. } => self.path_ty(node),
+            NodeKind::Path { .. } => {
+                let ty = self.path_ty(node);
+                // A use of a `comptime_int` constant carries that constant's
+                // value, so it is range-checked at *this* site.
+                if let Some(v) = self.const_int_value(node) {
+                    self.int_values.insert(node, v);
+                }
+                ty
+            }
             NodeKind::Unary { op, operand } => self.infer_unary(op, operand),
             NodeKind::Binary { op, lhs, rhs } => self.infer_binary(node, op, lhs, rhs),
             NodeKind::Tuple { elems } => {
@@ -352,10 +423,21 @@ impl Inferer<'_> {
                     return self.def_ty(def);
                 }
                 let bty = self.infer_expr(base);
-                // A field we cannot type (an unresolved base) is `Error`, not a
-                // fresh variable — a dangling variable would now be a false
-                // "type annotations needed" (see `finish`).
-                self.field_ty(&bty, name.as_str()).unwrap_or(Ty::Error)
+                if let Some(ft) = self.field_ty(&bty, name.as_str()) {
+                    return ft;
+                }
+                // A field we cannot type is `Error`, not a fresh variable — a
+                // dangling variable would be a false "type annotations needed"
+                // (see `finish`). Say why, unless the base is already broken.
+                let base_ty = self.cx.resolve(&bty);
+                if !matches!(base_ty, Ty::Error) && !is_var(&base_ty) {
+                    let msg = format!(
+                        "no field `{name}` on `{}`",
+                        base_ty.display(self.defs)
+                    );
+                    self.report(node, msg);
+                }
+                Ty::Error
             }
             NodeKind::TupleIndex { base, index } => {
                 let bty = self.infer_expr(base);
@@ -479,7 +561,11 @@ impl Inferer<'_> {
             NodeKind::While { cond, body } => {
                 let cty = self.infer_expr(cond);
                 self.expect(cond, &cty, &Ty::Bool);
+                // A `while` is a loop for `break` / `continue`, but it never
+                // yields a value, so its breaks must be valueless.
+                self.breaks.push(Ty::Void);
                 self.infer_expr(body);
+                self.breaks.pop();
                 Ty::Void
             }
             NodeKind::IntrinsicCall {
@@ -495,21 +581,60 @@ impl Inferer<'_> {
                 if DIVERGING_INTRINSICS.contains(&name.as_str()) {
                     return Ty::Never;
                 }
-                // `$cast.<T>(x)` / `$make.<T>()` etc.: the first type argument, if
-                // any, is the result; otherwise it is context-inferred.
-                generic_args
+                let arg = generic_args
                     .first()
                     .filter(|&&g| !matches!(self.ast.node(g).kind, NodeKind::TypeHole))
-                    .map(|&g| self.ty_from_node(g))
-                    .unwrap_or_else(|| self.cx.fresh())
+                    .map(|&g| self.ty_from_node(g));
+                let shape = INTRINSIC_RESULTS
+                    .iter()
+                    .find(|(n, _)| *n == name.as_str())
+                    .map(|(_, r)| *r)
+                    .unwrap_or(IntrinsicResult::Arg);
+                match shape {
+                    IntrinsicResult::Usize => Ty::usize(),
+                    IntrinsicResult::Str => Ty::Str,
+                    IntrinsicResult::Void => Ty::Void,
+                    IntrinsicResult::PtrToArg => Ty::Ptr {
+                        mutable: true,
+                        inner: Box::new(arg.unwrap_or_else(|| self.cx.fresh())),
+                    },
+                    // `$make.<[]T>(n)` is written with the slice already; it is
+                    // the *mutability* the allocation adds.
+                    IntrinsicResult::MutableArg => match arg {
+                        Some(Ty::Slice { inner, .. }) => Ty::Slice {
+                            mutable: true,
+                            inner,
+                        },
+                        Some(t) => t,
+                        None => self.cx.fresh(),
+                    },
+                    // Without a type argument the result is context-inferred.
+                    IntrinsicResult::Arg => arg.unwrap_or_else(|| self.cx.fresh()),
+                }
             }
             NodeKind::CompositeLit { ty, body } => {
-                let cty = match ty {
-                    Some(t) => self.ty_from_node(t),
-                    None => self.cx.fresh(),
-                };
-                self.infer_composite_body(&cty, &body);
-                cty
+                // Every element is typed on its own first, so the obligation
+                // below only has to *unify* them with the target's members.
+                self.infer_composite_elems(&body);
+                match ty {
+                    // `P { ... }` names its type: check the body right away.
+                    Some(t) => {
+                        let cty = self.ty_from_node(t);
+                        self.check_composite_body(node, &cty);
+                        cty
+                    }
+                    // `.{ ... }` gets its type from context — an annotation, a
+                    // parameter, a return type — which unification has not seen
+                    // yet. Defer the whole body until the variable is solved.
+                    None => {
+                        let recv = self.cx.fresh();
+                        self.cx.register(Obligation::CompositeBody {
+                            recv: recv.clone(),
+                            origin: node,
+                        });
+                        recv
+                    }
+                }
             }
             NodeKind::VariantLit { name, args } => {
                 // The enum is only known from context (the expected type), so the
@@ -518,14 +643,14 @@ impl Inferer<'_> {
                 // discharged once that variable is solved to a `Nominal` enum.
                 let arg_tys = self.variant_lit_arg_tys(&args);
                 let recv = self.cx.fresh();
-                if !arg_tys.is_empty() {
-                    self.cx.register(Obligation::VariantPayload {
-                        recv: recv.clone(),
-                        variant: name,
-                        args: arg_tys,
-                        origin: node,
-                    });
-                }
+                // Registered even with no payload: a unit variant still has to
+                // *exist* on whatever enum the context turns out to want.
+                self.cx.register(Obligation::VariantPayload {
+                    recv: recv.clone(),
+                    variant: name,
+                    args: arg_tys,
+                    origin: node,
+                });
                 recv
             }
             NodeKind::Arg { value, .. } | NodeKind::FieldInit { value, .. } => {
@@ -561,30 +686,24 @@ impl Inferer<'_> {
 
     /// Infer a composite literal's body, unifying each named field value with the
     /// struct's declared field type when the composite's type is a known nominal.
-    fn infer_composite_body(&mut self, cty: &Ty, body: &crate::parser::ast::CompositeBody) {
+    /// Type every element of a composite literal's body, without yet relating
+    /// them to the target type — that is [`check_composite_body`]'s job, which
+    /// may have to wait for the target to be inferred.
+    ///
+    /// [`check_composite_body`]: Inferer::check_composite_body
+    fn infer_composite_elems(&mut self, body: &crate::parser::ast::CompositeBody) {
         use crate::parser::ast::CompositeBody;
         match body {
             CompositeBody::Named(fields) => {
                 for &f in fields {
-                    if let NodeKind::FieldInit { name, value } = self.ast.node(f).kind.clone() {
-                        let vty = self.infer_expr(value);
-                        if let Some(ft) = self.field_ty(cty, name.as_str()) {
-                            self.expect(value, &vty, &ft);
-                        }
+                    if let NodeKind::FieldInit { value, .. } = self.ast.node(f).kind.clone() {
+                        self.infer_expr(value);
                     }
                 }
             }
             CompositeBody::Positional(elems) => {
-                // Array/slice element type, when known.
-                let elem = match self.autoderef(cty) {
-                    Ty::Slice { inner, .. } | Ty::Array { inner, .. } => Some(*inner),
-                    _ => None,
-                };
                 for &e in elems {
-                    let ety = self.infer_expr(e);
-                    if let Some(el) = &elem {
-                        self.expect(e, &ety, el);
-                    }
+                    self.infer_expr(e);
                 }
             }
             CompositeBody::Repeat { value, count } => {
@@ -638,15 +757,22 @@ impl Inferer<'_> {
                     Some(v) => self.infer_expr(v),
                     None => Ty::Void,
                 };
-                if let Some(expected) = self.breaks.last().cloned() {
-                    let anchor = value.unwrap_or(node);
-                    self.expect(anchor, &vty, &expected);
+                match self.breaks.last().cloned() {
+                    Some(expected) => {
+                        let anchor = value.unwrap_or(node);
+                        self.expect(anchor, &vty, &expected);
+                    }
+                    None => self.report(node, "`break` outside of a loop"),
                 }
             }
             NodeKind::Defer { body } => {
                 self.infer_expr(body);
             }
-            NodeKind::Continue => {}
+            NodeKind::Continue => {
+                if self.breaks.is_empty() {
+                    self.report(node, "`continue` outside of a loop");
+                }
+            }
             // Any other statement position holds an expression.
             _ => {
                 self.infer_expr(node);
@@ -667,7 +793,16 @@ impl Inferer<'_> {
                 mutable: true,
                 inner: Box::new(oty),
             },
-            UnOp::Neg | UnOp::BitNot => oty,
+            UnOp::Neg => {
+                // `-128` is one `comptime_int`, not a negation of `128`: the
+                // range check has to see the sign, or the minimum of every
+                // signed type would be rejected.
+                if let Some(v) = self.int_values.remove(&operand) {
+                    self.int_values.insert(operand, -v);
+                }
+                oty
+            }
+            UnOp::BitNot => oty,
             UnOp::Not => {
                 self.expect(operand, &oty, &Ty::Bool);
                 Ty::Bool
@@ -863,25 +998,216 @@ impl Inferer<'_> {
                     // Not an enum (or an error): nothing to constrain.
                     base if !matches!(base, Ty::Nominal { .. }) => Outcome::Solved,
                     base => {
-                        if let Some(payload) = self.variant_payload(&base, variant.as_str()) {
-                            for (i, (arg_name, arg_ty)) in args.iter().enumerate() {
-                                let target = match arg_name {
-                                    Some(n) => payload
-                                        .iter()
-                                        .find(|(pn, _)| pn.as_ref() == Some(n))
-                                        .map(|(_, t)| t.clone()),
-                                    None => payload.get(i).map(|(_, t)| t.clone()),
-                                };
-                                if let Some(t) = target {
-                                    self.expect(*origin, arg_ty, &t);
+                        let (variant, origin) = (variant.clone(), *origin);
+                        let args = args.clone();
+                        match self.variant_payload(&base, variant.as_str()) {
+                            Some(payload) => {
+                                // A tuple payload is positional, so its count is
+                                // part of the variant's shape.
+                                let positional = args.iter().all(|(n, _)| n.is_none());
+                                if positional && payload.len() != args.len() {
+                                    let msg = format!(
+                                        "variant `.{variant}` takes {} value(s) but {} were supplied",
+                                        payload.len(),
+                                        args.len()
+                                    );
+                                    self.report(origin, msg);
                                 }
+                                for (i, (arg_name, arg_ty)) in args.iter().enumerate() {
+                                    let target = match arg_name {
+                                        Some(n) => payload
+                                            .iter()
+                                            .find(|(pn, _)| pn.as_ref() == Some(n))
+                                            .map(|(_, t)| t.clone()),
+                                        None => payload.get(i).map(|(_, t)| t.clone()),
+                                    };
+                                    match target {
+                                        Some(t) => self.expect(origin, arg_ty, &t),
+                                        None => {
+                                            if let Some(n) = arg_name {
+                                                let msg = format!(
+                                                    "variant `.{variant}` has no field `{n}`"
+                                                );
+                                                self.report(origin, msg);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                let msg = format!(
+                                    "`{}` has no variant `.{variant}`",
+                                    self.cx.resolve(&base).display(self.defs)
+                                );
+                                self.report(origin, msg);
                             }
                         }
                         Outcome::Solved
                     }
                 }
             }
+            Obligation::CompositeBody { recv, origin } => {
+                let target = self.cx.shallow(recv);
+                if is_var(&target) {
+                    return Outcome::Deferred;
+                }
+                let (origin, target) = (*origin, target);
+                self.check_composite_body(origin, &target);
+                Outcome::Solved
+            }
         }
+    }
+
+    /// Match a composite literal's body against the type it turned out to have,
+    /// unifying every element and reporting a body that does not fit.
+    fn check_composite_body(&mut self, node: NodeId, target: &Ty) {
+        use crate::parser::ast::CompositeBody;
+        let NodeKind::CompositeLit { body, .. } = self.ast.node(node).kind.clone() else {
+            return;
+        };
+        if matches!(target, Ty::Error) {
+            return;
+        }
+        match body {
+            CompositeBody::Named(fields) => self.check_record_body(node, target, &fields),
+            CompositeBody::Positional(elems) => self.check_positional_body(node, target, &elems),
+            CompositeBody::Repeat { value, count } => {
+                match self.autoderef(target) {
+                    Ty::Array { inner, .. } | Ty::Slice { inner, .. } => {
+                        let vty = self.node_ty(value);
+                        self.expect(value, &vty, &inner);
+                    }
+                    _ => self.report(node, "a `value ; count` literal builds an array"),
+                }
+                // The repeat count is a length, not an element.
+                let cty = self.node_ty(count);
+                self.expect(count, &cty, &Ty::usize());
+            }
+        }
+    }
+
+    /// `{ name: value, ... }` against a struct: every name must be one of the
+    /// struct's fields, and every field must be given exactly once.
+    fn check_record_body(&mut self, node: NodeId, target: &Ty, fields: &[NodeId]) {
+        let Ty::Nominal { def, .. } = self.autoderef(target) else {
+            let msg = format!(
+                "`{}` is not a struct, so it cannot be built from named fields",
+                self.cx.resolve(target).display(self.defs)
+            );
+            self.report(node, msg);
+            return;
+        };
+        let mut seen: Vec<Symbol> = Vec::new();
+        for &f in fields {
+            let NodeKind::FieldInit { name, value } = self.ast.node(f).kind.clone() else {
+                continue;
+            };
+            match self.field_ty(target, name.as_str()) {
+                Some(ft) => {
+                    let vty = self.node_ty(value);
+                    self.expect(value, &vty, &ft);
+                }
+                None => {
+                    let msg = format!(
+                        "`{}` has no field `{name}`",
+                        self.defs.canonical_string(def)
+                    );
+                    self.report(f, msg);
+                    continue;
+                }
+            }
+            if seen.contains(&name) {
+                self.report(f, format!("field `{name}` is given more than once"));
+            } else {
+                seen.push(name);
+            }
+        }
+        // Every declared field must be initialized.
+        let missing: Vec<String> = self
+            .record_field_names(def)
+            .into_iter()
+            .filter(|n| !seen.contains(n))
+            .map(|n| format!("`{n}`"))
+            .collect();
+        if !missing.is_empty() {
+            let msg = format!(
+                "missing field{} {} in `{}`",
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join(", "),
+                self.defs.canonical_string(def)
+            );
+            self.report(node, msg);
+        }
+    }
+
+    /// `{ a, b, ... }` against an array/slice (all one element type), a tuple, or
+    /// a tuple struct (positional member types).
+    fn check_positional_body(&mut self, node: NodeId, target: &Ty, elems: &[NodeId]) {
+        let members: Option<Vec<Ty>> = match self.autoderef(target) {
+            // A sized array wants exactly its length; a slice takes any count.
+            Ty::Array { len, inner, .. } => {
+                let n = len.map_or(elems.len(), |l| l as usize);
+                Some(vec![(*inner).clone(); n])
+            }
+            Ty::Slice { inner, .. } => Some(vec![(*inner).clone(); elems.len()]),
+            Ty::Tuple(ts) => Some(ts),
+            Ty::Nominal { .. } => self.tuple_struct_tys(target),
+            _ => None,
+        };
+        let Some(members) = members else {
+            let msg = format!(
+                "`{}` cannot be built from a positional literal",
+                self.cx.resolve(target).display(self.defs)
+            );
+            self.report(node, msg);
+            return;
+        };
+        if members.len() != elems.len() {
+            let msg = format!(
+                "this literal has {} element(s) but `{}` needs {}",
+                elems.len(),
+                self.cx.resolve(target).display(self.defs),
+                members.len()
+            );
+            self.report(node, msg);
+        }
+        for (e, m) in elems.iter().zip(&members) {
+            let ety = self.node_ty(*e);
+            self.expect(*e, &ety, m);
+        }
+    }
+
+    /// The declared field names of a record struct, in declaration order.
+    fn record_field_names(&self, def: DefId) -> Vec<Symbol> {
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Vec::new();
+        };
+        let ast = &self.asts[&file];
+        let rhs = match ast.node(node).kind.clone() {
+            NodeKind::ConstBind { rhs, .. } => rhs,
+            _ => node,
+        };
+        let NodeKind::StructType {
+            kind: crate::parser::ast::StructKind::Record(fields),
+            ..
+        } = ast.node(rhs).kind.clone()
+        else {
+            return Vec::new();
+        };
+        fields
+            .iter()
+            .filter_map(|&f| match &ast.node(f).kind {
+                NodeKind::Field { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The type already inferred for `node` (composite bodies are walked once,
+    /// up front, so every element already has one).
+    fn node_ty(&mut self, node: NodeId) -> Ty {
+        self.types.get(&node).cloned().unwrap_or_else(|| self.infer_expr(node))
     }
 
     /// Pick the impl of `trait_def` that applies to `self_ty` (with trait
@@ -1095,9 +1421,10 @@ impl Inferer<'_> {
                 out,
                 ..
             } => (self_ty.clone(), *trait_def, *origin, Some(out.clone())),
-            // A variant literal whose enum was never determined: the result
-            // variable itself surfaces as "type annotations needed" in finalize.
-            Obligation::VariantPayload { .. } => return,
+            // A variant or composite literal whose type was never determined:
+            // the result variable itself surfaces as "type annotations needed"
+            // in finalize, so there is nothing extra to say here.
+            Obligation::VariantPayload { .. } | Obligation::CompositeBody { .. } => return,
         };
         let s = self.cx.shallow(&self_ty);
         if !is_var(&s) {
@@ -1131,6 +1458,13 @@ impl Inferer<'_> {
     // ===< calls >===
 
     fn infer_call(&mut self, callee: NodeId, args: &[NodeId]) -> Ty {
+        // `f.<T>(x)` / `recv.m.<T>()` — peel the turbofish. Resolution runs on
+        // the callee it wraps; the explicit arguments only change how the
+        // resolved signature is instantiated, so they ride along as `targs`.
+        let (callee, targs) = match self.ast.node(callee).kind.clone() {
+            NodeKind::GenericApply { base, args: targs } => (base, targs),
+            _ => (callee, Vec::new()),
+        };
         // A call whose callee names a type is a construction, not a function call.
         if let Some(def) = self.callee_type_def(callee) {
             for a in args {
@@ -1149,42 +1483,57 @@ impl Inferer<'_> {
                 // Inherent (or trait-impl) method already collected into the
                 // receiver type's namespace: the fast path.
                 if let Some(m) = self.method_def(&recv, name.as_str()) {
-                    return self.infer_method_call(callee, &recv, m, args);
+                    return self.infer_method_call(callee, &recv, m, args, &targs);
                 }
                 // Otherwise search in-scope trait impls whose self type unifies
                 // with the receiver — the only way to reach a method on a
                 // structural receiver (`[]T`, a range), whose impl parks its
                 // members outside any nominal namespace.
                 if let Some(m) = self.trait_method_def(&recv, name.as_str()) {
-                    return self.infer_method_call(callee, &recv, m, args);
+                    return self.infer_method_call(callee, &recv, m, args, &targs);
                 }
                 // A method on a bounded type parameter resolves in the bound:
                 // `<I: Summing>` makes `it.total()` mean `Summing.total`, with
                 // the concrete impl picked once `I` is instantiated.
                 if let Some(m) = self.bound_method_def(&recv, name.as_str()) {
-                    return self.infer_method_call(callee, &recv, m, args);
+                    return self.infer_method_call(callee, &recv, m, args, &targs);
                 }
                 // A method on a trait object resolves in the trait itself; which
                 // impl runs is a vtable lookup a later stage performs.
                 if let Some(m) = self.dyn_method_def(&recv, name.as_str()) {
-                    return self.infer_method_call(callee, &recv, m, args);
+                    return self.infer_method_call(callee, &recv, m, args, &targs);
                 }
                 // Last, the one ergonomic exception `@using` grants (§3.10): a
                 // method the outer struct does not have resolves on the upcast
                 // target, with the receiver bound to the embedded sub-object.
                 if let Some((m, up)) = self.using_method_def(&recv, name.as_str()) {
                     self.ast.set_meta(base, up.clone());
-                    return self.infer_method_call(callee, &up.target, m, args);
+                    return self.infer_method_call(callee, &up.target, m, args, &targs);
+                }
+                // Nothing found. A field holding a function is still a valid
+                // callee, so only complain when there is no such member at all.
+                if self.field_ty(&recv, name.as_str()).is_none() {
+                    let r = self.cx.resolve(&recv);
+                    if !matches!(r, Ty::Error) && !is_var(&r) {
+                        for a in args {
+                            self.infer_expr(*a);
+                        }
+                        let msg =
+                            format!("no method `{name}` on `{}`", r.display(self.defs));
+                        self.report(callee, msg);
+                        return Ty::Error;
+                    }
                 }
             }
         }
-        // A direct function call: build the signature and **instantiate** its
-        // generic type parameters with fresh variables so each call site infers
-        // its own type arguments (Rust-style).
+        // A direct function call: build the signature and instantiate its generic
+        // type parameters — with whatever the turbofish pinned, and a fresh
+        // variable for every parameter it did not, so each call site infers its
+        // own type arguments (Rust-style).
         if let Some(def) = self.resolved_def(callee) {
             if self.defs.get(def).kind == DefKind::Func {
                 let sig = self.func_def_ty(def);
-                let inst = self.instantiate(&sig);
+                let inst = self.instantiate_with(&sig, def, &targs);
                 self.types.insert(callee, inst.clone());
                 return self.apply_call(callee, &inst, args);
             }
@@ -1254,7 +1603,16 @@ impl Inferer<'_> {
             if !self.in_scope_traits.contains(&td) {
                 continue;
             }
-            let Some(&method) = imp.members.get(&sym) else { continue };
+            // An impl that does not override the member still provides it when
+            // the trait declared a default body (§ trait defaults).
+            let Some(method) = imp
+                .members
+                .get(&sym)
+                .copied()
+                .or_else(|| self.trait_default_method(td, &sym))
+            else {
+                continue;
+            };
             if self.defs.get(method).kind != DefKind::Func {
                 continue;
             }
@@ -1319,6 +1677,33 @@ impl Inferer<'_> {
         }
     }
 
+    /// Unify a method's `self` parameter with the receiver, inserting the one
+    /// reference adjustment the call site implies.
+    ///
+    /// The shapes line up directly more often than not — a `*Self` method called
+    /// on a `*T` receiver — and going straight for the pointee (as if the
+    /// receiver were always a value) silently fails there, leaving the impl's
+    /// generics unsolved. So try the direct unification first, then `*Self`
+    /// against a value receiver (the call takes its address), then a value
+    /// `self` against a pointer receiver (the call derefs it).
+    fn unify_self_param(&mut self, param: &Ty, recv: &Ty) {
+        let snap = self.cx.snapshot();
+        if self.cx.unify(param, recv).is_ok() {
+            return;
+        }
+        self.cx.rollback(snap);
+        if let Ty::Ptr { inner, .. } = self.cx.shallow(param) {
+            let snap = self.cx.snapshot();
+            if self.cx.unify(&inner, recv).is_ok() {
+                return;
+            }
+            self.cx.rollback(snap);
+        }
+        if let Ty::Ptr { inner, .. } = self.cx.shallow(recv) {
+            let _ = self.cx.unify(param, &inner);
+        }
+    }
+
     /// Rewrite a trait *declaration*'s `Self` to what the receiver actually is.
     ///
     /// Only calls that land on a trait's own declaration need this — dispatch
@@ -1343,6 +1728,28 @@ impl Inferer<'_> {
         }
         let map = HashMap::from([(parent, head)]);
         self.subst_type_params(sig, &map)
+    }
+
+    /// The trait's own declaration of `name`, but only when it carries a
+    /// **default body** — a bodyless signature is a requirement the impl must
+    /// satisfy, not something callable through the impl.
+    fn trait_default_method(&self, trait_def: DefId, name: &Symbol) -> Option<DefId> {
+        let m = *self.defs.get(trait_def).ns.members.get(name)?;
+        let d = self.defs.get(m);
+        if d.kind != DefKind::Func {
+            return None;
+        }
+        let (file, node) = (d.file?, d.node?);
+        let ast = &self.asts[&file];
+        let rhs = match &ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        matches!(
+            ast.node(rhs).kind,
+            NodeKind::FuncExpr { body: Some(_), .. }
+        )
+        .then_some(m)
     }
 
     /// Resolve `name` on a trait-object receiver (`dyn Trait` or `*dyn Trait`) to
@@ -1412,9 +1819,10 @@ impl Inferer<'_> {
         recv: &Ty,
         method: super::def::DefId,
         args: &[NodeId],
+        targs: &[NodeId],
     ) -> Ty {
         let sig = self.func_def_ty(method);
-        let inst = self.instantiate(&sig);
+        let inst = self.instantiate_with(&sig, method, targs);
         // Dispatching through a trait object or a bound reaches the trait's
         // *declaration*, whose `Self` is the trait's own nominal. For this call
         // `Self` is the receiver, so say so rather than leaving the signature
@@ -1424,17 +1832,10 @@ impl Inferer<'_> {
         let Ty::Func { params, ret } = self.cx.shallow(&inst) else {
             return Ty::Error;
         };
-        // Unify the `self` parameter with the receiver (through a pointer if the
-        // method takes `*Self` / `*mut Self`).
+        // Bind the `self` parameter to the receiver.
         if let Some(self_param) = params.first() {
-            match self.cx.shallow(self_param) {
-                Ty::Ptr { inner, .. } => {
-                    let _ = self.cx.unify(&inner, recv);
-                }
-                other => {
-                    let _ = self.cx.unify(&other, recv);
-                }
-            }
+            let p = self_param.clone();
+            self.unify_self_param(&p, recv);
         }
         // Unify the remaining parameters with the call arguments.
         let value_params = &params[params.len().min(1)..];
@@ -1454,19 +1855,74 @@ impl Inferer<'_> {
     /// variable). This is what makes a generic function/method infer fresh type
     /// arguments at each call site — e.g. `Vec.new()` yields `Vec.<?>` whose `?`
     /// is later solved by a `push`.
-    fn instantiate(&mut self, ty: &Ty) -> Ty {
-        let mut params = Vec::new();
-        self.collect_type_params(ty, &mut params);
+    /// Instantiate `sig` with the call site's **explicit** type arguments bound
+    /// to `def`'s declared type parameters, in order.
+    ///
+    /// A missing argument, a `_` hole, or an `<Assoc = T>` binding leaves that
+    /// parameter to inference, so `id.<i32>(x)` and `id(x)` differ only in how
+    /// much was pinned up front. Too many arguments is an error.
+    fn instantiate_with(&mut self, sig: &Ty, def: DefId, targs: &[NodeId]) -> Ty {
+        let params = self.func_type_param_defs(def);
+        let explicit: Vec<NodeId> = targs
+            .iter()
+            .copied()
+            .filter(|&a| !matches!(self.ast.node(a).kind, NodeKind::AssocBinding { .. }))
+            .collect();
+        if explicit.len() > params.len() {
+            let msg = format!(
+                "`{}` takes {} type argument(s) but {} were supplied",
+                self.defs.canonical_string(def),
+                params.len(),
+                explicit.len()
+            );
+            let anchor = explicit[params.len()];
+            self.report(anchor, msg);
+        }
+        // `<Assoc = T>` constraints still apply even when positional args do not.
+        for &a in targs {
+            self.record_generic_arg(a);
+        }
         let mut map = HashMap::new();
-        for def in params {
-            let v = self.cx.fresh();
-            map.insert(def, v);
+        for (i, p) in params.iter().enumerate() {
+            let arg = explicit.get(i).copied().filter(|&a| {
+                !matches!(self.ast.node(a).kind, NodeKind::TypeHole)
+            });
+            let t = match arg {
+                Some(a) => self.ty_from_node(a),
+                None => self.cx.fresh(),
+            };
+            map.insert(*p, t);
         }
-        if map.is_empty() {
-            ty.clone()
-        } else {
-            self.subst_type_params(ty, &map)
+        // A parameter the signature mentions but the declaration did not list
+        // (defensive) still needs a variable.
+        let mut rest = Vec::new();
+        self.collect_type_params(sig, &mut rest);
+        for d in rest {
+            map.entry(d).or_insert_with(|| self.cx.fresh());
         }
+        self.subst_type_params(sig, &map)
+    }
+
+    /// A function's declared generic **type** parameters, in order (const value
+    /// parameters are not type arguments and are skipped).
+    fn func_type_param_defs(&self, def: DefId) -> Vec<DefId> {
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Vec::new();
+        };
+        let ast = &self.asts[&file];
+        let rhs = match &ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let NodeKind::FuncExpr { generics, .. } = &ast.node(rhs).kind else {
+            return Vec::new();
+        };
+        generics
+            .iter()
+            .filter(|&&g| matches!(ast.node(g).kind, NodeKind::GenericTypeParam { .. }))
+            .filter_map(|&g| self.def_meta_in(file, g))
+            .collect()
     }
 
     fn collect_type_params(&self, ty: &Ty, out: &mut Vec<super::def::DefId>) {
@@ -1575,7 +2031,117 @@ impl Inferer<'_> {
         match self.defs.get(def).kind {
             DefKind::Func => self.func_def_ty(def),
             DefKind::Struct | DefKind::Enum => self.nominal_of(def),
-            // A top-level const's type is not inferred in the bootstrap.
+            DefKind::Const => self.const_def_ty(def),
+            _ => self.cx.fresh(),
+        }
+    }
+
+    /// The exact integer a path names, when it resolves to a constant whose
+    /// value is an integer literal (following a chain of such constants).
+    fn const_int_value(&self, node: NodeId) -> Option<num_bigint::BigInt> {
+        let mut def = self.resolved_def(node)?;
+        for _ in 0..16 {
+            let d = self.defs.get(def);
+            if d.kind != DefKind::Const {
+                return None;
+            }
+            let (file, n) = (d.file?, d.node?);
+            let NodeKind::ConstBind { rhs, .. } = self.asts[&file].node(n).kind.clone() else {
+                return None;
+            };
+            match self.asts[&file].node(rhs).kind.clone() {
+                NodeKind::Lit(Lit::Int(v)) => return Some(v),
+                NodeKind::Path { .. } => def = self.resolved_def_in(file, rhs)?,
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Give a comptime literal back its `comptime_int` / `comptime_float` type
+    /// and record the conversion the context asked for, so lowering can make it
+    /// an explicit `$cast` instead of a silent change of type.
+    ///
+    /// Only literal-bearing nodes qualify: everything else already *had* the
+    /// runtime type, rather than converting into it.
+    fn record_comptime_coercion(&mut self, node: NodeId, resolved: Ty) -> Ty {
+        let comptime = match &self.ast.node(node).kind {
+            NodeKind::Lit(Lit::Int(_)) => Ty::ComptimeInt,
+            NodeKind::Lit(Lit::Float(_)) => Ty::ComptimeFloat,
+            _ => return resolved,
+        };
+        // A literal that stayed untyped needs no conversion.
+        if !matches!(resolved, Ty::Int { .. } | Ty::Float(_)) {
+            return resolved;
+        }
+        self.ast.set_meta(node, Coercion { to: resolved });
+        comptime
+    }
+
+    /// Reject a `comptime_int` that does not fit the runtime integer type it
+    /// settled on. The literal keeps its exact value until this point, so the
+    /// check is exact however large the number was written.
+    fn check_int_range(&mut self, node: NodeId, resolved: &Ty) {
+        let Some(value) = self.int_values.get(&node).cloned() else {
+            return;
+        };
+        let Ty::Int { signed, width } = resolved else {
+            return;
+        };
+        if super::ty::int_fits(&value, *signed, *width) {
+            return;
+        }
+        let msg = format!(
+            "the literal `{value}` does not fit in `{}`",
+            resolved.display(self.defs)
+        );
+        self.report(node, msg);
+    }
+
+    /// The type of a namespace-level `name :: value` constant, **at this use
+    /// site**.
+    ///
+    /// A constant whose value is a numeric literal is a `comptime_int` /
+    /// `comptime_float`: it has no single runtime type, so each use gets its own
+    /// numeric variable and settles independently — `A :: 42` may be an `i8` in
+    /// one place and an `i64` in another. Anything else has one concrete type,
+    /// inferred from the right-hand side.
+    fn const_def_ty(&mut self, def: DefId) -> Ty {
+        // A constant defined in terms of itself has no type; break the cycle
+        // rather than recursing forever.
+        if self.const_stack.contains(&def) {
+            return Ty::Error;
+        }
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return self.cx.fresh();
+        };
+        let NodeKind::ConstBind { rhs, .. } = self.asts[&file].node(node).kind.clone() else {
+            return self.cx.fresh();
+        };
+        self.const_stack.push(def);
+        let ty = self.const_rhs_ty(file, rhs);
+        self.const_stack.pop();
+        ty
+    }
+
+    /// The type a constant's right-hand side gives it, read in the file the
+    /// constant was declared in.
+    fn const_rhs_ty(&mut self, file: FileId, rhs: NodeId) -> Ty {
+        match self.asts[&file].node(rhs).kind.clone() {
+            // Numeric literals stay comptime: a fresh variable per use.
+            NodeKind::Lit(Lit::Int(_)) => self.cx.fresh_of(TyVarKind::Int),
+            NodeKind::Lit(Lit::Float(_)) => self.cx.fresh_of(TyVarKind::Float),
+            NodeKind::Lit(l) => self.lit_ty(&l),
+            // `-1` / `+1` are still literals for this purpose.
+            NodeKind::Unary { operand, .. } => self.const_rhs_ty(file, operand),
+            // A constant naming another constant inherits its comptime-ness.
+            NodeKind::Path { .. } => match self.resolved_def_in(file, rhs) {
+                Some(d) => self.def_ty(d),
+                None => Ty::Error,
+            },
+            // Anything else has a concrete type; infer it where it is written.
+            _ if file == self.file => self.infer_expr(rhs),
             _ => self.cx.fresh(),
         }
     }
@@ -2045,7 +2611,7 @@ impl Inferer<'_> {
                 primitive_ty(self.defs.get(def).name.as_str()).unwrap_or(Ty::Error)
             }
             DefKind::Struct | DefKind::Enum | DefKind::Trait => {
-                let args = generic_args
+                let mut args: Vec<Ty> = generic_args
                     .iter()
                     .filter(|&&a| {
                         !matches!(self.asts[&file].node(a).kind, NodeKind::AssocBinding { .. })
@@ -2055,6 +2621,14 @@ impl Inferer<'_> {
                 // Record `<Assoc = T>` constraints alongside.
                 for &a in generic_args {
                     self.record_generic_arg_in(file, a);
+                }
+                // A generic type named without (all of) its arguments — `Box` for
+                // `Box.<T>` — gets a fresh variable per missing parameter, so the
+                // use site infers them. Naming none of them is the common case:
+                // `Box { item: 4 }`.
+                let declared = self.type_param_defs(def).len();
+                while args.len() < declared {
+                    args.push(self.cx.fresh());
                 }
                 Ty::Nominal { def, args }
             }
@@ -2071,11 +2645,16 @@ impl Inferer<'_> {
 
     /// Expand a type-alias / associated-type binding to the type it names.
     ///
-    /// For an impl's `Output :: Vec3` this is `Vec3`; for a `distinct`/plain
-    /// alias it is the aliased type. An **abstract** associated type (a trait's
-    /// `Output :: type`, reached when the self type is still generic) has no
-    /// concrete value, so it becomes a fresh variable to be pinned by context
-    /// (e.g. the enclosing return type). Cycles fall back to an opaque nominal.
+    /// For an impl's `Output :: Vec3` this is `Vec3`; for a plain alias it is the
+    /// aliased type. A **`distinct`** alias is the exception: it is a fresh
+    /// nominal type over its underlying one and deliberately does *not* expand,
+    /// so `Meters` and `i32` never unify (§3.8) — converting between them takes
+    /// an explicit `$cast`.
+    ///
+    /// An **abstract** associated type (a trait's `Output :: type`, reached when
+    /// the self type is still generic) has no concrete value, so it becomes a
+    /// fresh variable to be pinned by context (e.g. the enclosing return type).
+    /// Cycles fall back to an opaque nominal.
     fn expand_alias(&mut self, def: DefId) -> Ty {
         if self.alias_stack.contains(&def) {
             return Ty::Nominal { def, args: Vec::new() };
@@ -2088,6 +2667,9 @@ impl Inferer<'_> {
             NodeKind::ConstBind { rhs, .. } => *rhs,
             _ => node,
         };
+        if matches!(self.asts[&file].node(rhs).kind, NodeKind::DistinctType { .. }) {
+            return Ty::Nominal { def, args: Vec::new() };
+        }
         if matches!(self.asts[&file].node(rhs).kind, NodeKind::AssocType { .. }) {
             return self.cx.fresh();
         }
@@ -2100,7 +2682,7 @@ impl Inferer<'_> {
     /// Read a literal array length if the length expression is an int literal.
     fn const_len_in(&self, file: FileId, node: NodeId) -> Option<u64> {
         match &self.asts[&file].node(node).kind {
-            NodeKind::Lit(Lit::Int(n)) if *n >= 0 => Some(*n as u64),
+            NodeKind::Lit(Lit::Int(n)) => u64::try_from(n).ok(),
             _ => None,
         }
     }

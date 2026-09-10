@@ -6,6 +6,7 @@
 //! [`logos::Lexer<'s, _>`] would otherwise force onto the struct.
 
 use logos::{FilterResult, Logos};
+use num_bigint::BigInt;
 
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
@@ -37,7 +38,7 @@ pub enum TokenKind {
     #[regex(r"0[xX][0-9a-fA-F_]+", lex_int)]
     #[regex(r"0[oO][0-7_]+", lex_int)]
     #[regex(r"0[bB][01_]+", lex_int)]
-    Int(i128),
+    Int(BigInt),
 
     #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9_]+)?", lex_float)]
     #[regex(r"[0-9][0-9_]*[eE][+-]?[0-9_]+", lex_float)]
@@ -347,7 +348,10 @@ fn block_comment(lex: &mut logos::Lexer<TokenKind>) -> FilterResult<(), LexError
 }
 
 /// Parse an integer literal in any base, ignoring `_` digit separators.
-fn lex_int(lex: &mut logos::Lexer<TokenKind>) -> Result<i128, LexErrorKind> {
+///
+/// The result is arbitrary-precision: an integer literal is a `comptime_int`
+/// and must keep its exact value until something casts it to a runtime width.
+fn lex_int(lex: &mut logos::Lexer<TokenKind>) -> Result<BigInt, LexErrorKind> {
     let slice = lex.slice();
     let (digits, radix) = if let Some(rest) = strip_prefix_ci(slice, "0x") {
         (rest, 16)
@@ -360,7 +364,7 @@ fn lex_int(lex: &mut logos::Lexer<TokenKind>) -> Result<i128, LexErrorKind> {
     };
 
     let cleaned: String = digits.chars().filter(|&c| c != '_').collect();
-    i128::from_str_radix(&cleaned, radix).map_err(|_| LexErrorKind::InvalidNumber)
+    BigInt::parse_bytes(cleaned.as_bytes(), radix).ok_or(LexErrorKind::InvalidNumber)
 }
 
 /// A lexed float literal: its `f64` value plus whether the source text asked for
@@ -553,11 +557,11 @@ mod tests {
         assert_eq!(
             kinds("123 1_000 0xFF 0o17 0b1010 3.14 1.0e-9 6.022e23"),
             vec![
-                TokenKind::Int(123),
-                TokenKind::Int(1000),
-                TokenKind::Int(255),
-                TokenKind::Int(0o17),
-                TokenKind::Int(0b1010),
+                TokenKind::Int(123.into()),
+                TokenKind::Int(1000.into()),
+                TokenKind::Int(255.into()),
+                TokenKind::Int(0o17.into()),
+                TokenKind::Int(0b1010.into()),
                 TokenKind::Float(narrow(3.14)),
                 TokenKind::Float(narrow(1.0e-9)),
                 TokenKind::Float(narrow(6.022e23)),

@@ -19,6 +19,7 @@
 //! really is an `f80` / `f128`). A general variable that is never solved is a
 //! "type annotations needed" error.
 
+use num_bigint::BigInt;
 use std::collections::HashMap;
 
 use crate::common::symbol::Symbol;
@@ -33,6 +34,17 @@ pub enum IntWidth {
     Fixed(u16),
     /// Pointer-sized (`isize` / `usize`).
     Ptr,
+}
+
+impl IntWidth {
+    /// The number of value bits, taking a pointer-sized width as 64 (the only
+    /// target the bootstrap compiles for).
+    pub fn bits(self) -> u32 {
+        match self {
+            IntWidth::Fixed(n) => n as u32,
+            IntWidth::Ptr => 64,
+        }
+    }
 }
 
 /// The five legal float widths (§3.1).
@@ -73,6 +85,13 @@ pub enum Ty {
     },
     /// A floating-point number.
     Float(FloatWidth),
+    /// An untyped integer literal — arbitrary precision, no runtime
+    /// representation. It survives into the IR only for a constant; anything a
+    /// program can hold at runtime converts out of it first, which lowering
+    /// makes explicit as a `$cast`.
+    ComptimeInt,
+    /// An untyped float literal, the `comptime_float` counterpart.
+    ComptimeFloat,
     Bool,
     Char,
     /// The `string` type.
@@ -165,6 +184,8 @@ impl Ty {
                 FloatWidth::F128 => "f128",
             }
             .to_string(),
+            Ty::ComptimeInt => "comptime_int".into(),
+            Ty::ComptimeFloat => "comptime_float".into(),
             Ty::Bool => "bool".into(),
             Ty::Char => "char".into(),
             Ty::Str => "string".into(),
@@ -278,6 +299,19 @@ pub enum Obligation {
         recv: Ty,
         variant: Symbol,
         args: Vec<(Option<Symbol>, Ty)>,
+        origin: NodeId,
+    },
+    /// A composite literal whose target type is only known from context — the
+    /// inferred `.{ ... }` form. Once `recv` resolves, the body is matched
+    /// against it: named fields against a struct's declared field types,
+    /// positional elements against an array/slice element or a tuple's members.
+    ///
+    /// The literal cannot be checked eagerly because its type flows *in* (from
+    /// an annotation, a parameter, or a return type), so this defers the whole
+    /// body until that type is available.
+    CompositeBody {
+        recv: Ty,
+        /// The literal's body node, re-read when the obligation is discharged.
         origin: NodeId,
     },
 }
@@ -669,6 +703,24 @@ impl InferCtxt {
             },
             other => other,
         }
+    }
+}
+
+/// Whether `value` is representable in an integer type of this width and
+/// signedness — the "coerces to any integer type **it fits**" rule for a
+/// `comptime_int`.
+pub fn int_fits(value: &BigInt, signed: bool, width: IntWidth) -> bool {
+    let bits = width.bits();
+    if bits == 0 {
+        return false;
+    }
+    if signed {
+        // -2^(n-1) ..= 2^(n-1) - 1
+        let limit = BigInt::from(1) << (bits - 1);
+        *value >= -&limit && *value < limit
+    } else {
+        // 0 ..= 2^n - 1
+        *value >= BigInt::from(0) && *value < (BigInt::from(1) << bits)
     }
 }
 
