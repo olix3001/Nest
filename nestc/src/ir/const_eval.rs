@@ -57,7 +57,7 @@
 use std::collections::HashMap;
 
 use num_bigint::BigInt;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::symbol::Symbol;
@@ -65,10 +65,11 @@ use crate::common::target::Target;
 use crate::parser::ast::{BinOp, Lit, UnOp};
 use crate::sema::builtins::BuiltinOp;
 use crate::sema::def::{DefId, DefKind, DefTable};
-use crate::sema::ty::{IntWidth, Ty};
+use crate::sema::ty::{FloatWidth, IntWidth, Ty, float_fits, int_truncate};
 
 use super::{
-    Arm, Block, Dispatch, Expr, ExprKind, IrId, Linked, Meta, Pattern, PatternKind, Stmt, StmtKind,
+    Arm, Block, Dispatch, Expr, ExprKind, ImplicitCast, IrId, Linked, Meta, Pattern, PatternKind,
+    Stmt, StmtKind, TypeDefKind,
 };
 
 /// How many expression evaluations one top-level request may take before the
@@ -82,6 +83,16 @@ const STEP_BUDGET: u32 = 1_000_000;
 /// because unbounded *recursion* would exhaust the host stack long before it
 /// exhausted a step count.
 const DEPTH_BUDGET: u32 = 128;
+
+/// Which promise a `$cast` carries — see [`ConstEval::cast`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CastMode {
+    /// The compiler inserted it, settling a literal on its use site's type. It
+    /// must be exact.
+    Implicit,
+    /// The program wrote it. It converts, and may lose precision.
+    Explicit,
+}
 
 // ===< Values >===
 
@@ -561,7 +572,8 @@ impl<'a> ConstEval<'a> {
                     return Ok(ConstValue::Void);
                 }
             }
-            return self.builtin_op(e.id, op, &vals);
+            let value = self.builtin_op(e.id, op, &vals)?;
+            return self.fits_result(e.id, value);
         }
         match dispatch {
             Dispatch::Virtual { .. } => Err(ConstError::new(
@@ -997,7 +1009,7 @@ impl<'a> ConstEval<'a> {
             _ => {}
         }
         if let (ConstValue::Int(x), ConstValue::Int(y)) = (&a, &b) {
-            return Self::int_binary(at, op, x, y);
+            return self.fits_result(at, Self::int_binary(at, op, x, y)?);
         }
         if let (ConstValue::Float(x), ConstValue::Float(y)) = (&a, &b) {
             return Self::float_binary(at, op, *x, *y);
@@ -1160,7 +1172,13 @@ impl<'a> ConstEval<'a> {
                 if self.unwinding() {
                     return Ok(ConstValue::Void);
                 }
-                self.cast(e.id, value, &self.meta.ty_or_error(e.id))
+                // Whether this cast is the compiler's or the program's decides
+                // what it promises — see [`ImplicitCast`].
+                let mode = match self.meta.get::<ImplicitCast>(e.id) {
+                    Some(_) => CastMode::Implicit,
+                    None => CastMode::Explicit,
+                };
+                self.cast(e.id, value, &self.meta.ty_or_error(e.id), mode)
             }
             other => Err(ConstError::new(
                 e.id,
@@ -1169,17 +1187,34 @@ impl<'a> ConstEval<'a> {
         }
     }
 
-    /// Convert a value to the type a `$cast` names, refusing rather than
-    /// wrapping when it does not fit.
+    /// Convert a value to the type a `$cast` names.
     ///
-    /// The range check is the point. A literal keeps its exact value until it
-    /// settles on a runtime type (§2.5), and this is where "settles" happens for
-    /// a constant — so `A :: u8 := 300` is caught here with the number in hand,
-    /// which is the only place it can be caught exactly.
-    fn cast(&self, at: IrId, value: ConstValue, to: &Ty) -> EvalResult {
+    /// What "convert" means depends on **who wrote the cast** (see
+    /// [`ImplicitCast`]):
+    ///
+    /// - A cast the compiler inserted must be **exact**. It is the conversion
+    ///   that settles an untyped literal on the type its use site asked for
+    ///   (§2.5), and nothing in the source said `300` should become `44`, so a
+    ///   value the target cannot hold is a mistake. This is the only place it
+    ///   can be caught exactly, with the arbitrary-precision number still in
+    ///   hand.
+    /// - A cast the **program** wrote may lose precision, because that is what
+    ///   it does at run time: `$cast.<u8>(300)` is `44` in a constant for the
+    ///   same reason it is `44` in a running program. A compile-time answer that
+    ///   differed from the run-time one would be worse than either.
+    fn cast(&self, at: IrId, value: ConstValue, to: &Ty, mode: CastMode) -> EvalResult {
+        let exact = mode == CastMode::Implicit;
         match (&value, to) {
             (_, Ty::Error) => Ok(value),
             (ConstValue::Int(n), Ty::Int { signed, width }) => {
+                if !exact {
+                    return Ok(ConstValue::Int(int_truncate(
+                        n,
+                        *signed,
+                        *width,
+                        self.target,
+                    )));
+                }
                 if !int_fits(n, *signed, *width, self.target) {
                     return Err(ConstError::new(
                         at,
@@ -1189,14 +1224,48 @@ impl<'a> ConstEval<'a> {
                 Ok(ConstValue::Int(n.clone()))
             }
             (ConstValue::Int(_), Ty::ComptimeInt) => Ok(value),
-            (ConstValue::Int(n), Ty::Float(_)) => {
-                Ok(ConstValue::Float(n.to_f64().ok_or_else(|| {
+            (ConstValue::Int(n), Ty::Float(w)) => {
+                let f = n.to_f64().ok_or_else(|| {
                     ConstError::new(at, "this integer is not representable as a float")
-                })?))
+                })?;
+                self.float_to(at, f, Some(*w), exact, to)
             }
-            (ConstValue::Float(_), Ty::Float(_) | Ty::ComptimeFloat) => Ok(value),
+            (ConstValue::Float(f), Ty::Float(w)) => self.float_to(at, *f, Some(*w), exact, to),
+            (ConstValue::Float(_), Ty::ComptimeFloat) => Ok(value),
+            // Only a written `$cast` reaches this: the language has no implicit
+            // float-to-integer conversion, so there is no exact form of it to
+            // define. It truncates toward zero, as the machine does.
+            (ConstValue::Float(f), Ty::Int { signed, width }) => {
+                if !f.is_finite() {
+                    return Err(ConstError::new(
+                        at,
+                        "an infinite or NaN float has no integer value",
+                    ));
+                }
+                let truncated = BigInt::from_f64(f.trunc()).ok_or_else(|| {
+                    ConstError::new(at, "this float has no integer value at compile time")
+                })?;
+                // Out of range is undefined at run time and unknowable here, so
+                // it is reported rather than guessed at — unlike an integer
+                // narrowing, which has one answer the machine agrees with.
+                if !int_fits(&truncated, *signed, *width, self.target) {
+                    return Err(ConstError::new(
+                        at,
+                        format!("`{truncated}` does not fit in `{}`", to.display(self.defs)),
+                    ));
+                }
+                Ok(ConstValue::Int(truncated))
+            }
             (ConstValue::Char(c), Ty::Int { signed, width }) => {
                 let n = BigInt::from(*c as u32);
+                if !exact {
+                    return Ok(ConstValue::Int(int_truncate(
+                        &n,
+                        *signed,
+                        *width,
+                        self.target,
+                    )));
+                }
                 if !int_fits(&n, *signed, *width, self.target) {
                     return Err(ConstError::new(at, "this `char` does not fit"));
                 }
@@ -1276,6 +1345,92 @@ impl<'a> ConstEval<'a> {
             Ty::Nominal { def, .. } => self.member_index(def, name),
             _ => None,
         }
+    }
+
+    /// Reject an arithmetic result the type it was computed at cannot hold.
+    ///
+    /// `P :: u8 := 200 * 2` multiplies **at `u8`** — the operands were settled
+    /// on `u8` before the multiply — so `400` is not a `u8` constant, and
+    /// storing it would make the compiler claim a byte holds four hundred.
+    /// Refusing is the same answer division by zero already gets, for the same
+    /// reason: at compile time there is nothing to trap, and inventing a
+    /// wrapped value would decide on the language's behalf that arithmetic
+    /// wraps — which the spec does not yet say. A written `$cast` is still the
+    /// way to ask for the low bits.
+    ///
+    /// A `comptime_int` result is *not* checked: it has no width by definition,
+    /// and exact arbitrary-precision arithmetic is the whole point of one.
+    fn fits_result(&self, at: IrId, value: ConstValue) -> EvalResult {
+        let ConstValue::Int(n) = &value else {
+            return Ok(value);
+        };
+        let declared = self.meta.ty_or_error(at);
+        let Ty::Int { signed, width } = self.repr_of(&declared) else {
+            return Ok(value);
+        };
+        if int_fits(n, signed, width, self.target) {
+            return Ok(value);
+        }
+        Err(ConstError::new(
+            at,
+            format!("`{n}` does not fit in `{}`", declared.display(self.defs)),
+        ))
+    }
+
+    /// The primitive a value of this type is stored as: the type itself, or —
+    /// for a `distinct` numeric — what it stands over (§2.4), following a chain
+    /// of them.
+    fn repr_of(&self, ty: &Ty) -> Ty {
+        let mut cur = ty.clone();
+        for _ in 0..16 {
+            let Ty::Nominal { def, .. } = cur else {
+                return cur;
+            };
+            let Some(TypeDefKind::Distinct { repr }) = self.linked.ty(def).map(|t| &t.kind) else {
+                return Ty::Nominal {
+                    def,
+                    args: Vec::new(),
+                };
+            };
+            cur = self.meta.ty_or_error(repr.id);
+        }
+        cur
+    }
+
+    /// Narrow a float to `width`, rounding as the machine would.
+    ///
+    /// An exact (compiler-inserted) conversion additionally refuses a value the
+    /// width cannot hold **at all** — one that overflows to infinity, or a
+    /// non-zero one that underflows to zero. Ordinary rounding is never an
+    /// error: `0.1` is not an `f64` either, and rejecting it would reject nearly
+    /// every float literal ever written (see
+    /// [`float_fits`](crate::sema::ty::float_fits)).
+    fn float_to(
+        &self,
+        at: IrId,
+        value: f64,
+        width: Option<FloatWidth>,
+        exact: bool,
+        to: &Ty,
+    ) -> EvalResult {
+        let Some(width) = width else {
+            return Ok(ConstValue::Float(value));
+        };
+        if exact && !float_fits(value, width) {
+            return Err(ConstError::new(
+                at,
+                format!("`{value:?}` does not fit in `{}`", to.display(self.defs)),
+            ));
+        }
+        // Store what the target actually holds, so a constant and the same
+        // expression at run time are the same number. `f16` is range-checked
+        // above but not rounded: the host has no `f16` to round through, and
+        // the bootstrap emits no code yet that would notice.
+        let stored = match width {
+            FloatWidth::F32 => value as f32 as f64,
+            _ => value,
+        };
+        Ok(ConstValue::Float(stored))
     }
 
     fn project(at: IrId, value: ConstValue, index: usize) -> EvalResult {

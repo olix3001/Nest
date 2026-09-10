@@ -5166,3 +5166,122 @@ fn a_byte_string_is_a_byte_slice() {
     let msg = first_error("f :: func (s: str) {}\nmain :: func () { f(b\"hi\") }\n");
     assert!(msg.contains("expected `core.str`, found `[]u8`"), "{msg}");
 }
+
+// ===< What a conversion promises (§6.5) >===
+
+/// The conversion the *compiler* inserts to settle a literal must be exact: it
+/// is the compiler choosing a type, not the program asking for a narrowing.
+#[test]
+fn an_inserted_conversion_must_be_exact() {
+    assert!(first_error("main :: func () { let y: u8 := 300 }\n").contains("does not fit in `u8`"));
+    assert!(
+        first_error("main :: func () { let z: f32 := 3.5e40 }\n").contains("does not fit in `f32`")
+    );
+    // A non-zero literal that would underflow to zero loses the number just as
+    // completely as one that overflows.
+    assert!(
+        first_error("main :: func () { let z: f32 := 1.0e-60 }\n")
+            .contains("does not fit in `f32`")
+    );
+    // Rounding is not a loss the rule can reject — `0.1` is no more exact in
+    // `f64` than in `f32`.
+    analyze_clean("main :: func () { let e: f32 := 0.1 }\n");
+}
+
+/// A `$cast` the program wrote may lose precision: it does at run time, and a
+/// constant that disagreed with the running program would be worse than either.
+#[test]
+fn a_written_cast_may_lose_precision() {
+    analyze_clean("main :: func () {\n  let x: u32 := 30423\n  let y: u8 := $cast.<u8>(x)\n}\n");
+    let ir = ir_text("A :: 400\nX :: u8 := $cast.<u8>(A)\nmain :: func () {}\n");
+    assert!(ir.contains("// = 144"), "{ir}");
+    let ir = ir_text("Y :: u8 := $cast.<u8>(300)\nmain :: func () {}\n");
+    assert!(ir.contains("// = 44"), "{ir}");
+    // The float direction too: what the program asked for is what it gets.
+    let ir = ir_text("Z :: f32 := $cast.<f32>(3.5e40)\nmain :: func () {}\n");
+    assert!(ir.contains("// = inf"), "{ir}");
+}
+
+/// The same value, both ways round, in the one place the difference is easiest
+/// to get wrong: a constant, where the evaluator is what performs the cast.
+#[test]
+fn a_constant_conversion_is_checked_and_a_written_one_is_not() {
+    let msgs = messages("B :: u8 := 300\nmain :: func () {}\n");
+    assert!(msgs.iter().any(|m| m.contains("does not fit")), "{msgs:#?}");
+    // Exactly one diagnostic: inference and the evaluator both check this
+    // conversion, and one mistake gets one message.
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(messages("B :: u8 := $cast.<u8>(300)\nmain :: func () {}\n").is_empty());
+}
+
+/// A `f32` constant stores what an `f32` holds, so the constant and the same
+/// expression at run time are the same number.
+#[test]
+fn a_narrowed_float_constant_stores_the_narrowed_value() {
+    let ir = ir_text("E :: f32 := 0.1\nmain :: func () {}\n");
+    assert!(ir.contains("// = 0.10000000149011612"), "{ir}");
+}
+
+/// A string literal has nothing to check: every type a `comptime_str` may
+/// settle on holds all of it (§1.5), so the exactness rule is satisfied by
+/// construction rather than by a check.
+#[test]
+fn a_string_conversion_is_always_exact() {
+    let ir = ir_text(
+        "A :: []u8 := \"héllo\"\nB :: []char := \"héllo\"\nC :: str := \"héllo\"\nmain :: func () {}\n",
+    );
+    assert!(ir.contains("// = b\"h\\xc3\\xa9llo\""), "{ir}");
+    assert!(ir.contains("// = { 'h', 'é', 'l', 'l', 'o' }"), "{ir}");
+    assert!(ir.contains("// = \"héllo\""), "{ir}");
+}
+
+/// §2.4 lets a literal reach a `distinct` numeric with no written cast, so the
+/// range check has to follow the type down to what it stands over — nothing
+/// else would catch it.
+#[test]
+fn a_literal_settling_on_a_distinct_numeric_is_range_checked() {
+    let src = "HttpPort :: distinct u16\nmain :: func () { let q: HttpPort := 70000 }\n";
+    assert!(
+        first_error(src).contains("does not fit in `HttpPort`"),
+        "{}",
+        first_error(src)
+    );
+    // A chain of `distinct`s still ends at a primitive.
+    let src = "A :: distinct u8\nB :: distinct A\nmain :: func () { let q: B := 300 }\n";
+    assert!(
+        first_error(src).contains("does not fit in `B`"),
+        "{}",
+        first_error(src)
+    );
+    // And the value that fits is still accepted with no ceremony.
+    analyze_clean("HttpPort :: distinct u16\nmain :: func () { let p: HttpPort := 80 }\n");
+}
+
+/// Arithmetic happens **at** the type the operands settled on, so a result that
+/// type cannot hold is refused — the same answer division by zero gets, and for
+/// the same reason: at compile time there is nothing to trap, and a wrapped
+/// value would decide on the language's behalf that arithmetic wraps.
+#[test]
+fn a_constant_arithmetic_result_must_fit_its_type() {
+    let msgs = messages("P :: u8 := 200 * 2\nmain :: func () {}\n");
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("`400` does not fit in `u8`")),
+        "{msgs:#?}"
+    );
+    // A `distinct` numeric is checked against what it stands over.
+    let msgs =
+        messages("HttpPort :: distinct u16\nQ :: HttpPort := 400 * 200\nmain :: func () {}\n");
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("`80000` does not fit in `HttpPort`")),
+        "{msgs:#?}"
+    );
+    // A `comptime_int` has no width, so its arithmetic stays exact — that is
+    // the whole point of one.
+    let ir = ir_text("BIG :: 200 * 2\nmain :: func () {}\n");
+    assert!(ir.contains("// = 400"), "{ir}");
+    // And the low bits are still one written cast away.
+    let ir = ir_text("P :: u8 := $cast.<u8>(200 * 2)\nmain :: func () {}\n");
+    assert!(ir.contains("// = 144"), "{ir}");
+}

@@ -110,6 +110,24 @@ pub use meta::{IrId, Meta};
 #[derive(Debug, Clone)]
 pub struct DefaultValue(pub Expr);
 
+/// Marks a `$cast` the **compiler** inserted, rather than one the program wrote
+/// (§1.5, §2.5). Set by lowering on the node it builds for a
+/// [`Coercion`](crate::sema::infer::Coercion); read by the const evaluator.
+///
+/// The two are the same operation and different *promises*. A written
+/// `$cast.<u8>(x)` is the program saying "narrow this, I know what that costs" —
+/// it may lose precision, exactly as it does at run time. An inserted one is the
+/// compiler settling an untyped literal on the type its use site asked for, and
+/// that conversion has to be **exact**: nothing in the source said `300` should
+/// become `44`, so a literal that does not fit is a mistake rather than a
+/// truncation.
+///
+/// It is a side-table fact rather than a distinct [`ExprKind`] because the
+/// distinction is spent by the time the check has run: to everything downstream
+/// of the const evaluator a cast is a cast.
+#[derive(Debug, Clone, Copy)]
+pub struct ImplicitCast;
+
 /// A whole lowered program: the type definitions it declares, the constants and
 /// static regions it declares, and every function that had a body.
 #[derive(Debug, Clone)]

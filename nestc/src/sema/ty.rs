@@ -433,7 +433,7 @@ pub struct InferCtxt {
     /// it has no [`DefTable`](super::def::DefTable) and a `distinct` type is an
     /// ordinary [`Ty::Nominal`] here — so the answer is computed once, up front,
     /// and handed in.
-    numeric_distincts: HashMap<DefId, TyVarKind>,
+    numeric_distincts: HashMap<DefId, Ty>,
     /// The `#lang("str")` type, when the program has one.
     ///
     /// Handed in for the same reason [`InferCtxt::numeric_distincts`] is:
@@ -451,7 +451,7 @@ impl InferCtxt {
     /// Record which `distinct` types stand over a numeric representation, so a
     /// numeric-literal variable may become one. Computed once per program by
     /// [`super::infer::infer_file`] and installed into every context it builds.
-    pub fn set_numeric_distincts(&mut self, m: HashMap<DefId, TyVarKind>) {
+    pub fn set_numeric_distincts(&mut self, m: HashMap<DefId, Ty>) {
         self.numeric_distincts = m;
     }
 
@@ -566,8 +566,24 @@ impl InferCtxt {
     /// Whether `ty` is a `distinct` type standing over a numeric primitive, and
     /// which family. `None` for everything else.
     pub fn numeric_distinct_kind(&self, ty: &Ty) -> Option<TyVarKind> {
+        Some(match self.numeric_distinct_repr(ty)? {
+            Ty::Int { .. } => TyVarKind::Int,
+            Ty::Float(_) => TyVarKind::Float,
+            _ => return None,
+        })
+    }
+
+    /// The **primitive** a `distinct` numeric type ultimately stands over,
+    /// following a chain of them. `None` for everything else.
+    ///
+    /// A literal that settles on a `distinct` numeric has to be range-checked
+    /// against that primitive: `HttpPort :: distinct u16` is a `u16` in every
+    /// way that concerns whether `70000` fits, and §2.4's whole point is that
+    /// the literal reaches it *without* a written cast — so nothing else would
+    /// check it.
+    pub fn numeric_distinct_repr(&self, ty: &Ty) -> Option<Ty> {
         match ty {
-            Ty::Nominal { def, .. } => self.numeric_distincts.get(def).copied(),
+            Ty::Nominal { def, .. } => self.numeric_distincts.get(def).cloned(),
             _ => None,
         }
     }
@@ -884,7 +900,7 @@ impl InferCtxt {
                 // need a `$cast`, which is precisely the ceremony the type is
                 // meant to buy back.
                 Ty::Nominal { def, .. }
-                    if self.numeric_distincts.get(def) == Some(&TyVarKind::Int) => {}
+                    if matches!(self.numeric_distincts.get(def), Some(Ty::Int { .. })) => {}
                 // Two int literals meeting: keep the other variable numeric too.
                 Ty::Var(w) if self.kind(*w) == TyVarKind::Int => {}
                 Ty::Var(w) if self.kind(*w) == TyVarKind::General => {
@@ -897,7 +913,7 @@ impl InferCtxt {
             TyVarKind::Float => match ty {
                 Ty::Float(_) => {}
                 Ty::Nominal { def, .. }
-                    if self.numeric_distincts.get(def) == Some(&TyVarKind::Float) => {}
+                    if matches!(self.numeric_distincts.get(def), Some(Ty::Float(_))) => {}
                 Ty::Var(w) if self.kind(*w) == TyVarKind::Float => {}
                 Ty::Var(w) if self.kind(*w) == TyVarKind::General => {
                     return self.bind_raw(*w, &Ty::Var(v));
@@ -1044,6 +1060,75 @@ pub fn int_fits(value: &BigInt, signed: bool, width: IntWidth, target: Target) -
         // 0 ..= 2^n - 1
         *value >= BigInt::from(0) && *value < (BigInt::from(1) << bits)
     }
+}
+
+/// Whether `value` survives the conversion to a float of this width — the
+/// float counterpart of [`int_fits`], and the rule an **implicit** conversion
+/// has to satisfy (§1.5).
+///
+/// "Fits" is deliberately not "is represented exactly". Almost no decimal
+/// fraction is exactly a binary float — `0.1` is not one in `f64` any more than
+/// in `f32` — so requiring exactness would reject nearly every float literal
+/// ever written. What is rejected is a conversion that loses the number
+/// *entirely*: a finite value that overflows to infinity, and a non-zero value
+/// that underflows to zero. Those two are the cases where the type cannot hold
+/// the written number at all, and where silently continuing would make the
+/// program mean something the source never said.
+///
+/// `f16` is range-checked against its extremes rather than rounded, and `f80` /
+/// `f128` accept whatever an `f64` already holds: the compiler's own storage for
+/// a compile-time float is an `f64` (see [`crate::parser::ast::Lit::Float`]), so
+/// a literal needing more than that is caught earlier, by `WideFloat`.
+pub fn float_fits(value: f64, width: FloatWidth) -> bool {
+    if !value.is_finite() {
+        // An `f64` that is already infinite means the literal overflowed on the
+        // way in; no width the compiler can store recovers it.
+        return false;
+    }
+    if value == 0.0 {
+        return true;
+    }
+    match width {
+        FloatWidth::F32 => {
+            let narrowed = value as f32;
+            narrowed.is_finite() && narrowed != 0.0
+        }
+        // The largest finite `f16` and the smallest positive subnormal one.
+        FloatWidth::F16 => value.abs() <= F16_MAX && value.abs() >= F16_MIN_SUBNORMAL,
+        FloatWidth::F64 | FloatWidth::F80 | FloatWidth::F128 => true,
+    }
+}
+
+/// The largest finite `f16` (2^15 × (2 − 2^−10)).
+const F16_MAX: f64 = 65504.0;
+
+/// The smallest positive subnormal `f16` (2^−24). Anything smaller rounds to
+/// zero.
+const F16_MIN_SUBNORMAL: f64 = 5.960_464_477_539_063e-8;
+
+/// Truncate `value` to `width` the way the machine does: keep the low bits and
+/// reinterpret them with the target's signedness.
+///
+/// This is what an **explicit** `$cast` means. The program asked for the
+/// narrowing and a run-time cast would do exactly this, so a compile-time one
+/// that refused — or that produced some other number — would make a constant
+/// disagree with the same expression evaluated at run time.
+pub fn int_truncate(value: &BigInt, signed: bool, width: IntWidth, target: Target) -> BigInt {
+    let bits = width.bits(target);
+    if bits == 0 {
+        return BigInt::from(0);
+    }
+    let modulus = BigInt::from(1) << bits;
+    // `mod_floor`, not `%`: Rust's remainder keeps the sign of the dividend, and
+    // the low bits of a negative number are its two's-complement ones.
+    let mut low = value % &modulus;
+    if low < BigInt::from(0) {
+        low += &modulus;
+    }
+    if signed && low >= (BigInt::from(1) << (bits - 1)) {
+        low -= modulus;
+    }
+    low
 }
 
 /// Parse a primitive type name (`i32`, `u7`, `usize`, `f64`, `bool`, …) into a

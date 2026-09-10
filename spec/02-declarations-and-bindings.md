@@ -73,9 +73,24 @@ floats, booleans, characters, string and byte-string literals, and composites of
 those, with locals, branches, `match` and loops. It holds no pointers and no heap
 values, so taking an address is not a constant expression — a string literal is
 not an exception, being read-only data the compiled program contains rather than
-something allocated. Integer arithmetic is exact and division by zero is
-an error rather than a trap, since there is no running program to trap. A
-computation that does not terminate is reported against a step budget.
+something allocated. Division by zero is an error rather than a trap, since
+there is no running program to trap. A computation that does not terminate is
+reported against a step budget.
+
+Integer arithmetic is **exact**, and where the result has a width it must fit
+it. A `comptime_int` has no width, so `BIG :: 200 * 2` is `400`; but
+`P :: u8 := 200 * 2` multiplies *at* `u8`, and `400` is not a `u8`:
+
+```
+BIG :: 200 * 2               // 400 — a comptime_int has no width
+P   :: u8 := 200 * 2         // error: `400` does not fit in `u8`
+P   :: u8 := $cast.<u8>(200 * 2)   // 144 — the low bits, asked for in writing
+```
+
+The same holds for a `distinct` numeric, checked against what it stands over
+(§2.4). Refusing rather than wrapping is the same answer division by zero gets:
+a constant is its value, and one that silently became a different number would
+be a worse answer than a rejected program.
 
 The left-hand side is a **pattern** (see
 [07-patterns-and-matching.md](07-patterns-and-matching.md)), which is why import

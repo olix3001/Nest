@@ -127,6 +127,10 @@ integer — until it is used in a typed context, where it implicitly converts to
 any integer type whose range holds its value (a value that does not fit is a
 compile error). A literal that no context constrains defaults to `isize`.
 
+The conversion the compiler inserts must be exact; a `$cast` the program writes
+narrows the way the machine does. `let y: u8 := 300` is an error and
+`$cast.<u8>(300)` is `44` — see §6.5.
+
 ### Floating-point literals
 
 ```
@@ -136,7 +140,11 @@ compile error). A literal that no context constrains defaults to `isize`.
 ```
 
 Has the type `comptime_float` until context assigns a concrete float type
-(`f16`/`f32`/`f64`/`f80`/`f128`); defaults to `f64`.
+(`f16`/`f32`/`f64`/`f80`/`f128`); defaults to `f64`. The width it settles on must
+be able to hold it: a literal that would overflow to infinity, or a non-zero one
+that would underflow to zero, is a compile error. Rounding is not — no decimal
+fraction is exactly a binary float — and a written `$cast` may lose either way
+(§6.5).
 
 ### Boolean literals
 

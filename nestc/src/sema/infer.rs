@@ -184,6 +184,21 @@ pub enum RecvAdjust {
 /// The node keeps its **own** type (`comptime_int`); `to` is what the context
 /// asked for. Lowering turns the pair into an explicit `$cast`, so no implicit
 /// conversion survives into the IR.
+/// Marks a node whose value **inference already reported** as out of range for
+/// the type it settled on, so the const evaluator's own range check does not say
+/// it twice.
+///
+/// The two checks overlap on purpose and neither is redundant: inference catches
+/// a literal at the site it is written, with the best span, and the evaluator
+/// catches everything *computed* (`A :: u8 := 200 * 2`), which inference never
+/// sees a value for. They only ever meet on a bare literal, and this is what
+/// keeps that meeting from producing two diagnostics for one mistake.
+///
+/// Set on the AST node by inference and copied onto the lowered `$cast` by
+/// [`super::lower`], because the evaluator reports against the cast.
+#[derive(Debug, Clone, Copy)]
+pub struct RangeReported;
+
 #[derive(Debug, Clone)]
 pub struct Coercion {
     /// The type the value is converted to.
@@ -358,6 +373,7 @@ pub fn infer_file(
                 alias_stack: Vec::new(),
                 const_stack: Vec::new(),
                 int_values: HashMap::new(),
+                float_values: HashMap::new(),
             }
         };
     }
@@ -447,7 +463,7 @@ fn str_lang_ty(defs: &DefTable, lang: &LangItems) -> Option<Ty> {
 /// Resolution has already run, so each step is a def lookup rather than a
 /// syntactic guess: the inner type node resolves either to a primitive — in
 /// which case its name gives the family — or to another type def to follow.
-fn numeric_distincts(defs: &DefTable, asts: &HashMap<FileId, Ast>) -> HashMap<DefId, TyVarKind> {
+fn numeric_distincts(defs: &DefTable, asts: &HashMap<FileId, Ast>) -> HashMap<DefId, Ty> {
     /// The inner type node of `def`, if `def` is a `distinct` type.
     fn distinct_inner(
         defs: &DefTable,
@@ -483,9 +499,10 @@ fn numeric_distincts(defs: &DefTable, asts: &HashMap<FileId, Ast>) -> HashMap<De
             let next = defs.resolve_alias(next);
             let nd = defs.get(next);
             if nd.kind == DefKind::Primitive {
+                // The primitive itself, not just its family: a literal
+                // settling on this `distinct` type has to fit that width.
                 kind = match super::ty::primitive_ty(nd.name.as_str()) {
-                    Some(Ty::Int { .. }) => Some(TyVarKind::Int),
-                    Some(Ty::Float(_)) => Some(TyVarKind::Float),
+                    Some(t @ (Ty::Int { .. } | Ty::Float(_))) => Some(t),
                     _ => None,
                 };
                 break;
@@ -578,6 +595,9 @@ struct Inferer<'a> {
     /// The exact `comptime_int` behind a node — a literal, or a use of a
     /// constant that is one — so its settled runtime type can be range-checked.
     int_values: HashMap<NodeId, num_bigint::BigInt>,
+    /// The same, for a `comptime_float`: the value behind a float literal or a
+    /// use of a constant that is one, so the width it settles on can be checked.
+    float_values: HashMap<NodeId, f64>,
 }
 
 impl Inferer<'_> {
@@ -669,6 +689,7 @@ impl Inferer<'_> {
             }
             self.check_float_width(node, &resolved);
             self.check_int_range(node, &resolved);
+            self.check_float_range(node, &resolved);
             let resolved = self.record_comptime_coercion(node, resolved);
             self.ast.set_meta(node, resolved);
         }
@@ -754,8 +775,14 @@ impl Inferer<'_> {
             NodeKind::Lit(lit) => {
                 // Keep the literal's exact value so `finish` can check it fits
                 // whatever runtime integer type it settles on.
-                if let Lit::Int(n) = &lit {
-                    self.int_values.insert(node, n.clone());
+                match &lit {
+                    Lit::Int(n) => {
+                        self.int_values.insert(node, n.clone());
+                    }
+                    Lit::Float(f) => {
+                        self.float_values.insert(node, *f);
+                    }
+                    _ => {}
                 }
                 self.lit_ty(&lit)
             }
@@ -767,10 +794,16 @@ impl Inferer<'_> {
             }
             NodeKind::Path { .. } => {
                 let ty = self.path_ty(node);
-                // A use of a `comptime_int` constant carries that constant's
-                // value, so it is range-checked at *this* site.
-                if let Some(v) = self.const_int_value(node) {
-                    self.int_values.insert(node, v);
+                // A use of a `comptime_int` / `comptime_float` constant carries
+                // that constant's value, so it is range-checked at *this* site.
+                match self.const_lit_value(node) {
+                    Some(Lit::Int(v)) => {
+                        self.int_values.insert(node, v);
+                    }
+                    Some(Lit::Float(v)) => {
+                        self.float_values.insert(node, v);
+                    }
+                    _ => {}
                 }
                 ty
             }
@@ -1223,6 +1256,9 @@ impl Inferer<'_> {
                 // signed type would be rejected.
                 if let Some(v) = self.int_values.remove(&operand) {
                     self.int_values.insert(operand, -v);
+                }
+                if let Some(v) = self.float_values.remove(&operand) {
+                    self.float_values.insert(operand, -v);
                 }
                 self.infer_prefix_op(node, "neg", "neg", oty)
             }
@@ -3426,9 +3462,14 @@ impl Inferer<'_> {
         self.cx.pin_str(ty)
     }
 
-    /// The exact integer a path names, when it resolves to a constant whose
-    /// value is an integer literal (following a chain of such constants).
-    fn const_int_value(&self, node: NodeId) -> Option<num_bigint::BigInt> {
+    /// The exact literal a path names, when it resolves to a constant bound to
+    /// one (following a chain of such constants).
+    ///
+    /// Only `Int` and `Float` come back: they are the two whose value has to
+    /// travel to the use site, because they are the two that settle on a
+    /// *width* there. A string literal is open too, but every type it may
+    /// become holds it, so there is nothing to check.
+    fn const_lit_value(&self, node: NodeId) -> Option<Lit> {
         let mut def = self.resolved_def(node)?;
         for _ in 0..16 {
             let d = self.defs.get(def);
@@ -3440,7 +3481,7 @@ impl Inferer<'_> {
                 return None;
             };
             match self.asts[&file].node(rhs).kind.clone() {
-                NodeKind::Lit(Lit::Int(v)) => return Some(v),
+                NodeKind::Lit(l @ (Lit::Int(_) | Lit::Float(_))) => return Some(l),
                 NodeKind::Path { .. } => def = self.resolved_def_in(file, rhs)?,
                 _ => return None,
             }
@@ -3483,7 +3524,11 @@ impl Inferer<'_> {
         let Some(value) = self.int_values.get(&node).cloned() else {
             return;
         };
-        let Ty::Int { signed, width } = resolved else {
+        // A `distinct` numeric is checked against what it stands over: §2.4
+        // lets a literal reach one with no written cast, so this is the only
+        // place `70000` meeting a `distinct u16` is caught.
+        let settled = self.numeric_repr(resolved);
+        let Ty::Int { signed, width } = &settled else {
             return;
         };
         if super::ty::int_fits(&value, *signed, *width, self.target) {
@@ -3494,6 +3539,44 @@ impl Inferer<'_> {
             resolved.display(self.defs)
         );
         self.report(node, msg);
+        // The const evaluator checks the same conversion again, on the `$cast`
+        // this node lowers to. Mark the node so it does not say it twice.
+        self.ast.set_meta(node, RangeReported);
+    }
+
+    /// The primitive a settled type is checked against: itself, or — for a
+    /// `distinct` numeric — the primitive it stands over (§2.4).
+    fn numeric_repr(&self, ty: &Ty) -> Ty {
+        self.cx
+            .numeric_distinct_repr(ty)
+            .unwrap_or_else(|| ty.clone())
+    }
+
+    /// The float counterpart: reject a `comptime_float` the type it settled on
+    /// cannot hold at all — one that overflows to infinity, or a non-zero one
+    /// that underflows to zero (§1.5, [`super::ty::float_fits`]).
+    ///
+    /// Ordinary rounding is *not* an error, and cannot be: `0.1` is not exactly
+    /// an `f64` either. What is rejected is the conversion that loses the
+    /// number entirely, because nothing in the source asked for `3.5e40` to
+    /// become `inf`. A written `$cast.<f32>(x)` still may.
+    fn check_float_range(&mut self, node: NodeId, resolved: &Ty) {
+        let Some(value) = self.float_values.get(&node).copied() else {
+            return;
+        };
+        let settled = self.numeric_repr(resolved);
+        let Ty::Float(width) = &settled else {
+            return;
+        };
+        if super::ty::float_fits(value, *width) {
+            return;
+        }
+        let msg = format!(
+            "the literal `{value:?}` does not fit in `{}`",
+            resolved.display(self.defs)
+        );
+        self.report(node, msg);
+        self.ast.set_meta(node, RangeReported);
     }
 
     /// The type of a namespace-level `name :: value` constant, **at this use

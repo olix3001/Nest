@@ -30,6 +30,7 @@
 use crate::common::diagnostic::Diagnostic;
 use crate::common::target::Target;
 use crate::sema::def::DefTable;
+use crate::sema::infer::RangeReported;
 use crate::sema::ty::Ty;
 
 use crate::ir::const_eval::ConstEval;
@@ -62,6 +63,12 @@ pub fn check(
                 meta.set(global.id, value);
             }
             Err(err) => {
+                // Inference already reported this exact conversion, at the
+                // literal itself and with a better span. One mistake, one
+                // diagnostic (see [`RangeReported`]).
+                if meta.get::<RangeReported>(err.at).is_some() {
+                    continue;
+                }
                 let what = if global.mutable {
                     format!("the initializer of `#static {}`", global.name)
                 } else {

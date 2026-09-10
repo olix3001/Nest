@@ -209,6 +209,40 @@ const raw_id: str := $cast(self.id) // CatId       -> str (target from annotatio
 legal. It never performs a disallowed conversion — illegal casts are compile
 errors, not run-time coercions.
 
+### A written `$cast` may lose; an inserted one may not
+
+A `$cast` **the program writes** is allowed to lose precision. Narrowing an
+integer keeps the low bits, and narrowing a float rounds — exactly what the
+machine does, and exactly what the program asked for. This holds at compile time
+too, so a constant and the same expression at run time are the same number:
+
+```
+A :: 400
+X :: u8 := $cast.<u8>(A)       // 144 — the low 8 bits, as at run time
+Y :: u8 := $cast.<u8>(300)     // 44
+Z :: f32 := $cast.<f32>(3.5e40) // inf
+```
+
+The conversion the **compiler inserts** to settle an untyped literal on the type
+its use site asked for (§1.5, §2.5) may not. Nothing in the source said `300`
+should become `44`, so a literal the target cannot hold is an error:
+
+```
+let y: u8 := 300               // error: the literal `300` does not fit in `u8`
+let z: f32 := 3.5e40           // error: the literal `3.5e40` does not fit in `f32`
+let ok: u8 := $cast.<u8>(x)    // fine for any integer `x` — it was written
+```
+
+"Cannot hold" is exact for integers: the value keeps its arbitrary precision
+until it settles, so the check is exact however the number was written. For
+floats it means the width loses the number *entirely* — a finite value that
+overflows to infinity, or a non-zero one that underflows to zero. Ordinary
+rounding is not an error and cannot be: `0.1` is no more exact in `f64` than in
+`f32`, so `const e: f32 := 0.1` is a `f32`'s nearest value to `0.1`.
+
+A string literal has nothing to check: every type a `comptime_str` may settle on
+(§1.5) holds all of it.
+
 ## 6.6 Prefix and unary operators
 
 ```

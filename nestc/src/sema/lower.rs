@@ -47,15 +47,15 @@ use crate::parser::ast::{
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::OpResolution;
 use super::infer::{
-    ArgOrder, Coercion, DistinctRecv, DynCoerce, MethodDispatch, MethodRes, RecvAdjust,
-    SliceCoerce, Upcast,
+    ArgOrder, Coercion, DistinctRecv, DynCoerce, MethodDispatch, MethodRes, RangeReported,
+    RecvAdjust, SliceCoerce, Upcast,
 };
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
 use crate::ir::{
-    Arm, AssocConst, Binding, Block, DefaultValue, Dispatch, Expr, ExprKind, Function, Global, IrId,
-    Member, Meta, Param, Pattern, PatternKind, Program, Recv, Stmt, StmtKind, TraitMethod, TypeDef,
-    TypeDefKind, Variant,
+    Arm, AssocConst, Binding, Block, DefaultValue, Dispatch, Expr, ExprKind, Function, Global,
+    ImplicitCast, IrId, Member, Meta, Param, Pattern, PatternKind, Program, Recv, Stmt, StmtKind,
+    TraitMethod, TypeDef, TypeDefKind, Variant,
 };
 
 /// Lower every function body in `file` to IR.
@@ -704,9 +704,15 @@ impl Lowerer<'_> {
         }
         // A comptime literal converting into a runtime type: emit the `$cast`
         // the surface syntax left implicit.
+        //
+        // It is marked as the compiler's own, because an inserted conversion
+        // promises to be exact where a written one does not (see
+        // [`ImplicitCast`]). If inference already reported this literal as out
+        // of range, that travels with it so the evaluator does not report the
+        // same mistake a second time.
         if let Some(c) = self.ast.meta::<Coercion>(node) {
             let value = self.lower_expr_inner(node);
-            return self.expr(
+            let cast = self.expr(
                 node,
                 c.to,
                 ExprKind::Intrinsic {
@@ -714,6 +720,11 @@ impl Lowerer<'_> {
                     args: vec![value],
                 },
             );
+            self.meta.set(cast.id, ImplicitCast);
+            if self.ast.meta::<RangeReported>(node).is_some() {
+                self.meta.set(cast.id, RangeReported);
+            }
+            return cast;
         }
         // A `[N]T` reaching a `[]T`: the view is the whole sub-slice, so emit
         // exactly what `a[..]` emits.
@@ -1310,6 +1321,10 @@ impl Lowerer<'_> {
                     args: vec![recv],
                 },
             );
+            // The compiler's, not the program's: a `distinct` type and its
+            // representation are the same bits, so this conversion cannot lose
+            // anything, and nothing about it was written down.
+            self.meta.set(recv.id, ImplicitCast);
         }
         let written: Vec<Option<NodeId>>;
         let slots: &[Option<NodeId>] = match self.ast.meta::<ArgOrder>(callee) {
