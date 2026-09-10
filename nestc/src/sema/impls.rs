@@ -119,11 +119,7 @@ pub fn build(
 /// `bool`, the width-parameterized integers the resolver interns on demand.
 /// Those are the language's, which for this purpose means `core`'s: the core
 /// library is the one place that may hang methods off them.
-fn owner<'a>(
-    defs: &DefTable,
-    pkg_of: &'a HashMap<FileId, String>,
-    def: DefId,
-) -> Option<&'a str> {
+fn owner<'a>(defs: &DefTable, pkg_of: &'a HashMap<FileId, String>, def: DefId) -> Option<&'a str> {
     match defs.get(def).file {
         Some(f) => pkg_of.get(&f).map(String::as_str),
         None => Some("core"),

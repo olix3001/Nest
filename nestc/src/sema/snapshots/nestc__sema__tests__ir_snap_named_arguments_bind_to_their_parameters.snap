@@ -15,6 +15,6 @@ func f(r: *Router) -> i32 {
   let d: i32 = (Router.listen: func(*Router, core.str, i32) -> i32)(r: *Router, "h": core.str, $cast(80: comptime_int): i32): i32
   return #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.Add.add: func(i32, i32) -> i32)(a: i32, b: i32): i32, c: i32): i32, d: i32): i32
 }
-func listen(self: *Router, host: core.str, port: i32) -> i32 #recv(ptr) {
+func listen(self: *Router, host: core.str, port: i32) -> i32 #self(*) {
   return port: i32
 }

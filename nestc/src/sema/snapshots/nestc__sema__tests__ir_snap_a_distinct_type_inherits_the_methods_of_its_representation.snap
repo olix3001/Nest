@@ -9,15 +9,15 @@ distinct Wrapper = Base
 func f(w: Wrapper) -> usize {
   return #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(#builtin(Add) (core.Add.add: func(usize, usize) -> usize)((Base.inherited: func(*Base) -> usize)((&$cast(w: Wrapper): Base): *Base): usize, (<impl Wrapper>.own: func(*Wrapper) -> usize)((&w: Wrapper): *Wrapper): usize): usize, (<impl Wrapper>.shared: func(*Wrapper) -> usize)((&w: Wrapper): *Wrapper): usize): usize
 }
-func inherited(self: *Base) -> usize #recv(ptr) {
+func inherited(self: *Base) -> usize #self(*) {
   return ((self: *Base.*): Base.n): usize
 }
-func shared(self: *Base) -> usize #recv(ptr) {
+func shared(self: *Base) -> usize #self(*) {
   return $cast(1: comptime_int): usize
 }
-func own(self: *Wrapper) -> usize #recv(ptr) {
+func own(self: *Wrapper) -> usize #self(*) {
   return $cast(2: comptime_int): usize
 }
-func shared(self: *Wrapper) -> usize #recv(ptr) {
+func shared(self: *Wrapper) -> usize #self(*) {
   return $cast(3: comptime_int): usize
 }

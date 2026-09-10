@@ -1495,7 +1495,12 @@ impl Inferer<'_> {
                     Outcome::Failed
                 }
             },
-            Obligation::VariantPayload { recv, variant, args, origin } => {
+            Obligation::VariantPayload {
+                recv,
+                variant,
+                args,
+                origin,
+            } => {
                 match self.cx.shallow(recv) {
                     // Enum still unknown: retry once it is solved.
                     Ty::Var(_) => Outcome::Deferred,
@@ -1743,7 +1748,10 @@ impl Inferer<'_> {
     /// The type already inferred for `node` (composite bodies are walked once,
     /// up front, so every element already has one).
     fn node_ty(&mut self, node: NodeId) -> Ty {
-        self.types.get(&node).cloned().unwrap_or_else(|| self.infer_expr(node))
+        self.types
+            .get(&node)
+            .cloned()
+            .unwrap_or_else(|| self.infer_expr(node))
     }
 
     /// Pick the impl of `trait_def` that applies to `self_ty` (with trait
@@ -1951,13 +1959,7 @@ impl Inferer<'_> {
 
     /// The associated type `assoc` a user impl binds, with the impl's generics
     /// substituted. Reports if the impl fails to bind it.
-    fn user_assoc(
-        &mut self,
-        i: usize,
-        origin: NodeId,
-        assoc: &Symbol,
-        map: &Subst,
-    ) -> Ty {
+    fn user_assoc(&mut self, i: usize, origin: NodeId, assoc: &Symbol, map: &Subst) -> Ty {
         let imp = self.impls.impls[i].clone();
         match imp.assoc.get(assoc) {
             Some(&node) => {
@@ -2208,8 +2210,7 @@ impl Inferer<'_> {
                         for a in args {
                             self.infer_expr(*a);
                         }
-                        let msg =
-                            format!("no method `{name}` on `{}`", r.display(self.defs));
+                        let msg = format!("no method `{name}` on `{}`", r.display(self.defs));
                         self.report(callee, msg);
                         return Ty::Error;
                     }
@@ -2546,10 +2547,7 @@ impl Inferer<'_> {
     /// is nothing to infer or check there: the default was type-checked against
     /// this very parameter once, at the declaration, and lowering fills it in.
     fn apply_call(&mut self, callee: NodeId, callee_ty: &Ty, args: &[Option<NodeId>]) -> Ty {
-        let arg_tys: Vec<Option<Ty>> = args
-            .iter()
-            .map(|a| a.map(|n| self.infer_expr(n)))
-            .collect();
+        let arg_tys: Vec<Option<Ty>> = args.iter().map(|a| a.map(|n| self.infer_expr(n))).collect();
         match self.cx.shallow(callee_ty) {
             Ty::Func { params, ret } => {
                 if params.len() == arg_tys.len() {
@@ -2669,7 +2667,8 @@ impl Inferer<'_> {
             return None;
         }
         let (file, node) = (d.file?, d.node?);
-        let NodeKind::GenericTypeParam { constraint, .. } = self.asts[&file].node(node).kind.clone()
+        let NodeKind::GenericTypeParam { constraint, .. } =
+            self.asts[&file].node(node).kind.clone()
         else {
             return None;
         };
@@ -2749,11 +2748,7 @@ impl Inferer<'_> {
     /// The dispatch tag for a call that landed on a trait's own declaration:
     /// `wrap` applied to the owning trait, or plain [`MethodDispatch::Static`]
     /// if the method turns out not to be a trait member after all.
-    fn method_dispatch(
-        &self,
-        method: DefId,
-        wrap: fn(DefId) -> MethodDispatch,
-    ) -> MethodDispatch {
+    fn method_dispatch(&self, method: DefId, wrap: fn(DefId) -> MethodDispatch) -> MethodDispatch {
         match self.defs.get(method).parent {
             Some(p) if self.defs.get(p).kind == DefKind::Trait => wrap(p),
             _ => MethodDispatch::Static,
@@ -2794,10 +2789,10 @@ impl Inferer<'_> {
             .type_param_defs(trait_def)
             .into_iter()
             .map(|p| {
-                map.tys
-                    .get(&p)
-                    .cloned()
-                    .unwrap_or_else(|| Ty::Nominal { def: p, args: Vec::new() })
+                map.tys.get(&p).cloned().unwrap_or_else(|| Ty::Nominal {
+                    def: p,
+                    args: Vec::new(),
+                })
             })
             .collect();
         self.cx.register(Obligation::Trait {
@@ -2851,11 +2846,7 @@ impl Inferer<'_> {
             NodeKind::ConstBind { rhs, .. } => *rhs,
             _ => node,
         };
-        matches!(
-            ast.node(rhs).kind,
-            NodeKind::FuncExpr { body: Some(_), .. }
-        )
-        .then_some(m)
+        matches!(ast.node(rhs).kind, NodeKind::FuncExpr { body: Some(_), .. }).then_some(m)
     }
 
     /// Resolve `name` on a trait-object receiver (`dyn Trait` or `*dyn Trait`) to
@@ -3018,10 +3009,7 @@ impl Inferer<'_> {
         let args = &args[..];
         // A `None` slot is a defaulted parameter the call left out: checked once
         // at the declaration, filled in by lowering, nothing to do here.
-        let arg_tys: Vec<Option<Ty>> = args
-            .iter()
-            .map(|a| a.map(|n| self.infer_expr(n)))
-            .collect();
+        let arg_tys: Vec<Option<Ty>> = args.iter().map(|a| a.map(|n| self.infer_expr(n))).collect();
         if value_params.len() == arg_tys.len() {
             for (p, (arg_node, aty)) in value_params.iter().zip(args.iter().zip(&arg_tys)) {
                 if let (Some(node), Some(aty)) = (arg_node, aty) {
@@ -3174,7 +3162,8 @@ impl Inferer<'_> {
         let (Some(file), Some(node)) = (d.file, d.node) else {
             return Ty::Error;
         };
-        let NodeKind::GenericConstParam { ty, .. } = self.asts[&file].node(node).kind.clone() else {
+        let NodeKind::GenericConstParam { ty, .. } = self.asts[&file].node(node).kind.clone()
+        else {
             return Ty::Error;
         };
         self.ty_from_node_in(file, ty)
@@ -3613,10 +3602,7 @@ impl Inferer<'_> {
             return Ty::Error;
         };
         let Some(trait_def) = self.lang.get("from_residual") else {
-            self.report(
-                node,
-                "`.?` requires the `#lang(\"from_residual\")` item",
-            );
+            self.report(node, "`.?` requires the `#lang(\"from_residual\")` item");
             return Ty::Error;
         };
         let ret = self.ret.clone();
@@ -3696,7 +3682,11 @@ impl Inferer<'_> {
     /// The declared payload types of enum variant `name` on `base`, in order,
     /// each paired with its field name (for record variants) and with the enum's
     /// generics substituted. `None` if `base` is not an enum with that variant.
-    fn variant_payload(&mut self, base: &Ty, name: &str) -> Option<Vec<(Option<crate::common::symbol::Symbol>, Ty)>> {
+    fn variant_payload(
+        &mut self,
+        base: &Ty,
+        name: &str,
+    ) -> Option<Vec<(Option<crate::common::symbol::Symbol>, Ty)>> {
         use crate::parser::ast::VariantPayload;
         let base = self.autoderef(base);
         let Ty::Nominal { def, args } = base else {
@@ -3729,7 +3719,8 @@ impl Inferer<'_> {
             }
             VariantPayload::Record(fields) => {
                 for f in fields {
-                    if let NodeKind::Field { name, ty, .. } = self.asts[&file].node(f).kind.clone() {
+                    if let NodeKind::Field { name, ty, .. } = self.asts[&file].node(f).kind.clone()
+                    {
                         let ty = self.ty_from_node_in(file, ty);
                         out.push((Some(name), self.subst_type_params(&ty, &map)));
                     }
@@ -3754,7 +3745,10 @@ impl Inferer<'_> {
             _ => node,
         };
         let tys = match &self.asts[&file].node(rhs).kind {
-            NodeKind::StructType { kind: StructKind::Tuple(tys), .. } => tys.clone(),
+            NodeKind::StructType {
+                kind: StructKind::Tuple(tys),
+                ..
+            } => tys.clone(),
             _ => return None,
         };
         let map = self.nominal_subst(def, &args);
@@ -3846,7 +3840,9 @@ impl Inferer<'_> {
                     else {
                         continue;
                     };
-                    let fty = self.field_ty(ty, name.as_str()).unwrap_or_else(|| self.cx.fresh());
+                    let fty = self
+                        .field_ty(ty, name.as_str())
+                        .unwrap_or_else(|| self.cx.fresh());
                     match pattern {
                         Some(p) => self.bind_pattern(p, &fty),
                         None => {
@@ -3905,7 +3901,11 @@ impl Inferer<'_> {
             return;
         };
         let fty = payload
-            .and_then(|p| p.iter().find(|(n, _)| n.as_ref() == Some(&name)).map(|(_, t)| t.clone()))
+            .and_then(|p| {
+                p.iter()
+                    .find(|(n, _)| n.as_ref() == Some(&name))
+                    .map(|(_, t)| t.clone())
+            })
             .unwrap_or_else(|| self.cx.fresh());
         match pattern {
             Some(p) => self.bind_pattern(p, &fty),
@@ -3962,6 +3962,39 @@ impl Inferer<'_> {
                 }
                 _ => {}
             }
+        }
+
+        // A **trait method** has no body, so the per-function passes never type
+        // it: its signature is worked out on demand when a call selects it. A
+        // vtable slot is not a call, though, and object safety is a question
+        // about the signature alone — so stamp it here, once, on the method's
+        // own `FuncExpr`.
+        let trait_methods: Vec<DefId> = self
+            .defs
+            .iter()
+            .filter(|d| d.kind == DefKind::Trait && d.file == Some(self.file))
+            .flat_map(|d| d.ns.members.values().copied())
+            .filter(|&m| self.defs.get(m).kind == DefKind::Func)
+            .collect();
+        for m in trait_methods {
+            let ty = self.func_def_ty(m);
+            let (Some(file), Some(node)) = (self.defs.get(m).file, self.defs.get(m).node) else {
+                continue;
+            };
+            if file != self.file {
+                continue;
+            }
+            // The def's node is the `ConstBind`; stamp the `FuncExpr` it binds,
+            // which is the node lowering reads the signature off. It goes under
+            // its own key rather than as the node's `Ty`, which `infer_func`
+            // uses for the *return* type — a trait method with a default body
+            // would otherwise have this overwritten by the per-function pass.
+            let func = match &self.asts[&file].node(node).kind {
+                NodeKind::ConstBind { rhs, .. } => *rhs,
+                _ => node,
+            };
+            let ty = self.cx.resolve(&ty);
+            self.asts[&file].set_meta(func, super::Signature(ty));
         }
 
         // A tuple struct's positions are `Field` defs whose node is the type
@@ -4110,18 +4143,30 @@ impl Inferer<'_> {
     /// Cycles fall back to an opaque nominal.
     fn expand_alias(&mut self, def: DefId) -> Ty {
         if self.alias_stack.contains(&def) {
-            return Ty::Nominal { def, args: Vec::new() };
+            return Ty::Nominal {
+                def,
+                args: Vec::new(),
+            };
         }
         let d = self.defs.get(def);
         let (Some(file), Some(node)) = (d.file, d.node) else {
-            return Ty::Nominal { def, args: Vec::new() };
+            return Ty::Nominal {
+                def,
+                args: Vec::new(),
+            };
         };
         let rhs = match &self.asts[&file].node(node).kind {
             NodeKind::ConstBind { rhs, .. } => *rhs,
             _ => node,
         };
-        if matches!(self.asts[&file].node(rhs).kind, NodeKind::DistinctType { .. }) {
-            return Ty::Nominal { def, args: Vec::new() };
+        if matches!(
+            self.asts[&file].node(rhs).kind,
+            NodeKind::DistinctType { .. }
+        ) {
+            return Ty::Nominal {
+                def,
+                args: Vec::new(),
+            };
         }
         if matches!(self.asts[&file].node(rhs).kind, NodeKind::AssocType { .. }) {
             return self.cx.fresh();
@@ -4290,8 +4335,9 @@ impl Inferer<'_> {
                 Ty::Var(_) => String::new(),
                 other => format!(", found `{}`", other.display(self.defs)),
             };
-            let msg =
-                format!("expected `never`{found}: `never` is uninhabited, so no value has that type");
+            let msg = format!(
+                "expected `never`{found}: `never` is uninhabited, so no value has that type"
+            );
             self.report(node, msg);
             return;
         }
@@ -4327,8 +4373,13 @@ impl Inferer<'_> {
     /// taking the whole sub-slice — `a[..]` — so it is recorded as a
     /// [`SliceCoerce`] and lowers to that, not to a `$cast`.
     fn try_array_to_slice(&mut self, node: NodeId, actual: &Ty, expected: &Ty) -> bool {
-        let (Ty::Array { inner, .. }, Ty::Slice { mutable: false, inner: want }) =
-            (self.cx.shallow(actual), self.cx.shallow(expected))
+        let (
+            Ty::Array { inner, .. },
+            Ty::Slice {
+                mutable: false,
+                inner: want,
+            },
+        ) = (self.cx.shallow(actual), self.cx.shallow(expected))
         else {
             return false;
         };
@@ -4356,8 +4407,13 @@ impl Inferer<'_> {
     fn try_dyn_coerce(&mut self, node: NodeId, actual: &Ty, expected: &Ty) -> bool {
         // Only pointers unsize; the pointee must be a real type on the left and
         // the trait object on the right, with mutability the usual `*mut` → `*`.
-        let (Ty::Ptr { mutable, inner }, Ty::Ptr { mutable: em, inner: ei }) =
-            (self.cx.shallow(actual), self.cx.shallow(expected))
+        let (
+            Ty::Ptr { mutable, inner },
+            Ty::Ptr {
+                mutable: em,
+                inner: ei,
+            },
+        ) = (self.cx.shallow(actual), self.cx.shallow(expected))
         else {
             return false;
         };
@@ -4438,9 +4494,7 @@ impl Inferer<'_> {
             NodeKind::Return { .. } | NodeKind::Break { .. } | NodeKind::Continue => true,
             // A diverging intrinsic in statement position ends the block just as
             // a `return` does — `.!` leans on this to type its abort arm.
-            NodeKind::IntrinsicCall { name, .. } => {
-                DIVERGING_INTRINSICS.contains(&name.as_str())
-            }
+            NodeKind::IntrinsicCall { name, .. } => DIVERGING_INTRINSICS.contains(&name.as_str()),
             _ => false,
         }
     }

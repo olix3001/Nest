@@ -153,6 +153,37 @@ pub enum TypeDefKind {
     /// one-field struct has means the passes that flatten aggregates need no
     /// special case for it.
     Distinct { repr: Member },
+    /// `trait { ... }`. A trait is not a runtime type, but its **members in
+    /// declaration order** are the layout of every vtable built for it, so they
+    /// have to survive to the stage that builds one.
+    Trait {
+        methods: Vec<TraitMethod>,
+        /// Associated `::` constants. They are kept because they are what makes
+        /// a trait *not* object-safe — a vtable has no place to put one.
+        assoc_consts: Vec<Symbol>,
+    },
+}
+
+/// One method a trait declares: a vtable slot.
+///
+/// Its signature is `meta.ty(id)`, a [`Ty::Func`] in which `Self` appears as the
+/// trait's own [`Ty::Nominal`] — which is how "takes or returns `Self` by value"
+/// is recognized without any name matching.
+#[derive(Debug, Clone)]
+pub struct TraitMethod {
+    pub id: IrId,
+    pub def: DefId,
+    pub name: Symbol,
+    /// How the method takes `self` (§3.4). [`Recv::None`] means it declares no
+    /// receiver at all, which is what makes it un-callable through a trait
+    /// object.
+    pub recv: Recv,
+    /// Whether the method declares generic parameters of its own. One vtable
+    /// slot cannot stand for an unbounded family of instantiations.
+    pub generic: bool,
+    /// Whether the trait itself supplies a body — a default method. It still
+    /// occupies a slot; it only changes what fills it when an impl is silent.
+    pub has_default: bool,
 }
 
 /// One member of a struct, of a variant's payload, or the representation of a

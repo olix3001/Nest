@@ -8,6 +8,6 @@ struct P {
 func use_m(p: *P) -> i32 {
   return (P.get: func(*P) -> i32)(p: *P): i32
 }
-func get(self: *P) -> i32 #recv(ptr) {
+func get(self: *P) -> i32 #self(*) {
   return ((self: *P.*): P.x): i32
 }

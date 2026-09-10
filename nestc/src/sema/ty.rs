@@ -640,9 +640,7 @@ impl InferCtxt {
                 }
             }
             (Ty::Float(x), Ty::Float(y)) if x == y => Ok(()),
-            (Ty::Bool, Ty::Bool)
-            | (Ty::Char, Ty::Char)
-            | (Ty::Void, Ty::Void) => Ok(()),
+            (Ty::Bool, Ty::Bool) | (Ty::Char, Ty::Char) | (Ty::Void, Ty::Void) => Ok(()),
 
             (
                 Ty::Ptr {

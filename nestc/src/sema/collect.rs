@@ -221,10 +221,7 @@ impl Collector<'_> {
         | NodeKind::TraitType { generics, .. } = &rhs_kind
         {
             for &g in generics {
-                if matches!(
-                    self.ast.node(g).kind,
-                    NodeKind::GenericConstParam { .. }
-                ) {
+                if matches!(self.ast.node(g).kind, NodeKind::GenericConstParam { .. }) {
                     self.report(
                         g,
                         "a `const` generic parameter is not supported on a type declaration yet —                          put it on the function or `impl` that uses it",
@@ -615,9 +612,9 @@ impl Collector<'_> {
         };
         match &self.ast.node(value).kind {
             NodeKind::Lit(crate::parser::ast::Lit::Str(s)) => DirectiveArg::Str(Symbol::new(s)),
-            NodeKind::Lit(crate::parser::ast::Lit::Int(n)) => {
-                i128::try_from(n).map(DirectiveArg::Int).unwrap_or(DirectiveArg::Other)
-            }
+            NodeKind::Lit(crate::parser::ast::Lit::Int(n)) => i128::try_from(n)
+                .map(DirectiveArg::Int)
+                .unwrap_or(DirectiveArg::Other),
             NodeKind::Path { segments } if segments.len() == 1 => {
                 DirectiveArg::Name(segments[0].clone())
             }

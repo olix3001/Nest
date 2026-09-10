@@ -1870,6 +1870,182 @@ fn an_operator_in_a_const_function_is_not_a_call_to_check() {
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
 }
 
+// ===< Object safety >===
+
+#[test]
+fn an_object_safe_trait_still_coerces_and_dispatches() {
+    // The rejections below only mean something if the legal shape passes: a
+    // method with a pointer receiver, no generics, and no `Self` by value.
+    let src = "\
+Draw :: trait { draw :: func (self: *Self) -> i32 }
+S :: struct { n: i32 }
+impl Draw for S { draw :: func (self: *S) -> i32 { return self.n } }
+f :: func (s: *S) -> i32 {
+  let d: *dyn Draw := s
+  return d.draw()
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn a_trait_with_no_vtable_slot_is_rejected_at_the_coercion() {
+    for (src, needle) in [
+        (
+            "T :: trait { make :: func () -> i32 }\n\
+             S :: struct { n: i32 }\n\
+             impl T for S { make :: func () -> i32 { return 1 } }\n\
+             f :: func (s: *S) { let d: *dyn T := s }\n",
+            "`make` takes no `self`",
+        ),
+        (
+            "T :: trait { dup :: func (self: Self) -> i32 }\n\
+             S :: struct { n: i32 }\n\
+             impl T for S { dup :: func (self: S) -> i32 { return self.n } }\n\
+             f :: func (s: *S) { let d: *dyn T := s }\n",
+            "`dup` takes `self` by value",
+        ),
+        (
+            "T :: trait { clone :: func (self: *Self) -> Self }\n\
+             S :: struct { n: i32 }\n\
+             impl T for S { clone :: func (self: *S) -> S { return S { n: self.n } } }\n\
+             f :: func (s: *S) { let d: *dyn T := s }\n",
+            "`clone` returns `Self` by value",
+        ),
+        (
+            "T :: trait { with :: func <X> (self: *Self, x: X) -> i32 }\n\
+             S :: struct { n: i32 }\n\
+             impl T for S { with :: func <X> (self: *S, x: X) -> i32 { return self.n } }\n\
+             f :: func (s: *S) { let d: *dyn T := s }\n",
+            "`with` is generic",
+        ),
+    ] {
+        let msgs = messages(src);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected exactly one diagnostic for {src:?}: {msgs:#?}"
+        );
+        assert!(
+            msgs[0].contains("cannot be made into a trait object") && msgs[0].contains(needle),
+            "wrong diagnostic for {src:?}: {}",
+            msgs[0]
+        );
+    }
+}
+
+#[test]
+fn a_trait_that_is_never_coerced_need_not_be_object_safe() {
+    // Most traits are not object-safe and have no reason to be: an operator
+    // trait returns `Self.Output`, an iterator is generic. The mistake is
+    // *asking for a vtable*, so a trait nothing coerces is left alone.
+    let src = "\
+Clone2 :: trait { clone :: func (self: *Self) -> Self }
+S :: struct { n: i32 }
+impl Clone2 for S { clone :: func (self: *S) -> S { return S { n: self.n } } }
+f :: func (s: *S) -> i32 { return s.clone().n }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn the_object_safety_diagnostic_points_at_the_coercion() {
+    // Not at the trait's declaration: the trait is fine, and the place to change
+    // is the line that asked it to become an object.
+    let src = "\
+T :: trait { make :: func () -> i32 }
+S :: struct { n: i32 }
+impl T for S { make :: func () -> i32 { return 1 } }
+f :: func (s: *S) { let d: *dyn T := s }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert_eq!(session.diagnostics.len(), 1, "{:#?}", session.diagnostics);
+    let label = session.diagnostics[0]
+        .primary_label()
+        .expect("a primary label");
+    let file = session.sources.file(label.span.file).expect("a real file");
+    let line = file.line_col(label.span.span.start).line;
+    assert_eq!(
+        line, 4,
+        "the diagnostic points at line {line}, not the coercion"
+    );
+}
+
+#[test]
+fn the_ir_records_a_traits_methods_in_slot_order() {
+    // Declaration order *is* the vtable's layout, so a slot index means nothing
+    // without it. The def table's namespace is a map, which is why the order has
+    // to be recorded here rather than recovered later.
+    use crate::ir::TypeDefKind;
+    let src = "\
+T :: trait {
+  first  :: func (self: *Self) -> i32
+  second :: func (self: *mut Self) -> i32
+  third  :: func () -> i32
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    let file = entry_file(&session);
+    let t = session.ir[&file]
+        .types
+        .iter()
+        .find(|t| t.name.as_str() == "T")
+        .expect("the trait is in the IR");
+    let TypeDefKind::Trait { methods, .. } = &t.kind else {
+        panic!("T is not a trait: {:#?}", t.kind);
+    };
+    let shape: Vec<(String, crate::ir::Recv)> = methods
+        .iter()
+        .map(|m| (m.name.to_string(), m.recv))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("first".to_string(), crate::ir::Recv::Ptr),
+            ("second".to_string(), crate::ir::Recv::MutPtr),
+            ("third".to_string(), crate::ir::Recv::None),
+        ]
+    );
+    // Each slot carries its whole signature, which is what the object-safety
+    // rules read and what a vtable slot's shape is.
+    assert!(
+        matches!(
+            session.ir_meta.ty(methods[0].id),
+            Some(crate::sema::ty::Ty::Func { .. })
+        ),
+        "a trait method is not typed with its signature"
+    );
+}
+
+#[test]
+fn a_default_method_keeps_its_signature_not_its_return_type() {
+    // A trait method with a body is inferred by the per-function pass, which
+    // stamps the node's `Ty` with the *return* type. The signature therefore
+    // lives under its own key — without that, a default method's vtable slot
+    // would be typed `i32` rather than `func(*T) -> i32`.
+    use crate::ir::TypeDefKind;
+    use crate::sema::ty::Ty;
+    let src = "T :: trait { d :: func (self: *Self) -> i32 { return 1 } }\n";
+    let session = analyze_mem(&[("main", src)], "main");
+    let file = entry_file(&session);
+    let t = session.ir[&file]
+        .types
+        .iter()
+        .find(|t| t.name.as_str() == "T")
+        .expect("the trait is in the IR");
+    let TypeDefKind::Trait { methods, .. } = &t.kind else {
+        panic!("T is not a trait");
+    };
+    assert!(methods[0].has_default, "the default body was not recorded");
+    assert!(
+        matches!(session.ir_meta.ty(methods[0].id), Some(Ty::Func { .. })),
+        "the default method's slot is typed {:?}, not a signature",
+        session.ir_meta.ty(methods[0].id)
+    );
+}
+
 // ===< Linking the per-file programs >===
 
 #[test]

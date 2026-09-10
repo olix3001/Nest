@@ -2,6 +2,9 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+trait ToJson {
+  [0] render: func(*ToJson) -> i32 #self(*)
+}
 struct Cat {
   age: i32
 }
@@ -9,6 +12,6 @@ func go(c: *Cat) -> i32 {
   let j: *dyn ToJson = (c: *Cat as *dyn ToJson from Cat)
   return #virtual(ToJson) (ToJson.render: func(*dyn ToJson) -> i32)(j: *dyn ToJson): i32
 }
-func render(self: *Cat) -> i32 #recv(ptr) {
+func render(self: *Cat) -> i32 #self(*) {
   return ((self: *Cat.*): Cat.age): i32
 }

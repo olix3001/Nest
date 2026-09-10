@@ -2,6 +2,10 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+trait Step {
+  [0] step: func(*Step) -> i32 #self(*)
+  [1] twice: func(*Step) -> i32 #self(*)
+}
 struct Counter {
   n: i32
 }
@@ -17,12 +21,12 @@ func bounded(t: *T) -> i32 {
 func erased(d: *dyn Step) -> i32 {
   return #virtual(Step) (Step.step: func(*dyn Step) -> i32)(d: *dyn Step): i32
 }
-func bump(self: *Counter) -> i32 #recv(ptr) {
+func bump(self: *Counter) -> i32 #self(*) {
   return ((self: *Counter.*): Counter.n): i32
 }
-func step(self: *Counter) -> i32 #recv(ptr) {
+func step(self: *Counter) -> i32 #self(*) {
   return ((self: *Counter.*): Counter.n): i32
 }
-func twice(self: *Counter) -> i32 #recv(ptr) {
+func twice(self: *Counter) -> i32 #self(*) {
   return ((self: *Counter.*): Counter.n): i32
 }

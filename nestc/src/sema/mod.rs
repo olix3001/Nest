@@ -86,6 +86,18 @@ pub enum Resolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefMeta(pub DefId);
 
+/// A **declared** function's whole signature, stamped on its `FuncExpr` by
+/// inference.
+///
+/// Deliberately not the node's [`Ty`](ty::Ty): `infer_func` uses that slot for
+/// the function's *return* type, which is what lowering wants nearly everywhere.
+/// A trait method needs the whole signature — a vtable slot's shape, and the
+/// object-safety rules, are questions about the parameters as much as the result
+/// — and a method with a default body would otherwise have its signature
+/// overwritten by the per-function pass that runs afterwards.
+#[derive(Debug, Clone)]
+pub struct Signature(pub ty::Ty);
+
 /// The per-segment resolution of a multi-segment [`Path`], so every name in a
 /// dotted path (e.g. `Self.Output`) is linked, not just the final one.
 #[derive(Debug, Clone)]

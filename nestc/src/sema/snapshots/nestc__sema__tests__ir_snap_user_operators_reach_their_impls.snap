@@ -19,24 +19,24 @@ func ops(a: Bits, b: Bits, g: *mut Bits) -> bool #mutating {
   ((Bits.index_mut: func(*mut Bits, i32) -> *mut i32)(g: *mut Bits, $cast(2: comptime_int): i32): *mut i32.*): i32 = $cast(9: comptime_int): i32
   return (ne: bool And lt: bool): bool
 }
-func neg(self: Bits) -> Bits #recv(value) {
+func neg(self: Bits) -> Bits #self {
   return self: Bits
 }
-func bitnot(self: Bits) -> Bits #recv(value) {
+func bitnot(self: Bits) -> Bits #self {
   return self: Bits
 }
-func shl(self: Bits, rhs: i32) -> Bits #recv(value) {
+func shl(self: Bits, rhs: i32) -> Bits #self {
   return self: Bits
 }
-func eq(self: Bits, rhs: Bits) -> bool #recv(value) {
+func eq(self: Bits, rhs: Bits) -> bool #self {
   return true: bool
 }
-func cmp(self: Bits, rhs: Bits) -> core.Ordering #recv(value) {
+func cmp(self: Bits, rhs: Bits) -> core.Ordering #self {
   return .equal: core.Ordering
 }
-func index(self: *Bits, i: i32) -> *i32 #recv(ptr) {
+func index(self: *Bits, i: i32) -> *i32 #self(*) {
   return (&((self: *Bits.*): Bits.w): i32): *i32
 }
-func index_mut(self: *mut Bits, i: i32) -> *mut i32 #recv(mut ptr) #mutating {
+func index_mut(self: *mut Bits, i: i32) -> *mut i32 #self(*mut) #mutating {
   return (&mut ((self: *mut Bits.*): Bits.w): i32): *mut i32
 }

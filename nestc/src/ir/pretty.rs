@@ -99,6 +99,38 @@ impl Printer<'_> {
                 let ty = self.ty(repr.id);
                 self.line(&format!("distinct {}{tags} = {ty}", t.name));
             }
+            TypeDefKind::Trait {
+                methods,
+                assoc_consts,
+            } => {
+                self.line(&format!("trait {}{tags} {{", t.name));
+                self.indent += 1;
+                // Slot order is the declaration order, and a dump is where a
+                // reader checks it, so the index is printed with each method.
+                for (i, m) in methods.iter().enumerate() {
+                    let ty = self.ty(m.id);
+                    let mut tags = String::new();
+                    // In a trait, the *absence* of a receiver is worth saying:
+                    // it is what makes the method un-callable through a trait
+                    // object, so a reader checking object safety needs to see it.
+                    match m.recv {
+                        Recv::None => tags.push_str(" #no-self"),
+                        other => tags.push_str(recv_str(other)),
+                    }
+                    if m.generic {
+                        tags.push_str(" #generic");
+                    }
+                    if m.has_default {
+                        tags.push_str(" #default");
+                    }
+                    self.line(&format!("[{i}] {}: {ty}{tags}", m.name));
+                }
+                for c in assoc_consts {
+                    self.line(&format!("const {c}"));
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
         }
     }
 
@@ -144,12 +176,10 @@ impl Printer<'_> {
         for d in &self.meta.directives(f.id) {
             let _ = write!(tags, " {}", directive_str(d));
         }
-        match f.recv {
-            Recv::None => {}
-            Recv::Value => tags.push_str(" #recv(value)"),
-            Recv::Ptr => tags.push_str(" #recv(ptr)"),
-            Recv::MutPtr => tags.push_str(" #recv(mut ptr)"),
-        }
+        // The receiver prints the way it is written in source. A dump should not
+        // need a glossary: `#self(*mut)` says "this is a method whose receiver is
+        // `self: *mut Self`", which is the whole content of `Recv`.
+        tags.push_str(recv_str(f.recv));
         if f.mutating {
             tags.push_str(" #mutating");
         }
@@ -486,6 +516,17 @@ fn pattern_str(defs: &DefTable, p: &Pattern) -> String {
             format!("{} @ {}", binding.name, pattern_str(defs, pattern))
         }
         PatternKind::Deref(p) => format!("&{}", pattern_str(defs, p)),
+    }
+}
+
+/// How a function takes its receiver, spelled as the parameter would be. Empty
+/// for a function that is not a method.
+fn recv_str(recv: Recv) -> &'static str {
+    match recv {
+        Recv::None => "",
+        Recv::Value => " #self",
+        Recv::Ptr => " #self(*)",
+        Recv::MutPtr => " #self(*mut)",
     }
 }
 

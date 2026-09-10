@@ -27,6 +27,7 @@ pub mod constness;
 pub mod divergence;
 pub mod exhaustive;
 pub mod mutability;
+pub mod object_safety;
 
 /// Run every IR validation pass over `linked`, in order, collecting what they
 /// report.
@@ -36,6 +37,7 @@ pub fn run(defs: &DefTable, meta: &Meta, linked: &Linked) -> Vec<Diagnostic> {
     mutability::check(defs, meta, linked, &mut out);
     exhaustive::check(defs, meta, linked, &mut out);
     constness::check(defs, meta, linked, &mut out);
+    object_safety::check(defs, meta, linked, &mut out);
     out
 }
 

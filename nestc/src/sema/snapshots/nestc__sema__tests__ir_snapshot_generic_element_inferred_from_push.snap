@@ -17,6 +17,6 @@ func build_strings() -> void {
 func new() -> Vector.<T> {
   return Vector { len: $cast(0: comptime_int): usize }: Vector.<T>
 }
-func push(self: *mut Vector.<T>, value: T) -> void #recv(mut ptr) #mutating {
+func push(self: *mut Vector.<T>, value: T) -> void #self(*mut) #mutating {
   ((self: *mut Vector.<T>.*): Vector.<T>.len): usize = #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(((self: *mut Vector.<T>.*): Vector.<T>.len): usize, $cast(1: comptime_int): usize): usize
 }

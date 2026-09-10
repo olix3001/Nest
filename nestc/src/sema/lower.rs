@@ -54,7 +54,7 @@ use super::ty::Ty;
 use super::{DefMeta, Resolution};
 use crate::ir::{
     Arm, Binding, Block, Dispatch, Expr, ExprKind, Function, IrId, Member, Meta, Param, Pattern,
-    PatternKind, Program, Recv, Stmt, StmtKind, TypeDef, TypeDefKind, Variant,
+    PatternKind, Program, Recv, Stmt, StmtKind, TraitMethod, TypeDef, TypeDefKind, Variant,
 };
 
 /// Lower every function body in `file` to IR.
@@ -221,7 +221,10 @@ impl Lowerer<'_> {
             .iter()
             .filter(|d| {
                 d.file == Some(file)
-                    && matches!(d.kind, DefKind::Struct | DefKind::Enum | DefKind::TypeAlias)
+                    && matches!(
+                        d.kind,
+                        DefKind::Struct | DefKind::Enum | DefKind::TypeAlias | DefKind::Trait
+                    )
             })
             .map(|d| d.id)
             .collect();
@@ -265,6 +268,9 @@ impl Lowerer<'_> {
                 },
                 Vec::new(),
             ),
+            NodeKind::TraitType {
+                members, generics, ..
+            } => (self.lower_trait(def, &members), generics),
             // A plain type alias defines no new type: `A :: B` is another name
             // for `B`, and every use of it resolved to `B` long before now.
             _ => return None,
@@ -289,6 +295,98 @@ impl Lowerer<'_> {
             name,
             kind,
         })
+    }
+
+    /// A trait's members: its methods, in **declaration order**, plus the names
+    /// of any associated constants.
+    ///
+    /// Order is what matters here — it is the layout of every vtable built for
+    /// the trait, so a slot index means nothing without it. The def table's
+    /// namespace is a map, so the order comes from the member nodes.
+    fn lower_trait(&mut self, trait_def: DefId, members: &[NodeId]) -> TypeDefKind {
+        let mut methods = Vec::new();
+        let mut assoc_consts = Vec::new();
+        for &m in members {
+            let NodeKind::ConstBind { pattern, rhs } = self.ast.node(m).kind.clone() else {
+                continue;
+            };
+            let Some(name) = self.binding_name(pattern) else {
+                continue;
+            };
+            let Some(&def) = self.defs.get(trait_def).ns.members.get(&name) else {
+                continue;
+            };
+            match self.ast.node(rhs).kind.clone() {
+                NodeKind::FuncExpr {
+                    params,
+                    body,
+                    generics,
+                    ..
+                } => {
+                    let sig = self
+                        .ast
+                        .meta::<super::Signature>(rhs)
+                        .map(|s| s.0)
+                        .unwrap_or(Ty::Error);
+                    let recv = self.declared_recv(&params, &sig);
+                    let id = self.id(rhs);
+                    self.meta.set_ty(id, sig);
+                    self.meta
+                        .set_directives(id, self.defs.get(def).directives.clone());
+                    methods.push(TraitMethod {
+                        id,
+                        def,
+                        name,
+                        recv,
+                        generic: !generics.is_empty(),
+                        has_default: body.is_some(),
+                    });
+                }
+                // An associated type is a slot in the *impl*, not in the vtable.
+                NodeKind::AssocType { .. } => {}
+                _ => assoc_consts.push(name),
+            }
+        }
+        TypeDefKind::Trait {
+            methods,
+            assoc_consts,
+        }
+    }
+
+    /// How a **declared** function takes its receiver (§3.4).
+    ///
+    /// A trait method has no body, so it is never inferred per-function and its
+    /// parameter nodes carry no types of their own. The receiver's type comes
+    /// out of the signature instead — which is stamped on the `FuncExpr` — while
+    /// whether there *is* a receiver is still the syntactic question of whether
+    /// the first parameter is called `self`.
+    fn declared_recv(&self, params: &[NodeId], sig: &Ty) -> Recv {
+        let Some(&first) = params.first() else {
+            return Recv::None;
+        };
+        let NodeKind::Param { name, .. } = self.ast.node(first).kind.clone() else {
+            return Recv::None;
+        };
+        if name.as_str() != "self" {
+            return Recv::None;
+        }
+        let self_ty = match sig {
+            Ty::Func { params, .. } => params.first(),
+            _ => None,
+        };
+        match self_ty {
+            Some(Ty::Ptr { mutable: true, .. }) => Recv::MutPtr,
+            Some(Ty::Ptr { mutable: false, .. }) => Recv::Ptr,
+            _ => Recv::Value,
+        }
+    }
+
+    /// The name a binding pattern introduces.
+    fn binding_name(&self, pattern: NodeId) -> Option<Symbol> {
+        match &self.ast.node(pattern).kind {
+            NodeKind::BindingPat { name, .. } => Some(name.clone()),
+            _ => None,
+        }
     }
 
     /// The members of a struct, in **declaration order**.

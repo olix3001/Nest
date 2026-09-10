@@ -20,6 +20,6 @@ func up(e: Entity, p: *mut Entity) -> i32 #mutating {
   let m: i32 = (Transform.mag: func(Transform) -> i32)((e: Entity.t): Transform): i32
   return (take: func(Transform) -> i32)((e: Entity.t): Transform): i32
 }
-func mag(self: Transform) -> i32 #recv(value) {
+func mag(self: Transform) -> i32 #self {
   return (self: Transform.x): i32
 }
