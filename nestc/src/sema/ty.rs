@@ -588,6 +588,15 @@ impl InferCtxt {
         match (&a, &b) {
             // Errors and `never` absorb: they unify with anything without
             // producing further diagnostics.
+            //
+            // `never` absorbs **both ways here on purpose**, even though the
+            // language rule is one-way (`never` converts to everything, nothing
+            // converts to `never` — §3.1). `unify` is the symmetric operation:
+            // most of its callers are *joins* — the two arms of an `if`, the
+            // arms of a `match`, an operator's output against its expected type
+            // — where one side being `never` should simply yield the other, and
+            // a direction would be meaningless. The one-way rule belongs where a
+            // direction exists, which is `Inferer::expect`; see the guard there.
             (Ty::Error, _) | (_, Ty::Error) => Ok(()),
             (Ty::Never, _) | (_, Ty::Never) => Ok(()),
 
@@ -878,6 +887,12 @@ pub fn primitive_ty(name: &str) -> Option<Ty> {
         "bool" => return Some(Ty::Bool),
         "char" => return Some(Ty::Char),
         "void" => return Some(Ty::Void),
+        // `never` was always the type of `return` / `break` / a `loop` with no
+        // `break`; this is only the spelling. Writing it is what lets a
+        // signature *promise* divergence — `abort :: func () -> never` — which
+        // is what makes a diverging call sit in any expression position without
+        // the type checker special-casing it (§3.1).
+        "never" => return Some(Ty::Never),
         "isize" => return Some(Ty::isize()),
         "usize" => return Some(Ty::usize()),
         _ => {}

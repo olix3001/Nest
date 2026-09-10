@@ -889,6 +889,114 @@ fn a_cross_file_defaults_span_points_into_its_own_file() {
     assert_eq!(span_text(&session, args[1].id), "7");
 }
 
+// ===< `never` >===
+
+#[test]
+fn never_is_spellable_and_coerces_into_every_position() {
+    // `never` was always the type of `return` / `break` / a `loop` with no
+    // `break`; making it writable is what lets a signature promise divergence.
+    // Its whole point is that it sits anywhere a value is wanted, so check every
+    // such position at once.
+    let src = "\
+diverge :: func () -> never { return diverge() }
+takes :: func (n: i32) -> i32 { return n }
+positions :: func (b: bool) -> i32 {
+  let branch := if b { 1 } else { diverge() }
+  let arm := b.match { true => 2, false => diverge() }
+  let tail := { diverge() }
+  let arg := takes(diverge())
+  return branch + arm + tail + arg
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn a_never_returning_function_needs_no_return() {
+    // A `-> never` body that ends in a call to another `-> never` function is
+    // complete: there is no value to produce because control never gets there.
+    let src = "\
+sink :: func () -> never { return sink() }
+handler :: func () -> never { sink() }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn never_does_not_run_backwards() {
+    // The one-way rule. `never` coerces *to* every type; nothing coerces *to*
+    // it, because a value of an uninhabited type cannot exist. Left symmetric,
+    // `let x: never := 5` would type-check and then coerce `x` into anything,
+    // which is the entire soundness argument for `never` running in reverse.
+    //
+    // Exactly one diagnostic per case: a rejected annotation must not also draw
+    // the ordinary mismatch from the unification that follows it.
+    for (src, needle) in [
+        (
+            "f :: func () -> i32 {\n  let x: never := 5\n  return x\n}\n",
+            "`never` is uninhabited",
+        ),
+        (
+            "f :: func (x: never) -> i32 { return 0 }\ng :: func () -> i32 { return f(1) }\n",
+            "`never` is uninhabited",
+        ),
+        (
+            "f :: func () -> never { return 1 }\n",
+            "`never` is uninhabited",
+        ),
+    ] {
+        let session = analyze_mem(&[("main", src)], "main");
+        assert_eq!(
+            session.diagnostics.len(),
+            1,
+            "expected exactly one diagnostic for {src:?}: {:#?}",
+            session.diagnostics
+        );
+        assert!(
+            session.diagnostics[0].message.contains(needle),
+            "wrong diagnostic for {src:?}: {}",
+            session.diagnostics[0].message
+        );
+    }
+}
+
+#[test]
+fn a_never_annotation_accepts_a_diverging_value() {
+    // The other side of the one-way rule: `never` to `never` is fine, so a
+    // binding may be annotated with it as long as the value really diverges.
+    let src = "\
+sink :: func () -> never { return sink() }
+f :: func () -> i32 {
+  let x: never := sink()
+  return x
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
+fn string_is_not_a_primitive() {
+    // `str` is an ordinary `distinct []u8` in core, found by `#lang` tag. A
+    // stale `"string"` in the primitive table meant `x: string` resolved to a
+    // primitive with no `Ty` behind it and silently became the error type — a
+    // name mistake that produced no diagnostic at all.
+    let session = analyze_mem(
+        &[("main", "f :: func (x: string) -> i32 { return 1 }")],
+        "main",
+    );
+    assert!(
+        session
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("cannot resolve name `string`")),
+        "{:#?}",
+        session.diagnostics
+    );
+}
+
 // ===< Linking the per-file programs >===
 
 #[test]

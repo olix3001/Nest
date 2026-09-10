@@ -45,6 +45,13 @@ pub fn default_core_path() -> String {
 /// (§4.6). They have no source definition; each becomes a [`DefKind::Primitive`]
 /// def in the builtins scope.
 ///
+/// `never` is here for its *spelling* only: it was always the type of `return`,
+/// `break` and a `loop` with no `break`, and this is what lets a signature
+/// promise divergence (`abort :: func () -> never`). `string` is **not** here —
+/// `str` is an ordinary `distinct []u8` in `core`, found by its `#lang` tag; a
+/// stale entry meant `x: string` resolved to a primitive with no `Ty`, silently
+/// becoming an error type with no diagnostic.
+///
 /// The width-parameterized primitives are **not** listed here: the signed /
 /// unsigned integers `i<N>` / `u<N>` (arbitrary `N` in `1..=65535`, `i1`
 /// excluded, `u1` an alias of `bool`) and the floats `f16`/`f32`/`f64`/`f80`/
@@ -52,7 +59,7 @@ pub fn default_core_path() -> String {
 /// each on first use and interns it into the builtins scope (see
 /// `sema::resolve`). `isize`/`usize` are the only pointer-sized integers; there
 /// is no bare `int`/`uint`.
-pub const PRIMITIVES: &[&str] = &["bool", "char", "string", "isize", "usize", "void"];
+pub const PRIMITIVES: &[&str] = &["bool", "char", "isize", "never", "usize", "void"];
 
 /// Resolves `import "spec"` file specifiers to a stable key and source text.
 ///

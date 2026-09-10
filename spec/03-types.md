@@ -16,6 +16,7 @@ Floating point:    f16  f32  f64  f80  f128   (exactly these widths; there is no
 Boolean:           bool   (an alias for u1)
 Text:              char   (Unicode scalar, 32-bit)   str      (UTF-8, borrowed — see below)
 Unit:              void   (the empty tuple; a function with no `-> T` returns void)
+Uninhabited:       never  (the type of an expression that does not return)
 ```
 
 Integers are written `i<N>` / `u<N>` for a bit width `N` up to `65535`: the
@@ -38,6 +39,53 @@ literal has type `str`, and `s.len()` is its length in **bytes**.
 The **owned**, growable string lives in `std`, built on top of `str` and tagged
 `#lang` so that a `str` coerces into it implicitly. The same split applies to
 vectors, which `std` builds on slices.
+
+### `never`
+
+`never` is the type of an expression that **does not produce a value because
+control never reaches past it**. `return`, `break`, `continue` and a `loop` with
+no `break` all have type `never`, and so does a call to a function declared
+`-> never`:
+
+```nest
+abort :: func () -> never
+panic :: func (msg: str) -> never
+```
+
+`never` has **no values**. That is what makes its one rule sound:
+
+> `never` converts implicitly to **every** type. No type converts to `never`.
+
+The conversion can never actually run — reaching it would mean holding a value of
+an uninhabited type — so it costs nothing and is safe in every position. It is
+what lets a diverging call sit wherever a value is expected, with no special case
+in the type checker:
+
+```nest
+classify :: func (n: i32) -> str {
+  return n.match {
+    0     => "zero",
+    1..=9 => "small",
+    _     => panic("out of range"),   // never, converted to str
+  }
+}
+
+let x := if ok { compute() } else { abort() }
+```
+
+The rule is **one-way**. `let x: never := 5` is an error: `never` is uninhabited,
+so no value has that type. Were the conversion symmetric, that binding would
+type-check and then convert `x` into anything at all.
+
+A function declared `-> never` is **checked to genuinely never return**. A body
+with a reachable path to its end, or a reachable `return`, is an error — a
+`-> never` that can return would make the conversion above a lie. A body
+satisfies the rule by ending in a call to another `-> never` function, a `loop`
+with no `break`, or a `match` all of whose arms diverge.
+
+`never` is not `void`. `void` is the unit type: it has exactly one value, and a
+function returning it *does* return. `never` has zero values and its functions do
+not return at all.
 
 Integer literals have type `comptime_int` and float literals `comptime_float`
 until context assigns a concrete type (see

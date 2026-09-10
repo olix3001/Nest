@@ -4145,6 +4145,32 @@ impl Inferer<'_> {
     /// implicitly upcasts to that field's type (§3.10), so try the coercion
     /// before reporting.
     fn expect(&mut self, node: NodeId, actual: &Ty, expected: &Ty) {
+        // `never` is one-way. It converts *to* every type, which is what lets a
+        // diverging call sit in any expression position; nothing converts *to*
+        // it, because a value of an uninhabited type cannot exist (§3.1).
+        // `unify` cannot draw that line — it is symmetric, and its callers are
+        // mostly joins where `never` really is the identity — so it is drawn
+        // here, at the one place that knows which side is the value and which is
+        // the demand.
+        //
+        // Without this, `let x: never := 5` type-checks and then converts `x`
+        // into anything, which is the whole soundness argument for `never`
+        // running backwards.
+        let want = self.cx.resolve(expected);
+        let got = self.cx.resolve(actual);
+        if matches!(want, Ty::Never) && !matches!(got, Ty::Never | Ty::Error) {
+            // Do not name a type that is still an inference variable: a literal
+            // reaching here has not been defaulted yet, and `found `?0`` tells
+            // the reader nothing they can act on.
+            let found = match got {
+                Ty::Var(_) => String::new(),
+                other => format!(", found `{}`", other.display(self.defs)),
+            };
+            let msg =
+                format!("expected `never`{found}: `never` is uninhabited, so no value has that type");
+            self.report(node, msg);
+            return;
+        }
         let snapshot = self.cx.snapshot();
         if let Err((a, b)) = self.cx.unify(actual, expected) {
             self.cx.rollback(snapshot);
