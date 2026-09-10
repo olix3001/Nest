@@ -1330,6 +1330,213 @@ f :: func () {
     );
 }
 
+// ===< IR type definitions >===
+
+#[test]
+fn the_ir_carries_struct_definitions_in_declaration_order() {
+    // A `Ty::Nominal` is only a name. Layout assigns offsets by declaration
+    // order, so the order the IR records has to be the order they were written
+    // — which is why it cannot come from the def table's namespace map.
+    use crate::ir::TypeDefKind;
+    let src = "P :: struct { z: i32, a: bool, m: []u8 }\nf :: func (p: P) -> bool { return p.a }\n";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let t = session.ir[&file]
+        .types
+        .iter()
+        .find(|t| t.name.as_str() == "P")
+        .expect("struct P is in the IR");
+    let TypeDefKind::Struct { members } = &t.kind else {
+        panic!("P is not a struct: {:#?}", t.kind);
+    };
+    let names: Vec<_> = members.iter().map(|m| m.name.to_string()).collect();
+    assert_eq!(
+        names,
+        vec!["z", "a", "m"],
+        "members are not in source order"
+    );
+    // Each member is typed through the side table, like every other node.
+    let tys: Vec<_> = members
+        .iter()
+        .map(|m| {
+            session
+                .ir_meta
+                .ty(m.id)
+                .expect("a member is typed")
+                .display(&session.defs)
+        })
+        .collect();
+    assert_eq!(tys, vec!["i32", "bool", "[]u8"]);
+    // And the type node itself is typed with the type it defines.
+    assert_eq!(
+        session
+            .ir_meta
+            .ty(t.id)
+            .expect("the type def is typed")
+            .display(&session.defs),
+        "P"
+    );
+}
+
+#[test]
+fn a_tuple_struct_has_positional_members() {
+    // §3.3: a tuple struct is a struct whose members are named by position, so
+    // it needs no separate shape in the IR.
+    use crate::ir::TypeDefKind;
+    let src = "Pair :: struct (i32, bool)\nf :: func (p: Pair) -> i32 { return p.0 }\n";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let t = session.ir[&file]
+        .types
+        .iter()
+        .find(|t| t.name.as_str() == "Pair")
+        .expect("Pair is in the IR");
+    let TypeDefKind::Struct { members } = &t.kind else {
+        panic!("a tuple struct is not a struct: {:#?}", t.kind);
+    };
+    let names: Vec<_> = members.iter().map(|m| m.name.to_string()).collect();
+    assert_eq!(names, vec!["0", "1"]);
+}
+
+#[test]
+fn the_ir_carries_enum_variants_and_their_payloads() {
+    // Exhaustiveness needs every variant and the arity of each payload; the
+    // decision-tree lowering needs the same. Both read them here.
+    use crate::ir::TypeDefKind;
+    let src = "\
+E :: enum { none, one(i32), rec { x: f64, y: bool } }
+f :: func (e: E) -> i32 { return e.match { .none => 0, .one(n) => n, .rec { .. } => 1 } }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let t = session.ir[&file]
+        .types
+        .iter()
+        .find(|t| t.name.as_str() == "E")
+        .expect("E is in the IR");
+    let TypeDefKind::Enum { variants } = &t.kind else {
+        panic!("E is not an enum: {:#?}", t.kind);
+    };
+    let shape: Vec<(String, usize, bool)> = variants
+        .iter()
+        .map(|v| (v.name.to_string(), v.members.len(), v.tuple))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("none".to_string(), 0, false),
+            ("one".to_string(), 1, true),
+            ("rec".to_string(), 2, false),
+        ]
+    );
+    // A record payload's members are typed too — they have no defs of their
+    // own, so they are reached by node kind rather than through the def table.
+    let rec = variants.iter().find(|v| v.name.as_str() == "rec").unwrap();
+    let tys: Vec<_> = rec
+        .members
+        .iter()
+        .map(|m| {
+            session
+                .ir_meta
+                .ty(m.id)
+                .expect("a payload member is typed")
+                .display(&session.defs)
+        })
+        .collect();
+    assert_eq!(tys, vec!["f64", "bool"]);
+}
+
+#[test]
+fn a_distinct_type_carries_its_representation() {
+    // A `distinct` is structurally a newtype over one thing, so it takes the
+    // same shape a one-member struct does — which is what lets the aggregate
+    // flattening treat it without a special case.
+    use crate::ir::TypeDefKind;
+    let src = "Meters :: distinct f64\nf :: func (m: Meters) -> Meters { return m }\n";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let t = session.ir[&file]
+        .types
+        .iter()
+        .find(|t| t.name.as_str() == "Meters")
+        .expect("Meters is in the IR");
+    let TypeDefKind::Distinct { repr } = &t.kind else {
+        panic!("Meters is not a distinct: {:#?}", t.kind);
+    };
+    assert_eq!(
+        session
+            .ir_meta
+            .ty(repr.id)
+            .expect("the representation is typed")
+            .display(&session.defs),
+        "f64"
+    );
+}
+
+#[test]
+fn a_generic_types_members_stay_definition_relative() {
+    // A field declared `T` is stamped as the type parameter, not as anything a
+    // use site substituted — specializing here would leave monomorphization
+    // nothing to work from.
+    use crate::ir::TypeDefKind;
+    let src = "\
+Box :: struct <T> { value: T }
+f :: func (b: Box.<i32>) -> i32 { return b.value }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let t = session.ir[&file]
+        .types
+        .iter()
+        .find(|t| t.name.as_str() == "Box")
+        .expect("Box is in the IR");
+    let TypeDefKind::Struct { members } = &t.kind else {
+        panic!("Box is not a struct");
+    };
+    assert_eq!(
+        session
+            .ir_meta
+            .ty(members[0].id)
+            .expect("the member is typed")
+            .display(&session.defs),
+        "T",
+        "the member was specialized at its definition"
+    );
+}
+
+#[test]
+fn linking_collects_every_types_definition() {
+    // Whole-program, `core` included: an enum declared three files away still
+    // has to be reachable by the `DefId` a `Ty::Nominal` names it with.
+    let lib = "@public Shape :: enum { dot, line(i32) }\n";
+    let main = "lib :: import \"lib.nest\"\nP :: struct { n: i32 }\n\
+                f :: func (s: lib.Shape) -> i32 { return s.match { .dot => 0, .line(n) => n } }\n";
+    let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+
+    let by_name = |n: &str| session.linked.types().find(|t| t.name.as_str() == n);
+    let shape = by_name("Shape").expect("the library's enum is linked");
+    let p = by_name("P").expect("the entry file's struct is linked");
+    assert_ne!(
+        session.linked.file_of(shape.def),
+        session.linked.file_of(p.def),
+        "the two types should come from different files"
+    );
+    // Reachable by the def a `Ty::Nominal` carries, which is the whole point.
+    assert!(session.linked.ty(shape.def).is_some());
+    // `core`'s own types are linked in too.
+    assert!(
+        session.linked.type_count() > 2,
+        "core's types are missing: {}",
+        session.linked.type_count()
+    );
+}
+
 // ===< Linking the per-file programs >===
 
 #[test]

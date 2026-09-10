@@ -2,6 +2,9 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+struct Vector {
+  len: usize
+}
 func build_ints() -> usize {
   let xs: Vector.<isize> = (Vector.new: func() -> Vector.<isize>)(): Vector.<isize>
   (Vector.push: func(*mut Vector.<isize>, isize) -> void)((&mut xs: Vector.<isize>): *mut Vector.<isize>, $cast(1: comptime_int): isize): void

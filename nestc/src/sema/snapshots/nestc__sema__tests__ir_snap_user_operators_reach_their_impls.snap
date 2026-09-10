@@ -2,6 +2,9 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+struct Bits {
+  w: i32
+}
 func ops(a: Bits, b: Bits, g: *mut Bits) -> bool #mutating {
   let n: Bits = (Bits.neg: func(Bits) -> Bits)(a: Bits): Bits
   let c: Bits = (Bits.bitnot: func(Bits) -> Bits)(a: Bits): Bits

@@ -41,6 +41,7 @@ use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{
     Ast, BinOp, CompositeBody, Lit, NodeId, NodeKind, RangeKind, UnOp, VariantArgs, VariantPatArgs,
+    VariantPayload,
 };
 
 use super::def::{DefId, DefKind, DefTable, LangItems};
@@ -52,8 +53,8 @@ use super::infer::{
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
 use crate::ir::{
-    Arm, Binding, Block, Dispatch, Expr, ExprKind, Function, IrId, Meta, Param, Pattern,
-    PatternKind, Program, Recv, Stmt, StmtKind,
+    Arm, Binding, Block, Dispatch, Expr, ExprKind, Function, IrId, Member, Meta, Param, Pattern,
+    PatternKind, Program, Recv, Stmt, StmtKind, TypeDef, TypeDefKind, Variant,
 };
 
 /// Lower every function body in `file` to IR.
@@ -101,7 +102,8 @@ pub fn lower_file(
             }
         }
     }
-    Program { funcs }
+    let types = lo.lower_types(file);
+    Program { types, funcs }
 }
 
 struct Lowerer<'a> {
@@ -199,6 +201,169 @@ impl Lowerer<'_> {
         let id = self.derived(from);
         self.meta.set_ty(id, ty);
         Expr { id, kind }
+    }
+
+    // ===< type definitions >===
+
+    /// Lower every type this file declares.
+    ///
+    /// A `Ty::Nominal` names a type without saying what is in it, so the IR
+    /// carries the definitions themselves: layout, exhaustiveness and the LIR
+    /// aggregate flattening all need the contents, and none of them should have
+    /// to go back to the AST for them.
+    ///
+    /// Member types are read out of the arena rather than recomputed —
+    /// `infer::stamp_member_types` resolved each one against its declaration,
+    /// including aliases, `Self`, and generic parameters left as parameters.
+    fn lower_types(&mut self, file: FileId) -> Vec<TypeDef> {
+        let defs: Vec<DefId> = self
+            .defs
+            .iter()
+            .filter(|d| {
+                d.file == Some(file)
+                    && matches!(d.kind, DefKind::Struct | DefKind::Enum | DefKind::TypeAlias)
+            })
+            .map(|d| d.id)
+            .collect();
+        defs.into_iter()
+            .filter_map(|d| self.lower_type(d))
+            .collect()
+    }
+
+    fn lower_type(&mut self, def: DefId) -> Option<TypeDef> {
+        let d = self.defs.get(def);
+        let name = d.name.clone();
+        let directives = d.directives.clone();
+        let node = d.node?;
+        // A type is bound by `Name :: <type expression>`; the definition is the
+        // right-hand side.
+        let rhs = match &self.ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let (kind, generics) = match self.ast.node(rhs).kind.clone() {
+            NodeKind::StructType { generics, .. } => (
+                TypeDefKind::Struct {
+                    members: self.struct_members(def),
+                },
+                generics,
+            ),
+            NodeKind::EnumType {
+                variants, generics, ..
+            } => (
+                TypeDefKind::Enum {
+                    variants: variants
+                        .iter()
+                        .filter_map(|&v| self.lower_variant(def, v))
+                        .collect(),
+                },
+                generics,
+            ),
+            NodeKind::DistinctType { inner, .. } => (
+                TypeDefKind::Distinct {
+                    repr: self.member(inner, None, "0"),
+                },
+                Vec::new(),
+            ),
+            // A plain type alias defines no new type: `A :: B` is another name
+            // for `B`, and every use of it resolved to `B` long before now.
+            _ => return None,
+        };
+        let id = self.id(rhs);
+        // A type's own type is the nominal it names, over **its own** parameters
+        // — the `Ty` a bare use of the name has inside its own definition. Not
+        // a specialization: that is monomorphization's to make.
+        let args = generics
+            .iter()
+            .filter_map(|&g| self.def_of(g))
+            .map(|p| Ty::Nominal {
+                def: p,
+                args: Vec::new(),
+            })
+            .collect();
+        self.meta.set_ty(id, Ty::Nominal { def, args });
+        Some(TypeDef {
+            id,
+            def,
+            name,
+            directives,
+            kind,
+        })
+    }
+
+    /// The members of a struct, in **declaration order**.
+    ///
+    /// The def table's namespace is a map, so it cannot be the source of the
+    /// order — and order is the whole point for a struct, since layout assigns
+    /// offsets by it. A record's order comes from its `Field` nodes; a tuple
+    /// struct's comes from the names, which *are* the positions.
+    fn struct_members(&self, def: DefId) -> Vec<Member> {
+        let mut out: Vec<(usize, Member)> = self
+            .defs
+            .get(def)
+            .ns
+            .members
+            .values()
+            .filter(|&&m| self.defs.get(m).kind == DefKind::Field)
+            .filter_map(|&m| {
+                let fd = self.defs.get(m);
+                let at = fd.node?;
+                Some((at.0, self.member(at, Some(m), fd.name.as_str())))
+            })
+            .collect();
+        // Node ids are allocated in source order, so ordering by them is
+        // ordering by where each member was written.
+        out.sort_by_key(|(at, _)| *at);
+        out.into_iter().map(|(_, m)| m).collect()
+    }
+
+    fn lower_variant(&mut self, enum_def: DefId, node: NodeId) -> Option<Variant> {
+        let NodeKind::Variant { name, payload, .. } = self.ast.node(node).kind.clone() else {
+            return None;
+        };
+        let def = *self.defs.get(enum_def).ns.members.get(&name)?;
+        let (members, tuple) = match payload {
+            VariantPayload::None => (Vec::new(), false),
+            VariantPayload::Tuple(types) => (
+                types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &t)| self.member(t, None, &i.to_string()))
+                    .collect(),
+                true,
+            ),
+            VariantPayload::Record(fields) => (
+                fields
+                    .iter()
+                    .filter_map(|&f| match &self.ast.node(f).kind {
+                        NodeKind::Field { name, .. } => {
+                            let name = name.clone();
+                            Some(self.member(f, None, name.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                false,
+            ),
+        };
+        Some(Variant {
+            id: self.id(node),
+            def,
+            name,
+            members,
+            tuple,
+        })
+    }
+
+    /// One member, taking its type from the node inference stamped it on.
+    fn member(&self, at: NodeId, def: Option<DefId>, name: &str) -> Member {
+        let id = self.id(at);
+        self.meta.set_ty(id, self.ty(at));
+        Member {
+            id,
+            def,
+            name: Symbol::new(name),
+        }
     }
 
     fn lower_function(&mut self, def: DefId, func: NodeId) -> Option<Function> {

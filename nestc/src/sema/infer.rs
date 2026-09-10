@@ -362,6 +362,19 @@ pub fn infer_file(
             cx.check_const_param(g);
         }
     }
+    // Also declaration-level: resolve the declared type of every *member* — a
+    // struct field, an enum variant's payload, a `distinct`'s representation —
+    // and stamp it on its own node.
+    //
+    // Only inference can do this: a member's type node may name an alias, a
+    // generic argument or `Self`, and resolving those is exactly what
+    // `ty_from_node` is. Lowering then reads the answer back rather than
+    // reimplementing it, which is how the IR gets type definitions to carry
+    // (see [`crate::ir::TypeDef`]).
+    {
+        let mut cx = fresh!();
+        cx.stamp_member_types();
+    }
     for func in fns {
         let mut cx = fresh!();
         cx.infer_func(func);
@@ -3910,6 +3923,61 @@ impl Inferer<'_> {
     /// through the [`Resolution`] the name-resolver attached.
     fn ty_from_node(&mut self, node: NodeId) -> Ty {
         self.ty_from_node_in(self.file, node)
+    }
+
+    /// Stamp the declared type of every member in this file onto its own node,
+    /// for lowering to read back when it builds the IR's type definitions.
+    ///
+    /// The types are **definition-relative**: a field of `Box.<T>` declared `T`
+    /// is stamped as the type parameter, not as anything a use site
+    /// substituted. Substituting is monomorphization's job, and a definition
+    /// that had already been specialized would be no use to it.
+    fn stamp_member_types(&mut self) {
+        // Walk by node kind rather than by def, because only some members have
+        // one: a struct's fields do, a variant's payload does not (it belongs to
+        // the variant, not to the enum's namespace), and a `distinct`'s
+        // representation is a bare type node.
+        let nodes: Vec<NodeId> = self.ast.ids().collect();
+        for n in nodes {
+            match self.ast.node(n).kind.clone() {
+                // A record member, of a struct or of a variant alike. The type
+                // is stamped on the `Field` node itself, which is what the
+                // member's def points at.
+                NodeKind::Field { ty, .. } => {
+                    let t = self.ty_from_node(ty);
+                    self.ast.set_meta(n, t);
+                }
+                NodeKind::Variant {
+                    payload: crate::parser::ast::VariantPayload::Tuple(types),
+                    ..
+                } => {
+                    for t in types {
+                        let ty = self.ty_from_node(t);
+                        self.ast.set_meta(t, ty);
+                    }
+                }
+                NodeKind::DistinctType { inner, .. } => {
+                    let ty = self.ty_from_node(inner);
+                    self.ast.set_meta(inner, ty);
+                }
+                _ => {}
+            }
+        }
+
+        // A tuple struct's positions are `Field` defs whose node is the type
+        // node itself — there is no `Field` node wrapping them (see
+        // `collect_struct`), so the loop above did not reach them.
+        let positions: Vec<NodeId> = self
+            .defs
+            .iter()
+            .filter(|d| d.kind == DefKind::Field && d.file == Some(self.file))
+            .filter_map(|d| d.node)
+            .filter(|&n| !matches!(&self.ast.node(n).kind, NodeKind::Field { .. }))
+            .collect();
+        for at in positions {
+            let t = self.ty_from_node(at);
+            self.ast.set_meta(at, t);
+        }
     }
 
     fn ty_from_node_in(&mut self, file: FileId, node: NodeId) -> Ty {

@@ -2,6 +2,9 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+struct Counter {
+  n: i32
+}
 func inherent(c: *Counter) -> i32 {
   return (Counter.bump: func(*Counter) -> i32)(c: *Counter): i32
 }

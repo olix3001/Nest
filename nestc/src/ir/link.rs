@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use crate::common::source::FileId;
 use crate::sema::def::DefId;
 
-use super::{Function, Program};
+use super::{Function, Program, TypeDef};
 
 /// Every lowered function in the compilation, keyed by its [`DefId`].
 ///
@@ -38,6 +38,11 @@ use super::{Function, Program};
 /// is exactly why the map is keyed by it rather than by a path or a symbol.
 #[derive(Debug, Clone, Default)]
 pub struct Linked {
+    /// Every type the whole compilation declares, keyed by the [`DefId`] a
+    /// [`Ty::Nominal`](crate::sema::ty::Ty::Nominal) names it with. This is what
+    /// turns "which type is this" into "what is in it" for layout,
+    /// exhaustiveness and the LIR aggregate flattening.
+    types: HashMap<DefId, TypeDef>,
     funcs: HashMap<DefId, Function>,
     /// The file each function was lowered from, so a whole-program pass can
     /// still raise a diagnostic against the right source. A function's *nodes*
@@ -54,6 +59,8 @@ pub struct Linked {
     /// different order on every build — which makes a test that asserts on them
     /// flake rather than fail. Iteration goes through this instead.
     order: Vec<DefId>,
+    /// Declaration order for [`Linked::types`], for the same reason.
+    type_order: Vec<DefId>,
 }
 
 /// Merge every per-file [`Program`] into one whole-program view.
@@ -63,6 +70,11 @@ pub fn link(ir: &HashMap<FileId, Program>) -> Linked {
 
     let mut linked = Linked::default();
     for file in files {
+        for ty in &ir[&file].types {
+            linked.type_order.push(ty.def);
+            linked.file_of.insert(ty.def, file);
+            linked.types.insert(ty.def, ty.clone());
+        }
         for func in &ir[&file].funcs {
             linked.order.push(func.def);
             linked.file_of.insert(func.def, file);
@@ -106,6 +118,25 @@ impl Linked {
     /// always linked in, means analysis never got as far as lowering.
     pub fn is_empty(&self) -> bool {
         self.funcs.is_empty()
+    }
+
+    /// The definition of the type `def` names, if the program declares one.
+    ///
+    /// `None` for a trait, for a plain type alias (`A :: B` defines no new type
+    /// — every use of it resolved to `B`), and for a def that names no type at
+    /// all.
+    pub fn ty(&self, def: DefId) -> Option<&TypeDef> {
+        self.types.get(&def)
+    }
+
+    /// Every type definition, in declaration order.
+    pub fn types(&self) -> impl Iterator<Item = &TypeDef> {
+        self.type_order.iter().map(|d| &self.types[d])
+    }
+
+    /// How many types the program declares.
+    pub fn type_count(&self) -> usize {
+        self.types.len()
     }
 
     /// Every function, in definition order (see [`Linked::order`]).

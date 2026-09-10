@@ -2,6 +2,11 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+enum Color {
+  .red
+  .green
+  .blue
+}
 func pick(c: Color) -> i32 {
   match c: Color {
     .red => $cast(1: comptime_int): i32

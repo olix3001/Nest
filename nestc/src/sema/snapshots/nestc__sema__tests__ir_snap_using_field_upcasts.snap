@@ -2,6 +2,14 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+struct Transform {
+  x: i32
+  y: i32
+}
+struct Entity {
+  t: Transform
+  hp: i32
+}
 func take(t: Transform) -> i32 {
   return (t: Transform.x): i32
 }

@@ -2,6 +2,10 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+struct Cfg {
+  a: i32
+  b: i32
+}
 func g(x: i32, p: i32, c: Cfg, w: u8) -> i32 {
   return x: i32
 }

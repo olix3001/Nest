@@ -89,10 +89,82 @@ pub mod pretty;
 pub use link::{Linked, link};
 pub use meta::{IrId, Meta};
 
-/// A whole lowered program: every function that had a body.
+/// A whole lowered program: the type definitions it declares, and every
+/// function that had a body.
 #[derive(Debug, Clone)]
 pub struct Program {
+    pub types: Vec<TypeDef>,
     pub funcs: Vec<Function>,
+}
+
+/// One lowered type definition.
+///
+/// The IR carries these because a [`Ty::Nominal`] is only a *name*: it says
+/// which type, never what is in it. Everything downstream needs the contents —
+/// layout needs field types and order, exhaustiveness needs an enum's variants,
+/// LIR needs all of it to flatten aggregates into plain structs — and reaching
+/// back into the [`DefTable`](crate::sema::def::DefTable) and the AST for it
+/// would mean every one of those passes re-deriving what one pass already
+/// worked out.
+///
+/// The type this defines is `meta.ty(id)`, the same way every other node's type
+/// is read: `Ty::Nominal { def, args }` over its own generic parameters. Member
+/// types are `meta.ty(member.id)`, and are **definition-relative** — a field of
+/// `Pair.<T>` declared `T` is the type parameter, not anything a use site
+/// substituted, because substituting is monomorphization's job.
+#[derive(Debug, Clone)]
+pub struct TypeDef {
+    pub id: IrId,
+    pub def: DefId,
+    pub name: Symbol,
+    /// The `#...` directives written on the type (§9) — `#packed`, `#align(N)`,
+    /// `#soa`. Carried, not interpreted; layout is the pass that reads them.
+    pub directives: Vec<Directive>,
+    pub kind: TypeDefKind,
+}
+
+/// What a [`TypeDef`] defines.
+#[derive(Debug, Clone)]
+pub enum TypeDefKind {
+    /// `struct { a: T, b: U }`, and a tuple struct alike — a tuple struct's
+    /// members are named by position (`"0"`, `"1"`, …), which is what they
+    /// already are everywhere else in the IR (§3.3).
+    Struct { members: Vec<Member> },
+    /// `enum { a, b(T), c { x: U } }`.
+    Enum { variants: Vec<Variant> },
+    /// `distinct T`. The representation is the single [`Member`]: a `distinct`
+    /// is structurally a newtype over one thing, so giving it the same shape a
+    /// one-field struct has means the passes that flatten aggregates need no
+    /// special case for it.
+    Distinct { repr: Member },
+}
+
+/// One member of a struct, of a variant's payload, or the representation of a
+/// `distinct` type. Its type is `meta.ty(id)`.
+#[derive(Debug, Clone)]
+pub struct Member {
+    pub id: IrId,
+    /// The member's own definition, or `None` where the front end gives it none
+    /// — a variant's payload elements and a `distinct`'s representation are
+    /// positions in a declaration rather than named items.
+    pub def: Option<DefId>,
+    /// The member's name; a positional member is named by its index.
+    pub name: Symbol,
+}
+
+/// One `enum` variant.
+#[derive(Debug, Clone)]
+pub struct Variant {
+    pub id: IrId,
+    pub def: DefId,
+    pub name: Symbol,
+    /// The payload, empty for a bare variant. A tuple payload's members are
+    /// named by position, exactly as a tuple struct's are.
+    pub members: Vec<Member>,
+    /// Whether the payload was written positionally (`.b(T)`) rather than as a
+    /// record (`.c { x: U }`). It does not affect layout — it is what a pattern
+    /// and a dump need in order to print the variant the way it was written.
+    pub tuple: bool,
 }
 
 /// One lowered function.

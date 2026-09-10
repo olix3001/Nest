@@ -2,6 +2,10 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+struct Point {
+  x: i32
+  y: i32
+}
 func ps(p: Point, xs: []i32, n: i32, r: *i32) -> i32 {
   match p: Point {
     .{ x: 0, y: y } => y: i32

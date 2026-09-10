@@ -2,6 +2,9 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+struct Box2 {
+  w: i32
+}
 func use_dyn(b: *Box2, m: *mut Box2) -> i32 #mutating {
   let explicit: *dyn Draw = (b: *Box2 as *dyn Draw from Box2)
   let w: *mut dyn Draw = (m: *mut Box2 as *mut dyn Draw from Box2)

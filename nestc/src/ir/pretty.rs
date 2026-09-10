@@ -6,8 +6,8 @@ use std::fmt::Write;
 use crate::parser::ast::Lit;
 
 use super::{
-    Arm, Block, Dispatch, Expr, ExprKind, Function, IrId, Meta, Pattern, PatternKind, Program,
-    Recv, Stmt, StmtKind,
+    Arm, Block, Dispatch, Expr, ExprKind, Function, IrId, Member, Meta, Pattern, PatternKind,
+    Program, Recv, Stmt, StmtKind, TypeDef, TypeDefKind, Variant,
 };
 use crate::sema::def::{DefTable, Directive, DirectiveArg};
 
@@ -22,6 +22,11 @@ pub fn program_to_string(defs: &DefTable, meta: &Meta, program: &Program) -> Str
         out: String::new(),
         indent: 0,
     };
+    // Types first: a function's signature reads better once the reader has seen
+    // what its types are made of.
+    for t in &program.types {
+        p.type_def(t);
+    }
     for f in &program.funcs {
         p.function(f);
     }
@@ -60,6 +65,70 @@ impl Printer<'_> {
         }
         self.out.push_str(s);
         self.out.push('\n');
+    }
+
+    fn type_def(&mut self, t: &TypeDef) {
+        let mut tags = String::new();
+        for d in &t.directives {
+            let _ = write!(tags, " {}", directive_str(d));
+        }
+        match &t.kind {
+            TypeDefKind::Struct { members } => {
+                if members.is_empty() {
+                    self.line(&format!("struct {}{tags} {{}}", t.name));
+                    return;
+                }
+                self.line(&format!("struct {}{tags} {{", t.name));
+                self.indent += 1;
+                for m in members {
+                    self.member(m);
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            TypeDefKind::Enum { variants } => {
+                self.line(&format!("enum {}{tags} {{", t.name));
+                self.indent += 1;
+                for v in variants {
+                    self.variant(v);
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            TypeDefKind::Distinct { repr } => {
+                let ty = self.ty(repr.id);
+                self.line(&format!("distinct {}{tags} = {ty}", t.name));
+            }
+        }
+    }
+
+    fn member(&mut self, m: &Member) {
+        let ty = self.ty(m.id);
+        self.line(&format!("{}: {ty}", m.name));
+    }
+
+    fn variant(&mut self, v: &Variant) {
+        if v.members.is_empty() {
+            self.line(&format!(".{}", v.name));
+            return;
+        }
+        if v.tuple {
+            let tys = v
+                .members
+                .iter()
+                .map(|m| self.ty(m.id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.line(&format!(".{}({tys})", v.name));
+            return;
+        }
+        self.line(&format!(".{} {{", v.name));
+        self.indent += 1;
+        for m in &v.members {
+            self.member(m);
+        }
+        self.indent -= 1;
+        self.line("}");
     }
 
     fn function(&mut self, f: &Function) {

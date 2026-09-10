@@ -2,6 +2,12 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
+distinct Meters = f64
+struct Base {
+  n: usize
+}
+distinct Inherits = Base
+distinct Overrides = Base
 func f(a: Meters, b: Meters) -> Meters {
   return #builtin(Add) (core.Add.add: func(Meters, Meters) -> Meters)(a: Meters, b: Meters): Meters
 }

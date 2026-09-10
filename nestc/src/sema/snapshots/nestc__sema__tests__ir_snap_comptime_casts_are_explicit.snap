@@ -2,6 +2,9 @@
 source: src/sema/tests.rs
 expression: "ir_text(\"P :: struct { x: i32 }\\ncc :: func (n: i32) -> i32 {\\n  let a: i8 := 5\\n  const p := P { x: 1 }\\n  return n + 2\\n}\\n\")"
 ---
+struct P {
+  x: i32
+}
 func cc(n: i32) -> i32 {
   let a: i8 = $cast(5: comptime_int): i8
   let p: P = P { x: $cast(1: comptime_int): i32 }: P
