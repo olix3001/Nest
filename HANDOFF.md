@@ -1,9 +1,9 @@
-# Handoff: Phases 2–4 are built; phase 5 (the integer family) is next
+# Handoff: Phases 2–4 built, plus a round of language decisions; phase 5 next
 
 **Generated**: 2026-09-11
 **Branch**: `main`
 **Status**: Ready for review. **Phases 0 through 4 have no items left.**
-**350 tests pass**, `cargo clippy` reports 84 warnings (all pre-existing dead
+**363 tests pass**, `cargo clippy` reports 84 warnings (all pre-existing dead
 code; the baseline was 88 and nothing was added), every file in `examples/*.nest`
 compiles.
 
@@ -104,6 +104,64 @@ All three are committed.
 - [x] A slot mismatch **names the slot**: "an array length is a `usize`, and this
       is not one" rather than "a `const` argument …".
 
+### After the phases — a round of language decisions (`78d2b5e`..`4b041a3`)
+
+The user raised four things and answered a design question on each. All are built.
+
+- **`#caller_location` is a default argument** (`c00961a`). Spec §5.2 already
+  specified this and the compiler implemented neither it nor the `#caller_location`
+  *directive* it carried on `panic` (which parsed and did nothing). It is now an
+  expression, legal **only** as a default argument, evaluating to
+  `core.Location { file, line, column }` — a `#lang("location")` struct in
+  `core/loc.nest`, not in the prelude. `panic("boom")` reports the caller's line.
+  The lowering cannot go through the default cache (`Lowerer::defaults`), which
+  lowers each default once and clones it: every call would get the *declaration's*
+  position. `lower_args` checks for it and builds the value from the call site.
+- **`Default` and the `..` spread** (`8de2d87`). The user chose Rust-style over
+  field defaults: a literal never silently omits a field. `core.Default` is a
+  `#lang("default")` trait, and `P { x: 5, ..rest }` fills the rest. It is
+  **desugared** (`desugar::lower_spread`) into `{ __spread1 :: rest  P { x: 5,
+  y: __spread1.y } }`, so inference sees an ordinary complete literal and every
+  rule — privacy, field typing, missing-field — applies to the filled-in reads.
+  The temporary is **typed** with the literal's own type node, which is what
+  makes `P { x: 1, ..q }` a `Q`-is-not-a-`P` error rather than a silent build.
+  Cost of desugaring early: the **type must be named**, so `.{ ..rest }` is
+  refused — the field list comes from the resolved type and desugaring runs
+  before inference.
+- **A constant's type goes before the binder** (`ab4ebc6`). `MAX_BYTE: u8 :: 100`,
+  and `#static count: usize :: 0` / `#static scratch: [4096]u8`, and a trait's
+  `MAX: i32` / `MIN: i32 :: 0`. The point, in the user's words, is that
+  `NAME :: type` is a type alias **all the time**. `#static` now *requires* its
+  type — a region whose width depended on who read it is not a region. The AST
+  did not change: the parser still builds `AssocConst { ty, default }`, so the
+  whole typed-constant machinery downstream was already in place.
+  `Output :: type` and `Output :: Vec3` keep `::`, because both are
+  `name :: <a type>`, which is what that shape means everywhere.
+- **Trait conformance is checked** (`01f3977`). `impls::build` checked that an
+  impl's members were *present*; nothing checked they had the declared **type** —
+  including method signatures, which §4.1 has always promised.
+  `Inferer::check_impl_conformance` does it, in inference, because it is a
+  question about types. Both sides are substituted into the impl's world first:
+  `Self` → the impl's self type (`Self` inside a trait resolves to the trait's
+  own def, so substituting that def is what replaces it), the trait's generics →
+  what the impl wrote or a **fresh variable** when the impl wrote nothing (a bare
+  `impl Add for V` leaves `Rhs` for its own members to choose), and a method's own
+  generics aligned positionally onto the trait's.
+
+Two bugs fixed on the way:
+
+- **A struct-field default hung the compiler** (`78d2b5e`), and had since before
+  this session. The language has no field defaults, so `parse_field` stopped at
+  the type and left `:=` unconsumed; `expect_ident` reports *without* consuming,
+  so the struct-body loop never reached `}`. It is now refused by name, and every
+  member-body loop calls `Parser::ensure_progress` so the class cannot recur.
+- **A function-local `#static` was not lowered as a global** (`4b041a3`) — a
+  known limit the user leaned on ("inside functions `#static` is the way to
+  create statics"). It resolved to a `DefKind::Local`, so `lower_globals` never
+  saw it and the declared type was ignored (`usize` read back as `isize`). It is
+  now introduced as a `DefKind::Const` region whose def points at the *binding*,
+  with only its visibility coming from the block.
+
 ## Failed approaches (don't repeat these)
 
 Everything in the previous handoffs' lists still stands. New this session:
@@ -132,6 +190,18 @@ Everything in the previous handoffs' lists still stands. New this session:
   reported ``type mismatch: expected `[4]i32`, found `[4]i32``` — the lengths
   differ *by type*. Do not "fix" this by coercing at the length slot; that puts a
   hole in the identity rule phase 4 exists to establish.
+- **A blunt regex for the `NAME: T :: value` migration.** `([A-Z]\w*) :: (i32|…)`
+  also matches `Alias :: i32` (a type alias), `Output :: i32` (an associated-type
+  binding) and `Ty::isize()` (Rust). All three were rewritten and had to be
+  reverted by hand. The typed-constant form and the alias form are the same shape
+  until you know what the RHS *means*, which is the whole reason the syntax
+  changed — a migration script cannot know it either.
+- **Checking trait conformance in `impls.rs`.** That pass runs before inference,
+  so there are no types to compare. Completeness belongs there; matching does not.
+- **Comparing a trait method against an impl method without aligning their
+  generics.** The trait's `X` and the impl's `X` are different `DefId`s, so two
+  identical signatures failed to unify and reported `expected func(*S, X) -> i32,
+  found func(*S, X) -> i32`.
 - **Assuming `cargo test` rebuilds `target/debug/nestc`.** It does not. The
   examples loop ran against a stale binary twice and reported a phantom failure.
   `cargo build` first.
@@ -151,11 +221,17 @@ Everything in the previous handoffs' lists still stands. New this session:
 | The IR still prints `$name` for an intrinsic node | The IR is a compiler artifact, not source. Keeping it left 135 snapshot lines untouched |
 | `$abort` is gone; `core`'s `.!` bodies call `panic` | `abort` had no spec entry; `panic` does |
 | An array length must be a `usize`, checked at the declaration | §3.2 makes it a `usize` count. Typed const identity otherwise produces `expected [4]i32, found [4]i32`. Spec §5's illustration was corrected to match |
+| `#caller_location` is a default argument, never anything else | A default is filled in at the call site, which is the whole of why it names the caller. Elsewhere it could only mean "the position of this expression" |
+| `Default` + `..` spread, not struct field defaults | The user's call: a literal never silently omits a field, and `..` is the visible token that says "and the rest from here" |
+| The spread is desugared before inference | Every rule that applies to a written field then applies to a filled-in one, free. The price is that the type must be named |
+| `NAME: T :: value`, `#static NAME: T [:: value]`, `MAX: i32 [:: default]` | The type before the binder is what leaves `NAME :: type` a type alias unconditionally |
+| A `#static` must write its type | A region is storage; storage has a width, and the zeroed form has no initializer to infer one from |
+| Conformance is checked in inference | It is a question about types, and `impls::build` runs before there are any |
 | A `const` argument carries its type | §5: `3u8` and `3usize` are different arguments. Comparing values alone would collapse them, and nothing would catch it until monomorphization |
 
 ## Current state
 
-**Working**: everything. `cd nestc && cargo test` → **350 passed**. `cargo
+**Working**: everything. `cd nestc && cargo test` → **363 passed**. `cargo
 clippy` → 84 warnings, all pre-existing dead code. Every file in
 `examples/*.nest` compiles clean.
 
@@ -267,7 +343,7 @@ checked at all — its *value* is not known until monomorphization.
 
 ## Resume instructions
 
-1. `cd nestc && cargo test` — expect **350 passed**.
+1. `cd nestc && cargo test` — expect **363 passed**.
    - If ``cannot load package `core` ``: `packages/core/` is missing or
      `NEST_CORE` is stale. The default is
      `{CARGO_MANIFEST_DIR}/../packages/core/core.nest`.
@@ -293,7 +369,7 @@ checked at all — its *value* is not known until monomorphization.
    ways to be subtly wrong; the three named risks are `usize` collapsing into
    `u64`, const-generic recursion, and display churn.
 4. Whatever you touch, verify with all three:
-   - `cargo test` (350 and rising)
+   - `cargo test` (363 and rising)
    - `for f in ../examples/*.nest; do ./target/debug/nestc "$f" >/dev/null || echo "FAIL $f"; done`
    - `cargo clippy` — 84 warnings is the baseline; add none.
 
@@ -302,6 +378,14 @@ checked at all — its *value* is not known until monomorphization.
 Everything in the previous handoff's list still holds except where noted. New or
 changed:
 
+- **A `..` spread needs the type named.** `.{ x: 5, ..rest }` is refused; write
+  `P { x: 5, ..rest }`. Lifting this means moving the expansion after inference,
+  which needs a synthetic local and so a mutable `DefTable` in lowering.
+- **`Location` is not in the prelude**, so declaring a `#caller_location`
+  parameter costs `{ Location } :: import <core/loc>`. `panic` needs no import
+  because it carries the parameter itself.
+- **`make` still takes only a length**, and `#static` composes with other
+  directives but none of them (a link section, an offset) is implemented yet.
 - **`assert` is not in the prelude.** §6.4 puts only `cast`, `panic` and
   `size_of` there, so a compile-time assertion needs
   `{ assert } :: import <core/fail>` — including the struct-body form §6.10

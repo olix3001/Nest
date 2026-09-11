@@ -7,8 +7,9 @@ is right about the future.
 
 Phases 0 through 4 are **complete**: the front end parses, resolves, infers,
 lowers to IR, validates the IR, evaluates constants, splits the prelude, declares
-every intrinsic in `core`, and takes a `const` generic of any primitive type. 350
-tests pass. Phase 5 and everything after it is unbuilt.
+every intrinsic in `core`, and takes a `const` generic of any primitive type. A
+round of language decisions on top of that — `#caller_location`, `Default`, the
+binding syntax, trait conformance — is recorded below. 363 tests pass. Phase 5 and everything after it is unbuilt.
 
 ## The order, at a glance
 
@@ -259,6 +260,24 @@ call's own argument, a symbolic `[N]T` refusing a fixed-count literal, two
 distinct parameters being two distinct lengths, `[N][M]T`, and two
 instantiations in one expression. A mismatch is reported in the **lengths**
 (``expected `[4]u32`, found `[3]u32```), never in `N`.
+
+---
+
+## Between 4 and 5 — language decisions, all built
+
+Not a phase: four questions the user answered and the work that followed, in
+`78d2b5e`..`4b041a3`. `HANDOFF.md` has the detail; the decisions are:
+
+| Decision | Shape |
+|---|---|
+| `#caller_location` is an expression, legal only as a **default argument** | `func (loc: Location := #caller_location)`, `Location` a `#lang("location")` struct in `core/loc.nest` |
+| No struct field defaults; `Default` and `..` instead | `P { x: 5, ..Default.default() }`, desugared to explicit field reads off one temporary |
+| A constant's type goes **before** the binder | `NAME: T :: value`, `#static NAME: T [:: value]`, `MAX: i32 [:: default]` — so `NAME :: type` is a type alias always |
+| An impl's members are checked against the trait's **types**, not just their presence | `Inferer::check_impl_conformance` |
+
+Two bugs fixed on the way: a struct-field default **hung the parser** (it had,
+since before phase 2), and a function-local `#static` was never lowered as a
+global.
 
 ---
 
