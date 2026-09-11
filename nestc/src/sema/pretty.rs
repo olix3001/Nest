@@ -77,7 +77,6 @@ fn annotate(session: &Session, ast: &Ast, id: NodeId) -> String {
 fn res_str(defs: &DefTable, res: &Resolution) -> String {
     match res {
         Resolution::Def(d) => format!("-> d{} `{}`", d.0, defs.canonical_string(*d)),
-        Resolution::Intrinsic(name) => format!("-> ${name}"),
         Resolution::Error => "unresolved".to_string(),
     }
 }

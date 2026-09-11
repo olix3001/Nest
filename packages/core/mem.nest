@@ -1,0 +1,49 @@
+// Memory, layout, and conversion intrinsics.
+//
+// Every declaration here is a **bodyless `#intrinsic` function** (§6.4, §9): an
+// ordinary declaration with an ordinary signature, whose body the compiler
+// supplies. There is no `$name` form and no second namespace for
+// compiler-provided functions — a reader who wants to know what `cast` takes and
+// returns reads it here, beside everything else core declares.
+//
+// `#intrinsic` is the mirror of `#lang`, and the direction is what keeps them
+// apart: `#lang("add")` is the compiler looking *up* an item core provides;
+// `#intrinsic("cast")` is core declaring an item the compiler *fills in*. The
+// tag, not the name, is the identity — so renaming a declaration here is a
+// library decision, not a compiler change.
+
+// The sole explicit conversion (§6.5). `cast.<T>(x)` names the target; `cast(x)`
+// takes it from context, which is ordinary return-position inference — `T` is
+// the *first* parameter precisely so a turbofish can supply it and leave `U` to
+// be inferred from the argument.
+//
+// What a cast promises depends on who wrote it: a `cast` the program wrote may
+// lose precision (narrowing keeps the low bits, as at run time), while one the
+// compiler inserted to settle a literal must be exact (§6.5).
+@public cast :: #intrinsic("cast") func <T, U> (x: U) -> T
+
+// Reinterpret the bits of `x` as a `T` of the same size. The size equality is a
+// check the compiler makes at the call, not something the signature says — there
+// is no bound that means "same layout".
+@public transmute :: #intrinsic("transmute") func <T, U> (x: U) -> T
+
+// Layout queries. Both are compile-time constants once `T` is concrete, which is
+// why they may appear on the RHS of a `::`.
+@public size_of  :: #intrinsic("size_of") func <T> () -> usize
+@public align_of :: #intrinsic("align_of") func <T> () -> usize
+
+// Allocation (§6.9). The language is collected, so there is no free.
+//
+// `new.<T>()` yields one zeroed, GC-managed `T`.
+@public new :: #intrinsic("new") func <T> () -> *mut T
+
+// `make.<[]T>(len)` yields a zeroed, GC-managed slice of `len` elements.
+//
+// This is one of the two intrinsics whose result the signature cannot state: the
+// type argument is written `[]T` and the result is `[]mut T` — the *mutability*
+// is what the allocation adds, and no bound expresses that. The compiler applies
+// it at the call site; the `[]T` written here is the shape, not the promise.
+@public make :: #intrinsic("make") func <T> (len: usize) -> T
+
+// Splice a file's bytes into the binary as a compile-time `[]u8`.
+@public embed_file :: #intrinsic("embed_file") func (path: str) -> []u8

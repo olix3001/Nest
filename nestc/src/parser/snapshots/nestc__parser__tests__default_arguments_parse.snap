@@ -1,6 +1,6 @@
 ---
 source: src/parser/tests.rs
-expression: "tree(\"\\\npad :: func (s: string, width: usize := 8, fill: char := ' ') -> string {\n    s\n}\nmk :: func (c: Cfg := .{ a: 1 }, n: i32 := $cast.<i32>(2)) {\n}\n\")"
+expression: "tree(\"\\\npad :: func (s: string, width: usize := 8, fill: char := ' ') -> string {\n    s\n}\nmk :: func (c: Cfg := .{ a: 1 }, n: i32 := cast.<i32>(2)) {\n}\n\")"
 ---
 File
   ConstBind ::
@@ -33,9 +33,11 @@ File
       Param n: (default :=)
         TypePath
           Path `i32`
-        IntrinsicCall $cast
-          TypePath
-            Path `i32`
+        Call
+          GenericApply .<>
+            Path `cast`
+            TypePath
+              Path `i32`
           Arg
             Lit Int(2)
       Block

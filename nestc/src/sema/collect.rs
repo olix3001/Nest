@@ -205,6 +205,7 @@ impl Collector<'_> {
         // this flag and needs no notion of "is this one special".
         let is_static = directives.iter().any(|d| d.name.as_str() == "static");
         self.defs.get_mut(def).directives = directives;
+        self.check_bodyless(rhs, &rhs_kind, def);
         if is_static {
             self.defs.get_mut(def).mutable = true;
         }
@@ -265,6 +266,46 @@ impl Collector<'_> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A bodyless `func` stands without an implementation, and §9 gives exactly
+    /// three ways that is allowed: `#intrinsic` (the compiler supplies the
+    /// body), `extern` (another object file does), and a trait requirement (an
+    /// impl does). This path sees the first two — a trait's members are
+    /// collected by [`Collector::collect_trait_member`], which never reaches
+    /// here — so anything else bodyless is an error.
+    ///
+    /// Until now the shape was silently accepted and meant nothing, which is the
+    /// worst of both: a declaration that looks like it does something and does
+    /// not.
+    fn check_bodyless(&mut self, rhs: NodeId, rhs_kind: &NodeKind, def: DefId) {
+        let NodeKind::FuncExpr {
+            body, extern_abi, ..
+        } = rhs_kind
+        else {
+            return;
+        };
+        let tag = self.defs.get(def).intrinsic_tag();
+        // An `#intrinsic` **must** be bodyless: the compiler is going to supply
+        // the body, so a written one would be dead code with no way to tell.
+        if let Some(tag) = &tag {
+            if body.is_some() {
+                self.report(rhs, "an `#intrinsic` function may not have a body");
+            }
+            // The compiler must recognize it here, at the declaration. Deferring
+            // to the first call would report a missing body far from the line
+            // that promised one.
+            if super::intrinsics::lookup(tag.as_str()).is_none() {
+                let msg = format!("unknown intrinsic `{tag}`");
+                self.report(rhs, msg);
+            }
+        }
+        if body.is_none() && tag.is_none() && extern_abi.is_none() {
+            self.report(
+                rhs,
+                "a function with no body must be `#intrinsic`, `extern`, or a trait requirement",
+            );
         }
     }
 

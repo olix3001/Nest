@@ -21,7 +21,7 @@ impl <T, E> Try for Result.<T, E> {
   unwrap :: func (self: Result.<T, E>) -> T {
     return self.match {
       .ok(v)  => v,
-      .err(e) => $abort(e),
+      .err(e) => panic("called `.!` on an `.err`"),
     }
   }
 }

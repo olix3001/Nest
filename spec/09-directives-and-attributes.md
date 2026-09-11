@@ -232,6 +232,15 @@ but its effect is described where operators are (§6.13).
   | `#lang("add")` | compiler → core | "find the item with this tag and wire syntax to it" |
   | `#intrinsic` | core → compiler | "this declaration has no body; you supply it" |
 
+  The directive takes an optional **tag**: `#intrinsic("size_of")` says *which*
+  intrinsic the declaration is, and a bare `#intrinsic` means "the tag is the
+  declared name". The tag, never the name or the path, is the identity — for the
+  same reason `#lang`'s is (§9.3). A compiler that keyed on `core.mem.size_of`
+  would turn renaming a library declaration into a compiler change, and `core` is
+  meant to be replaceable. The two forms mean the same thing for every
+  declaration whose name already matches its tag, which is all of them today;
+  writing the tag is what makes a rename possible later.
+
   A function marked `#intrinsic` **must** have no body, and the compiler must
   recognize it — an `#intrinsic` the compiler has never heard of is an error at
   the declaration, not a link failure later. Conversely a bodyless function that

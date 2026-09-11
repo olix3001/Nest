@@ -148,6 +148,27 @@ impl Parser {
     }
 
     /// The kind `n` tokens ahead (`0` == [`Parser::peek`]).
+    /// Whether the parser is looking at a **comptime item** — a bare call in a
+    /// position that otherwise holds declarations (§6.10).
+    ///
+    /// `assert(size_of.<Self>() == 64)` may sit among a struct's fields, a
+    /// trait's members, or a namespace's items. With `$assert` retired the
+    /// sigil no longer marks it, so the shape does: every declaration in these
+    /// positions is `name :: rhs` (or `name: ty` for a field), and a call is an
+    /// identifier followed by anything else. One token of lookahead decides it.
+    pub(crate) fn at_comptime_item(&self) -> bool {
+        matches!(self.peek(), Some(TokenKind::Ident(_)))
+            && matches!(
+                self.peek_nth(1),
+                Some(
+                    TokenKind::LParen
+                        | TokenKind::Dot
+                        | TokenKind::DotLt
+                        | TokenKind::LBracket
+                )
+            )
+    }
+
     pub(crate) fn peek_nth(&self, n: usize) -> Option<&TokenKind> {
         self.tokens.get(self.pos + n).map(|t| &t.kind)
     }

@@ -48,6 +48,7 @@ pub mod fields;
 pub mod impls;
 pub mod imports;
 pub mod infer;
+pub mod intrinsics;
 pub mod lower;
 pub mod pretty;
 pub mod resolve;
@@ -75,8 +76,6 @@ use session::{FileMeta, Session};
 pub enum Resolution {
     /// Resolved to a unique definition.
     Def(DefId),
-    /// A compiler `$`-intrinsic (no def).
-    Intrinsic(Symbol),
     /// Could not be resolved (a diagnostic was reported).
     Error,
 }

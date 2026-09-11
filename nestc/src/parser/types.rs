@@ -389,8 +389,8 @@ impl Parser {
             if self.at(&TokenKind::RBrace) || self.at_eof() {
                 break;
             }
-            // A `$intrinsic(...)` comptime item may sit among the fields.
-            if matches!(self.peek(), Some(TokenKind::Ident(s)) if s.as_str().starts_with('$')) {
+            // A comptime item — `assert(...)` — may sit among the fields (§6.10).
+            if self.at_comptime_item() {
                 members.push(self.parse_expr());
             } else {
                 members.push(self.parse_field());
@@ -552,11 +552,11 @@ impl Parser {
         )
     }
 
-    /// One trait member: a `$intrinsic(...)` comptime item, or a `name :: rhs`
+    /// One trait member: an `assert(...)` comptime item, or a `name :: rhs`
     /// binding whose RHS is either a bodyless `func` (a method signature) or the
     /// contextual `type [ ':' bounds ]` (an associated type).
     fn parse_trait_member(&mut self) -> NodeId {
-        if matches!(self.peek(), Some(TokenKind::Ident(s)) if s.as_str().starts_with('$')) {
+        if self.at_comptime_item() {
             return self.parse_expr();
         }
         let start = self.cur_span();

@@ -28,6 +28,9 @@ prelude :: import "prelude.nest"
 @public iter    :: import "iter.nest"
 @public range   :: import "range.nest"
 @public slice   :: import "slice.nest"
+@public mem     :: import "mem.nest"
+@public fail    :: import "fail.nest"
+@public gc      :: import "gc.nest"
 
 // `str.nest` gets no namespace re-export: its one public member is `str`, which
 // the prelude already exports, and a `str` namespace sitting beside the `str`

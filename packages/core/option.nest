@@ -23,7 +23,7 @@ impl <T> Try for Option.<T> {
   unwrap :: func (self: Option.<T>) -> T {
     return self.match {
       .some(v) => v,
-      .none    => $abort(),
+      .none    => panic("called `.!` on a `.none`"),
     }
   }
 }

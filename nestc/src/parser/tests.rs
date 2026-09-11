@@ -249,11 +249,11 @@ fn error_handling_and_intrinsics() {
         "\
 load :: func () -> Result.<Config, Error> {
   const text := read_file(\"c\").?
-  const n := $size_of.<CatImage>()
-  const p := $new.<CatImage>()
+  const n := size_of.<CatImage>()
+  const p := new.<CatImage>()
   const port := to_port(8080).!
   defer file.close()
-  const bits := $cast.<*dyn ToJson>(&cat)
+  const bits := cast.<*dyn ToJson>(&cat)
   return .ok(parsed)
 }
 "
@@ -349,7 +349,7 @@ fn default_arguments_parse() {
 pad :: func (s: string, width: usize := 8, fill: char := ' ') -> string {
     s
 }
-mk :: func (c: Cfg := .{ a: 1 }, n: i32 := $cast.<i32>(2)) {
+mk :: func (c: Cfg := .{ a: 1 }, n: i32 := cast.<i32>(2)) {
 }
 "
     ))

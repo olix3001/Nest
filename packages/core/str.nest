@@ -36,5 +36,5 @@ impl str {
   // The underlying bytes. Going this way is always sound: valid UTF-8 is a
   // subset of arbitrary bytes. The reverse needs a check, and lives in `std`
   // until there is enough machinery here to write it.
-  as_bytes :: #inline func (self: str) -> []u8 { return $cast.<[]u8>(self) }
+  as_bytes :: #inline func (self: str) -> []u8 { return cast.<[]u8>(self) }
 }

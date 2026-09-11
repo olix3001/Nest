@@ -15,7 +15,7 @@ exist.
 | `operators.nest` | operator traits (`Add`, `Mul`, …) and their impls |
 | `inference.nest` | generics, trait bounds, associated types, projection |
 | `errors.nest` | `.?` propagation on `Result` **and** `Option`, `.!` abort, `for` over a slice |
-| `arrays.nest` | `[N]T` lengths, `<const N: usize>` value generics, `.len` / `$len`, array→slice |
+| `arrays.nest` | `[N]T` lengths, `<const N: usize>` value generics, `.len` / `len`, array→slice |
 | `dispatch.nest` | `@using` upcasts, `dyn` trait objects, bound-directed calls |
 
 `use_math.nest` is the cross-file example: `math :: import "math.nest"` binds the

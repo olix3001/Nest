@@ -234,7 +234,7 @@ Tokens recognized by the lexer:
 =  +=  -=  *=  /=  %=
 &                   // address-of (prefix) / bitwise-and (infix)   (& mut for a mutable ref)
 *                   // pointer type (prefix) / multiply (infix)
-@  #  $             // attribute / directive / intrinsic sigils
+@  #                // attribute / directive sigils
 .  ,  ;  (  )  {  }  [  ]
 ```
 

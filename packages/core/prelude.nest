@@ -26,3 +26,10 @@
 @public { Result } :: import "result.nest"
 @public { ControlFlow } :: import "control.nest"
 @public { str } :: import "str.nest"
+
+// The three intrinsics §6.4 puts here. `cast` appears wherever a conversion is
+// written, `panic` wherever something must not happen, and `size_of` in enough
+// signatures and constants to earn its place; the rest of `core/mem` and all of
+// `core/gc` are an import away.
+@public { cast, size_of } :: import "mem.nest"
+@public { panic } :: import "fail.nest"

@@ -86,8 +86,8 @@ impl Parser {
                 let ld = self.parse_local_decl();
                 out.push(self.finish_decl(attrs, directives, ld, start));
             }
-            // `$assert(...)` and friends: a comptime item.
-            Some(TokenKind::Ident(s)) if s.as_str().starts_with('$') => {
+            // `assert(...)` and friends: a comptime item (§6.10).
+            _ if self.at_comptime_item() => {
                 if decorated {
                     self.error(
                         start,

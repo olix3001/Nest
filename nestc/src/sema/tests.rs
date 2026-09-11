@@ -1876,7 +1876,7 @@ f :: func (
   b: i32 := K,
   c: P := P {{ x: 2 }},
   d: i32 := pure(3),
-  e: i32 := $cast.<i32>(K),
+  e: i32 := cast.<i32>(K),
   g: i32 := K + 1,
 ) -> i32 {{ return a }}
 "
@@ -2287,11 +2287,12 @@ fn the_gc_intrinsics_are_known_and_yield_nothing() {
     // All three are statements, not values: what they do is change what the
     // collector may do next (§6.4.1).
     let src = "\
+{ gc_collect, gc_keep_alive, gc_pin } :: import <core/gc>
 S :: struct { n: i32 }
 f :: func (p: *S) {
-  $gc_collect()
-  $gc_keep_alive(p)
-  $gc_pin(p)
+  gc_collect()
+  gc_keep_alive(p)
+  gc_pin(p)
 }
 ";
     let session = analyze_mem(&[("main", src)], "main");
@@ -2995,7 +2996,7 @@ fn ir_snap_match_variant_binding() {
 
 #[test]
 fn try_abort_in_a_value_position_does_not_force_void() {
-    // `$abort` diverges, so the `.err` arm it sits in contributes no type: the
+    // `abort` diverges, so the `.err` arm it sits in contributes no type: the
     // `match` takes the `.ok` arm's, and `.!` is usable where a value is wanted.
     let session = analyze_mem(
         &[(
@@ -3142,9 +3143,9 @@ fn ir_snap_try_abort_lowers_to_unwrap() {
 #[test]
 fn ir_snap_const_generic_length_and_len() {
     // `N` stays symbolic inside the generic body and is solved per call site;
-    // `.len()` is `core`'s inherent method on the sequences; its body is `$len`.
+    // `.len()` is `core`'s inherent method on the sequences; its body is `len`.
     insta::assert_snapshot!(ir_text(
-        "count :: func <const N: usize, T> (a: [N]T) -> usize { return a.len() }\nf :: func (s: []i32) -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return count(a) + a.len() + $len(s)\n}\n"
+        "{ len } :: import <core/slice>\ncount :: func <const N: usize, T> (a: [N]T) -> usize { return a.len() }\nf :: func (s: []i32) -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return count(a) + a.len() + len(s)\n}\n"
     ));
 }
 
@@ -3165,7 +3166,7 @@ fn ir_snap_static_trait_call_targets_the_selected_impl() {
 #[test]
 fn ir_snap_intrinsic_call() {
     insta::assert_snapshot!(ir_text(
-        "ic :: func (x: i64) -> i32 { return $cast.<i32>(x) }\n"
+        "ic :: func (x: i64) -> i32 { return cast.<i32>(x) }\n"
     ));
 }
 
@@ -3318,7 +3319,7 @@ fn self_in_a_structural_impl_is_the_structural_target() {
     // means the target: `self: *Self` there is a `*[]T`. This is the same
     // binding `core` relies on for `.len()`.
     let s = analyze_clean(
-        "Sum :: trait { sum :: func (self: *Self) -> usize }\nimpl <T> Sum for []T { sum :: func (self: *Self) -> usize { return $len(self) } }\nf :: func (s: []i32) -> usize { return s.sum() }\n",
+        "{ len } :: import <core/slice>\nSum :: trait { sum :: func (self: *Self) -> usize }\nimpl <T> Sum for []T { sum :: func (self: *Self) -> usize { return len(self) } }\nf :: func (s: []i32) -> usize { return s.sum() }\n",
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
@@ -3356,7 +3357,7 @@ fn dyn_needs_a_trait() {
 #[test]
 fn ir_snap_dyn_mutating_dispatch_and_explicit_cast() {
     // A `*mut T` unsizes to a `*mut dyn Trait`, which is what lets a mutating
-    // method be called through the object; and `$cast.<*dyn Trait>(p)` is the
+    // method be called through the object; and `cast.<*dyn Trait>(p)` is the
     // *same* unsizing written out, so it lowers to the same fat-pointer node
     // rather than to a reinterpretation of bits.
     let src = "\
@@ -3370,7 +3371,7 @@ impl Draw for Box2 {
   scale :: func (self: *mut Self, k: i32) { self.w = self.w * k }
 }
 use_dyn :: func (b: *Box2, m: *mut Box2) -> i32 {
-  const explicit := $cast.<*dyn Draw>(b)
+  const explicit := cast.<*dyn Draw>(b)
   let w: *mut dyn Draw := m
   w.scale(2)
   return explicit.area()
@@ -3934,7 +3935,7 @@ build_strings :: func () {
 #[test]
 fn ir_snap_comptime_casts_are_explicit() {
     // A literal is a `comptime_int` with no runtime representation; every point
-    // one becomes a runtime integer is an explicit `$cast` in the IR, so no
+    // one becomes a runtime integer is an explicit `cast` in the IR, so no
     // conversion is left implicit for a later stage to rediscover.
     insta::assert_snapshot!(ir_text(
         "P :: struct { x: i32 }\ncc :: func (n: i32) -> i32 {\n  let a: i8 := 5\n  const p := P { x: 1 }\n  return n + 2\n}\n"
@@ -4077,9 +4078,136 @@ fn an_unknown_field_or_method_is_reported_not_silently_erased() {
 
 #[test]
 fn intrinsics_have_their_own_result_types() {
-    // `$size_of` is a `usize` whatever `T` is, and `$new` allocates a `*mut T`.
+    // `size_of` is a `usize` whatever `T` is, and `new` allocates a `*mut T`.
     analyze_clean(
-        "C :: struct { n: i32 }\nf :: func () {\n  const a: usize := $size_of.<i32>()\n  const b: *mut C := $new.<C>()\n  const c: []mut u8 := $make.<[]u8>(16)\n}\n",
+        "{ new, make } :: import <core/mem>\nC :: struct { n: i32 }\nf :: func () {\n  const a: usize := size_of.<i32>()\n  const b: *mut C := new.<C>()\n  const c: []mut u8 := make.<[]u8>(16)\n}\n",
+    );
+}
+
+#[test]
+fn an_intrinsic_is_an_ordinary_declaration_in_core() {
+    // §6.4: an intrinsic has a signature, takes turbofish arguments, infers, and
+    // is reached by the ordinary name-resolution rules. Nothing about the *call*
+    // is special — `cast.<u8>(n)` is one call node with a resolved callee, and
+    // the compiler only steps in to supply the body.
+    let s = analyze_clean("f :: func (n: i32) -> u8 { return cast.<u8>(n) }\n");
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    assert!(ir.contains("$cast(n: i32): u8"), "{ir}");
+
+    // The target type is the *first* generic parameter, so a turbofish pins it
+    // and leaves the source to be inferred; with no turbofish it comes from
+    // context. Neither is a rule about `cast` — it is how every generic call
+    // works.
+    analyze_clean("f :: func (n: i32) -> u8 { return cast(n) }\n");
+
+    // `$` is not a token any more.
+    assert_eq!(
+        first_error("f :: func (n: i32) -> u8 { return $cast.<u8>(n) }\n"),
+        "unexpected character"
+    );
+}
+
+#[test]
+fn only_core_may_declare_an_intrinsic_and_only_a_known_one() {
+    // The compiler must recognize an `#intrinsic` **at the declaration** (§9).
+    // Deferring to the first call would report a missing body far from the line
+    // that promised one.
+    assert_eq!(
+        first_error("f :: #intrinsic(\"teleport\") func () -> void\n"),
+        "unknown intrinsic `teleport`"
+    );
+    // An `#intrinsic` may not have a body: the compiler is going to supply one,
+    // so a written body would be dead code with no way to tell.
+    assert_eq!(
+        first_error("f :: #intrinsic(\"gc_collect\") func () -> void { return }\n"),
+        "an `#intrinsic` function may not have a body"
+    );
+    // And the rule that shape now has a meaning: a bodyless namespace-level
+    // `func` used to parse and mean nothing.
+    assert_eq!(
+        first_error("f :: func (n: i32) -> u8\n"),
+        "a function with no body must be `#intrinsic`, `extern`, or a trait requirement"
+    );
+    // The three that are allowed. A trait requirement is bodyless by nature; an
+    // `extern` one is implemented in another object file.
+    analyze_clean(
+        "T :: trait { m :: func (self: Self) -> i32 }\n\
+         e :: extern(\"c\") func (n: i32) -> i32\n\
+         i :: #intrinsic(\"gc_collect\") func () -> void\n",
+    );
+}
+
+#[test]
+fn an_intrinsic_is_identified_by_its_tag_not_its_name() {
+    // The same promise `#lang` makes: `core` stays renameable, because the
+    // compiler keys on the tag. A declaration called `sizeof` tagged
+    // `"size_of"` is the `size_of` intrinsic.
+    let s = analyze_clean(
+        "sizeof :: #intrinsic(\"size_of\") func <T> () -> usize\n\
+         f :: func () -> usize { return sizeof.<i32>() }\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    assert!(ir.contains("$size_of(): usize"), "{ir}");
+
+    // A bare `#intrinsic` defaults the tag to the declared name, which is what
+    // every declaration in `core` happens to want.
+    analyze_clean("gc_collect :: #intrinsic func () -> void\n");
+}
+
+#[test]
+fn the_intrinsics_needing_more_than_a_signature_are_two() {
+    // `make.<[]T>(n)` is written with the slice already and yields `[]mut T`:
+    // the *mutability* is what the allocation adds, and no bound says that.
+    let s = analyze_clean(
+        "{ make } :: import <core/mem>\nf :: func () -> []mut u8 { return make.<[]u8>(16) }\n",
+    );
+    assert!(!s.has_errors());
+
+    // `len(x)` takes an array or a slice and nothing else — also unsayable, so
+    // the check lives in the compiler beside the declaration's unbounded `T`.
+    assert!(
+        first_error("{ len } :: import <core/slice>\nf :: func (n: i32) -> usize { return len(n) }\n")
+            .contains("`len` needs an array or a slice"),
+    );
+
+    // Everything else is its signature and nothing more. `panic` returns
+    // `never`, which is why it may end a block that owes a value — there is no
+    // list of diverging intrinsics for it to be on.
+    analyze_clean("f :: func (b: bool) -> i32 {\n  if b { return 1 }\n  panic(\"no\")\n}\n");
+}
+
+#[test]
+fn the_prelude_carries_three_intrinsics_and_no_more() {
+    // §6.4: `cast`, `panic` and `size_of` are in the prelude; the rest of
+    // `core/mem` and all of `core/gc` are an import away.
+    analyze_clean(
+        "f :: func (n: i32) -> u8 { return cast.<u8>(n) }\n\
+         g :: func () -> usize { return size_of.<i32>() }\n\
+         h :: func () -> never { panic(\"stop\") }\n",
+    );
+    for (name, src) in [
+        ("new", "f :: func () { const p := new.<i32>() }\n"),
+        ("transmute", "f :: func (n: i32) { const b := transmute.<u32>(n) }\n"),
+        ("gc_collect", "f :: func () { gc_collect() }\n"),
+        ("len", "f :: func (s: []i32) -> usize { return len(s) }\n"),
+    ] {
+        assert_eq!(first_error(src), format!("cannot resolve name `{name}`"));
+    }
+}
+
+#[test]
+fn a_comptime_item_no_longer_needs_a_sigil() {
+    // §6.10: a `void` intrinsic call may stand as an item in a struct, trait or
+    // namespace body. `$assert` marked those; with the sigil gone the *shape*
+    // does — every declaration in those positions is `name :: rhs` (or
+    // `name: ty` for a field), so an identifier followed by anything else is a
+    // call.
+    analyze_clean(
+        "{ assert } :: import <core/fail>\n\
+         H :: struct {\n  assert(size_of.<i32>() == 4)\n  n: i32,\n}\n\
+         assert(size_of.<i32>() == 4)\n",
     );
 }
 
@@ -4307,12 +4435,12 @@ fn len_is_an_inherent_method_the_receiver_type_picks() {
 
 #[test]
 fn the_len_intrinsic_folds_on_a_fixed_array_and_reads_a_slice_header() {
-    // `$len` is the primitive `.len()`'s body is written in. On a `[N]T` whose
+    // `len` is the primitive `.len()`'s body is written in. On a `[N]T` whose
     // `N` is known it folds to the literal count right here; on a `[]T` it stays
     // for the header read, and on a still-generic `[N]T` it stays for
     // monomorphization to substitute.
     let s = analyze_clean(
-        "count :: func <const N: usize, T> (a: [N]T) -> usize { return $len(a) }\nf :: func (s: []i32) -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return $len(a) + $len(s)\n}\n",
+        "{ len } :: import <core/slice>\ncount :: func <const N: usize, T> (a: [N]T) -> usize { return len(a) }\nf :: func (s: []i32) -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return len(a) + len(s)\n}\n",
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
@@ -4331,15 +4459,15 @@ fn len_works_through_a_mutable_slice() {
 #[test]
 fn the_len_intrinsic_rejects_a_type_with_no_length() {
     assert!(
-        first_error("f :: func (n: i32) -> usize { return $len(n) }\n")
-            .contains("`$len` needs an array or a slice"),
+        first_error("{ len } :: import <core/slice>\nf :: func (n: i32) -> usize { return len(n) }\n")
+            .contains("`len` needs an array or a slice"),
     );
 }
 
 #[test]
 fn a_fixed_array_unsizes_to_a_read_only_slice() {
     // One `func (s: []T)` serves every length; the IR shows the full sub-slice
-    // the source left implicit — the same `$slice` an explicit `a[..]` emits.
+    // the source left implicit — the same `slice` an explicit `a[..]` emits.
     let s = analyze_clean(
         "take :: func (s: []i32) -> usize { return s.len() }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n",
     );
@@ -4374,21 +4502,22 @@ fn ir_snap_array_lengths_through_the_pipeline() {
     //
     //   - `[_]T { … }`  — the literal's element count becomes the type's `N`
     //   - `[3]i32`      — written out, and the same type as the inferred one
-    //   - `[N]T`        — still a `const` parameter; `$len` cannot fold yet and
+    //   - `[N]T`        — still a `const` parameter; `len` cannot fold yet and
     //                     stays for monomorphization to substitute
-    //   - `$len(a)`     — folds to the literal on a known `N`
+    //   - `len(a)`     — folds to the literal on a known `N`
     //   - `a.len()`     — `core`'s inherent method; which impl runs is picked by
     //                     the receiver's type, so an array and a slice reach
     //                     different ones
     //   - `take(a)`     — the `[3]i32` -> `[]i32` unsizing, spelled as the
     //                     whole sub-slice it means
     let src = "\
-count :: func <const N: usize, T> (a: [N]T) -> usize { return $len(a) }
+{ len } :: import <core/slice>
+count :: func <const N: usize, T> (a: [N]T) -> usize { return len(a) }
 take :: func (s: []i32) -> usize { return s.len() }
 f :: func () -> usize {
   const inferred := [_]i32 { 1, 2, 3 }
   const written: [3]i32 := inferred
-  const folded := $len(written)
+  const folded := len(written)
   const method := written.len()
   return count(inferred) + folded + method + take(written)
 }
@@ -4533,7 +4662,7 @@ f :: func (r: *Router) -> i32 {
 #[test]
 fn ir_snap_a_default_may_be_any_constant_form() {
     // The forms §5.2 admits, each reaching the call site: a path to a `const`
-    // item, a composite literal, a `$cast`, and a `const` generic parameter.
+    // item, a composite literal, a `cast`, and a `const` generic parameter.
     //
     // Two things to read off this snapshot. The composite literal is rebuilt at
     // the call site rather than shared, which is what keeps a mutable default
@@ -4544,7 +4673,7 @@ fn ir_snap_a_default_may_be_any_constant_form() {
 PORT :: 8080
 Cfg :: struct { a: i32, b: i32 }
 
-g :: func (x: i32, p: i32 := PORT, c: Cfg := .{ a: 1, b: 2 }, w: u8 := $cast.<u8>(3)) -> i32 {
+g :: func (x: i32, p: i32 := PORT, c: Cfg := .{ a: 1, b: 2 }, w: u8 := cast.<u8>(3)) -> i32 {
   return x
 }
 
@@ -4647,7 +4776,7 @@ fn an_inherited_builtin_operator_stays_homogeneous() {
 fn ir_snap_a_literal_settles_on_a_distinct_numeric() {
     // A `comptime_int` may become a `distinct` type over an integer, the same
     // way it becomes the integer itself (§2.4). Without this every literal
-    // assigned to a distinct numeric would need a `$cast`, which is exactly the
+    // assigned to a distinct numeric would need a `cast`, which is exactly the
     // ceremony the type exists to buy back.
     //
     // Note the literal in `p + 1` types as `HttpPort`, not `isize`: reaching a
@@ -4853,7 +4982,7 @@ fn a_const_generic_parameter_must_be_an_integer() {
         assert!(diag_contains(&s, needle), "{:#?}", s.diagnostics);
     }
     // The integer case that the language actually uses stays clean.
-    let s = analyze_clean("f :: func <const N: usize> (a: [N]i32) -> usize { return $len(a) }\n");
+    let s = analyze_clean("{ len } :: import <core/slice>\nf :: func <const N: usize> (a: [N]i32) -> usize { return len(a) }\n");
     assert!(!s.has_errors(), "{:#?}", s.diagnostics);
 }
 
@@ -4863,7 +4992,7 @@ fn an_array_length_travels_with_the_const_parameter() {
     // site's `[3]i32` solves it for *that* instantiation, and the callee's body
     // still says `[N]T` because it is one body for every length.
     let s = analyze_clean(
-        "count :: func <const N: usize, T> (a: [N]T) -> usize { return $len(a) }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3, 4 }\n  return count(a)\n}\n",
+        "{ len } :: import <core/slice>\ncount :: func <const N: usize, T> (a: [N]T) -> usize { return len(a) }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3, 4 }\n  return count(a)\n}\n",
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
@@ -5202,7 +5331,7 @@ main :: func () {
 }
 ";
     analyze_clean(src);
-    // Each settled type is reached through an explicit `$cast` off the literal's
+    // Each settled type is reached through an explicit `cast` off the literal's
     // own `comptime_str`, the way an integer literal reaches its width.
     let ir = ir_text(src);
     assert!(ir.contains("$cast(\"hi\": comptime_str): []u8"), "{ir}");
@@ -5296,17 +5425,17 @@ fn an_inserted_conversion_must_be_exact() {
     analyze_clean("main :: func () { let e: f32 := 0.1 }\n");
 }
 
-/// A `$cast` the program wrote may lose precision: it does at run time, and a
+/// A `cast` the program wrote may lose precision: it does at run time, and a
 /// constant that disagreed with the running program would be worse than either.
 #[test]
 fn a_written_cast_may_lose_precision() {
-    analyze_clean("main :: func () {\n  let x: u32 := 30423\n  let y: u8 := $cast.<u8>(x)\n}\n");
-    let ir = ir_text("A :: 400\nX :: u8 := $cast.<u8>(A)\nmain :: func () {}\n");
+    analyze_clean("main :: func () {\n  let x: u32 := 30423\n  let y: u8 := cast.<u8>(x)\n}\n");
+    let ir = ir_text("A :: 400\nX :: u8 := cast.<u8>(A)\nmain :: func () {}\n");
     assert!(ir.contains("// = 144"), "{ir}");
-    let ir = ir_text("Y :: u8 := $cast.<u8>(300)\nmain :: func () {}\n");
+    let ir = ir_text("Y :: u8 := cast.<u8>(300)\nmain :: func () {}\n");
     assert!(ir.contains("// = 44"), "{ir}");
     // The float direction too: what the program asked for is what it gets.
-    let ir = ir_text("Z :: f32 := $cast.<f32>(3.5e40)\nmain :: func () {}\n");
+    let ir = ir_text("Z :: f32 := cast.<f32>(3.5e40)\nmain :: func () {}\n");
     assert!(ir.contains("// = inf"), "{ir}");
 }
 
@@ -5319,7 +5448,7 @@ fn a_constant_conversion_is_checked_and_a_written_one_is_not() {
     // Exactly one diagnostic: inference and the evaluator both check this
     // conversion, and one mistake gets one message.
     assert_eq!(msgs.len(), 1, "{msgs:#?}");
-    assert!(messages("B :: u8 := $cast.<u8>(300)\nmain :: func () {}\n").is_empty());
+    assert!(messages("B :: u8 := cast.<u8>(300)\nmain :: func () {}\n").is_empty());
 }
 
 /// A `f32` constant stores what an `f32` holds, so the constant and the same
@@ -5390,6 +5519,6 @@ fn a_constant_arithmetic_result_must_fit_its_type() {
     let ir = ir_text("BIG :: 200 * 2\nmain :: func () {}\n");
     assert!(ir.contains("// = 400"), "{ir}");
     // And the low bits are still one written cast away.
-    let ir = ir_text("P :: u8 := $cast.<u8>(200 * 2)\nmain :: func () {}\n");
+    let ir = ir_text("P :: u8 := cast.<u8>(200 * 2)\nmain :: func () {}\n");
     assert!(ir.contains("// = 144"), "{ir}");
 }

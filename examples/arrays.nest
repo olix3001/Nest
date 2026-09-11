@@ -1,5 +1,9 @@
 // arrays.nest — fixed-length arrays, `const` generic values, and `.len()`.
-// No imports.
+//
+// `len` is an ordinary `#intrinsic` declaration in `core` (§6.4), reached like
+// any other name that is not in the prelude.
+
+{ len } :: import <core/slice>
 
 // The length of a `[N]T` is part of its type, so these are different types and
 // neither converts to the other.
@@ -20,13 +24,13 @@ sum :: func <const N: usize, T> (xs: [N]T) -> usize {
 }
 
 // `.len()` is not syntax: it is an inherent method the core library declares on
-// `[N]T` and on `[]T`, with the `$len` intrinsic as its body. The receiver's type
-// picks which of the two runs. `$len` itself folds to a constant on a fixed array
+// `[N]T` and on `[]T`, with the `len` intrinsic as its body. The receiver's type
+// picks which of the two runs. `len` itself folds to a constant on a fixed array
 // whose length is known, and reads the header on a slice.
 @public
 lengths :: func (s: []i32) -> usize {
   const fixed := triple()
-  return fixed.len() + $len(s)
+  return fixed.len() + len(s)
 }
 
 // A fixed array coerces to a read-only slice, which is how one function serves

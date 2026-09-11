@@ -1,6 +1,6 @@
 ---
 source: src/parser/tests.rs
-expression: "tree(\"\\\nload :: func () -> Result.<Config, Error> {\n  const text := read_file(\\\"c\\\").?\n  const n := $size_of.<CatImage>()\n  const p := $new.<CatImage>()\n  const port := to_port(8080).!\n  defer file.close()\n  const bits := $cast.<*dyn ToJson>(&cat)\n  return .ok(parsed)\n}\n\")"
+expression: "tree(\"\\\nload :: func () -> Result.<Config, Error> {\n  const text := read_file(\\\"c\\\").?\n  const n := size_of.<CatImage>()\n  const p := new.<CatImage>()\n  const port := to_port(8080).!\n  defer file.close()\n  const bits := cast.<*dyn ToJson>(&cat)\n  return .ok(parsed)\n}\n\")"
 ---
 File
   ConstBind ::
@@ -22,14 +22,18 @@ File
                 Lit Str("c")
         LocalDecl const
           BindingPat n
-          IntrinsicCall $size_of
-            TypePath
-              Path `CatImage`
+          Call
+            GenericApply .<>
+              Path `size_of`
+              TypePath
+                Path `CatImage`
         LocalDecl const
           BindingPat p
-          IntrinsicCall $new
-            TypePath
-              Path `CatImage`
+          Call
+            GenericApply .<>
+              Path `new`
+              TypePath
+                Path `CatImage`
         LocalDecl const
           BindingPat port
           Try Abort
@@ -43,11 +47,13 @@ File
               Path `file`
         LocalDecl const
           BindingPat bits
-          IntrinsicCall $cast
-            PtrType *
-              DynType dyn
-                TypePath
-                  Path `ToJson`
+          Call
+            GenericApply .<>
+              Path `cast`
+              PtrType *
+                DynType dyn
+                  TypePath
+                    Path `ToJson`
             Arg
               Unary Ref
                 Path `cat`

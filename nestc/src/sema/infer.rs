@@ -47,11 +47,6 @@ use super::impls::{ImplInfo, ImplTable};
 use super::ty::{Const, FloatWidth, InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
 use super::{DefMeta, Resolution};
 
-/// Intrinsics that never return, so a call to one types as [`Ty::Never`] rather
-/// than a value: it absorbs into whatever position it appears in instead of
-/// leaving an unsolvable variable behind.
-const DIVERGING_INTRINSICS: &[&str] = &["abort", "panic"];
-
 /// One enclosing `loop` / `while` while its body is being inferred.
 struct LoopFrame {
     /// The type its `break`s agree on.
@@ -60,49 +55,6 @@ struct LoopFrame {
     /// types as [`Ty::Never`] rather than as an unsolved variable.
     broke: bool,
 }
-
-/// What an intrinsic's result type is made of.
-///
-/// Most `$`-intrinsics are generic in one type argument, but only some of them
-/// *return* it: `$cast.<T>(x)` is a `T`, while `$new.<T>()` is a `*mut T` and
-/// `$size_of.<T>()` is a `usize` regardless of `T` (§6.9, §12).
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum IntrinsicResult {
-    /// The first type argument, unchanged.
-    Arg,
-    /// `*mut` of the first type argument.
-    PtrToArg,
-    /// The first type argument, made mutable (`$make.<[]T>(n)` is `[]mut T`).
-    MutableArg,
-    /// Always `usize` — a size, an alignment, a count.
-    Usize,
-    /// Always `string`.
-    Str,
-    /// No value.
-    Void,
-}
-
-/// The result shape of each known `$`-intrinsic. An intrinsic missing from this
-/// table falls back to its first type argument, or to a context-inferred
-/// variable when it has none.
-const INTRINSIC_RESULTS: &[(&str, IntrinsicResult)] = &[
-    ("cast", IntrinsicResult::Arg),
-    ("transmute", IntrinsicResult::Arg),
-    ("new", IntrinsicResult::PtrToArg),
-    ("make", IntrinsicResult::MutableArg),
-    ("len", IntrinsicResult::Usize),
-    ("size_of", IntrinsicResult::Usize),
-    ("align_of", IntrinsicResult::Usize),
-    ("name", IntrinsicResult::Str),
-    ("embed_file", IntrinsicResult::Str),
-    ("assert", IntrinsicResult::Void),
-    // The three the collector exposes (§6). Each is a statement, not a value:
-    // what they do is change what the collector may do next, which is why none
-    // of them hands anything back.
-    ("gc_collect", IntrinsicResult::Void),
-    ("gc_keep_alive", IntrinsicResult::Void),
-    ("gc_pin", IntrinsicResult::Void),
-];
 
 /// How an operator (or other trait-dispatched) node resolved, stamped onto the
 /// operator's AST node by the trait solver so [`super::lower`] can emit a
@@ -1021,60 +973,6 @@ impl Inferer<'_> {
                 self.infer_expr(body);
                 self.breaks.pop();
                 Ty::Void
-            }
-            NodeKind::IntrinsicCall {
-                name,
-                generic_args,
-                args,
-            } => {
-                let arg_tys: Vec<Ty> = args.iter().map(|&a| self.infer_expr(a)).collect();
-                // A diverging intrinsic never yields a value, so it types as
-                // `never` and unifies with whatever position it appears in.
-                if DIVERGING_INTRINSICS.contains(&name.as_str()) {
-                    return Ty::Never;
-                }
-                // `$len(a)` is the primitive behind the `a.len` sugar, and is
-                // callable directly (§3.2); it takes one array or slice.
-                if name.as_str() == "len" {
-                    self.check_len_intrinsic(node, &args, &arg_tys);
-                    return Ty::usize();
-                }
-                // `$from_residual(r)` is the compiler-internal half of `.?`
-                // (§8.3): rebuild the enclosing function's return type from a
-                // propagated residual.
-                if name.as_str() == "from_residual" {
-                    return self.infer_from_residual(node, &args, &arg_tys);
-                }
-                let arg = generic_args
-                    .first()
-                    .filter(|&&g| !matches!(self.ast.node(g).kind, NodeKind::TypeHole))
-                    .map(|&g| self.ty_from_node(g));
-                let shape = INTRINSIC_RESULTS
-                    .iter()
-                    .find(|(n, _)| *n == name.as_str())
-                    .map(|(_, r)| *r)
-                    .unwrap_or(IntrinsicResult::Arg);
-                match shape {
-                    IntrinsicResult::Usize => Ty::usize(),
-                    IntrinsicResult::Str => self.str_ty(),
-                    IntrinsicResult::Void => Ty::Void,
-                    IntrinsicResult::PtrToArg => Ty::Ptr {
-                        mutable: true,
-                        inner: Box::new(arg.unwrap_or_else(|| self.cx.fresh())),
-                    },
-                    // `$make.<[]T>(n)` is written with the slice already; it is
-                    // the *mutability* the allocation adds.
-                    IntrinsicResult::MutableArg => match arg {
-                        Some(Ty::Slice { inner, .. }) => Ty::Slice {
-                            mutable: true,
-                            inner,
-                        },
-                        Some(t) => t,
-                        None => self.cx.fresh(),
-                    },
-                    // Without a type argument the result is context-inferred.
-                    IntrinsicResult::Arg => arg.unwrap_or_else(|| self.cx.fresh()),
-                }
             }
             NodeKind::CompositeLit { ty, body } => {
                 // Every element is typed on its own first, so the obligation
@@ -2363,7 +2261,8 @@ impl Inferer<'_> {
                         };
                     }
                 };
-                return self.apply_call(callee, &inst, &args);
+                let result = self.apply_call(callee, &inst, &args);
+                return self.intrinsic_result(def, result, &args);
             }
         }
         let cty = self.infer_expr(callee);
@@ -3864,54 +3763,51 @@ impl Inferer<'_> {
 
     // ===< field access >===
 
-    /// Type `$from_residual(r)`, the intrinsic `.?` desugars its failure arm to.
+    /// Apply the one rule an intrinsic needs beyond its declared signature
+    /// (§6.4), if `def` is one and it has such a rule.
     ///
-    /// The result is the **enclosing function's** return type — the one thing
-    /// only the checker can supply, and the reason `.?` cannot desugar to an
-    /// ordinary call. Requiring `Ret : FromResidual.<typeof r>` is what decides
-    /// whether the propagation is legal: the identity impl each `Try` type
-    /// provides for its own residual covers `Result.?` in a `Result` function
-    /// and `Option.?` in an `Option` one, and a user impl is what lets a
-    /// residual cross error types (§8.3). Selecting the impl also stamps the
-    /// `from_residual` it resolved to, so lowering emits a real call.
-    fn infer_from_residual(&mut self, node: NodeId, args: &[NodeId], arg_tys: &[Ty]) -> Ty {
-        let [_] = args else {
-            self.report(node, "`$from_residual` takes exactly one argument");
-            return Ty::Error;
+    /// The list is short on purpose — see [`super::intrinsics`]. A call to an
+    /// intrinsic is an ordinary call against an ordinary signature declared in
+    /// `core`, and the whole value of declaring them there is lost if each one
+    /// grows a special case here instead.
+    fn intrinsic_result(&mut self, def: DefId, result: Ty, args: &[Option<NodeId>]) -> Ty {
+        let Some(tag) = self.defs.get(def).intrinsic_tag() else {
+            return result;
         };
-        let Some(trait_def) = self.lang.get("from_residual") else {
-            self.report(node, "`.?` requires the `#lang(\"from_residual\")` item");
-            return Ty::Error;
-        };
-        let ret = self.ret.clone();
-        self.cx.register(Obligation::Trait {
-            self_ty: ret.clone(),
-            trait_def: self.defs.resolve_alias(trait_def),
-            args: vec![arg_tys[0].clone()],
-            origin: node,
-            stamp: Some(Symbol::new("from_residual")),
-        });
-        ret
-    }
-
-    /// `$len` takes exactly one array or slice; anything else has no length to
-    /// report. A pointer to one counts — `core`'s `Len` impls take `self` by
-    /// pointer and hand it straight to `$len`.
-    fn check_len_intrinsic(&mut self, node: NodeId, args: &[NodeId], arg_tys: &[Ty]) {
-        let [arg] = args else {
-            self.report(node, "`$len` takes exactly one argument");
-            return;
-        };
-        let ty = self.autoderef(&arg_tys[0]);
-        // An unsolved receiver is not yet wrong; a `[N]T` / `[]T` is right.
-        if has_len(&ty) || matches!(ty, Ty::Error) || is_var(&ty) {
-            return;
+        match super::intrinsics::lookup(tag.as_str()).and_then(|r| r.special) {
+            // `make.<[]T>(n)` yields `[]mut T`: the type argument is the shape
+            // and the mutability is what the allocation adds.
+            Some(super::intrinsics::Special::MutableArg) => match self.cx.shallow(&result) {
+                Ty::Slice { inner, .. } => Ty::Slice {
+                    mutable: true,
+                    inner,
+                },
+                Ty::Ptr { inner, .. } => Ty::Ptr {
+                    mutable: true,
+                    inner,
+                },
+                other => other,
+            },
+            // `len(x)` takes an array or a slice, which no bound in the language
+            // says. The declared `T` is unbounded, so the check is here.
+            Some(super::intrinsics::Special::SequenceArg) => {
+                if let [Some(arg)] = args {
+                    let arg_ty = self.node_ty(*arg);
+                    let ty = self.autoderef(&arg_ty);
+                    // An unsolved argument is not yet wrong; a `[N]T` / `[]T` is
+                    // right.
+                    if !has_len(&ty) && !matches!(ty, Ty::Error) && !is_var(&ty) {
+                        let msg = format!(
+                            "`len` needs an array or a slice, not `{}`",
+                            self.cx.resolve(&ty).display(self.defs)
+                        );
+                        self.report(*arg, msg);
+                    }
+                }
+                result
+            }
+            None => result,
         }
-        let msg = format!(
-            "`$len` needs an array or a slice, not `{}`",
-            self.cx.resolve(&ty).display(self.defs)
-        );
-        self.report(*arg, msg);
     }
 
     /// The declared type of field `name` on a nominal struct type, if reachable,
@@ -4791,9 +4687,12 @@ impl Inferer<'_> {
     fn diverges(&self, node: NodeId) -> bool {
         match &self.ast.node(node).kind {
             NodeKind::Return { .. } | NodeKind::Break { .. } | NodeKind::Continue => true,
-            // A diverging intrinsic in statement position ends the block just as
-            // a `return` does — `.!` leans on this to type its abort arm.
-            NodeKind::IntrinsicCall { name, .. } => DIVERGING_INTRINSICS.contains(&name.as_str()),
+            // A call that types as `never` ends the block just as a `return`
+            // does — `.!` leans on this to type its `panic` arm. There is no
+            // list of diverging intrinsics any more: `panic` is declared
+            // `-> never` in `core`, so the signature says it and every other
+            // diverging function gets the same treatment for free (§3.1).
+            NodeKind::Call { .. } => matches!(self.types.get(&node), Some(Ty::Never)),
             _ => false,
         }
     }

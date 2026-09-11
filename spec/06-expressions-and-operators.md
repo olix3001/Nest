@@ -130,10 +130,15 @@ documented where every other function is documented.
 
 ```nest
 // core/mem.nest
-@public size_of  :: #intrinsic func <T> () -> usize
-@public align_of :: #intrinsic func <T> () -> usize
-@public cast     :: #intrinsic func <T, U> (x: U) -> T
+@public size_of  :: #intrinsic("size_of") func <T> () -> usize
+@public align_of :: #intrinsic("align_of") func <T> () -> usize
+@public cast     :: #intrinsic("cast") func <T, U> (x: U) -> T
 ```
+
+The tag in the directive is what identifies the intrinsic; a bare `#intrinsic`
+defaults it to the declared name (§9). `cast` takes its **target type first** so
+that `cast.<u8>(n)` pins `T` and leaves `U` to be inferred from the argument —
+that is ordinary partial-turbofish inference, not a rule about `cast`.
 
 There is no `$name` form. A separate namespace for compiler-provided functions
 bought nothing: it split the library in two, meant the signatures lived in the

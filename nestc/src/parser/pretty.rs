@@ -87,7 +87,6 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
             Some(n) => format!("Arg {n}:"),
             None => "Arg".into(),
         },
-        IntrinsicCall { name, .. } => format!("IntrinsicCall ${name}"),
         CompositeLit { ty, body } => {
             let shape = match body {
                 CompositeBody::Named(_) => "named",

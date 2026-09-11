@@ -72,8 +72,6 @@ pub enum DefKind {
     Import,
     /// A builtin primitive type (`i32`, `string`, ...) with no source.
     Primitive,
-    /// A builtin `$`-intrinsic.
-    Intrinsic,
     /// A member of a package/file we can name but have not loaded — kept so a use
     /// still resolves to a stable id instead of an error.
     External,
@@ -110,7 +108,6 @@ impl DefKind {
             DefKind::Local => "local",
             DefKind::Import => "import",
             DefKind::Primitive => "primitive",
-            DefKind::Intrinsic => "intrinsic",
             DefKind::External => "external",
         }
     }
@@ -230,6 +227,22 @@ impl Def {
     /// The def an [`DefKind::Import`] alias ultimately points at (or itself).
     pub fn target(&self) -> DefId {
         self.alias.unwrap_or(self.id)
+    }
+
+    /// The intrinsic tag this definition claims, if it is marked `#intrinsic`
+    /// (§6.4, §9).
+    ///
+    /// `#intrinsic("size_of")` names the intrinsic explicitly; a bare
+    /// `#intrinsic` means "the tag is the declared name". The explicit form is
+    /// what keeps `core` renameable — the compiler recognizes an intrinsic by
+    /// its tag, never by the name or path a library happens to give it, exactly
+    /// as it finds a `#lang` item by tag.
+    pub fn intrinsic_tag(&self) -> Option<Symbol> {
+        let d = self.directives.iter().find(|d| d.is("intrinsic"))?;
+        Some(match d.args.first() {
+            Some(DirectiveArg::Str(tag)) => tag.clone(),
+            _ => self.name.clone(),
+        })
     }
 }
 

@@ -31,7 +31,7 @@ pub enum TokenKind {
     BlockComment,
 
     // ===< Identifiers and literals >===
-    #[regex(r"\$?[_\p{L}][_\p{L}0-9]*", |lex| Symbol::new(lex.slice()))]
+    #[regex(r"[_\p{L}][_\p{L}0-9]*", |lex| Symbol::new(lex.slice()))]
     Ident(Symbol),
 
     #[regex(r"[0-9][0-9_]*", lex_int)]
@@ -723,13 +723,13 @@ mod tests {
     fn keywords_idents_intrinsics() {
         // `self` / `Self` are ordinary identifiers, not keywords.
         assert_eq!(
-            kinds("func foo self Self $cast _x"),
+            kinds("func foo self Self cast _x"),
             vec![
                 TokenKind::FuncKw,
                 TokenKind::Ident(Symbol::new("foo")),
                 TokenKind::Ident(Symbol::new("self")),
                 TokenKind::Ident(Symbol::new("Self")),
-                TokenKind::Ident(Symbol::new("$cast")),
+                TokenKind::Ident(Symbol::new("cast")),
                 TokenKind::Ident(Symbol::new("_x")),
             ]
         );

@@ -370,12 +370,6 @@ pub enum NodeKind {
     },
     /// `[name:] value` — one call argument.
     Arg { name: Option<Symbol>, value: NodeId },
-    /// `$name[.<T,...>](args...)` — a compiler intrinsic call.
-    IntrinsicCall {
-        name: Symbol,
-        generic_args: Vec<NodeId>,
-        args: Vec<NodeId>,
-    },
     /// `[Type] { body }` / `.{ body }` — record, array, or repeat literal.
     ///
     /// The typed tuple-struct form `Type(args...)` is syntactically identical to a
@@ -716,12 +710,6 @@ impl NodeKind {
                 out.extend_from_slice(arms);
             }
             Arg { value, .. } | FieldInit { value, .. } => out.push(*value),
-            IntrinsicCall {
-                generic_args, args, ..
-            } => {
-                out.extend_from_slice(generic_args);
-                out.extend_from_slice(args);
-            }
             CompositeLit { ty, body } => {
                 push_opt(out, ty);
                 body.collect_children(out);

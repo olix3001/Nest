@@ -9,7 +9,6 @@
 //! a second comparison rather than fold it.
 
 use crate::common::span::Span;
-use crate::common::symbol::Symbol;
 
 use super::ast::{
     BinOp, CompositeBody, Lit, NodeId, NodeKind, RangeKind, TryKind, UnOp, VariantArgs,
@@ -350,9 +349,6 @@ impl Parser {
                 self.bump();
                 self.alloc(span, NodeKind::Lit(Lit::Bool(false)))
             }
-            Some(TokenKind::Ident(sym)) if sym.as_str().starts_with('$') => {
-                self.parse_intrinsic_call()
-            }
             Some(TokenKind::Ident(_)) => {
                 let name = self.expect_ident();
                 self.alloc(
@@ -394,32 +390,6 @@ impl Parser {
                 self.error_node(span, msg)
             }
         }
-    }
-
-    /// `$name [ generic_args ] [ '(' args ')' ]` — an intrinsic call. The stored
-    /// name drops the leading `$`.
-    fn parse_intrinsic_call(&mut self) -> NodeId {
-        let span = self.cur_span();
-        let raw = self.expect_ident();
-        let name = Symbol::new(raw.as_str().trim_start_matches('$'));
-        let generic_args = if self.at(&TokenKind::DotLt) {
-            self.parse_generic_args().0
-        } else {
-            Vec::new()
-        };
-        let (args, end) = if self.at(&TokenKind::LParen) {
-            self.parse_call_args()
-        } else {
-            (Vec::new(), span)
-        };
-        self.alloc(
-            span.to(end),
-            NodeKind::IntrinsicCall {
-                name,
-                generic_args,
-                args,
-            },
-        )
     }
 
     /// `( )` unit, `( expr )` grouping, or `( expr { ',' expr } )` tuple.

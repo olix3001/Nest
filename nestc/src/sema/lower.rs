@@ -1085,34 +1085,6 @@ impl Lowerer<'_> {
                 self.expr(node, ty, ExprKind::Variant { name, args })
             }
             NodeKind::CompositeLit { body, .. } => self.lower_composite(node, &body, ty),
-            NodeKind::IntrinsicCall { name, args, .. } => {
-                let mut lowered: Vec<Expr> = args.iter().map(|&a| self.lower_expr(a)).collect();
-                // `$len(a)` folds on a fixed array — the length is part of the
-                // type, so there is nothing left to compute at run time. This is
-                // the whole of `core`'s `Len` impls once they are inlined.
-                if name.as_str() == "len" && lowered.len() == 1 {
-                    let base = lowered.remove(0);
-                    let base = self.autoderef(base);
-                    return self.len_expr(base, ty);
-                }
-                // An explicit `$cast.<*dyn Trait>(p)` builds the same fat
-                // pointer the implicit coercion does; it is a spelling of the
-                // unsizing, not a reinterpretation of bits, so it lowers to the
-                // same node (§3.4).
-                if name.as_str() == "cast" && lowered.len() == 1 {
-                    if let Some(cast) = self.dyn_cast(lowered[0].clone(), &ty) {
-                        return cast;
-                    }
-                }
-                self.expr(
-                    node,
-                    ty,
-                    ExprKind::Intrinsic {
-                        name,
-                        args: lowered,
-                    },
-                )
-            }
             NodeKind::Arg { value, .. } => self.lower_expr(value),
             // A nested item — a local `func`, `struct`, or `import` written
             // among a block's statements — is a *definition*, not a step the
@@ -1181,6 +1153,15 @@ impl Lowerer<'_> {
             return self.expr(node, ty, ExprKind::Construct { def, fields });
         }
         let target = self.resolved_def(head);
+        // A call to an `#intrinsic` declaration has no body to call: the
+        // compiler supplies it, so the call *is* the operation (§6.4). It lowers
+        // to an [`ExprKind::Intrinsic`] keyed by the declaration's tag — which is
+        // why the tag, and not the function's name or path, is what a later
+        // stage keys on.
+        if let Some(tag) = target.and_then(|d| self.defs.get(d).intrinsic_tag()) {
+            let args = self.lower_args(target, slots);
+            return self.lower_intrinsic(node, tag, args, ty);
+        }
         let callee = Box::new(self.lower_expr(callee));
         let args = self.lower_args(target, slots);
         self.expr(
@@ -1193,6 +1174,28 @@ impl Lowerer<'_> {
                 dispatch: Dispatch::Static,
             },
         )
+    }
+
+    /// Build the IR node for an intrinsic call, applying the two foldings that
+    /// happen here rather than in codegen.
+    fn lower_intrinsic(&mut self, node: NodeId, tag: Symbol, mut args: Vec<Expr>, ty: Ty) -> Expr {
+        // `len(a)` folds on a fixed array — the length is part of the type, so
+        // there is nothing left to compute at run time. This is the whole of
+        // `core`'s `.len()` methods once they are inlined.
+        if tag.as_str() == "len" && args.len() == 1 {
+            let base = args.remove(0);
+            let base = self.autoderef(base);
+            return self.len_expr(base, ty);
+        }
+        // An explicit `cast.<*dyn Trait>(p)` builds the same fat pointer the
+        // implicit coercion does; it is a spelling of the unsizing, not a
+        // reinterpretation of bits, so it lowers to the same node (§3.4).
+        if tag.as_str() == "cast" && args.len() == 1 {
+            if let Some(cast) = self.dyn_cast(args[0].clone(), &ty) {
+                return cast;
+            }
+        }
+        self.expr(node, ty, ExprKind::Intrinsic { name: tag, args })
     }
 
     /// Lower a call's argument slots, filling each `None` — a parameter the call
@@ -1340,6 +1343,12 @@ impl Lowerer<'_> {
         let mut call_args = vec![self.adjust_recv(recv, res.adjust, &res.self_ty)];
         let lowered = self.lower_args(Some(res.method), slots);
         call_args.extend(lowered);
+        // A method may be `#intrinsic` too — `x.wrapping_add(y)` is one (§3.1) —
+        // and it lowers the same way a free intrinsic call does, with the
+        // receiver as the first argument.
+        if let Some(tag) = self.defs.get(res.method).intrinsic_tag() {
+            return self.lower_intrinsic(node, tag, call_args, ty);
+        }
         // Inference recorded the instantiated signature on this node; falling
         // back to a reconstruction keeps the IR typed if it did not.
         let callee_ty = match self.ty(callee) {
