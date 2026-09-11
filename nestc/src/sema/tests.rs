@@ -2552,6 +2552,85 @@ fn a_trait_with_no_vtable_slot_is_rejected_at_the_coercion() {
     }
 }
 
+/// §4.1: "the compiler checks every required method is present with a matching
+/// signature". Presence is `impls::build`'s job; this is the *matching* half.
+#[test]
+fn an_impl_member_must_match_the_declaration_it_supplies() {
+    for (src, needle) in [
+        (
+            "T :: trait { f :: func (self: Self) -> i32 }\n\
+             S :: struct { n: i32 }\n\
+             impl T for S { f :: func (self: S) -> bool { return true } }\n",
+            "expected `func(S) -> i32`, found `func(S) -> bool`",
+        ),
+        (
+            "T :: trait { f :: func (self: Self, n: i32) -> i32 }\n\
+             S :: struct { n: i32 }\n\
+             impl T for S { f :: func (self: S, n: bool) -> i32 { return 1 } }\n",
+            "expected `func(S, i32) -> i32`, found `func(S, bool) -> i32`",
+        ),
+        // `Self` is the impl's type, so a method that takes something else is
+        // not the method the trait asked for.
+        (
+            "T :: trait { f :: func (self: Self) -> i32 }\n\
+             S :: struct { n: i32 }\nQ :: struct { n: i32 }\n\
+             impl T for S { f :: func (self: Q) -> i32 { return 1 } }\n",
+            "expected `func(S) -> i32`, found `func(Q) -> i32`",
+        ),
+        // An associated constant declares a type, and an impl that writes one
+        // must write that one.
+        (
+            "T :: trait { MAX: i32 }\nS :: struct { n: i32 }\n\
+             impl T for S { MAX: bool :: true }\n",
+            "expected `i32`, found `bool`",
+        ),
+        // A method's own generics are aligned positionally: the trait's `X` and
+        // the impl's `X` are different defs, and the message says `X` rather
+        // than a variable number.
+        (
+            "T :: trait { with :: func <X> (self: *Self, x: X) -> i32 }\n\
+             S :: struct { n: i32 }\n\
+             impl T for S { with :: func <X> (self: *S, x: X) -> bool { return true } }\n",
+            "expected `func(*S, X) -> i32`, found `func(*S, X) -> bool`",
+        ),
+    ] {
+        let e = first_error(src);
+        assert!(e.contains("does not match the declaration in"), "{src}: {e}");
+        assert!(e.contains(needle), "{src}: {e}");
+    }
+}
+
+#[test]
+fn a_conforming_impl_is_left_alone() {
+    // The matching cases, including the two that look like mismatches and are
+    // not.
+    analyze_clean(
+        "T :: trait { f :: func (self: Self) -> i32 }\n\
+         S :: struct { n: i32 }\nimpl T for S { f :: func (self: S) -> i32 { return 1 } }\n",
+    );
+    analyze_clean(
+        "T :: trait { with :: func <X> (self: *Self, x: X) -> i32 }\n\
+         S :: struct { n: i32 }\n\
+         impl T for S { with :: func <X> (self: *S, x: X) -> i32 { return 1 } }\n",
+    );
+    // An impl that leaves an associated constant's type out has nothing to
+    // disagree with.
+    analyze_clean("T :: trait { MAX: i32 }\nS :: struct { n: i32 }\nimpl T for S { MAX :: 100 }\n");
+    // A **bare** `impl Add for V` names no trait arguments, which leaves `Rhs`
+    // for the impl's own members to decide — so `add` taking a `V` is the impl
+    // choosing, not the impl disagreeing.
+    analyze_clean(
+        "{ Add } :: import <core/ops>\nV :: struct { n: i32 }\n\
+         impl Add for V { Output :: V  add :: func (self: V, rhs: V) -> V { return self } }\n",
+    );
+    // And a generic impl compares as the family it is.
+    analyze_clean(
+        "{ Add } :: import <core/ops>\nW :: struct <T> { v: T }\n\
+         impl <T> Add for W.<T> { Output :: W.<T>\n\
+           add :: func (self: W.<T>, rhs: W.<T>) -> W.<T> { return self } }\n",
+    );
+}
+
 #[test]
 fn a_trait_that_is_never_coerced_need_not_be_object_safe() {
     // Most traits are not object-safe and have no reason to be: an operator

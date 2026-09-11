@@ -361,6 +361,19 @@ pub fn infer_file(
             cx.check_const_param(g);
         }
     }
+    // Declaration-level, and the other half of what an `impl` promises: every
+    // member it supplies must have the type the trait declared. Completeness —
+    // *which* members are required — was checked in `impls::build`, which runs
+    // before there are any types to compare.
+    {
+        let mut cx = fresh!();
+        let mine: Vec<usize> = (0..impls.impls.len())
+            .filter(|&i| impls.impls[i].file == file && impls.impls[i].trait_def.is_some())
+            .collect();
+        for i in mine {
+            cx.check_impl_conformance(i);
+        }
+    }
     // Also declaration-level: resolve the declared type of every *member* — a
     // struct field, an enum variant's payload, a `distinct`'s representation —
     // and stamp it on its own node.
@@ -3825,6 +3838,174 @@ impl Inferer<'_> {
                 Ty::Error
             }
         }
+    }
+
+    /// Check that every member an impl supplies has the type its trait declared
+    /// (§4.1: "the compiler checks every required method is present with a
+    /// matching signature").
+    ///
+    /// Presence is `impls::build`'s job; this is the *matching* half, and it has
+    /// to live here because it is a question about types. The trait's
+    /// declarations are written in terms of `Self` and the trait's own generic
+    /// parameters, so both sides are substituted into the impl's world first:
+    /// `Self` becomes the impl's self type, `Rhs` becomes what the impl wrote
+    /// for it, and the impl's own generics become fresh variables so
+    /// `impl <T> Add for Wrap.<T>` compares as the family it is.
+    fn check_impl_conformance(&mut self, i: usize) {
+        let imp = self.impls.impls[i].clone();
+        let Some(trait_def) = imp.trait_def else {
+            return;
+        };
+        let trait_def = self.defs.resolve_alias(trait_def);
+        let mut map = self.fresh_impl_map(&imp.generics);
+        let self_ty = self.impl_self_ty(&imp, &map);
+        // `Self` inside a trait resolves to the trait itself, so substituting the
+        // trait's def is what replaces it.
+        map.tys.insert(trait_def, self_ty.clone());
+        // `impl Add.<i32> for V` — the trait's own parameters take what the impl
+        // wrote for them.
+        let trait_generics = self.trait_generic_param_defs(trait_def);
+        for (idx, &g) in trait_generics.iter().enumerate() {
+            let t = match imp.trait_args.get(idx) {
+                Some(&node) => {
+                    let t = self.ty_from_node_in(imp.file, node);
+                    self.subst_type_params(&t, &map)
+                }
+                // A bare `impl Add for Vec3` names no arguments, which leaves
+                // the trait's parameters for the impl's own members to decide:
+                // `Rhs` is whatever `add` takes. A fresh variable is exactly
+                // that — free, and pinned by the first member that mentions it.
+                None => self.cx.fresh(),
+            };
+            map.tys.insert(g, t);
+        }
+
+        let members: Vec<(Symbol, DefId)> = self
+            .defs
+            .get(trait_def)
+            .ns
+            .members
+            .iter()
+            .map(|(n, &d)| (n.clone(), d))
+            .collect();
+        for (name, required) in members {
+            let Some(&supplied) = imp.members.get(&name) else {
+                // Absent: already reported as incomplete, or defaulted by the
+                // trait, in which case there is nothing of the impl's to check.
+                continue;
+            };
+            let want = match self.defs.get(required).kind {
+                DefKind::Func => self.func_def_ty(required),
+                // An associated **type** is what the impl is for — it supplies
+                // the answer, so there is nothing to hold it to. An associated
+                // constant declares a type, and that one is checkable.
+                DefKind::Const => match self.declared_member_ty(required) {
+                    Some(t) => t,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            let got = match self.defs.get(supplied).kind {
+                DefKind::Func => self.func_def_ty(supplied),
+                DefKind::Const => match self.declared_member_ty(supplied) {
+                    // An impl that leaves the type out (`MAX :: 100`) has
+                    // nothing to disagree with; its *value* is checked against
+                    // the requirement wherever it is read.
+                    Some(t) => t,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            // A method may have generics of its own, and the trait's `X` and the
+            // impl's `X` are different defs however alike they read. Align them
+            // positionally onto one fresh variable each, or two signatures that
+            // are the same signature fail to unify.
+            let mut map = map.clone();
+            if self.defs.get(required).kind == DefKind::Func {
+                let want_gs = self.func_generic_param_defs(required);
+                let got_gs = self.func_generic_param_defs(supplied);
+                for (idx, &wg) in want_gs.iter().enumerate() {
+                    let is_const = self.defs.get(wg).kind == DefKind::ConstParam;
+                    match (is_const, got_gs.get(idx)) {
+                        // Onto the *trait's* parameter, not a fresh variable:
+                        // both sides then agree, and a mismatch elsewhere in the
+                        // signature reads `func(*S, X) -> bool` rather than
+                        // `func(*S, ?7) -> bool`.
+                        (false, Some(&gg)) => {
+                            map.tys.insert(
+                                gg,
+                                Ty::Nominal {
+                                    def: wg,
+                                    args: Vec::new(),
+                                },
+                            );
+                        }
+                        (true, Some(&gg)) => {
+                            map.consts.insert(gg, Const::Param(wg));
+                        }
+                        // Different arity: the signatures disagree, and saying
+                        // so with the parameters left as written reads better
+                        // than a message full of `?3`.
+                        (_, None) => {}
+                    }
+                }
+            }
+            let want = self.subst_type_params(&want, &map);
+            let got = self.subst_type_params(&got, &map);
+            // Compare in a snapshot: this is a question, and answering it should
+            // not bind anything the rest of the file then sees.
+            let snapshot = self.cx.snapshot();
+            let agree = self.cx.unify(&want, &got).is_ok();
+            self.cx.rollback(snapshot);
+            if agree {
+                continue;
+            }
+            let msg = format!(
+                "`{}` does not match the declaration in `{}`: expected `{}`, found `{}`",
+                name,
+                self.defs.canonical_string(trait_def),
+                self.cx.resolve(&want).display(self.defs),
+                self.cx.resolve(&got).display(self.defs),
+            );
+            let at = self.defs.get(supplied).node.unwrap_or(imp.self_node);
+            self.report_in(imp.file, at, msg);
+        }
+    }
+
+    /// The type written on a member whose declaration carries one — an
+    /// associated constant's `MAX: i32`. `None` when the member declares no
+    /// type (an associated-type binding, or an impl constant that leaves it out).
+    fn declared_member_ty(&mut self, def: DefId) -> Option<Ty> {
+        let d = self.defs.get(def);
+        let (file, node) = (d.file?, d.node?);
+        let NodeKind::ConstBind { rhs, .. } = self.asts[&file].node(node).kind.clone() else {
+            return None;
+        };
+        match self.asts[&file].node(rhs).kind.clone() {
+            NodeKind::AssocConst { ty, .. } => Some(self.ty_from_node_in(file, ty)),
+            _ => None,
+        }
+    }
+
+    /// A trait's declared generic parameters, in source order.
+    fn trait_generic_param_defs(&self, trait_def: DefId) -> Vec<DefId> {
+        let d = self.defs.get(trait_def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Vec::new();
+        };
+        let ast = &self.asts[&file];
+        let rhs = match &ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let NodeKind::TraitType { generics, .. } = &ast.node(rhs).kind else {
+            return Vec::new();
+        };
+        generics
+            .iter()
+            .filter(|&&g| matches!(ast.node(g).kind, NodeKind::GenericTypeParam { .. }))
+            .filter_map(|&g| self.def_meta_in(file, g))
+            .collect()
     }
 
     /// Apply the one rule an intrinsic needs beyond its declared signature
