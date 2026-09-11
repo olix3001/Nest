@@ -2,8 +2,8 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
-distinct HttpPort = u16
-distinct Meters = f64
+distinct HttpPort = u16  // size 2, align 2
+distinct Meters = f64  // size 8, align 8
 func f() -> HttpPort {
   let p: HttpPort = 80: HttpPort
   return p: HttpPort

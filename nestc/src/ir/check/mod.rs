@@ -28,22 +28,33 @@ pub mod constness;
 pub mod declarations;
 pub mod divergence;
 pub mod exhaustive;
+pub mod layouts;
 pub mod mutability;
 pub mod object_safety;
 pub mod reachability;
 
 /// Run every IR validation pass over `linked`, in order, collecting what they
 /// report.
-pub fn run(defs: &DefTable, meta: &Meta, linked: &Linked) -> Vec<Diagnostic> {
+pub fn run(
+    defs: &DefTable,
+    meta: &Meta,
+    linked: &Linked,
+    layouts: &crate::ir::layout::Layouts,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     divergence::check(defs, meta, linked, &mut out);
     mutability::check(defs, meta, linked, &mut out);
     exhaustive::check(defs, meta, linked, &mut out);
     constness::check(defs, meta, linked, &mut out);
-    constants::check(defs, meta, linked, &mut out);
+    constants::check(defs, meta, linked, layouts, &mut out);
     object_safety::check(defs, meta, linked, &mut out);
     reachability::check(defs, meta, linked, &mut out);
     declarations::check(defs, meta, linked, &mut out);
+    // Last: laying a type out asks what its members are, and the declaration
+    // check above is what rejects a member that is the type itself. Running in
+    // the other order would mean laying out a cycle, which does not fail — it
+    // does not terminate.
+    layouts::check(defs, meta, linked, layouts, &mut out);
     out
 }
 

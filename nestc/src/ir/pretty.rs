@@ -140,10 +140,11 @@ impl Printer<'_> {
         for d in &self.meta.directives(t.id) {
             let _ = write!(tags, " {}", directive_str(d));
         }
+        let lay = self.layout_str(t.id);
         match &t.kind {
             TypeDefKind::Struct { members } => {
                 if members.is_empty() {
-                    self.line(&format!("struct {}{tags} {{}}", t.name));
+                    self.line(&format!("struct {}{tags} {{}}{lay}", t.name));
                     return;
                 }
                 self.line(&format!("struct {}{tags} {{", t.name));
@@ -152,7 +153,7 @@ impl Printer<'_> {
                     self.member(m);
                 }
                 self.indent -= 1;
-                self.line("}");
+                self.line(&format!("}}{lay}"));
             }
             TypeDefKind::Enum { variants } => {
                 self.line(&format!("enum {}{tags} {{", t.name));
@@ -161,11 +162,11 @@ impl Printer<'_> {
                     self.variant(v);
                 }
                 self.indent -= 1;
-                self.line("}");
+                self.line(&format!("}}{lay}"));
             }
             TypeDefKind::Distinct { repr } => {
                 let ty = self.ty(repr.id);
-                self.line(&format!("distinct {}{tags} = {ty}", t.name));
+                self.line(&format!("distinct {}{tags} = {ty}{lay}", t.name));
             }
             TypeDefKind::Trait { methods, consts } => {
                 self.line(&format!("trait {}{tags} {{", t.name));
@@ -233,6 +234,16 @@ impl Printer<'_> {
         }
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// A type's layout, when one has been computed (§7). Printed on the
+    /// declaration line because that is where a reader asking "how big is this"
+    /// is looking, and because a size that is not shown is a size nobody checks.
+    fn layout_str(&self, id: IrId) -> String {
+        match self.meta.get::<crate::ir::layout::Layout>(id) {
+            Some(l) => format!("  // size {}, align {}", l.size, l.align),
+            None => String::new(),
+        }
     }
 
     fn function(&mut self, f: &Function) {

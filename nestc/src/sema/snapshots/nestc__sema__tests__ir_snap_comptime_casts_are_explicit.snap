@@ -4,7 +4,7 @@ expression: "ir_text(\"P :: struct { x: i32 }\\ncc :: func (n: i32) -> i32 {\\n 
 ---
 struct P {
   x: i32
-}
+}  // size 4, align 4
 func cc(n: i32) -> i32 {
   let a: i8 = $cast(5: comptime_int): i8
   let p: P = P { x: $cast(1: comptime_int): i32 }: P

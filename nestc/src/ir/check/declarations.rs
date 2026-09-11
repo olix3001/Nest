@@ -15,6 +15,17 @@ use crate::sema::ty::Ty;
 
 use crate::ir::{IrId, Linked, Meta, TypeDef, TypeDefKind};
 
+/// Marks a type that contains itself by value, so the layout pass knows the
+/// failure it is about to hit has already been explained.
+///
+/// It is a marker rather than a second computation for the reason every "already
+/// reported" marker in this compiler is one: the two passes ask different
+/// questions — "is there a cycle" and "how big is this" — and a cycle is the
+/// answer to the first, so the second should not re-derive it and phrase it
+/// worse.
+#[derive(Debug, Clone, Copy)]
+pub struct RecursiveLayout;
+
 /// Run the declaration-level checks.
 pub fn check(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagnostic>) {
     recursive_layouts(defs, meta, linked, out);
@@ -45,6 +56,15 @@ fn recursive_layouts(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Ve
         let mut path = Vec::new();
         let mut visiting = HashSet::new();
         if let Some(cycle) = find_cycle(meta, linked, t.def, &mut visiting, &mut path) {
+            // Mark every type in the cycle, so the layout pass does not say the
+            // same thing again in its own words: a type that contains itself has
+            // no size *because* of the cycle, and one mistake gets one
+            // diagnostic (the same rule [`RangeReported`] follows).
+            for &d in &cycle {
+                if let Some(ty) = linked.ty(d) {
+                    meta.set(ty.id, RecursiveLayout);
+                }
+            }
             reported.extend(cycle.iter().copied());
             let names: Vec<String> = cycle
                 .iter()
@@ -196,6 +216,45 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
         }
     }
 
+    // A **member** carries directives too, and the same argument applies: one
+    // written where it cannot mean anything will be ignored forever. `#align(N)`
+    // over-aligns a field (§9) and `#raw` suppresses its zero-initialization;
+    // `#packed` and `#soa` describe how an aggregate stores *its* members, which
+    // is not a thing a single field can do.
+    for t in linked.types() {
+        for m in members_of(t) {
+            for d in meta.directives(m.id) {
+                let name = d.name.as_str();
+                if matches!(name, "packed" | "soa") {
+                    let mut diag =
+                        Diagnostic::error(format!("`#{name}` does not apply to a field"));
+                    if let Some(span) = meta.span(m.id) {
+                        diag = diag.with_primary(span, "");
+                    }
+                    out.push(diag.with_note(
+                        "it describes how an aggregate stores its members; write it on the \
+                         type (§9)",
+                    ));
+                    continue;
+                }
+                if name == "align"
+                    && !matches!(d.args.first(), Some(DirectiveArg::Int(n)) if *n > 0 && n.count_ones() == 1)
+                {
+                    let mut diag = Diagnostic::error(
+                        "`#align` needs an integer argument that is a power of two",
+                    );
+                    if let Some(span) = meta.span(m.id) {
+                        diag = diag.with_primary(span, "");
+                    }
+                    out.push(diag.with_note(
+                        "alignment is an address constraint — \"a multiple of N\" — and only a \
+                         power of two is one",
+                    ));
+                }
+            }
+        }
+    }
+
     // `#section` and `#offset` name a place in the object file, so they apply to
     // the things that *become* symbols: functions and constants. On anything
     // else there is no symbol for them to describe.
@@ -236,6 +295,16 @@ fn what(t: &TypeDef) -> &'static str {
         TypeDefKind::Enum { .. } => "an enum",
         TypeDefKind::Distinct { .. } => "a `distinct` type",
         TypeDefKind::Trait { .. } => "a trait",
+    }
+}
+
+/// Every member a type declares, a variant's payload included.
+fn members_of(t: &TypeDef) -> Vec<&crate::ir::Member> {
+    match &t.kind {
+        TypeDefKind::Struct { members } => members.iter().collect(),
+        TypeDefKind::Distinct { repr } => vec![repr],
+        TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| &v.members).collect(),
+        TypeDefKind::Trait { .. } => Vec::new(),
     }
 }
 

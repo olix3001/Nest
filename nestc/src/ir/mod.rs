@@ -84,6 +84,7 @@ pub use crate::sema::builtins::BuiltinOp;
 
 pub mod check;
 pub mod const_eval;
+pub mod layout;
 pub mod link;
 pub mod meta;
 pub mod mono;

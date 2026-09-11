@@ -7,7 +7,7 @@ trait Make {
 }
 struct W {
   v: i32
-}
+}  // size 4, align 4
 func f() -> W {
   return (W.make: func(i32) -> W)($cast(3: comptime_int): i32): W
 }

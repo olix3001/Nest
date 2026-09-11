@@ -1,180 +1,149 @@
-# Handoff: Phase 6 is done — monomorphization, symbols, and dispatch on a bound
+# Handoff: Phase 7 is done — layout, plus four fixes to phase 6
 
 **Generated**: 2026-09-11
 **Branch**: `main`
-**Status**: **392 tests pass**, `cargo clippy` reports 74 warnings (down from the
-84 baseline; the set is the baseline minus the dead-code entries this phase made
-live, plus one of the same kind in `mono.rs`). Every file in `examples/*.nest`
-compiles.
+**Status**: **417 tests pass**, `cargo clippy` reports 73 warnings (the 84
+baseline minus the dead-code entries these phases made live, plus three of the
+same kind — items only the tests use). Every file in `examples/*.nest` compiles.
 
-**Read `design/roadmap.md` §6 first.** It is the plan of record and is now marked
-done. This document is the *state* — what was decided, what is built, what will
-bite you. **Phase 7 (layout) is next and is unblocked.**
-
-## Goal
-
-Phase 6: a concrete program. A generic function is not code — `func <T> (x: T)`
-describes a family, and a machine can be handed only a member of it — so the
-family has to become its members before anything below the IR can run.
+**Read `design/roadmap.md` §7 first**, then its **Open questions** section —
+there is one decision there waiting on you. This document is the *state*.
+**Phase 8 (LIR: shape and control flow) is next and is unblocked.**
 
 ## What is built (this session)
 
-The pass is **`nestc/src/ir/mono.rs`**, run from `sema::analyze` after the
-`ir::check` passes.
+### Four fixes to phase 6, all with tests
 
-- [x] **One function per distinct argument set.** `id.<i32>`, `id.<bool>`,
-      `id.<u8>` are three `Function`s with three `DefId`s. The generic
-      declaration is **dropped** from `Linked` — there is nothing to emit for a
-      family, and keeping it is where a surviving `Dispatch::Generic` would hide.
-- [x] **Every function has a symbol**, mangled per `design/lir.md` §7 and stamped
-      with the unmangled name beside it as an `Instance` meta fact.
-- [x] **No `Dispatch::Generic` survives.** A call on a bound is resolved by
-      matching the now-concrete self type against each candidate impl's target.
-- [x] **Both carried to-dos are done.** `check::constness::check_only` re-runs
-      over exactly the new instantiations; the const **evaluator** binds a
-      `<const N>` argument from the call's `Instantiation`, so `twice.<4>()` in a
-      `::` binding now evaluates to `8`.
-- [x] **`--emit`-less dump**: the driver prints a `===< MONO >===` section, each
-      function headed by `// <symbol> = <name>`. That is how everything below was
-      eyeballed.
+- [x] **`[SIZE * 2]T` is a legal array length.** §3.2 says a length is a
+      compile-time constant and an expression over constants is one. **Read the
+      roadmap's Open questions section**: this was built differently from the
+      note you left there, and the difference is yours to confirm.
+- [x] **A generic with no finite set of instantiations is reported.**
+      `grow.<T>` calling `grow.<Box.<T>>` used to run the compiler out of stack.
+      There is now a depth budget (`mono::INSTANTIATION_DEPTH`, 64) and one
+      diagnostic per declaration.
+- [x] **A bound's trait arguments reach monomorphization.** `impl Conv.<i32> for
+      Vec3` and `impl Conv.<bool> for Vec3` are coherent (§4.9) and both apply to
+      `Vec3`; selection used to pick one silently.
+- [x] **Two impls of one trait for one type no longer share a symbol.** Their
+      members have the same name *and* the same canonical path, so the
+      implemented trait is now part of the symbol (`_NC4Vec3XN4ConvIi32E2to`) and
+      of the name (`Vec3.<as Conv.<i32>>.to`). `design/lir.md` §7 records the
+      encoding.
 
-### Where the generic arguments come from (`Instantiation` / `Generics`)
+### Phase 7 — layout
 
-This is the load-bearing decision of the phase.
+`nestc/src/ir/layout.rs` computes; `nestc/src/ir/check/layouts.rs` asks about
+every declared type and stamps the answer. The **rules** are in
+`design/lir.md` §7cc, and they are rules rather than derivations — a backend has
+to agree with them.
 
-Inference already works out what each call site instantiates its callee with —
-that *is* what inferring a call is. It now **records** the answer:
+- [x] **Sizes, alignments and offsets** for every shape: scalars, pointers,
+      slices, arrays, tuples, structs, enums, `distinct`s.
+- [x] **A query, not a pass.** Asked about a concrete `Ty`, memoized by
+      `mono::type_key` — the mangled encoding, whose one job is injectivity, so
+      two types share it precisely when they are the same type. `Ty` cannot be a
+      key: a `const` argument may hold a float, so there is no `Hash`.
+- [x] **`#packed` and `#align(N)`**, on a type *and* on a field. A member now
+      carries its own directives into the IR; before this, `#align(8)` on a field
+      was silently ignored. `#packed` / `#soa` on a field are rejected.
+- [x] **`size_of` / `align_of` fold to constants**, including inside a generic
+      `#const` function.
+- [x] **The target comes back, here and only here.** A *pointer's* width is
+      written nowhere in a type; `usize`'s is (phase 5). `layout` asks the
+      target; everything else — the const evaluator included — asks `layout`.
+- [x] **Layouts print in the IR dump** (`}  // size 12, align 4`), which is what
+      the 22 regenerated snapshots assert.
 
-- `Generics { params, own }` on a function's node: every parameter it is generic
-  over, declared ones first, and how many of those it declared itself.
-- `Instantiation(Vec<GenericArg>)` on a call's callee node: what this call bound
-  them to, in the same order.
+## The three load-bearing decisions
 
-Both are built by `Inferer::instantiate_parts`, in one place, so the order cannot
-drift. Lowering carries them into the IR; `mono` reads the pair back.
+### One arithmetic, two walks
 
-The alternative — unify the callee's declared signature against the type the call
-settled on — is a second implementation free to disagree, **and it is wrong**
-wherever the signature does not mention a parameter: `func <T> () -> usize {
-return $size_of.<T>() }` has no `T` anywhere in `func() -> usize`.
+`ir::const_eval::binary_values` / `int_binary` / `float_binary` / `unary_op` are
+**free functions over `ConstValue`s** with no tree and no node behind them. The
+IR evaluator calls them; so does inference's fold over the AST, which is what
+makes `[SIZE * 2]T` work.
 
-It survives as a deliberate **narrow fallback** (`Mono::args_from_signature`) for
-the one call shape that records nothing: an **operator**. `a + b` picks its impl
-through trait selection rather than the generic-instantiation path, so nothing
-along the way had an argument list to record — but the callee's type was
-reconstructed by lowering from already-concrete operands, so matching the
-declaration against it is sound *there*.
+That shape is the whole point. `SIZE * 2` must not mean one thing in a type and
+another in a value, so there is exactly one implementation of the semantics —
+and two walks, because the trees genuinely differ and one runs before the other
+exists. The error is a plain `String` for the same reason: the message about
+`2 / 0` is the same everywhere, and only the *place* to report it differs.
 
-### The `own` split, and why it exists
+### Layout is a query, and type definitions stay generic
 
-`Generics::own` says how many parameters the declaration listed itself; the rest
-are the enclosing `impl`'s. A method is generic over `impl <T> Vec.<T>`'s `T`
-without declaring it.
+`TypeDef`s are **definition-relative**: a field of `Pair.<T>` is a `T`, exactly
+as lowering left it. Substituting the use site's arguments is layout's job.
 
-The split matters in exactly one place and matters a lot there. When a call on a
-bound becomes a call on the impl that satisfied it, the two halves come from
-different places: the **method's own** arguments come from the call site (the
-trait's declaration and the impl's must list the same ones, so they line up by
-position), the **impl's** from matching the impl's target against the concrete
-self type. Without the split there is no way to tell which is which.
+That is why monomorphization instantiates *functions* and not types, and it is
+what keeps one `Pair` in the program instead of one per instantiation. A generic
+type is skipped by the stamping pass for the same reason `T` is: it has no
+layout, and its instantiations do.
 
-It is also what makes `core.Vec.<i32>.push` mangle and print with the arguments
-on the type rather than trailing off the end.
+### The layout pass stamps and does not complain
 
-### Instantiating a body is a renumbering
-
-`Mono::instantiate` clones the `Function` and walks it with a `VisitorMut`,
-giving every node a **fresh `IrId`** and copying the facts hung off the old one —
-span, type (substituted), directives, `ImplicitCast`, `RangeReported`,
-`Instantiation` (substituted) — across.
-
-- Ids **cannot** be shared: the one fact that differs between two instantiations
-  is the per-node type, and that is keyed by id.
-- A **local's `DefId` is not** renumbered. Two instantiations share one
-  declaration per local, which is what a local's def is: the place it was
-  written. Their types differ and live on the fresh ids.
-
-### Resolving a call on a bound
-
-`Dispatch::Generic { trait_def, method, self_ty }` → `Dispatch::Static`, with the
-callee rewritten to the impl's method.
-
-- Each impl's target is resolved out of syntax **once**, after inference, into
-  `infer::ImplTarget` — `ty_from_node` belongs to inference and `mono` has none
-  of that machinery. `Session` now holds `impls` and `impl_targets` side by side,
-  indexed alike.
-- Matching is **one-way** (`match_ty`): the impl's generics are the holes, the
-  concrete type is the answer. A hole asked to be two different things fails,
-  which is what keeps `impl <T> Pair.<T, T>` off `Pair.<i32, f64>`.
-- A concrete impl beats a blanket one, as during inference.
-- The self type is **autoderefed on the second try**: `Dispatch::Generic` records
-  the `self` **parameter**'s type, so `d.weight()` on a `*D` arrives as
-  `*Entity` while the impl is written `impl Describe for Entity`. Exact first, so
-  an impl really written for a pointer still wins.
+It would be natural for it to report every type it cannot lay out. It does not,
+because **every one of those is already reported** by the check that owns the
+question: an unsized member by §3.4's rule, a cycle by
+`declarations::recursive_layouts` (which now marks the types it rejected, so
+layout stays quiet), an errored member by inference. A second diagnostic for one
+mistake is what the whole diagnostic discipline here is arranged to avoid.
 
 ## Failed approaches (don't repeat these)
 
 Everything in the previous handoffs' lists still stands. New this session:
 
-- **Recovering a call's generic arguments by unifying signatures.** Wrong for any
-  parameter the signature does not mention (`$size_of.<T>()`), and a second
-  implementation of something inference computed once. Kept only as the operator
-  fallback above, where both signatures are in hand and every argument is in
-  them.
-- **Rooting the walk at `main` (plus externs, plus a library's public surface).**
-  Built first, and it produces a **broken program**: this pass does not eliminate
-  dead code, so an unreached concrete `f` is still emitted — and if the walk
-  never visited `f`, the generic `len` it calls was never instantiated *and was
-  dropped*, leaving `f` naming a function that does not exist. Since nothing is
-  eliminated, every function that will be emitted has to be a root. There is a
-  regression test (`every_call_names_a_function_the_program_still_has`).
-- **Mangling per `design/lir.md` §7 as written.** The scheme was not injective.
-  An integer is a letter followed by digits and a path component *starts* with
-  digits, so `i324core3Foo` is `i32`+`core.Foo` or `i324`+something; and
-  `Ku167` is `u16` at `7` or `u167` at nothing. Fixed with an `N` before a
-  nominal path and a `p`/`n` sign letter before every numeric `const` value —
-  `design/lir.md` §7 is amended to match, with the reasoning.
-- **Omitting a nominal's `I ... E` when it has no arguments.** Then
-  `N4core6OptionN4core6Option` is one four-component path or two two-component
-  ones. The empty list is still a list.
-- **Keying instances by their arguments.** `Ty` has no `Hash`/`Eq` — a `const`
-  argument may hold a float. Keying by the **symbol** is better anyway: a mangled
-  name's one job is injectivity, so two argument sets share a symbol exactly when
-  they are the same instantiation.
-- **Mutating `Linked` and expecting the link tests to hold.** `link.rs` says
-  monomorphization rewrites `Linked` and leaves the per-file programs alone —
-  that is the intent — but `linking_merges_every_file_into_one_program` asserted
-  on `session.linked` after `analyze`. It now measures `ir::link(&session.ir)`
-  directly, which is what it was always about.
-- **Running monomorphization before the `ir::check` passes.** Every one of them
-  wants to report against the program as written: one mistake inside `func <T>`
-  is one mistake, not one per call site.
-- **Expecting `walk_pattern_mut` to reach a `Binding`.** It visits sub-*patterns*;
-  the `Binding` inside `At` and inside a slice `rest` is not one and has its own
-  `IrId`. `Cloner::visit_pattern` handles both by hand.
+- **Rooting monomorphization at `main`** — already recorded, and the regression
+  test (`every_call_names_a_function_the_program_still_has`) is what caught it.
+- **Reporting from the layout pass.** Built, and every message was a second one
+  for a mistake already reported: `dyn Trait` by value, and a self-containing
+  type. Both showed up as test failures asserting *exactly one* diagnostic — the
+  guard working as designed.
+- **`Const::Unevaluated(DefId)` for a computed array length.** It cannot work: a
+  length is part of a type's identity (§3.2), so `[SIZE * 2]T` has to unify with
+  `[8]T` *during* inference, and an unevaluated length unifies with nothing until
+  after linking.
+- **Suggesting "bind it to a `::` constant first" for a call in a length.** The
+  first message said that; following the constant arrives right back at the call,
+  so the advice was wrong. The message now states the ordering limit instead.
+- **Putting a `Target` back into `ConstEval`.** Phase 5 took it out on purpose.
+  What it needed was not the target but a *layout*, so it holds a `&Layouts` —
+  the answerer, not the answer.
+- **Reading `size_of.<T>()`'s type from the signature.** There is none:
+  `func <T> () -> usize` mentions `T` nowhere. It comes from the call's
+  `Instantiation`, which meant carrying that onto **intrinsic** nodes too — the
+  intrinsic branch of `lower_call` returns early and was skipping it.
+- **Binding only `const` generic arguments in the evaluator's frame.** A
+  `size_of.<T>()` inside a generic `#const` body then asked about `T` itself.
+  There is now a `ty_frames` stack beside `frames`, and a nested call resolves
+  `T` against the frame it came from rather than passing the name on.
+- **Assuming a member's directives reach the IR.** They did not:
+  `Lowerer::member` built a `Member` with a type and a span and nothing else.
 
 ## Key decisions
 
 | Decision | Rationale |
 |---|---|
-| A call site's generic arguments are **recorded**, not re-derived | Inference computed them once; a second derivation is free to disagree, and is wrong for a parameter the signature never mentions |
-| `Generics` records `own` | The only way to tell a method's own arguments from its impl's when a bound is resolved — they come from different places |
-| Instances are keyed by their **symbol** | A mangled name's one job is injectivity, so it *is* the key. Also sidesteps `Ty` having no `Hash` |
-| A local's `DefId` is **not** renumbered per instance | Two instantiations share one declaration per local; that is what a local's def is. Only the type differs, and that is on the fresh id |
-| The roots are every **concrete** function, not `main` | Nothing is dropped, so everything emitted must still have its callees, and a generic declaration does not survive. The set narrows by itself when DCE arrives |
-| Monomorphization runs **after** the `ir::check` passes | A mistake inside a generic is one mistake, reported against the function as written |
-| The generic declaration is removed from `Linked` | It is not code. Removing it is also what makes "no `Dispatch::Generic` survives" checkable |
-| Impl targets are resolved into `Ty` once, after inference | `ty_from_node` belongs to inference; mono holds a concrete type and wants a match, not a unification |
-| Impl matching is **one-way** | The right-hand side is settled; the only question is what the impl's generics would have to be |
-| The const **evaluator** binds `<const N>` itself, not waiting for mono | A constant's value is needed *during* inference (an array length, a `const` argument); mono runs long afterwards |
-| `usize` / `isize` mangle as `us` / `is` | They stand where a primitive stands and are in every other program; `N4core5usizeIE` in every symbol would be noise. Keyed on the `#lang` tag |
+| One arithmetic, two walks | `SIZE * 2` must not mean two things. The trees differ and one runs first; the semantics do not and must not |
+| A length is folded during inference | It is part of a type's identity, so it has to be a number before unification asks whether two types are the same |
+| A **call** in a type is refused, not worked around | A body is not compiled until its types are known, and a length is one of them. Naming it through a constant does not help |
+| Layout is a query, memoized by the mangled type encoding | "Every type" is not enumerable; injectivity is exactly what a cache key wants, and `Ty` has no `Hash` |
+| Type definitions stay definition-relative | One `Pair` in the program, not one per instantiation — and it is why mono instantiates functions, not types |
+| An integer's size rounds up to a power-of-two alignment, capped at 16 | `u24` has no three-byte load; `[N]u24` would otherwise have a stride nothing can use. The cap is because a 512-byte alignment for a `u4096` is absurd |
+| `Layout::size` is the **stride** | Every consumer wants it; two numbers would mean every one of them choosing |
+| Fields are never reordered | `#packed` is defined as removing *padding*, which only means something if the order is the written one |
+| An enum's payload overlaps | One variant is live at a time; end-to-end would make an enum as big as all of them |
+| The layout pass stamps and does not report | Every failure it can see is already reported by the check that owns the question |
+| `#soa` warns rather than being ignored | A silently ignored directive is worse than an unimplemented one. It waits on what a place projection *is*, which is phase 8 |
+| A trait impl's member carries its trait in the symbol | Two coherent impls for one type share a name and a path; without it they share a symbol |
+| `ConstEval` holds a `&Layouts`, not a `Target` | Phase 5's line still holds: how wide a pointer is is layout's question alone |
 
 ## Current state
 
-**Working**: everything. `cd nestc && cargo test` → **392 passed**. `cargo
-clippy` → 74 warnings. Every file in `examples/*.nest` compiles clean. The
-roadmap, `design/lir.md` §7 and this document all describe what is actually
-built.
+**Working**: everything. `cd nestc && cargo test` → **417 passed**. `cargo
+clippy` → 73 warnings. Every file in `examples/*.nest` compiles clean. The
+roadmap, `design/lir.md` §7 and §7cc, `spec/03-types.md` §3.2 and this document
+all describe what is actually built.
 
 **Broken**: nothing.
 
@@ -182,133 +151,120 @@ built.
 
 **Deliberately not done**:
 
-- **Dead-code elimination.** See the roots decision above.
-- **Cross-compilation-unit generics.** A generic declaration is not a root;
-  which instantiations exist is a question about a consumer this compilation
-  cannot see.
-- **Two impls of one trait for one self type differing only in the trait's own
-  arguments** (`impl Add.<f64> for Vec3` beside `impl Add.<i32> for Vec3`).
-  `Dispatch::Generic` records the trait, not the arguments the bound was written
-  with, so there is nothing to match them against. `ImplTarget` would grow a
-  `trait_args` field on the day the IR carries them; it was built with one and
-  it was removed, because an unused field is worse than a missing one.
-- **A computed array length** (`[SIZE * 2]T`). Still rejected by
-  `Inferer::const_value_in`, and still **not** a monomorphization question: the
-  const evaluator runs on the IR and a length is wanted during inference, before
-  there is any IR. Lowering one expression on demand, or an AST-level evaluator,
-  is the shape of the fix. The previous handoff filed this under phase 6; it
-  belongs to whichever phase decides to build one of those two things.
-- **Moving `+`, `-` and the rest out of `sema::builtins` into real `Add` / `Sub`
-  impls in `core`.** Unchanged from the last handoff, and still cleanup rather
-  than a fix.
+- **`#soa`.** Warned about, not consumed. It waits on the LIR's place
+  projection: storing `[N]Particle` column-wise means `&a[i]` no longer names a
+  contiguous `Particle`, and what a projection *is* is phase 8's to say.
+- **A call or `size_of` inside a type.** `[double(4)]T` and
+  `[size_of.<H>()]u8` are both refused. Neither is a layout or a folding
+  question — both want dependency-ordered analysis, which is a phase of its own.
+  It is in the roadmap's Open questions.
+- **ABI classification.** How a struct is *passed* — registers, stack, hidden
+  pointer — is a different question from how it is stored. It belongs with §11.3
+  and codegen.
+- **Dead-code elimination** and **cross-compilation-unit generics**: unchanged
+  from the phase 6 handoff.
+- **Moving `+`, `-` and the rest out of `sema::builtins`** into `core` impls:
+  unchanged, and still cleanup rather than a fix.
 
 ## Files to know
 
 | File | Why it matters |
 |---|---|
-| `design/roadmap.md` §6, §7 | §6 is what was built; §7 is next. Read before starting. |
-| `design/lir.md` §7, §7b, §7c | Names and mangling (amended this session), aggregate flattening, debug info. §7b/§7c are phase 8's brief and §7's neighbours. |
-| `nestc/src/ir/mono.rs` | The whole phase. `run`, `roots`, `Mono::reach` / `instantiate` / `rewrite_call` / `select`, `match_ty`, `mangle`. |
-| `nestc/src/sema/infer.rs` | `Generics`, `GenericArg`, `Instantiation`, `ImplTarget`, `instantiate_parts`, `stamp_generics`, `resolve_impl_targets`. |
-| `nestc/src/ir/link.rs` | `Linked::insert` / `remove` — what mono adds and drops. |
-| `nestc/src/ir/check/constness.rs` | `check_only`, the deferred re-check. |
-| `nestc/src/ir/const_eval.rs` | `call_const_fn` binds `<const N>` from the call's `Instantiation`. |
-| `nestc/src/sema/mod.rs` | `analyze`'s ordering, and `monomorphize`. |
-| `nestc/src/common/options.rs` | `Target` (`pointer_bits`, `os`, `arch`) and `profile` — phase 7 wants these back. |
+| `design/roadmap.md` §7, §8, **Open questions** | §7 is what was built; §8 is next; Open questions has one waiting on you. |
+| `design/lir.md` §1, 2, 4 | Phase 8's brief: basic blocks, places, terminators, the `match` decision tree. |
+| `design/lir.md` §7b, §7cc, §7c, §7d | Aggregate flattening, the layout rules, debug info, what a build setting changes. All four are phase 8 input. |
+| `nestc/src/ir/layout.rs` | `Layouts::of` / `fields` / `enum_layout`, the rules, `subst_ty` (shared with the const evaluator). |
+| `nestc/src/ir/check/layouts.rs` | The stamping pass, and why it reports nothing. |
+| `nestc/src/ir/mono.rs` | Phase 6. `type_key` is here and layout uses it. |
+| `nestc/src/ir/const_eval.rs` | `binary_values` and friends (the shared arithmetic, at the bottom of the file); `frames` / `ty_frames`; `$size_of`. |
+| `nestc/src/sema/infer.rs` | `const_value_in` / `const_operand` (the AST fold), `Generics`, `Instantiation`, `ImplTarget`. |
+| `nestc/src/common/options.rs` | `Target` — `pointer_bits` is what layout reads. |
 
 ## Code context
 
-```
-$ nestc x.nest        # the tail of the output
-===< MONO >===
-// _NC4main = main
-func main() -> void {
-  let x: i32 = (Box.get: func(*Box.<i32>) -> i32)((&bi: Box.<i32>): *Box.<i32>): i32
-  ...
-}
-// _NC3BoxIi32E3get = Box.<i32>.get
-func get(self: *Box.<i32>) -> i32 #self(*) { ... }
-// _NC3BoxIbE3get = Box.<bool>.get
-func get(self: *Box.<bool>) -> bool #self(*) { ... }
-// _NC6sum_itIN7CounterIEE = sum_it.<Counter>
-func sum_it(s: *Counter) -> i32 {
-  return (Counter.total: func(*Counter) -> i32)(s: *Counter): i32   // was Dispatch::Generic
-}
-// _NC6repeatIKu16p7E = repeat.<7>
-func repeat() -> u16 { return 7: u16 }                              // was ExprKind::ConstParam
+```nest
+Header  :: #packed struct { magic: u32, len: u16, tag: u8 }   // size 7,  align 1
+Padded  :: struct { a: u8, b: u32, c: u8 }                    // size 12, align 4
+Wide    :: #align(16) struct { x: f32, y: f32 }               // size 16, align 16
+Over    :: struct { a: u8, #align(8) b: u8, c: u8 }           // size 16, align 8
+Colour  :: enum { red, green, blue }                          // size 1,  align 1
+Payload :: enum { none, num(i64), pair(u8, u8) }              // size 16, align 8
+
+SIZE: usize :: 4
+buf :: func (x: [SIZE * 2]i32) -> usize { return x.len() }    // x: [8]i32
 ```
 
 ```rust
-// ir/mono.rs
-pub struct Instance { pub origin: DefId, pub args: Vec<GenericArg>, pub name: String, pub symbol: Symbol }
-pub fn run(defs: &mut DefTable, meta: &Meta, linked: &mut Linked,
-           impls: &ImplTable, targets: &[ImplTarget]) -> Vec<Diagnostic>;
+// ir/layout.rs
+pub struct Layout { pub size: u64, pub align: u64 }   // `size` is the stride
+pub struct Fields { pub layout: Layout, pub offsets: Vec<u64> }
+pub struct EnumLayout { pub layout: Layout, pub tag: Layout, pub payload_at: u64,
+                        pub payload: Layout, pub variants: Vec<Fields> }
+impl Layouts<'_> {
+    pub fn of(&self, ty: &Ty) -> Result<Layout, LayoutError>;
+    pub fn fields(&self, ty: &Ty) -> Option<Result<Fields, LayoutError>>;
+    pub fn enum_layout(&self, ty: &Ty) -> Option<Result<EnumLayout, LayoutError>>;
+}
 
-// sema/infer.rs
-pub struct Generics { pub params: Vec<DefId>, pub own: usize }
-pub enum GenericArg { Ty(Ty), Const(Const) }
-pub struct Instantiation(pub Vec<GenericArg>);
-pub struct ImplTarget { pub self_ty: Ty }
+// ir/const_eval.rs — the shared arithmetic, no tree behind it
+pub fn binary_values(op: BinOp, a: &ConstValue, b: &ConstValue) -> Result<ConstValue, String>;
+pub fn unary_op(op: UnOp, v: &ConstValue) -> Result<ConstValue, String>;
 ```
 
 **The non-obvious bits.**
 
-*`Instance` is stamped on **every** function, concrete ones included*, with
-`origin == def` and no arguments. A concrete function is its own only instance,
-and saying so uniformly is what lets a consumer read it without first asking
-whether there is one.
+*A `Layout` is stamped on a `TypeDef`'s `IrId`, and the per-file `Program`s share
+those ids with `Linked`* — so the IR dump shows layouts even though it renders
+what lowering produced. That is the documented behaviour of `link` (it clones,
+preserving ids), and the const-value comments in the same dumps have always
+worked the same way.
 
-*The order of `Generics::params` and of `Instantiation`'s arguments is the same
-order, and it is decided in one place.* If you touch `instantiate_parts`, touch
-`stamp_generics` in the same edit — they walk the same signature with the same
-two halves (declared, then `collect_generic_params` over the signature: types
-then consts).
+*`layout::subst_ty` and `mono`'s are different functions on purpose.* Mono's also
+substitutes `const` parameters into widths and array lengths; layout's has no
+const map and does not need one. Do not "unify" them without giving layout the
+map.
 
-*A `reach_vtable` walk sorts the impl's members before queueing them.* A
-`HashMap`'s iteration order varies between runs, and every queued job allocates a
-`DefId` in the order it was queued — so without the sort two builds of one
-program produce different def numbering.
+*The layout pass runs **last** in `check::run`.* Laying out a cycle does not fail,
+it does not terminate, so `declarations::recursive_layouts` has to have run and
+marked its types first.
 
-*Mono does not run on a program that already reported an error.* Its IR describes
-something that does not type-check, so the walk would at best find nothing and at
-worst report a defect in the pass for a defect in the program.
+*`#align` on a member is read from `meta.directives(member.id)`*, which only
+exists because `Lowerer::member` now copies the field def's directives. Anything
+else that wants a member's directives gets them the same way.
 
 ## Resume instructions
 
-1. `cd nestc && cargo test` — expect **392 passed**.
+1. `cd nestc && cargo test` — expect **417 passed**.
 2. See the phase working:
    ```
    cargo build
    cat > /tmp/e.nest <<'EOF'
-   Summing :: trait { total :: func (self: *Self) -> i32 }
-   Counter :: struct { n: i32 }
-   impl Summing for Counter { total :: func (self: *Counter) -> i32 { return self.n } }
-   sum_it :: func <S: Summing> (s: *S) -> i32 { return s.total() }
-   Box :: struct <T> { v: T }
-   impl <T> Box.<T> { @public get :: func (self: *Box.<T>) -> T { return self.v } }
-   repeat :: func <const N: u16> () -> u16 { return N }
-   @public main :: func () {
-     const c := Counter { n: 1 }
-     const p := sum_it(&c)
-     const bi := Box.<i32> { v: 1 }
-     const bb := Box.<bool> { v: true }
-     const x := bi.get()
-     const y := bb.get()
-     const r := repeat.<7>()
-   }
+   { size_of, align_of } :: import <core/mem>
+   Header  :: #packed struct { magic: u32, len: u16, tag: u8 }
+   Padded  :: struct { a: u8, b: u32, c: u8 }
+   Payload :: enum { none, num(i64), pair(u8, u8) }
+   SIZE: usize :: 4
+   A: usize :: size_of.<Header>()
+   B: usize :: size_of.<Payload>()
+   C: usize :: align_of.<Padded>()
+   buf :: func (x: [SIZE * 2]i32) -> usize { return x.len() }
+   @public main :: func () { const z := A }
    EOF
-   ./target/debug/nestc /tmp/e.nest | sed -n '/MONO/,$p' | grep '^//'
+   ./target/debug/nestc /tmp/e.nest | grep -E 'size |= [0-9]|func buf'
    ```
-   Expected: no diagnostics, and instances for `Box.<i32>.get`, `Box.<bool>.get`,
-   `sum_it.<Counter>`, `repeat.<7>`, `Counter.total`.
-3. **Phase 7 (layout) is next.** `design/roadmap.md` §7 is the plan: sizes,
-   alignments and offsets per monomorphized type; `#packed`, `#align(N)`, `#soa`;
-   and this is where the **target comes back** — `PTR_BITS` is a `core` constant
-   for the type system, but a layout needs a real pointer width. Note phase 5
-   removed `Target` from `Inferer` / `ConstEval` / the exhaustiveness checker on
-   purpose; do not thread it back through those.
-4. Whatever you touch, verify with all three:
-   - `cargo test` (392 and rising)
+   Expected: `Header` 7/1, `Padded` 12/4, `Payload` 16/8, `A = 7`, `B = 16`,
+   `C = 4`, and `buf(x: [8]i32)`.
+3. **Answer the one open question** in `design/roadmap.md` — how `[SIZE * 2]T`
+   was built versus the note you left.
+4. **Phase 8 (LIR: shape and control flow) is next.** `design/roadmap.md` §8 is
+   the plan and `design/lir.md` §1, 2, 4, 7b is the content: basic blocks,
+   places, terminators, the `match` decision tree, aggregates flattened to
+   structs. Two things already in hand that it consumes: every function has a
+   symbol (phase 6) and every concrete type has a layout (phase 7). One thing it
+   has to decide before `#soa` can be consumed: what a place projection through a
+   column-wise array *is*.
+5. Whatever you touch, verify with all three:
+   - `cargo test` (417 and rising)
    - `for f in ../examples/*.nest; do ./target/debug/nestc "$f" >/dev/null || echo "FAIL $f"; done`
    - `cargo clippy` — compare the warning **set**, not the count.
 
@@ -316,24 +272,25 @@ worst report a defect in the pass for a defect in the program.
 
 Everything in the previous handoff's list still holds. New or changed:
 
-- **An unreached concrete function is still emitted**, with a symbol, and is a
-  root of the walk. See the roots decision.
-- **A generic declaration is gone from `Linked` after this pass.** The per-file
-  `Program`s still have it — they are the record of what lowering produced — so
-  `--emit=ir` and the IR snapshot tests are unaffected.
-- **`Dispatch::Virtual` is untouched.** Which function a vtable slot holds is a
-  property of the vtable, and building one is IR → LIR's job (phase 8). The
-  *impls* that fill the slots are reached, through the `*dyn` coercion.
-- **A trait's own generic arguments do not take part in selection.** See
-  "deliberately not done".
-- **`match_const` compares widths by value**, so `int.<32>` and `i32` match: they
-  are the same type (§3.1) and both normalize to a bare width.
-- **A `const` argument that is not a primitive encodes as `Z`.** §5 makes an
-  aggregate inadmissible, so reaching that is a defect; `Z` keeps the symbol
-  injective among the values that do arrive rather than inventing one.
-- **`mono.rs`'s `Instance::origin` / `args` show as "never read" in clippy.** The
-  bin does not read them yet; the tests do. Same class as the several dozen
-  pre-existing entries of that kind.
+- **A `const` generic argument takes a literal or a named constant, not an
+  expression.** `repeat.<N * 2>` does not parse, and that is the **grammar**:
+  inside `.<...>` a `>` is the closing bracket. An array length has no such
+  problem because `]` closes it. Rust solves this with braces
+  (`foo::<{ N * 2 }>()`); Nest has not decided.
+- **`[N * 2]T` with `N` a `const` generic parameter is refused.** `[N]T` is fine.
+  A `Const` has no shape for an unevaluated expression, so the combined form
+  would have to stay symbolic to monomorphization — and it says so rather than
+  guessing.
+- **`int.<N>` inside a family impl has no layout**, and the stamping pass skips
+  it along with every other generic. The width is a `const` parameter, so the
+  type is as generic as one over a `T`.
+- **A zero-sized type is a real thing.** `void` and `never` are size 0, align 1,
+  and a member of one costs nothing and keeps its name.
+- **`f80` is size 16, align 16.** Ten bytes of data and six of padding, which is
+  what every ABI that has the type does. What a *slot* costs is what a layout is.
+- **`mono::type_key` is public** and is the key for anything keyed by a type.
+  Prefer it over a display string, which is not injective — two types in
+  different namespaces can print alike.
 
 ## Warnings
 
@@ -342,22 +299,24 @@ Everything in the previous handoff's list still holds. New or changed:
   for later calls — use absolute paths.
 - **`cargo test` does not rebuild `target/debug/nestc`.** Run `cargo build`
   before the examples loop or you are testing a stale binary.
-- **Compare the clippy warning *set*, not the count.** A new warning and a fixed
-  one cancel out in a count. `cargo clippy --message-format=short 2>&1 | grep -E
-  '^src|^warning: ' | sed 's/:[0-9]*:[0-9]*:/:/' | sort`, then `comm` against the
-  baseline. Note the redirection: `2>&1 | grep`, **not** `2>&1 > file` — the
-  second sends clippy's stderr to the terminal and leaves you an empty file and a
-  clean-looking diff.
+- **Compare the clippy warning *set*, not the count.** `cargo clippy
+  --message-format=short 2>&1 | grep -E '^src|^warning: ' | sed
+  's/:[0-9]*:[0-9]*:/:/' | sort`, then `comm` against the baseline. Note the
+  redirection: `2>&1 | grep`, **not** `2>&1 > file` — the second sends clippy's
+  stderr to the terminal and leaves you an empty file and a clean-looking diff.
 - **`cargo clippy` caches.** `touch` the file you changed, or you will compare
   against a stale run.
 - **`rustfmt --edition 2024 <file>` follows `mod` declarations** and reformats
-  every file it reaches. **Never** run `cargo fmt` with no arguments.
+  every file it reaches. **Never** run `cargo fmt` with no arguments. Note
+  `src/sema/infer.rs`, `lower.rs`, `session.rs` and `tests.rs` were *already*
+  unformatted before any of this work; leave them.
 - **Regenerating snapshots**: `INSTA_UPDATE=always cargo test`, then
   `rm -f src/*/snapshots/*.snap.new` and
   `sed -i '' '/^assertion_line: /d' src/*/snapshots/*.snap`. Then **read every
   diff** — against `git`, not against `.snap.new`.
 - **Many tests assert *exactly one* diagnostic.** Deliberate: the regression
   guard against cascades. Fix the cascade rather than loosening the assertion.
+  Both layout cascades this session were caught by exactly that.
 - **A new intrinsic is a row in `sema/intrinsics.rs` first.**
 - **`#lang` discovery is by tag only.** Never hardcode a core type's name, file
   or position.
@@ -372,6 +331,7 @@ Everything in the previous handoff's list still holds. New or changed:
 
 - Commits are **title-only**: no body, no co-author trailer, changes bundled as
   `feat: a + feat: b + fix: c`.
-- The user redesigned the integer representation three times mid-implementation
-  during phase 5. Expect the design to keep moving; commit green states often so
-  a redesign costs one commit, not a session.
+- The design moves. Commit green states often so a redesign costs one commit,
+  not a session.
+- When a note in `design/roadmap.md` is departed from, say so *there* and in the
+  reply — the `[SIZE * 2]T` row is the worked example.

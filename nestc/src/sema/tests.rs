@@ -7041,3 +7041,345 @@ fn an_inherent_method_takes_no_trait_qualifier() {
     );
     assert_eq!(symbol_of(&session, "Box.<i32>.get"), "_NC3BoxIi32E3get");
 }
+
+// ===< Layout (phase 7) >===
+
+/// A layout query over an analyzed session, for asking about types the program
+/// never wrote a `size_of` for.
+fn layouts_of(session: &Session) -> crate::ir::layout::Layouts<'_> {
+    crate::ir::layout::Layouts::new(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        session.options.target,
+    )
+}
+
+/// The `(size, align)` of the type named `name` in the entry file.
+fn layout_of_named(session: &Session, name: &str) -> (u64, u64) {
+    let t = session
+        .linked
+        .types()
+        .find(|t| t.name.as_str() == name)
+        .unwrap_or_else(|| panic!("no type named `{name}`"));
+    let l = session
+        .ir_meta
+        .get::<crate::ir::layout::Layout>(t.id)
+        .unwrap_or_else(|| panic!("`{name}` has no layout"));
+    (l.size, l.align)
+}
+
+/// The value of the constant `name`, which every test below reads a `size_of`
+/// back through.
+fn const_value(session: &Session, name: &str) -> u64 {
+    let g = session
+        .linked
+        .globals()
+        .find(|g| g.name.as_str() == name)
+        .unwrap_or_else(|| panic!("no constant `{name}`"));
+    match session.ir_meta.get::<crate::ir::ConstValue>(g.id) {
+        Some(crate::ir::ConstValue::Int(n)) => u64::try_from(&n).expect("a non-negative size"),
+        other => panic!("`{name}` did not evaluate to an integer: {other:?}"),
+    }
+}
+
+/// Wrap `decls` in a program that reads `size_of.<ty>()` back as a constant.
+fn size_of_ty(ty: &str) -> u64 {
+    let src = format!(
+        "{{ size_of }} :: import <core/mem>\nS: usize :: size_of.<{ty}>()\n\
+         @public main :: func () {{ const z := S }}\n"
+    );
+    const_value(&analyze_clean(&src), "S")
+}
+
+fn align_of_ty(ty: &str) -> u64 {
+    let src = format!(
+        "{{ align_of }} :: import <core/mem>\nA: usize :: align_of.<{ty}>()\n\
+         @public main :: func () {{ const z := A }}\n"
+    );
+    const_value(&analyze_clean(&src), "A")
+}
+
+/// An integer's size is its width rounded up to whole bytes, and its alignment
+/// is that rounded up to a power of two (capped at `MAX_ALIGN`). `u24` is the
+/// case that makes this a *decision*: no machine has a three-byte load, so
+/// `[N]u24` would otherwise have a stride nothing could use.
+#[test]
+fn an_integers_layout_follows_its_width() {
+    assert_eq!(size_of_ty("u8"), 1);
+    assert_eq!(size_of_ty("i7"), 1);
+    assert_eq!(size_of_ty("u16"), 2);
+    assert_eq!(size_of_ty("u24"), 4);
+    assert_eq!(align_of_ty("u24"), 4);
+    assert_eq!(size_of_ty("i64"), 8);
+    assert_eq!(size_of_ty("u128"), 16);
+    // Past the alignment cap the size keeps growing and the alignment does not.
+    assert_eq!(size_of_ty("u4096"), 512);
+    assert_eq!(align_of_ty("u4096"), 16);
+}
+
+/// The rest of the scalars, including the two that occupy nothing.
+#[test]
+fn the_scalar_layouts() {
+    assert_eq!(size_of_ty("bool"), 1);
+    // A `char` is a Unicode scalar value, not a byte (§3.1).
+    assert_eq!(size_of_ty("char"), 4);
+    assert_eq!(size_of_ty("f32"), 4);
+    assert_eq!(size_of_ty("f64"), 8);
+    assert_eq!(size_of_ty("void"), 0);
+    assert_eq!(align_of_ty("void"), 1);
+    // A pointer-sized type's width is in the type already (§3.1); a *pointer's*
+    // is the target's, and this is the only place that is asked.
+    assert_eq!(size_of_ty("usize"), 8);
+    assert_eq!(size_of_ty("*i32"), 8);
+    // A slice is a pointer and a length; a fixed array is its elements.
+    assert_eq!(size_of_ty("[]i32"), 16);
+    assert_eq!(size_of_ty("[4]u16"), 8);
+    assert_eq!(size_of_ty("[3]i32"), 12);
+}
+
+/// Fields are laid out in **declaration order** with padding between them, and
+/// nothing is reordered. That is a promise rather than a limitation: `#packed`
+/// is defined as removing padding, which only means something if the order is
+/// the written one.
+#[test]
+fn a_struct_pads_between_fields_and_keeps_its_order() {
+    let session = analyze_clean(
+        "Padded :: struct { a: u8, b: u32, c: u8 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    // `a` at 0, three bytes of padding, `b` at 4, `c` at 8, then three of tail
+    // padding to make the stride a multiple of 4.
+    assert_eq!(layout_of_named(&session, "Padded"), (12, 4));
+    let ty = session
+        .linked
+        .types()
+        .find(|t| t.name.as_str() == "Padded")
+        .map(|t| session.ir_meta.ty_or_error(t.id))
+        .unwrap();
+    let fields = layouts_of(&session).fields(&ty).unwrap().unwrap();
+    assert_eq!(fields.offsets, vec![0, 4, 8]);
+}
+
+/// `#packed` removes inter-field padding: every field sits at the next byte
+/// (§9). It is the one thing that can lower an alignment, and that is the point
+/// — a wire format has no padding in it.
+#[test]
+fn packed_removes_every_gap() {
+    let session = analyze_clean(
+        "Header :: #packed struct { magic: u32, len: u16, tag: u8 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    assert_eq!(layout_of_named(&session, "Header"), (7, 1));
+    let ty = session
+        .linked
+        .types()
+        .find(|t| t.name.as_str() == "Header")
+        .map(|t| session.ir_meta.ty_or_error(t.id))
+        .unwrap();
+    assert_eq!(
+        layouts_of(&session).fields(&ty).unwrap().unwrap().offsets,
+        vec![0, 4, 6]
+    );
+}
+
+/// `#align(N)` raises a type's alignment, and the size follows — a stride has to
+/// be a multiple of the alignment or the second element of an array would be
+/// misaligned.
+#[test]
+fn align_raises_the_alignment_and_the_stride_with_it() {
+    let session = analyze_clean(
+        "Wide :: #align(16) struct { x: f32, y: f32 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    assert_eq!(layout_of_named(&session, "Wide"), (16, 16));
+}
+
+/// An enum is a tag and a payload, and the payload **overlaps**: one variant is
+/// live at a time, so laying them end to end would make an enum as big as all of
+/// them together.
+#[test]
+fn an_enum_is_a_tag_and_an_overlapping_payload() {
+    let session = analyze_clean(
+        "Colour :: enum { red, green, blue }\n\
+         Payload :: enum { none, num(i64), pair(u8, u8) }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    // Nothing to carry: the tag is the whole type.
+    assert_eq!(layout_of_named(&session, "Colour"), (1, 1));
+    // A one-byte tag, seven bytes of padding, then eight shared by an `i64` and
+    // a `(u8, u8)` — not by both at once.
+    assert_eq!(layout_of_named(&session, "Payload"), (16, 8));
+
+    let ty = session
+        .linked
+        .types()
+        .find(|t| t.name.as_str() == "Payload")
+        .map(|t| session.ir_meta.ty_or_error(t.id))
+        .unwrap();
+    let e = layouts_of(&session).enum_layout(&ty).unwrap().unwrap();
+    assert_eq!(e.tag.size, 1);
+    assert_eq!(e.payload_at, 8);
+    assert_eq!(e.payload.size, 8);
+}
+
+/// A `distinct T` **is** `T`'s representation reinterpreted (§2.4) — not "the
+/// same size as", the same bytes. That is what makes a `usize` and its
+/// `uint.<64>` interchangeable in memory and different in the type system.
+#[test]
+fn a_distinct_type_has_exactly_its_representations_layout() {
+    let session = analyze_clean(
+        "Meters :: distinct f64\n\
+         Port :: distinct u16\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    assert_eq!(layout_of_named(&session, "Meters"), (8, 8));
+    assert_eq!(layout_of_named(&session, "Port"), (2, 2));
+}
+
+/// A trait object is reached through a pointer, and that pointer is **fat**: the
+/// data pointer and the vtable pointer. It is the one place a pointer's size
+/// depends on what it points at.
+#[test]
+fn a_pointer_to_a_trait_object_is_two_words() {
+    assert_eq!(
+        size_of_ty("*i32"),
+        8,
+        "a thin pointer is one word, for contrast"
+    );
+    let session = analyze_clean(
+        "{ size_of } :: import <core/mem>\n\
+         Tr :: trait { m :: func (self: *Self) -> i32 }\n\
+         S: usize :: size_of.<*dyn Tr>()\n\
+         @public main :: func () { const z := S }\n",
+    );
+    assert_eq!(const_value(&session, "S"), 16);
+}
+
+/// A generic type has no layout, in the same way and for the same reason that
+/// `T` does not — its **instantiations** do, and each arrives at the query when
+/// a use site mentions it.
+#[test]
+fn a_generic_type_is_laid_out_per_instantiation() {
+    let session = analyze_clean(
+        "{ size_of } :: import <core/mem>\n\
+         Pair :: struct <T> { a: T, b: T }\n\
+         A: usize :: size_of.<Pair.<i32>>()\n\
+         B: usize :: size_of.<Pair.<f64>>()\n\
+         C: usize :: size_of.<Pair.<bool>>()\n\
+         @public main :: func () { const z := A }\n",
+    );
+    assert_eq!(const_value(&session, "A"), 8);
+    assert_eq!(const_value(&session, "B"), 16);
+    assert_eq!(const_value(&session, "C"), 2);
+    // The definition itself is generic, so nothing was stamped on it.
+    let t = session
+        .linked
+        .types()
+        .find(|t| t.name.as_str() == "Pair")
+        .expect("`Pair` is declared");
+    assert!(
+        session
+            .ir_meta
+            .get::<crate::ir::layout::Layout>(t.id)
+            .is_none()
+    );
+}
+
+/// `size_of` inside a generic is answered **after** monomorphization has chosen
+/// the argument, which is the whole reason the type travels on the call's
+/// instantiation rather than in the signature (`func <T> () -> usize` mentions
+/// `T` nowhere).
+#[test]
+fn size_of_in_a_generic_is_answered_per_instantiation() {
+    let session = analyze_clean(
+        "{ size_of } :: import <core/mem>\n\
+         #const\n\
+         width :: func <T> () -> usize { return size_of.<T>() }\n\
+         A: usize :: width.<i32>()\n\
+         B: usize :: width.<f64>()\n\
+         @public main :: func () { const z := A }\n",
+    );
+    assert_eq!(const_value(&session, "A"), 4);
+    assert_eq!(const_value(&session, "B"), 8);
+}
+
+/// `#soa` is recognized and checked for where it may be written, and is **not
+/// yet acted on**. A directive that is silently ignored is worse than one that
+/// is not implemented, so it says so — as a warning, because the program is not
+/// wrong, only laid out the other way.
+#[test]
+fn soa_says_it_is_not_consumed_yet() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "Parts :: #soa struct { x: f32, y: f32 }\n\
+             @public main :: func () { const z := 1 }\n",
+        )],
+        "main",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let msgs: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("`#soa`") && m.contains("not consumed yet")),
+        "{msgs:?}"
+    );
+}
+
+/// A type that cannot be laid out is reported **once**, by the check that owns
+/// the question — not a second time by layout in worse words.
+#[test]
+fn an_unlayoutable_type_is_reported_once() {
+    let msgs = messages(
+        "Tr :: trait { m :: func (self: *Self) -> i32 }\n\
+         Bad :: struct { t: dyn Tr }\n",
+    );
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    let recursive = messages("Node :: struct { next: Node }\n");
+    assert_eq!(recursive.len(), 1, "{recursive:?}");
+}
+
+/// `#align(N)` applies to a **field** as much as to a type (§9). A member
+/// carries its own directives for the same reason a type does: the pass that
+/// consumes them should never have to reach back into the def table.
+#[test]
+fn align_on_a_field_over_aligns_it() {
+    let session = analyze_clean(
+        "Plain :: struct { a: u8, b: u8, c: u8 }\n\
+         Over :: struct { a: u8, #align(8) b: u8, c: u8 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    assert_eq!(layout_of_named(&session, "Plain"), (3, 1));
+    // `b` is pushed to offset 8, and the struct's own alignment follows it.
+    assert_eq!(layout_of_named(&session, "Over"), (16, 8));
+    let ty = session
+        .linked
+        .types()
+        .find(|t| t.name.as_str() == "Over")
+        .map(|t| session.ir_meta.ty_or_error(t.id))
+        .unwrap();
+    assert_eq!(
+        layouts_of(&session).fields(&ty).unwrap().unwrap().offsets,
+        vec![0, 8, 9]
+    );
+}
+
+/// A directive written where it cannot mean anything would be ignored forever,
+/// which is the whole reason the legality check exists. Fields are no exception.
+#[test]
+fn a_field_directive_that_cannot_mean_anything_is_rejected() {
+    assert!(
+        messages("S :: struct { #packed a: u8 }\n")[0].contains("does not apply to a field"),
+        "{:?}",
+        messages("S :: struct { #packed a: u8 }\n")
+    );
+    assert!(
+        messages("S :: struct { #align(3) a: u8 }\n")[0].contains("power of two"),
+        "{:?}",
+        messages("S :: struct { #align(3) a: u8 }\n")
+    );
+}

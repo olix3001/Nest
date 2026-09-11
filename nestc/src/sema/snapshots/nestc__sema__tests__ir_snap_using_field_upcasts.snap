@@ -5,11 +5,11 @@ expression: ir_text(src)
 struct Transform {
   x: i32
   y: i32
-}
+}  // size 8, align 4
 struct Entity {
   t: Transform
   hp: i32
-}
+}  // size 12, align 4
 func take(t: Transform) -> i32 {
   return (t: Transform.x): i32
 }

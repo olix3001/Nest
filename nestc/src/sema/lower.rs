@@ -543,6 +543,16 @@ impl Lowerer<'_> {
     fn member(&self, at: NodeId, def: Option<DefId>, name: &str) -> Member {
         let id = self.id(at);
         self.meta.set_ty(id, self.ty(at));
+        // A member carries its own directives: `#align(N)` applies to a field as
+        // much as to a type (§9), and `#raw` is only ever written on one. They
+        // travel the same way a type's do — on the node, so the pass that
+        // consumes them never has to reach back into the def table.
+        if let Some(d) = def {
+            let directives = self.defs.get(d).directives.clone();
+            if !directives.is_empty() {
+                self.meta.set_directives(id, directives);
+            }
+        }
         Member {
             id,
             def,
@@ -1173,7 +1183,14 @@ impl Lowerer<'_> {
         // stage keys on.
         if let Some(tag) = target.and_then(|d| self.defs.get(d).intrinsic_tag()) {
             let args = self.lower_args(target, slots, node);
-            return self.lower_intrinsic(node, tag, args, ty);
+            let e = self.lower_intrinsic(node, tag, args, ty);
+            // An intrinsic carries its generic arguments too, and for the one
+            // reason nothing else needs them: `size_of.<T>()` mentions `T`
+            // **nowhere** in its signature (`func <T> () -> usize`), so the type
+            // it is asking about exists only in the instantiation. Without this
+            // the layout query would have nothing to be asked about.
+            self.carry_instantiation(head, &e);
+            return e;
         }
         let callee = Box::new(self.lower_expr(callee));
         let args = self.lower_args(target, slots, node);

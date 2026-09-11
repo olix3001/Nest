@@ -626,6 +626,75 @@ How much of this is emitted is a build setting, not a property of LIR: LIR alway
 carries it, and a build that asks for no debug info simply drops it at the end.
 Dropping late is cheap; reconstructing is not possible.
 
+## 7cc. Layout: the rules a size is computed by
+
+§7b fixes an aggregate's *shape* and says explicitly that the tag's width and
+whether the payload overlaps are layout's to decide. This is where they are
+decided. The rules are in `nestc/src/ir/layout.rs`, and they are **decisions**
+rather than derivations — a backend has to agree with them, so they are written
+down.
+
+Layout is a **query**, not a pass: it is asked about a concrete type and
+memoizes the answer. "Every type" is not a set anyone can enumerate — `[N]T` for
+every `N` a program mentions, every tuple, every instantiation — so each arrives
+when something needs it. What *is* enumerated is the types a program declares;
+each concrete one is laid out once and the result stamped on its `TypeDef`.
+
+| Type | Size | Alignment |
+|---|---|---|
+| `i<N>` / `u<N>` | `ceil(N/8)` rounded up to the alignment | that byte count rounded up to a power of two, capped at 16 |
+| `f16`/`f32`/`f64` | 2 / 4 / 8 | itself |
+| `f80` / `f128` | 16 | 16 |
+| `bool` | 1 | 1 |
+| `char` | 4 | 4 |
+| `void`, `never` | 0 | 1 |
+| `*T` | the target's pointer width | itself |
+| `*dyn Trait` | two words | one word |
+| `[]T` / `[]mut T` | two words (`ptr`, `len`) | one word |
+| `[N]T` | `N × stride(T)` | `align(T)` |
+| `func(...)` | one word | itself |
+| tuple, struct | fields in **declaration order** | the widest field's |
+| `distinct T` | exactly `T`'s | exactly `T`'s |
+| `enum` | tag, then a payload every variant shares | the wider of the two |
+
+Five of these earn a word:
+
+- **An integer's size is a decision.** `u24` is a legal type (§3.1) and no
+  machine has a three-byte load, so something has to say whether it occupies
+  three bytes or four. Four — because the alternative is that `[N]u24` has a
+  stride nothing can load. The alignment cap at 16 is the other half: a `u4096`
+  is 512 bytes and a 512-byte alignment would be absurd, since alignment exists
+  so that a load can be one instruction.
+- **`size` is the stride**, tail padding included. There is no separate "data
+  size", because every consumer here wants the stride and carrying two numbers
+  would mean every one of them choosing.
+- **Fields are never reordered.** That is a promise, not a limitation: §9's
+  `#packed` is defined as *removing padding*, which only means something if the
+  order is the written one, and an FFI struct that reordered itself would not be
+  one.
+- **An enum's payload overlaps.** One variant is live at a time, so the space is
+  shared; laying them end to end would make an enum as big as all of them
+  together, which is not a trade anyone wants for a type whose whole point is
+  that it is one of them. The tag is the smallest unsigned integer that tells the
+  variants apart — one byte for anything up to 256 of them.
+- **A `distinct T` has exactly `T`'s layout.** Not "the same size as": the same
+  bytes (§2.4). That is what makes a `usize` and its `uint.<64>` interchangeable
+  in memory and different in the type system.
+
+`#packed` sets every field's alignment to 1 — it is the one thing that can lower
+an alignment, and that is the point of it. `#align(N)` raises an alignment, on a
+type or on a single field, and the size follows: a stride has to be a multiple of
+the alignment or the second element of an array would be misaligned.
+
+### Where the target comes back
+
+Phase 5 took the target out of the type layer on purpose: `usize` is `distinct
+uint.<PTR_BITS>` over a constant `core` supplies (§3.1), so a *type* never has to
+ask how wide a pointer is. A layout does — not for `usize`, whose width is
+already in the type, but for a **pointer**, which is not a `usize` and has no
+width written anywhere. `layout` is the one place allowed to ask; everything
+else, the const evaluator included, asks `layout`.
+
 ## 7d. What a build's settings change here
 
 A setting (`Options` in `nestc/src/common/options.rs`) is decided before the

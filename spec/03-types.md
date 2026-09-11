@@ -367,6 +367,12 @@ data.
 [N]mut T    fixed array whose elements may be mutated through this reference
 ```
 
+The length is any **compile-time constant expression**: a literal, a named
+constant, a `const` generic parameter, or arithmetic over those — `[8]T`,
+`[SIZE]T`, `[N]T`, `[SIZE * 2]T` are all lengths. A *call* is not one, and that
+is an ordering fact rather than a rule about lengths: a function's body is not
+compiled until its types are known, and a length is one of those types.
+
 Slices, like pointers, are **immutable by default**: `s[i] = x` is legal only
 when `s : []mut T`. Indexing is `s[i]`, length is `s.len()`, sub-slicing is
 `s[lo..<hi]` (see the range operators in

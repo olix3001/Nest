@@ -4,7 +4,7 @@ expression: ir_text(src)
 ---
 struct Router {
   port: i32
-}
+}  // size 4, align 4
 func g(x: i32, y: i32) -> i32 {
   return #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(x: i32, y: i32): i32
 }

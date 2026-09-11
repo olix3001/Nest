@@ -214,9 +214,24 @@ pub struct ConstEval<'a> {
     defs: &'a DefTable,
     meta: &'a Meta,
     linked: &'a Linked,
+    /// The layout query, for the intrinsics that ask what a type *is* in memory.
+    ///
+    /// Note what is **not** here: a [`Target`](crate::common::options::Target).
+    /// How wide a pointer is is layout's question and layout's alone (§3.1 put
+    /// `usize` in `core` precisely so that nothing else has to ask), so this
+    /// holds the answerer rather than the answer.
+    layouts: &'a super::layout::Layouts<'a>,
     /// Locals in scope, innermost frame last. A `#const` function's frame does
     /// not see its caller's — a call pushes a fresh one.
     frames: Vec<HashMap<DefId, ConstValue>>,
+    /// The **type** arguments of the call each frame belongs to, so that a
+    /// `size_of.<T>()` inside a generic `#const` body is asked about what the
+    /// call bound `T` to rather than about `T`.
+    ///
+    /// It is a stack beside `frames` and not a field in them for the reason a
+    /// type argument is not a local: it never has a value, and nothing in the
+    /// body can rebind it.
+    ty_frames: Vec<HashMap<DefId, Ty>>,
     /// Globals currently being evaluated, to catch `A :: B` / `B :: A`. A cycle
     /// has no value, and following it would not terminate.
     in_progress: Vec<DefId>,
@@ -234,12 +249,19 @@ pub struct ConstEval<'a> {
 }
 
 impl<'a> ConstEval<'a> {
-    pub fn new(defs: &'a DefTable, meta: &'a Meta, linked: &'a Linked) -> Self {
+    pub fn new(
+        defs: &'a DefTable,
+        meta: &'a Meta,
+        linked: &'a Linked,
+        layouts: &'a super::layout::Layouts<'a>,
+    ) -> Self {
         ConstEval {
             defs,
             meta,
             linked,
+            layouts,
             frames: vec![HashMap::new()],
+            ty_frames: vec![HashMap::new()],
             in_progress: Vec::new(),
             steps: 0,
             depth: 0,
@@ -658,18 +680,36 @@ impl<'a> ConstEval<'a> {
             .get::<crate::sema::infer::Generics>(func.id)
             .map(|g| g.params)
             .unwrap_or_default();
+        let mut ty_frame = HashMap::new();
         for (p, a) in params.iter().zip(&generic_args) {
-            if let crate::sema::infer::GenericArg::Const(k) = a
-                && let Some(v) = const_arg_value(k)
-            {
-                frame.insert(*p, v);
+            match a {
+                crate::sema::infer::GenericArg::Const(k) => {
+                    if let Some(v) = const_arg_value(k) {
+                        frame.insert(*p, v);
+                    }
+                }
+                // A **type** argument, which is not a value and lives in its own
+                // frame. It is substituted through when the body asks a question
+                // about a type — which today means `$size_of` / `$align_of`.
+                crate::sema::infer::GenericArg::Ty(t) => {
+                    // The caller's own frame first: a chain of generic `#const`
+                    // calls passes `T` along, and each link has to resolve it
+                    // against where it came from rather than pass the name on.
+                    let t = match self.ty_frames.last() {
+                        Some(m) if !m.is_empty() => super::layout::subst_ty(m, t),
+                        _ => t.clone(),
+                    };
+                    ty_frame.insert(*p, t);
+                }
             }
         }
         self.frames.push(frame);
+        self.ty_frames.push(ty_frame);
         self.depth += 1;
         let out = self.block(&body);
         self.depth -= 1;
         self.frames.pop();
+        self.ty_frames.pop();
         match out? {
             // A body that falls off its end with no tail returns `void`; one
             // whose tail is the result returns that.
@@ -1101,10 +1141,54 @@ impl<'a> ConstEval<'a> {
                 };
                 self.cast(e.id, value, &self.meta.ty_or_error(e.id), mode)
             }
+            // `$size_of` / `$align_of` are the program asking what a type *is*
+            // in memory, and that is a question with an answer now (§7 layout).
+            // It is answered here rather than at run time because it has to be:
+            // `[size_of.<Header>()]u8` is a **type**, so the number is needed
+            // before there is any code.
+            //
+            // The type is not in the signature — `func <T> () -> usize` mentions
+            // `T` nowhere — so it comes from the instantiation the call site
+            // recorded, which is also what makes it correct inside a generic:
+            // monomorphization substituted `T` before this ran.
+            "size_of" | "align_of" => {
+                let ty = self.type_argument(e.id).ok_or_else(|| {
+                    ConstError::new(e.id, format!("`${name}` needs a type argument"))
+                })?;
+                let layout = self
+                    .layouts
+                    .of(&ty)
+                    .map_err(|err| ConstError::new(e.id, err.message()))?;
+                let n = if name.as_str() == "size_of" {
+                    layout.size
+                } else {
+                    layout.align
+                };
+                Ok(ConstValue::Int(n.into()))
+            }
             other => Err(ConstError::new(
                 e.id,
                 format!("`${other}` has no compile-time value in this subset"),
             )),
+        }
+    }
+
+    /// The single **type** argument a call instantiated its callee with.
+    ///
+    /// `None` when the call recorded none, or when the first argument is a
+    /// `const` value rather than a type — neither is something this can guess at.
+    fn type_argument(&self, at: IrId) -> Option<Ty> {
+        let crate::sema::infer::Instantiation(args) = self.meta.get(at)?;
+        let ty = match args.first()? {
+            crate::sema::infer::GenericArg::Ty(t) => t.clone(),
+            crate::sema::infer::GenericArg::Const(_) => return None,
+        };
+        // Inside a generic `#const` body the argument is the enclosing
+        // function's own parameter — `size_of.<T>()` in `func <T> ()`. What the
+        // *caller* bound it to is what the question is about.
+        match self.ty_frames.last() {
+            Some(map) if !map.is_empty() => Some(super::layout::subst_ty(map, &ty)),
+            _ => Some(ty),
         }
     }
 
@@ -1546,9 +1630,7 @@ pub fn unary_op(op: UnOp, v: &ConstValue) -> Result<ConstValue, String> {
         (UnOp::Neg, ConstValue::Float(f)) => Ok(ConstValue::Float(-f)),
         (UnOp::Not, ConstValue::Bool(b)) => Ok(ConstValue::Bool(!b)),
         (UnOp::BitNot, ConstValue::Int(n)) => Ok(ConstValue::Int(!n)),
-        (UnOp::Ref | UnOp::RefMut, _) => {
-            Err("taking an address has no compile-time value".into())
-        }
+        (UnOp::Ref | UnOp::RefMut, _) => Err("taking an address has no compile-time value".into()),
         (_, other) => Err(format!(
             "cannot apply this operator to `{}`",
             other.display()

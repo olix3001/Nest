@@ -4,7 +4,7 @@ expression: ir_text(src)
 ---
 struct Router {
   port: i32
-}
+}  // size 4, align 4
 func mk(host: core.str, port: i32, backlog: i32) -> i32 {
   return port: i32
 }

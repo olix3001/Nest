@@ -8,7 +8,7 @@ trait Step {
 }
 struct Counter {
   n: i32
-}
+}  // size 4, align 4
 func inherent(c: *Counter) -> i32 {
   return (Counter.bump: func(*Counter) -> i32)(c: *Counter): i32
 }

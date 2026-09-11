@@ -5,7 +5,7 @@ expression: ir_text(src)
 struct Point {
   x: i32
   y: i32
-}
+}  // size 8, align 4
 func ps(p: Point, xs: []i32, n: i32, r: *i32) -> i32 {
   match p: Point {
     .{ x: 0, y: y } => y: i32

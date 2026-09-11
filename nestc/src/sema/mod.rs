@@ -316,11 +316,25 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // The validation passes deliberately deferred out of inference. They run on
     // the linked IR, where all surface sugar is already resolved, and they only
     // report — see [`crate::ir::check`].
-    let diags = crate::ir::check::run(
-        &session.defs,
-        &session.ir_meta,
-        &session.linked,
-    );
+    let diags = {
+        // Layout is a **query**, built once and shared: "every type" is not a
+        // set anyone can enumerate, so each one arrives when something asks
+        // (see [`crate::ir::layout`]). This is also where the target comes back
+        // after phase 5 took it out of the type layer — a pointer's width is a
+        // layout question and nothing above this needs it.
+        let layouts = crate::ir::layout::Layouts::new(
+            &session.defs,
+            &session.ir_meta,
+            &session.linked,
+            session.options.target,
+        );
+        crate::ir::check::run(
+            &session.defs,
+            &session.ir_meta,
+            &session.linked,
+            &layouts,
+        )
+    };
     session.diagnostics.extend(diags);
 
     // Monomorphization. It runs **after** the checks and not before, because

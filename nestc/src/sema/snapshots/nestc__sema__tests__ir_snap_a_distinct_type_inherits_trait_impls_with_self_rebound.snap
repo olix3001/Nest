@@ -2,15 +2,15 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
-distinct Meters = f64
+distinct Meters = f64  // size 8, align 8
 trait Show {
   [0] show: func(Show) -> usize #self
 }
 struct Base {
   n: usize
-}
-distinct Inherits = Base
-distinct Overrides = Base
+}  // size 8, align 8
+distinct Inherits = Base  // size 8, align 8
+distinct Overrides = Base  // size 8, align 8
 func f(a: Meters, b: Meters) -> Meters {
   return #builtin(Add) (core.Add.add: func(Meters, Meters) -> Meters)(a: Meters, b: Meters): Meters
 }

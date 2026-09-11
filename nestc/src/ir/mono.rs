@@ -295,12 +295,7 @@ impl Mono<'_> {
     /// `impl <T> Conv.<T> for Wrap.<T>` instantiated at `i32`, the qualifier is
     /// `Conv.<i32>` and not `Conv.<T>`, because two instantiations of one impl
     /// are two functions and have to be named as such.
-    fn trait_qualifier(
-        &self,
-        linked: &Linked,
-        origin: DefId,
-        args: &[GenericArg],
-    ) -> Option<Ty> {
+    fn trait_qualifier(&self, linked: &Linked, origin: DefId, args: &[GenericArg]) -> Option<Ty> {
         let i = *self.member_impl.get(&origin)?;
         let trait_def = self.impls.impls[i].trait_def?;
         let trait_args = self.targets.get(i).map(|t| t.trait_args.clone())?;
@@ -431,12 +426,14 @@ impl Mono<'_> {
         if let Some(span) = linked.get(origin).and_then(|f| self.meta.span(f.id)) {
             d = d.with_primary(span, "this function instantiates itself at a larger type");
         }
-        self.out.push(d.with_note(
-            "a generic that calls itself at a *different* argument — `f.<T>` calling \
+        self.out.push(
+            d.with_note(
+                "a generic that calls itself at a *different* argument — `f.<T>` calling \
              `f.<Box.<T>>` — asks for a new function every time, so there is no finite \
              program to emit"
-                .to_string(),
-        ));
+                    .to_string(),
+            ),
+        );
     }
 
     /// Record what a function is, and the two names it will be known by.
@@ -738,8 +735,7 @@ impl Mono<'_> {
         self.match_impl_exact(trait_def, self_ty, trait_args)
             .or_else(|| {
                 let inner = strip_ptr(self_ty);
-                (inner != *self_ty)
-                    .then(|| self.match_impl_exact(trait_def, &inner, trait_args))?
+                (inner != *self_ty).then(|| self.match_impl_exact(trait_def, &inner, trait_args))?
             })
     }
 
@@ -1322,6 +1318,19 @@ fn mangle(
         push_args(&mut s, defs, &trailing);
     }
     Symbol::new(&s)
+}
+
+/// The mangled encoding of one type, on its own.
+///
+/// Exposed because it is the right **cache key** for anything keyed by a type:
+/// its one job is injectivity, so two types share it precisely when they are the
+/// same type. [`Ty`] itself cannot be one — a `const` argument may hold a float,
+/// so there is no `Hash` and no `Eq` — and a display string is not injective
+/// either, because two types in different namespaces can print alike.
+pub fn type_key(defs: &DefTable, ty: &Ty) -> String {
+    let mut s = String::new();
+    push_ty(&mut s, defs, ty);
+    s
 }
 
 fn push_len(s: &mut String, text: &str) {

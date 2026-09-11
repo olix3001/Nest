@@ -33,6 +33,7 @@ use crate::sema::infer::RangeReported;
 use crate::sema::ty::Ty;
 
 use crate::ir::const_eval::ConstEval;
+use crate::ir::layout::Layouts;
 use crate::ir::{Linked, Meta};
 
 /// Evaluate every global initializer, recording what it produced and reporting
@@ -41,9 +42,10 @@ pub fn check(
     defs: &DefTable,
     meta: &Meta,
     linked: &Linked,
+    layouts: &Layouts,
     out: &mut Vec<Diagnostic>,
 ) {
-    let mut cx = ConstEval::new(defs, meta, linked);
+    let mut cx = ConstEval::new(defs, meta, linked, layouts);
     for global in linked.globals() {
         // A `#static` with no `:=` is zeroed; there is no expression to run.
         let Some(init) = &global.init else { continue };

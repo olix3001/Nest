@@ -23,7 +23,7 @@ Phase 6 and everything after it is unbuilt.
 | 4 | `const` generics over any primitive ✅ | — | medium | Prerequisite for 5, useful alone |
 | 5 | The integer families `int.<N>` / `uint.<N>` ✅ | 3, 4 | large | The deepest type-system change; everything after it is easier |
 | 6 | Monomorphization ✅ | 5 | large | Was the old "Phase 2"; 5 changes what it must substitute |
-| 7 | Layout | 6 | medium | A generic type has no layout until its arguments are known |
+| 7 | Layout ✅ | 6 | medium | A generic type has no layout until its arguments are known |
 | 8 | LIR: shape and control flow | 7 | large | `design/lir.md` §1–4 |
 | 9 | LIR: defer, drops, safepoints | 8 | large | `design/lir.md` §3, 5, 6 |
 | 10 | Codegen and the real driver | 9 | large | The first executable |
@@ -496,11 +496,63 @@ Four things the first cut of this phase got wrong or left out, all with tests:
 
 ---
 
-## Phase 7 — Layout
+## Phase 7 — Layout ✅ **done**
 
-Sizes, alignments and offsets, per monomorphized type. Consumes `#packed`,
-`#align(N)`, `#soa`, and resolves `PTR_BITS` from the target. Recursive-layout
-checking already exists (`616cd3b`).
+**Goal.** Sizes, alignments and offsets, per monomorphized type. Consumes
+`#packed`, `#align(N)`, `#soa`, and resolves the pointer width from the target.
+Recursive-layout checking already existed (`616cd3b`).
+
+**Done when.** Every concrete type has a size and an alignment, every aggregate
+has field offsets, and `size_of` / `align_of` are constants.
+
+### What is built
+
+`nestc/src/ir/layout.rs` is the computation and `nestc/src/ir/check/layouts.rs`
+is the pass that asks it about every type a program declares. The rules — and
+they are *rules*, not derivations, since a backend has to agree with them — are
+written down in `design/lir.md` §7cc.
+
+- **A query, not a pass.** Layout is asked about a concrete `Ty` and memoizes
+  the answer, keyed by the type's mangled encoding (`mono::type_key`), which is
+  the right key for the same reason it is the right key for an instantiation: its
+  one job is injectivity. "Every type" is not a set anyone can enumerate — `[N]T`
+  for every `N`, every tuple, every instantiation — so each arrives when
+  something needs it.
+- **Type definitions stay definition-relative.** A field of `Pair.<T>` is a `T`,
+  as it was after lowering; substituting the use site's arguments is layout's
+  job. That is what keeps one `Pair` in the program instead of one per
+  instantiation, and it is why monomorphization instantiates *functions* and not
+  types.
+- **`#packed`, `#align(N)` on a type and on a field.** A member now carries its
+  own directives into the IR, which it did not before — `#align(8)` on a field
+  was silently ignored.
+- **`size_of` / `align_of` fold to constants**, including inside a generic
+  `#const` function: the type travels on the call's `Instantiation` (the
+  signature `func <T> () -> usize` mentions `T` nowhere), and the evaluator keeps
+  a type frame beside its value frame so a nested call resolves `T` against where
+  it came from.
+- **The target comes back here and only here.** A *pointer's* width is not
+  written anywhere in a type — `usize`'s is, since phase 5 — so `layout` asks the
+  target and everything else, the const evaluator included, asks `layout`.
+- **Layouts show in the IR dump** (`}  // size 12, align 4`), which is what the
+  snapshots now assert.
+
+### What it does not do
+
+- **`#soa`.** It is recognized, checked for where it may be written, and
+  **warned about** rather than silently ignored. What it waits on is not layout
+  arithmetic: storing a `[N]Particle` column-wise means `&a[i]` no longer names a
+  contiguous `Particle`, so a place projection through it is a different
+  operation — and what a place projection *is* belongs to the LIR lowering
+  (§1), which is phase 8.
+- **Reporting.** The pass stamps and does not complain, because every concrete
+  type it cannot lay out has already been reported by the check that owns the
+  question (an unsized member by §3.4's rule, a cycle by `recursive_layouts`, an
+  errored member by inference). A second diagnostic for one mistake is the thing
+  the diagnostic discipline here is arranged to avoid.
+- **ABI classification.** How a struct is *passed* — in registers, on the stack,
+  by hidden pointer — is a different question from how it is stored, and it
+  belongs with the C FFI work (§11.3) and codegen.
 
 ## Phase 8 — LIR: shape and control flow
 
@@ -528,6 +580,30 @@ tool translating a profile should keep talking to the compiler the same way.
 |---|---|---|
 | What `overflow=` does in a **release** profile | the user | nothing — nestc takes it as input either way |
 | Whether `PTR_BITS` is spelled in the source, or only exists inside the compiler | the user | phase 5, cosmetically, **USER NOTE:** It should be defined by the target info, exists only inside the compiler |
-| Array lengths through the const evaluator (`[SIZE * 2]T`) | design | phase 6 — a `Const::Unevaluated(DefId)` resolved post-link is the shape; **do not** bolt a second evaluator onto the AST; This step can be deferred for the future |
+| ~~Array lengths through the const evaluator (`[SIZE * 2]T`)~~ — **built, differently; see below** | the user, to confirm | nothing |
+| A call or `size_of` inside a *type* (`[double(4)]T`, `[size_of.<H>()]u8`) | design | nothing today; wants dependency-ordered analysis, which is a phase of its own |
 | The `str` → `String` / `[]T` → `Vec.<T>` conversion: a `From`-style trait or a `#lang` coercion | the user | `std`, which does not exist yet; This decision is left for after the codegen works. |
 | `#when` (conditional compilation) | the user | nothing yet; not in the parser, spec, or grammar |
+
+**On `[SIZE * 2]T`.** The note here asked for a `Const::Unevaluated(DefId)`
+resolved post-link, and said *do not bolt a second evaluator onto the AST*. What
+was built is neither quite one nor quite the other, and the difference is worth
+confirming.
+
+`Const::Unevaluated` does not work, for a reason that is about types rather than
+about effort: **a length is part of a type's identity** (§3.2), so `[SIZE * 2]T`
+has to unify with `[8]T` *during* inference. An unevaluated length would unify
+with nothing until after linking, so every such unification would have to defer
+— and "these two types are the same" is the promise inference exists to check.
+
+What was built instead keeps one implementation of the **semantics** and admits
+two **walks**. `ir::const_eval::binary_values` / `int_binary` / `float_binary` /
+`unary_op` are free functions over `ConstValue`s with no tree behind them; the IR
+evaluator calls them, and so does inference's fold over the AST. There is no
+second arithmetic — `SIZE * 2` cannot mean one thing in a type and another in a
+value — but there are two tree walks, because the trees genuinely differ and one
+runs before the other exists.
+
+The part of the note that stands unchanged is the ordering limit: a **call** in a
+type still cannot be evaluated, and is reported as such rather than worked
+around. That is the row above.

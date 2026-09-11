@@ -6,7 +6,7 @@ enum Color {
   .red
   .green
   .blue
-}
+}  // size 1, align 1
 func pick(c: Color) -> i32 {
   match c: Color {
     .red => $cast(1: comptime_int): i32

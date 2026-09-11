@@ -4,10 +4,10 @@ expression: "ir_text(\"Q :: struct { v: i32 }\\nP :: struct { inner: Q }\\nchain
 ---
 struct Q {
   v: i32
-}
+}  // size 4, align 4
 struct P {
   inner: Q
-}
+}  // size 4, align 4
 func chain(p: *P) -> i32 {
   return (((p: *P.*): P.inner): Q.v): i32
 }

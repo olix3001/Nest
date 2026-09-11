@@ -4,8 +4,8 @@ expression: ir_text(src)
 ---
 struct Base {
   n: usize
-}
-distinct Wrapper = Base
+}  // size 8, align 8
+distinct Wrapper = Base  // size 8, align 8
 func f(w: Wrapper) -> usize {
   return #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(#builtin(Add) (core.Add.add: func(usize, usize) -> usize)((Base.inherited: func(*Base) -> usize)((&$cast(w: Wrapper): Base): *Base): usize, (<impl Wrapper>.own: func(*Wrapper) -> usize)((&w: Wrapper): *Wrapper): usize): usize, (<impl Wrapper>.shared: func(*Wrapper) -> usize)((&w: Wrapper): *Wrapper): usize): usize
 }
