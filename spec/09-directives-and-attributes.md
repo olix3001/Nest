@@ -219,7 +219,7 @@ but its effect is described where operators are (§6.13).
   ```nest
   @public size_of :: #intrinsic func <T> () -> usize
 
-  impl <const N: usize, const S: bool> int.<N, S> {
+  impl <const N: u16> int.<N> {
     wrapping_add :: #intrinsic func (self: Self, rhs: Self) -> Self
   }
   ```

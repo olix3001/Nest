@@ -9,7 +9,10 @@ Phases 0 through 4 are **complete**: the front end parses, resolves, infers,
 lowers to IR, validates the IR, evaluates constants, splits the prelude, declares
 every intrinsic in `core`, and takes a `const` generic of any primitive type. A
 round of language decisions on top of that — `#caller_location`, `Default`, the
-binding syntax, trait conformance — is recorded below. 363 tests pass. Phase 5 and everything after it is unbuilt.
+binding syntax, trait conformance — is recorded below. Phase 5 built the integer
+families and implicit widening on top of that; what remains of it is moving
+`usize` into `core`. **371 tests pass.** Phase 6 and everything after it is
+unbuilt.
 
 ## The order, at a glance
 
@@ -18,7 +21,7 @@ binding syntax, trait conformance — is recorded below. 363 tests pass. Phase 5
 | 2 | The prelude split ✅ | — | small | Self-contained, and every later phase adds names that have to land on one side of it |
 | 3 | `#intrinsic`, and retiring `$name` ✅ | 2 | medium | Cheaper before core grows; every later phase declares intrinsics |
 | 4 | `const` generics over any primitive ✅ | — | medium | Prerequisite for 5, useful alone |
-| 5 | The integer family `int.<N, S>` | 3, 4 | large | The deepest type-system change; everything after it is easier |
+| 5 | The integer families `int.<N>` / `uint.<N>` | 3, 4 | large | The deepest type-system change; everything after it is easier |
 | 6 | Monomorphization | 5 | large | Was the old "Phase 2"; 5 changes what it must substitute |
 | 7 | Layout | 6 | medium | A generic type has no layout until its arguments are known |
 | 8 | LIR: shape and control flow | 7 | large | `design/lir.md` §1–4 |
@@ -202,9 +205,15 @@ Other departures from the plan:
 **Goal.** `const N: Ty` accepts any primitive `Ty`, not only `usize`. Spec §5
 already states this.
 
-**Why it is here.** Phase 5 needs `const S: bool`. It is also independently
-useful and can be tested on its own, which is why it is a separate phase rather
-than the first half of phase 5.
+**Why it is here.** Phase 5 needs a `const` parameter at a non-`usize` type —
+`int.<N>` takes a `u16` width. It is also independently useful and can be tested
+on its own, which is why it is a separate phase rather than the first half of
+phase 5.
+
+(The original reason given here was `const S: bool`, for a one-family
+`int.<N, S>`. Phase 5 split the signedness into two constructors instead — see
+§5 — so `bool` is no longer the motivating case, though `<const B: bool>` still
+works and is still tested.)
 
 **Work.**
 
@@ -281,17 +290,16 @@ global.
 
 ---
 
-## Phase 5 — The integer family `int.<N, S>`
+## Phase 5 — The integer families `int.<N>` / `uint.<N>` 🟡 **mostly done**
 
-**Goal.** Integers are one generic family: `int.<N, S>` with `N: usize` the width
-and `S: bool` the signedness. `i32`, `u8`, `usize` remain as sugar. Spec §3.1
-already states this.
+**Goal.** Integers are two generic families: `int.<N>` (signed) and `uint.<N>`
+(unsigned), with `N: u16` the width in bits. `i32`, `u8` are sugar. Spec §3.1.
 
 **Why it exists.** So that the operations on integers can be written **once**, in
-`core`, as an inherent impl over the family:
+`core`, as an inherent impl over a whole family:
 
 ```nest
-impl <const N: usize, const S: bool> int.<N, S> {
+impl <const N: u16> int.<N> {
   wrapping_add :: #intrinsic("wrapping_add") func (self: Self, rhs: Self) -> Self
 }
 ```
@@ -300,48 +308,85 @@ Per-width impls cannot do this: `u4096` is a legal type, so there is no finite
 list. This is the whole reason the phase exists — `.wrapping_add` is not
 reachable any other way.
 
-**Work.**
+### What is done (`6248d22`, `13ffe2d`, `cb85833`)
 
-1. **`Ty::Int`.** `{ signed: bool, width: IntWidth }` becomes a form carrying two
-   `Const`s. `IntWidth::Fixed(u16)` and `IntWidth::Ptr` collapse into the width
-   `Const`, with a new opaque case for pointer-sized: `usize` is
-   `int.<PTR_BITS, false>`, where `PTR_BITS` is target-supplied and **opaque to
-   type identity**, so `usize` and `u64` stay different types on a 64-bit target.
-   Layout resolves it; the type system never does.
-2. **Resolution.** `int` is a builtin generic type constructor in type position.
-   `primitive_ty("i32")` returns the same type `int.<32, true>` builds, so the
-   two spellings are one type with no conversion.
-3. **Display.** Print the sugar when both arguments are literal (`i32`), the
-   generic form when either is symbolic (`int.<N, S>` inside the impl, `usize`
-   for the pointer case). Diagnostics get worse in exactly the places this is
-   done carelessly.
-4. **Every `Ty::Int { .. }` match site.** Roughly forty, all compiler-guided.
-   `int_fits`, `int_truncate`, `exhaustive::int_bounds` and the numeric-distinct
-   machinery each read the width through the `Const` instead of an enum.
-5. **Impl indexing and selection.** `impls::build` accepts a family self type;
-   method lookup on a concrete integer selects it with `N` and `S` bound. The
-   `[N]T` impl already proves the shape works — this is the same thing with two
-   parameters instead of one.
-6. **`core/num.nest`.** The family impl, with `wrapping_*`, `checked_*`,
-   `saturating_*`, `count_ones`, `leading_zeros`, and the rest, each
-   `#intrinsic`.
+- [x] **`Ty::Int { signed: bool, width: Const }`.** `IntWidth` is gone.
+      Unification solves the width through `unify_const`, so `uint.<N>` meeting
+      `u8` learns `N = 8`; the signedness is compared, never solved.
+- [x] **`int` / `uint` are builtin type constructors** in type position, and
+      `int.<32>` *is* `i32` — the same `Ty`, not a conversion. `uint.<1>` is
+      `bool`, matching `u1`.
+- [x] **A family impl works.** `core/num.nest` has `wrapping_add` /
+      `wrapping_sub` as `#intrinsic` members of `impl <const N: u16> int.<N>`
+      and its `uint.<N>` twin, verified on `u8`, `i64`, `i7`, `u4096` and inside
+      a caller's own `<const N>` generic.
+- [x] **Display prints the sugar** when the width is known and the family form
+      when it is not. Zero snapshot churn.
+- [x] **Implicit widening** (§3.1): a narrower integer stands where a wider one
+      is wanted, by range containment — signed→unsigned never, unsigned→signed
+      only when strictly wider. A `const` parameter fills a slot on the same
+      rule. Lowers to the existing exact implicit `$cast`.
 
-**Risks.** The largest phase in the plan, and the one with the most ways to be
-subtly wrong:
+### What is left — `usize` into `core`
 
-- **`usize` collapsing into `u64`.** If `PTR_BITS` is ever folded to a number in
-  the type system, `impl usize` and `impl u64` collide and a target change
-  silently alters type identity. The opacity is the design; do not "simplify" it.
-- **Const-generic recursion.** `int.<N, S>` is a type whose arguments are
-  constants, and constants have types, which are integers. The evaluator must not
-  need `int.<32, true>`'s definition to evaluate `32`. Keep the width a plain
-  `usize` value, not an `int.<…>`-typed one.
-- **Display churn.** Every snapshot with an integer type in it changes if the
-  sugar rule is wrong. Get rule 3 right before regenerating anything.
+The user's design, settled but **not landed**. WIP lives on the branch
+`phase5-usize-in-core` (`90d57b1`), which does **not** build clean.
 
-**Done when.** `x.wrapping_add(y)` works for `u8`, `i64` *and* `u7`; `i32` and
-`int.<32, true>` are the same type; `usize` is not `u64`; snapshots show the
-sugar.
+`usize` and `isize` stop being primitives and become `core` declarations:
+
+```nest
+usize :: distinct uint.<PTR_BITS>
+isize :: distinct  int.<PTR_BITS>
+```
+
+with `PTR_BITS` coming from a compiler-generated `core/target.nest` that also
+supplies `OS`, `ARCH` and `PROFILE` as values of `Os` / `Arch` / `Profile` —
+enums declared by hand in `core/os.nest`. The generated file is a **member of
+core** rather than a package of its own, so that it can name those enums: the
+coupling is then between two files of one package instead of between the compiler
+and a library's vocabulary.
+
+Three things make it work, and one of them is not obvious:
+
+1. **A width is a bare `u16`** (`Const::Width(u16)`), not a `Const::Value` at
+   type `u16`. A `Value` carries the `Ty` it was written at, and that `Ty` for a
+   width would be `u16` — itself `uint.<16>`, whose width carries a `u16`,
+   without end. Holding the number bare is what makes the representation finite,
+   and it is what lets `usize` be defined in terms of a width at all.
+2. `Ty::usize()` can no longer be built context-free, so it is injected into
+   `InferCtxt` by `#lang` tag exactly as `str` already is
+   (`set_ptr_int_tys`), and `Const::len` takes the type as an argument.
+3. `numeric_distincts` has to *read* `distinct uint.<PTR_BITS>` — one literal or
+   one hop to a constant — or core's declaration would be decorative.
+
+**The gaps that stopped it**, each independent and each real:
+
+- **`Ty::is_primitive` is false for a nominal `distinct`**, so
+  `impl <T, const N: usize> [N]T` in `slice.nest` is rejected with "a `const`
+  generic parameter must have a primitive type". `check_const_param` has to
+  resolve the numeric-distinct representation first.
+- **The const evaluator cannot evaluate an enum variant**, so
+  `OS: Os :: Os.Linux` in the generated file fails with "`Linux` has no
+  compile-time value". This is the largest of the three and is not really about
+  integers at all.
+- **A width read from a constant** (`uint.<PTR_BITS>`) reports "an integer width
+  must be a literal, a constant, or a `const` generic parameter" — an ordering
+  problem between the import binding and `const_of_def`, not yet diagnosed.
+
+**Risks** (the two that remain from the original three; display churn is
+settled):
+
+- **`usize` collapsing into `u64`.** It is a `distinct` now, so the protection is
+  §2.4 nominal identity rather than an opaque width — but the invariant is the
+  same and `a_pointer_sized_integer_neither_widens_nor_is_widened_into` is the
+  guard.
+- **Const-generic recursion.** See point 1 above: the bare width is the fix, and
+  it must not be "simplified" back into a typed value.
+
+**Done when.** `x.wrapping_add(y)` works for `u8`, `i64` *and* `u7` ✅; `i32` and
+`int.<32>` are the same type ✅; snapshots show the sugar ✅; `usize` is not `u64`
+✅ (as a primitive today, as a `distinct` once the above lands); `usize` is
+declared in `core` ❌.
 
 ---
 

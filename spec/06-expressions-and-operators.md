@@ -167,7 +167,7 @@ The intrinsics (extensible; not a closed list):
 | `gc_collect()` | request a collection now (§6.4.1) |
 | `gc_keep_alive(x)` | keep `x` reachable up to this point (§6.4.1) |
 | `gc_pin(x)` | make `x`'s object immortal and immovable (§6.4.1) |
-| `wrapping_add`, `checked_add`, `saturating_add`, … | integer operations with a stated overflow behaviour; inherent methods on `int.<N, S>` (§3.1) |
+| `wrapping_add`, `checked_add`, `saturating_add`, … | integer operations with a stated overflow behaviour; inherent methods on `int.<N>` / `uint.<N>` (§3.1) |
 
 ```nest
 const bits := transmute.<u32>(3.14)

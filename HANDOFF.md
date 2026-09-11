@@ -1,443 +1,275 @@
-# Handoff: Phases 2–4 built, plus a round of language decisions; phase 5 next
+# Handoff: Phase 5 — the integer families are built; `usize` into `core` is not
 
 **Generated**: 2026-09-11
 **Branch**: `main`
-**Status**: Ready for review. **Phases 0 through 4 have no items left.**
-**363 tests pass**, `cargo clippy` reports 84 warnings (all pre-existing dead
-code; the baseline was 88 and nothing was added), every file in `examples/*.nest`
-compiles.
+**Status**: **371 tests pass**, `cargo clippy` reports 84 warnings (all
+pre-existing dead code; identical to the baseline set, not merely the same
+count), every file in `examples/*.nest` compiles.
 
-**Read `design/roadmap.md` first.** It is the plan of record: ten phases, in
-order, each completed one marked ✅ with a "what it actually took" section saying
-where reality departed from the plan. This document is the *state* — what was
-decided, what is built, what will bite you.
+**Read `design/roadmap.md` §5 first.** It is the plan of record and now carries a
+"what is left" section naming the three gaps precisely. This document is the
+*state* — what was decided, what is built, what will bite you.
 
 ## Goal
 
-Build everything that reads the IR: the validation passes deferred out of
-inference, then monomorphization, then **LIR** — a MIR-like low-level IR that is
-the last stop before code generation. `design/lir.md` is the LIR design;
-`design/roadmap.md` is the order of work; this document is the state.
-
-The user scoped this session to **phases 2, 3 and 4 only**, one commit each.
-All three are committed.
+Phase 5: integers are generic families, so that `wrapping_add` and its
+neighbours can be written **once** in `core` instead of once per width. `u4096`
+is a legal type, so there is no finite list of widths — a generic self type is
+the only way to reach them all.
 
 ## What is built (this session)
 
-### Phase 2 — the prelude split (`effcafa`)
+### The families (`6248d22`, `13ffe2d`)
 
-- [x] **`packages/core/prelude.nest`** — re-exports `Option`, `Result`,
-      `ControlFlow`, `str`, and (after phase 3) `cast`, `size_of`, `panic`.
-      Nothing else in `core` is globbed.
-- [x] **`core.nest` re-exports topic *namespaces***, not members, so
-      `import <core/ops>` resolves. `str.nest` and `fail.nest` get no namespace
-      re-export — a namespace called `str` or `panic` beside the prelude's `str`
-      *type* and `panic` *function* would be one name meaning two things.
-      (`panic.nest` was renamed **`fail.nest`** for this reason.)
-- [x] **`#lang` may tag an `import` binding.** The prelude is a namespace
-      assembled by re-export, so the binding that names it is the only thing a
-      tag can sit on. The tag rides on `RawImport`/`ImportDecl` and is registered
-      by `imports::wire`, because the target namespace is unknown before then.
-- [x] **`sema::analyze` globs the `#lang("prelude")` namespace**, looked up
-      *after* the wiring loop, never by name or path.
-- [x] **A `#lang` trait is selectable without importing its name.** `a + b`
-      reaches `Add` by tag; gating that on `import <core/ops>` would make `+`
-      require an import. Same rule for the desugars that call a lang trait's
-      method by name (`for` → `.into_iter()` / `.next()`, `.?` → `.branch()`).
-      `Inferer::lang_traits` is the escape hatch, checked beside
-      `in_scope_traits` in `select` and in impl-method lookup.
-- [x] **Imports wire in dependency order** (`sema::mod::wire_order`, a post-order
-      DFS tolerant of cycles).
+- [x] **`Ty::Int { signed: bool, width: Const }`.** `IntWidth` is gone.
+- [x] **Two families, not one.** `int.<N>` signed and `uint.<N>` unsigned, with
+      `N` the width. The first cut had one family `int.<N, S>` with a `bool`
+      signedness; the user changed it and the two-constructor form is better —
+      see Key Decisions.
+- [x] **`int` / `uint` are builtin type constructors** in type position.
+      `int.<32>` **is** `i32` — the same `Ty`, not a conversion. `uint.<1>` is
+      `bool`, matching `u1`. A bare `int` is refused: a family needs its width.
+- [x] **Unification solves the width** through `unify_const`, so `uint.<N>`
+      meeting `u8` learns `N = 8`. The signedness is *compared*, never solved.
+- [x] **A family impl works.** `packages/core/num.nest` declares
+      `wrapping_add` / `wrapping_sub` as `#intrinsic` members of
+      `impl <const N: u16> int.<N>` and its `uint.<N>` twin. Verified on `u8`,
+      `i64`, `i7`, `u4096`, and inside a caller's own `<const N>` generic.
+- [x] **Display prints the sugar** when the width is known, the family form when
+      it is not. **Zero snapshot churn** — all 135 lines stayed put.
 
-### Phase 3 — `#intrinsic`, and retiring `$name` (`cead807`)
+### Implicit widening (`cb85833`)
 
-- [x] **`$` is not a token.** Dropped from the identifier regex; `parse_intrinsic_call`,
-      `NodeKind::IntrinsicCall`, `Resolution::Intrinsic` and `DefKind::Intrinsic`
-      are all gone.
-- [x] **Every intrinsic is a bodyless `#intrinsic` declaration in `core`** —
-      `mem.nest` (`cast`, `transmute`, `size_of`, `align_of`, `new`, `make`,
-      `embed_file`), `fail.nest` (`panic`, `assert`), `gc.nest` (the three
-      collector intrinsics), `slice.nest` (`len`).
-- [x] **`sema/intrinsics.rs`** — the registry. `INTRINSICS` is the tag list;
-      `Special` is the *two* rules a signature cannot state.
-- [x] **Identity is the tag.** `#intrinsic("size_of")` names it; a bare
-      `#intrinsic` defaults to the declared name. `Def::intrinsic_tag()` reads it.
-      An unknown tag is an error **at the declaration**.
-- [x] **A bodyless `func` must be `#intrinsic`, `extern`, or a trait
-      requirement** (`Collector::check_bodyless`). That shape used to parse and
-      mean nothing.
-- [x] **An intrinsic call is an ordinary call.** Inference has no special path;
-      `lower_call` / `lower_method_call` see the callee's tag and build
-      `ExprKind::Intrinsic` instead of `ExprKind::Call`.
-- [x] **`DIVERGING_INTRINSICS` is gone**: `panic` is declared `-> never`, so
-      *any* call typing as `never` ends a block (`Inferer::diverges`).
-- [x] **Comptime items need no sigil.** `assert(...)` may stand among a struct's
-      fields, a trait's members, or a namespace's items;
-      `Parser::at_comptime_item` decides by shape with one token of lookahead.
+- [x] **A narrower integer stands where a wider one is wanted.** The rule is
+      **range containment**, not "more bits", so the signed cases fall out of it:
+      same signedness wider always; unsigned→signed only when *strictly* wider
+      (`u8`→`i16` yes, `u8`→`i8` no); signed→unsigned never.
+- [x] **A `const` parameter fills a slot on the same rule.** `<const N: u16>` is
+      a good `u32` argument.
+- [x] **Pointer-sized types take no part**, either direction. See Key Decisions.
+- [x] Lowers to the **existing** exact implicit `$cast` (`Coercion { to }`), so
+      nothing new appears in the IR.
 
-### Phase 4 — `const` generics over any primitive (`c99deac`)
+## What is NOT built — `usize` into `core`
 
-- [x] **`Const::Value(u64)` → `Const::Value(Box<ConstArg>)`** — a
-      `ir::const_eval::ConstValue` **and** the `Ty` it was written at. `Const`
-      lost `Copy` and `Eq`.
-- [x] **Both halves are identity.** `unify_const` compares the whole `ConstArg`,
-      so `3u8` and `3usize` are different arguments.
-- [x] **`check_const_param` admits any primitive** (`Ty::is_primitive`) and
-      rejects aggregates with §5's reason.
-- [x] **`const_value_in`** replaces `const_len_depth`: it reads a value *at* a
-      wanted type, carries a slot description for diagnostics (`"an array
-      length"` / `"a `const` argument"`), and range-checks integer literals where
-      they are written.
-- [x] **The turbofish parser takes any primitive literal**, negative numbers
-      included (`Parser::const_arg_lit`). Inside `.<...>` a leading `-` is part
-      of the literal, not an operator — there is no const-expression arithmetic
-      there.
-- [x] **An array length must be a `usize`** — see Key Decisions.
-- [x] **A `const` parameter is type-checked wherever it appears in a type**, not
-      only where it is read as a value. `a_const_parameter_in_a_type_is_checked_as_a_type`
-      and `a_const_parameter_is_a_value_of_its_declared_type` pin the matrix:
-      `N` solved from a `[N]T` argument and carried into the return type; an
-      explicit `.<4>` contradicting the argument; a symbolic `[N]T` refusing a
-      fixed-count literal; two distinct parameters being two distinct lengths;
-      nesting (`[N][M]T`); two instantiations in one expression; and every
-      primitive parameter reading back as its own type in value position.
-- [x] A slot mismatch **names the slot**: "an array length is a `usize`, and this
-      is not one" rather than "a `const` argument …".
+The design is settled. The code is **on the branch `phase5-usize-in-core`
+(`90d57b1`), which does not build clean.** `main` does not contain it.
 
-### After the phases — a round of language decisions (`78d2b5e`..`4b041a3`)
+Intended shape:
 
-The user raised four things and answered a design question on each. All are built.
+```nest
+// packages/core/num.nest
+usize :: distinct uint.<PTR_BITS>
+isize :: distinct  int.<PTR_BITS>
+```
 
-- **`#caller_location` is a default argument** (`c00961a`). Spec §5.2 already
-  specified this and the compiler implemented neither it nor the `#caller_location`
-  *directive* it carried on `panic` (which parsed and did nothing). It is now an
-  expression, legal **only** as a default argument, evaluating to
-  `core.Location { file, line, column }` — a `#lang("location")` struct in
-  `core/loc.nest`, not in the prelude. `panic("boom")` reports the caller's line.
-  The lowering cannot go through the default cache (`Lowerer::defaults`), which
-  lowers each default once and clones it: every call would get the *declaration's*
-  position. `lower_args` checks for it and builds the value from the call site.
-- **`Default` and the `..` spread** (`8de2d87`, `822bff9`). The user chose
-  Rust-style over field defaults: a literal never silently omits a field.
-  `core.Default` is a `#lang("default")` trait, and both `P { x: 5, ..rest }`
-  and `.{ x: 5, ..rest }` fill the rest.
+`PTR_BITS` comes from a compiler-**generated** `core/target.nest`, which also
+supplies `OS`, `ARCH`, `PROFILE` as values of `Os` / `Arch` / `Profile` — enums
+written by hand in `core/os.nest`. The generated file is a **member of core**,
+not a package of its own, precisely so it can name those enums.
 
-  The work is **split across two passes**, and that split is the whole design.
-  `desugar::lower_spread` binds the temporary — `{ __spread1 :: rest  P { x: 5,
-  ..__spread1 } }` — because a new local needs a `DefId` and desugaring is the
-  pass that allocates them; it is also what gives "evaluated once" a place a
-  reader can see, since the call is bound to a name before any field reads it.
-  `Lowerer::fill_from_spread` then expands the spread into `Field` reads off
-  that temporary, because the fields a spread fills come from the literal's
-  **type**, and `.{ … }` has none until inference has settled it.
+The branch has all of that written, plus the three mechanisms it needs (see Key
+Decisions: the bare width, the `#lang` injection, the distinct-walker change).
+**Three independent gaps stop it**, and they are why it is not on `main`:
 
-  The first cut expanded everything in desugaring and so had to refuse
-  `.{ ..rest }`. Moving only the expansion to lowering removed the restriction
-  with one code path for both spellings.
+1. **`Ty::is_primitive` is false for a nominal `distinct`.** `slice.nest`'s
+   `impl <T, const N: usize> [N]T` is then rejected with "a `const` generic
+   parameter must have a primitive type, but `N` is `core.usize`".
+   `check_const_param` must resolve the numeric-distinct representation first.
+2. **The const evaluator cannot evaluate an enum variant.** The generated
+   `OS: Os :: Os.Linux` fails with "`Linux` has no compile-time value". This is
+   the biggest of the three and is not about integers at all — it is a missing
+   const-eval case.
+3. **A width read from a constant fails.** `uint.<PTR_BITS>` reports "an integer
+   width must be a literal, a constant, or a `const` generic parameter".
+   Undiagnosed; suspect the `{ PTR_BITS } :: import "target.nest"` binding is a
+   `DefKind::Local` (a destructuring field pattern) rather than something
+   `const_of_def` follows.
 
-  A spread is held to the type being built (`check_record_body` expects it
-  against the target), so `P { x: 1, ..q }` with `q: Q` is a type error and not
-  a silent build.
-- **A constant's type goes before the binder** (`ab4ebc6`). `MAX_BYTE: u8 :: 100`,
-  and `#static count: usize :: 0` / `#static scratch: [4096]u8`, and a trait's
-  `MAX: i32` / `MIN: i32 :: 0`. The point, in the user's words, is that
-  `NAME :: type` is a type alias **all the time**. `#static` now *requires* its
-  type — a region whose width depended on who read it is not a region. The AST
-  did not change: the parser still builds `AssocConst { ty, default }`, so the
-  whole typed-constant machinery downstream was already in place.
-  `Output :: type` and `Output :: Vec3` keep `::`, because both are
-  `name :: <a type>`, which is what that shape means everywhere.
-- **Trait conformance is checked** (`01f3977`). `impls::build` checked that an
-  impl's members were *present*; nothing checked they had the declared **type** —
-  including method signatures, which §4.1 has always promised.
-  `Inferer::check_impl_conformance` does it, in inference, because it is a
-  question about types. Both sides are substituted into the impl's world first:
-  `Self` → the impl's self type (`Self` inside a trait resolves to the trait's
-  own def, so substituting that def is what replaces it), the trait's generics →
-  what the impl wrote or a **fresh variable** when the impl wrote nothing (a bare
-  `impl Add for V` leaves `Rhs` for its own members to choose), and a method's own
-  generics aligned positionally onto the trait's.
-
-Two bugs fixed on the way:
-
-- **A struct-field default hung the compiler** (`78d2b5e`), and had since before
-  this session. The language has no field defaults, so `parse_field` stopped at
-  the type and left `:=` unconsumed; `expect_ident` reports *without* consuming,
-  so the struct-body loop never reached `}`. It is now refused by name, and every
-  member-body loop calls `Parser::ensure_progress` so the class cannot recur.
-- **A function-local `#static` was not lowered as a global** (`4b041a3`) — a
-  known limit the user leaned on ("inside functions `#static` is the way to
-  create statics"). It resolved to a `DefKind::Local`, so `lower_globals` never
-  saw it and the declared type was ignored (`usize` read back as `isize`). It is
-  now introduced as a `DefKind::Const` region whose def points at the *binding*,
-  with only its visibility coming from the block.
+Resume by fixing those three **on the branch**, then rebasing onto `main`.
 
 ## Failed approaches (don't repeat these)
 
 Everything in the previous handoffs' lists still stands. New this session:
 
-- **Leaving operator traits behind the in-scope filter after the prelude split.**
-  `impls` selection consults `in_scope_traits`, which was seeded from the
-  whole-of-core glob. Removing the glob made `a + b` report
-  ``i32` does not implement `core.Add.<i32>`` in **74 tests**. Traits reached by
-  `#lang` tag must bypass that filter; the name is still needed to *write* an
-  impl.
-- **Wiring imports in `HashMap` order.** `walk_package` looks up a *member* of
-  the target namespace, and `<core/ops>` names a member `core.nest` produces by
-  re-export — so it does not exist until that file is wired. Symptom:
-  ``package has no public member `ops```, intermittently. Fixed by `wire_order`,
-  not by retrying.
-- **Believing the roadmap's item 4 for phase 3.** It claimed `cast`, `transmute`
-  and `panic` need special handling in inference because their signatures cannot
-  say what they do. All three are ordinary declarations (see Key Decisions). The
-  user flagged this before the work started and was right. The real exceptions
-  are `make` and `len`.
-- **`Const::Value(l) => l as usize`.** After the retype, `Const::Value` holds a
-  box, so every `match` on it that assumed an integer had to go through
-  `Const::value()`, which returns `Option<u64>` and is `None` for a `bool`.
-- **A non-`usize` `const` parameter in an array-length slot.**
-  `func <const N: u32> () -> [N]i32` with a `[4]i32` annotation at the call site
-  reported ``type mismatch: expected `[4]i32`, found `[4]i32``` — the lengths
-  differ *by type*. Do not "fix" this by coercing at the length slot; that puts a
-  hole in the identity rule phase 4 exists to establish.
-- **A blunt regex for the `NAME: T :: value` migration.** `([A-Z]\w*) :: (i32|…)`
-  also matches `Alias :: i32` (a type alias), `Output :: i32` (an associated-type
-  binding) and `Ty::isize()` (Rust). All three were rewritten and had to be
-  reverted by hand. The typed-constant form and the alias form are the same shape
-  until you know what the RHS *means*, which is the whole reason the syntax
-  changed — a migration script cannot know it either.
-- **Expanding the `..` spread entirely in desugaring.** It needs the struct's
-  field list, which comes from the literal's type, and desugaring runs before
-  inference — so the named form worked and `.{ ..rest }` had to be refused. Bind
-  the temporary there (it needs a `DefId`) and expand in lowering (it has the
-  type). Do not reach for a mutable `DefTable` in lowering; nothing needs one.
-- **Removing the non-struct check with the desugar it lived in.** `E { ..e }`
-  went quiet, because an enum is `Ty::Nominal` too and has no fields to miss.
-  `check_record_body` now requires `DefKind::Struct` — which also closed a
-  pre-existing hole where `E { }` was silently accepted.
-- **Reading a field's declared type off its type node.** `stamp_member_types`
-  stamps it on the **`Field` node itself**, the node the member's def points at.
-  Reading the inner type node gave `<error>` for every spread-filled field.
-- **Checking trait conformance in `impls.rs`.** That pass runs before inference,
-  so there are no types to compare. Completeness belongs there; matching does not.
-- **Comparing a trait method against an impl method without aligning their
-  generics.** The trait's `X` and the impl's `X` are different `DefId`s, so two
-  identical signatures failed to unify and reported `expected func(*S, X) -> i32,
-  found func(*S, X) -> i32`.
-- **Assuming `cargo test` rebuilds `target/debug/nestc`.** It does not. The
-  examples loop ran against a stale binary twice and reported a phantom failure.
-  `cargo build` first.
-- **`cd nestc && …` in a compound Bash command.** The working directory persists
-  into the *next* call. Use absolute paths.
+- **One family `int.<N, S>` with a `bool` signedness.** Built, then replaced.
+  Nothing is ever generic over signedness, so the `S` argument buys an inference
+  variable no program can solve, and it lets a signed and an unsigned type unify
+  *through* it. Two constructors cost one extra impl in `core` and remove a whole
+  class of wrong.
+- **A width as a `Const::Value` at type `u16`.** Infinite regress: a `Value`
+  carries the `Ty` it was written at; that `Ty` is `u16`, which is `uint.<16>`,
+  whose width carries a `u16`… The branch's `Const::Width(u16)` holds the number
+  **bare**, which is what makes the representation finite. Do not "simplify" it
+  back into a typed value.
+- **Typing an integer width at `usize` once `usize` is a `core` distinct.** A
+  definitional cycle, not an implementation wrinkle: reading `PTR_BITS` at
+  `usize` requires `usize`, which is defined as `uint.<PTR_BITS>`. The `u16`
+  width is what breaks it.
+- **`Const::PtrBits` (an opaque width) to keep `usize` from being `u64`.** Built
+  and committed, then removed on the branch in favour of `distinct`. It worked,
+  but it is a special case in the const lattice where §2.4 already has a
+  mechanism. Named here because the *invariant* it protected is still the one
+  that matters.
+- **Forgetting `unify_const` needs an arm for a new `Const` variant.** Adding
+  `PtrBits` without one made `usize` fail to unify with **itself** — 240 tests,
+  all reporting ``expected `usize`, found `usize```. Any new variant needs its
+  reflexive case.
+- **Assuming `subst_type_params` / `collect_generic_params` / `resolve` /
+  `finalize` reach a new field.** `Ty::Int` gained a `Const`, and every one of
+  those four walkers needed an arm. The one that actually bit: without the
+  `collect_generic_params` arm, the family impl's `N` is never freshened, so
+  `a.wrapping_add(b)` on a `u8` returns `uint.<N>` with `N` still symbolic.
+- **`Target::HOST` in `Ty::display`.** Rendering a type must not consult the
+  target — that is the fold the whole design forbids. Use `Const::value()` /
+  `Const::bits()`, which need no target.
+- **A generated module as its own package.** It cannot name `core`'s types, so
+  `OS` could only be a string. Making it a *member of core* is what lets the
+  enums live in core, which is what the user asked for.
+- **Naming a generated file `<core/target.nest>`.** A relative
+  `import "os.nest"` inside it resolves against the file's own name, so the
+  placeholder name broke the import. Give it core's real directory.
 
 ## Key decisions
 
 | Decision | Rationale |
 |---|---|
-| The prelude is found by `#lang("prelude")` on an `import` binding in `core.nest` | It is a namespace assembled by re-export; the binding is the only thing a tag can sit on. Same promise `#lang` makes everywhere: `core` stays renameable |
-| A `#lang`-tagged trait is always a selection candidate | `a + b` reaches `Add` by tag, so the compiler named it, not the program. Otherwise `+` would need an import |
-| `core/panic.nest` → `core/fail.nest`; `str.nest` gets no namespace re-export | The root exports each topic file as a namespace; `panic`/`str` would collide with the prelude's function and type |
-| `#intrinsic` takes an **optional** tag | The spec's code blocks show the bare form; the roadmap wanted the tag. Both are accepted, and the tag is what the compiler keys on |
-| `cast`, `transmute` and `panic` are **ordinary declarations** | `cast :: func <T, U> (x: U) -> T` — `T` first, so a turbofish pins it and `U` infers; `cast(x)` takes `T` from context; `panic -> never` states divergence. All three already worked |
-| The only two `Special`s are `make` (result is `[]mut T`) and `len` (argument must be a sequence) | No bound in the language says "the same type, made mutable" or "one of the two built-in sequences" |
-| The IR still prints `$name` for an intrinsic node | The IR is a compiler artifact, not source. Keeping it left 135 snapshot lines untouched |
-| `$abort` is gone; `core`'s `.!` bodies call `panic` | `abort` had no spec entry; `panic` does |
-| An array length must be a `usize`, checked at the declaration | §3.2 makes it a `usize` count. Typed const identity otherwise produces `expected [4]i32, found [4]i32`. Spec §5's illustration was corrected to match |
-| `#caller_location` is a default argument, never anything else | A default is filled in at the call site, which is the whole of why it names the caller. Elsewhere it could only mean "the position of this expression" |
-| `Default` + `..` spread, not struct field defaults | The user's call: a literal never silently omits a field, and `..` is the visible token that says "and the rest from here" |
-| The spread binds its temporary in desugaring and expands in lowering | The temporary needs a `DefId` (desugaring allocates those); the expansion needs the literal's type (only inference has it). Splitting is what lets `.{ ..rest }` work |
-| `NAME: T :: value`, `#static NAME: T [:: value]`, `MAX: i32 [:: default]` | The type before the binder is what leaves `NAME :: type` a type alias unconditionally |
-| A `#static` must write its type | A region is storage; storage has a width, and the zeroed form has no initializer to infer one from |
-| Conformance is checked in inference | It is a question about types, and `impls::build` runs before there are any |
-| A `const` argument carries its type | §5: `3u8` and `3usize` are different arguments. Comparing values alone would collapse them, and nothing would catch it until monomorphization |
+| Two families `int.<N>` / `uint.<N>`, not one `int.<N, S>` | Signedness selects the family; nothing is generic over it. An argument for it buys an unsolvable inference variable and lets signed and unsigned unify through it |
+| A width is a `u16` | §3.1 caps a width at 65535, so `u16` holds every legal one. It is also what breaks the `usize` definitional cycle |
+| A width is a **bare** number (`Const::Width`), not a value at a type | A typed width regresses infinitely: `u16` is `uint.<16>` whose width is a `u16`. Bare is finite — and is what a width *is*, since nothing stores one at run time |
+| A written width is normalized to `Const::Width` | Otherwise `int.<32>` carries a `u16`-typed `Const::Value` and `i32` carries a bare width, and the two compare unequal — the "same type" promise would be a lie |
+| Widening is **range containment**, not "more bits" | The signed cases fall out instead of being special-cased: unsigned→signed needs the extra bit, signed→unsigned has nowhere to put a negative |
+| Pointer-sized types never widen, either direction | Whether a `u64` fits a `usize` is the target's business. A coercion that appears on one machine and not another is worse than one that never happens |
+| A widening reuses `Coercion { to }` | It is exact, which is exactly what the existing implicit `$cast` promises. A new node kind would say nothing new |
+| `usize` is a `distinct`, not a primitive (branch) | §2.4 already means "same representation, different type". That is the whole requirement, so the language's own mechanism should carry it |
+| The generated target module is a **member of core** (branch) | Only then can it name `core`'s `Os` / `Arch` / `Profile`. The coupling becomes two files of one package rather than compiler-to-library |
+| `usize` / `isize` are injected into `InferCtxt` by `#lang` tag (branch) | Exactly the existing `set_str_ty` precedent: unification has no def table and cannot do a `#lang` lookup |
 
 ## Current state
 
-**Working**: everything. `cd nestc && cargo test` → **363 passed**. `cargo
-clippy` → 84 warnings, all pre-existing dead code. Every file in
-`examples/*.nest` compiles clean.
+**Working**: everything on `main`. `cd nestc && cargo test` → **371 passed**.
+`cargo clippy` → 84 warnings, the same *set* as before this session. Every file
+in `examples/*.nest` compiles clean.
 
-**Broken**: nothing known.
+**Broken**: nothing on `main`. The branch `phase5-usize-in-core` does not build.
 
-**Uncommitted changes**: `design/roadmap.md` (the ✅ marks and the three
-"what it actually took" sections) and this file.
+**Uncommitted changes**: none.
 
-**A deliberate gap**: `spec/` still describes phase 5, which is not implemented.
-Integers are still `Ty::Int { signed, width }` with `IntWidth::Fixed`/`Ptr`;
-`i32` is a primitive rather than sugar for `int.<32, true>`; there is no
-`wrapping_add`. `design/roadmap.md` §5 is the map of that gap.
+**A deliberate gap**: `spec/03-types.md` §3.1 already describes `usize` as
+`distinct uint.<PTR_BITS>` and documents the target constants, because that is
+the settled design — the spec is ahead of `main` on exactly that one point, and
+`design/roadmap.md` §5 says so.
 
 ## Files to know
 
 | File | Why it matters |
 |---|---|
-| `design/roadmap.md` | **The plan**, with phases 2–4 marked done and what each actually took. Read before starting anything. |
-| `design/lir.md` | The LIR design: mangling, debug info, the flattening table, the settings that change lowering. |
-| `nestc/src/sema/intrinsics.rs` | The intrinsic registry. A new intrinsic is a row here **then** a declaration in `core` — the declaration is rejected until the row exists. |
-| `nestc/src/sema/ty.rs` | `Ty`, `Const`, `ConstArg`, `InferCtxt`, `is_primitive`, `unify_const`, `primitive_ty`. **Phase 5 lands here hardest.** |
-| `nestc/src/sema/infer.rs` | `const_value_in`, `const_from_lit`, `const_of_def`, `check_const_param`, `intrinsic_result`, `lang_traits`, `diverges`. |
-| `nestc/src/sema/lower.rs` | `lower_intrinsic` — where a call to an `#intrinsic` def becomes `ExprKind::Intrinsic`. |
-| `nestc/src/sema/collect.rs` | `check_bodyless` (the three ways a signature may stand alone) and the `#lang`-on-import tag. |
-| `nestc/src/sema/imports.rs` / `mod.rs` | `RawImport.lang`, and `wire_order` — the dependency-ordered wiring. |
-| `nestc/src/sema/builtins.rs` | The one place primitive operator impls live. **Phase 5's family impl extends or replaces this.** |
-| `packages/core/mem.nest` | The intrinsic declarations, with the `make` caveat written down. |
-| `packages/core/slice.nest` | `impl <T, const N: usize> [N]T` — the precedent phase 5 copies, with two parameters instead of one. |
+| `design/roadmap.md` §5 | The plan, with the three remaining gaps named. Read before starting. |
+| `nestc/src/sema/ty.rs` | `Ty::Int`, `Const`, `int_widens`, `int_parts`, `unify`, display. The phase lives here. |
+| `nestc/src/sema/infer.rs` | `int_family_ty` (the `int.<N>` reader), `try_int_widen`, `const_ty_widens`, `is_ptr_sized`, `collect_generic_params`, `subst_const`. |
+| `packages/core/num.nest` | The two family impls, and where `usize` / `isize` are meant to land. |
+| `packages/core/slice.nest` | The `[N]T` precedent the family impls copy. |
+| `nestc/src/sema/intrinsics.rs` | A new intrinsic is a row here **first**; the `core` declaration is rejected until it exists. |
+| `nestc/src/common/options.rs` | `Target` (now `pointer_bits`, `os`, `arch`) and `profile`. `-C os=`, `-C arch=`, `-C profile=`. |
 
 ## Code context
 
-**The surface forms this session added or changed:**
-
 ```nest
-{ Add } :: import <core/ops>        // the prelude no longer globs all of core
-a + b                               // still needs no import: `Add` is found by tag
+// The families, and the sugar that names their members.
+f :: func (a: int.<32>) -> i32 { return a }     // the same type
+g :: func (b: uint.<8>) -> u8  { return b }
+h :: func (c: uint.<1>) -> bool { return c }    // `u1` is `bool`
 
-@public cast :: #intrinsic("cast") func <T, U> (x: U) -> T   // core/mem.nest
-cast.<u8>(n)                        // `T` pinned, `U` inferred
-cast(n)                             // `T` from context
-panic("unreachable")                // -> never, so it may end a block owing a value
-len(xs)                             // { len } :: import <core/slice>
+// Written once, reaching every width.
+impl <const N: u16> uint.<N> {
+  @public wrapping_add :: #intrinsic("wrapping_add") func (self: Self, rhs: Self) -> Self
+}
+x :: func (a: u4096, b: u4096) -> u4096 { return a.wrapping_add(b) }
 
-assert(size_of.<i32>() == 4)        // a comptime item; no sigil, no `::`
-
-pick :: func <const B: bool> (a: i32, b: i32) -> i32 { if B { return a }  return b }
-pick.<true>(1, 2)
-sep  :: func <const C: char> () -> char { return C }
-sep.<','>()
-neg  :: func <const N: i8> () -> i8 { return N }
-neg.<-3>()
+// Widening: narrower into wider, never the reverse.
+w :: func (v: u16) -> u32 { return v }          // fine
+n :: func (v: u32) -> u16 { return v }          // error
+s :: func (v: u8)  -> i16 { return v }          // fine: strictly wider
+e :: func (v: i16) -> u32 { return v }          // error: signed into unsigned
 ```
-
-**The types:**
 
 ```rust
 // sema/ty.rs
-pub enum Const {
-    Value(Box<ConstArg>),   // a value AND the type it was written at
-    Param(DefId),
-    Var(ConstVar),
-    Error,
+pub enum Ty { Int { signed: bool, width: Const }, /* … */ }
+pub fn int_widens(from: (bool, u32), to: (bool, u32)) -> bool;
+impl Ty {
+    pub fn int(bits: u16, signed: bool) -> Ty;   // `int.<bits>` / `uint.<bits>`
+    pub fn u8() -> Ty;
+    pub fn int_parts(&self, target: Target) -> Option<(bool, u32)>;  // None when symbolic
 }
-pub struct ConstArg { pub ty: Ty, pub value: ConstValue }
-impl Const {
-    pub fn known(ty: Ty, value: ConstValue) -> Const;
-    pub fn len(n: u64) -> Const;          // `usize`-typed; an array length
-    pub fn value(&self) -> Option<u64>;   // None for a bool/char/float
-}
-impl Ty { pub fn is_primitive(&self) -> bool; }   // Int | Float | Bool | Char
-
-// sema/intrinsics.rs
-pub enum Special { MutableArg, SequenceArg }
-pub struct IntrinsicRow { pub tag: &'static str, pub special: Option<Special> }
-pub const INTRINSICS: &[IntrinsicRow];
-pub fn lookup(tag: &str) -> Option<&'static IntrinsicRow>;
-
-// sema/def.rs
-impl Def { pub fn intrinsic_tag(&self) -> Option<Symbol>; }  // arg, else the name
-
-// sema/imports.rs
-pub struct RawImport { …, pub lang: Option<Symbol>, … }       // `#lang` on an import
 ```
 
 **The non-obvious bits.**
 
-*An intrinsic leaves no trace in inference.* `f.<T>(x)` on an `#intrinsic` def is
-type-checked exactly like any generic call; only `Inferer::intrinsic_result`
-runs afterwards, and only for `make` and `len`. If you are tempted to add a third
-case there, check whether the *signature* can say it instead — that is the whole
-point of declaring them in `core`.
+*A width is not a type argument like any other.* It is normalized, range-checked
+at `u16`, and compared bare. `int_family_ty` is the only place that builds one
+from source, and `primitive_ty` is the only place that builds one from a name;
+those two **must** agree or `int.<32>` and `i32` stop being one type.
 
-*The IR's intrinsic namespace is not core's.* `ExprKind::Intrinsic` also carries
-compiler-internal operations lowering invents (`array`, `repeat`, `slice`,
-`full`, `format`), which have no `core` declaration. The registry maps a
-declaration's tag into that namespace; it does not enumerate it.
+*The signedness is compared, never unified.* `unify` on two integers runs
+`s1 != s2 || unify_const(w1, w2)`. If you ever make signedness a `Const`, this is
+the line that silently starts letting `i32` unify with `u32`.
 
-*A `const` parameter takes part in type checking, not just in substitution.*
-`[N]u32` is a type, so `N` reaches unification through `Const` — a mismatch is
-reported in the **lengths** (``expected `[4]u32`, found `[3]u32```) rather than
-in `N`, and two distinct parameters never unify. In value position `N` has the
-type it was declared with, so a `<const B: bool>` read where a `usize` is wanted
-is an ordinary mismatch.
+*Widening happens in `expect`, not `unify`.* `unify` is symmetric and most of its
+callers are joins; the direction only exists where one side is the value and the
+other is the demand. Same reason `never` is one-way there.
 
-*A `const` parameter's type is checked against its slot at every use.*
-`const_of_def` compares the parameter's declared type with the slot's `want` and
-refuses a mismatch. This is the only place a symbolic `Const::Param` can be
-checked at all — its *value* is not known until monomorphization.
+*`int_parts` returns `None` for a symbolic width.* Every caller has to decide
+what "not known until monomorphization" means for it. None of them may invent a
+number — that is how `usize` would silently become `u64`.
 
 ## Resume instructions
 
-1. `cd nestc && cargo test` — expect **363 passed**.
-   - If ``cannot load package `core` ``: `packages/core/` is missing or
-     `NEST_CORE` is stale. The default is
-     `{CARGO_MANIFEST_DIR}/../packages/core/core.nest`.
-2. See this session's work end to end:
+1. `cd nestc && cargo test` — expect **371 passed**.
+2. See the phase working:
    ```
    cargo build
    cat > /tmp/e.nest <<'EOF'
-   { Add } :: import <core/ops>
-   { len } :: import <core/slice>
-   V :: struct { n: i32 }
-   impl Add for V { Output :: V  add :: func (self: V, rhs: V) -> V { return self } }
-   sum   :: func (a: i32, b: i32) -> i32 { return a + b }
-   count :: func (xs: []i32) -> usize { return len(xs) }
-   small :: func <const N: u8> () -> u8 { return N }
-   pick  :: func <const B: bool> (a: i32, b: i32) -> i32 { if B { return a }  return b }
-   main  :: func () { const x := cast.<u8>(1)  const y := pick.<true>(1, 2) }
+   wide :: func (a: u4096, b: u4096) -> u4096 { return a.wrapping_add(b) }
+   same :: func (a: int.<32>) -> i32 { return a }
+   widen :: func (x: u16) -> u32 { return x }
+   fam :: func <const N: u16> (a: int.<N>, b: int.<N>) -> int.<N> { return a.wrapping_add(b) }
    EOF
-   ./target/debug/nestc /tmp/e.nest | grep -E '^func|\$'
+   ./target/debug/nestc /tmp/e.nest | grep -E '\$wrapping|\$cast'
    ```
-   - Expected: no diagnostics; `$cast(...)` in `main`'s body.
-3. Read `design/roadmap.md` §5, then start **phase 5 (the integer family
-   `int.<N, S>`)**. It is the largest phase in the plan and the one with the most
-   ways to be subtly wrong; the three named risks are `usize` collapsing into
-   `u64`, const-generic recursion, and display churn.
+   Expected: no diagnostics; `$wrapping_add(a: u4096, b: u4096): u4096` and an
+   implicit `$cast(x: u16): u32`.
+3. **The remaining work**: `git checkout phase5-usize-in-core`, fix the three
+   gaps listed above, rebase onto `main`. Gap 2 (const-eval of an enum variant)
+   is the one to size first — it is the largest and the least about integers.
 4. Whatever you touch, verify with all three:
-   - `cargo test` (363 and rising)
+   - `cargo test` (371 and rising)
    - `for f in ../examples/*.nest; do ./target/debug/nestc "$f" >/dev/null || echo "FAIL $f"; done`
-   - `cargo clippy` — 84 warnings is the baseline; add none.
+   - `cargo clippy` — compare the warning **set**, not the count.
 
 ## Edge cases and known limits
 
 Everything in the previous handoff's list still holds except where noted. New or
 changed:
 
-- **A struct literal does not check field privacy**, spread or written:
-  `field_ty` looks a field up by name without consulting visibility, so a
-  literal outside the declaring namespace can name a private field. Pre-existing
-  and unrelated to the spread, which inherits whatever the written form does.
-- **`Location` is not in the prelude**, so declaring a `#caller_location`
-  parameter costs `{ Location } :: import <core/loc>`. `panic` needs no import
-  because it carries the parameter itself.
-- **`make` still takes only a length**, and `#static` composes with other
-  directives but none of them (a link section, an offset) is implemented yet.
-- **`assert` is not in the prelude.** §6.4 puts only `cast`, `panic` and
-  `size_of` there, so a compile-time assertion needs
-  `{ assert } :: import <core/fail>` — including the struct-body form §6.10
-  shows without one. Worth revisiting if it grates.
-- **`core`'s `.!` bodies panic with a fixed string.** There is no formatting, so
-  `Result.unwrap` cannot report the error value it had.
-- **`make` takes only a length.** Spec §6.9 has `make.<[]T>(len, cap)`; the
-  declaration is one-argument until default arguments on a bodyless `#intrinsic`
-  are checked.
-- **`size_of.<T>()` still loses `T` in the IR.** `ExprKind::Intrinsic` carries no
-  type arguments, exactly as before — the result type is stamped on the node and
-  `usize` says nothing about `T`. Phase 7 (layout) is where that has to change.
-- **A `const` generic parameter on a *type* declaration is still rejected**
-  (`collect.rs`): a nominal type's identity is `(def, type-args)` with no slot
-  for a value. Unchanged by phase 4.
-- **An integer literal does not fill a `char` slot.** `f.<0x61>()` on a
-  `<const C: char>` is refused; write `'a'`.
-- **Array lengths still do not go through the const evaluator.** `[SIZE * 2]T` is
-  rejected. The fix is a `Const::Unevaluated(DefId)` resolved post-link, and it
-  belongs with phase 6. **Do not** bolt a second evaluator onto the AST. (The
-  user has marked this deferrable in `design/roadmap.md`'s open questions.)
-- **`examples/packages/use_packages.nest` does not compile from the CLI** —
-  ``unknown package `shapes` ``. Not a regression: that example needs packages
-  registered programmatically, which only `tests.rs` does.
-- **A generic `#const` function's calls are still not checked.** Phase 6.
-- **`#static` inside a function parses, resolves and type-checks, but is not
-  lowered as a global.**
-- **Exhaustiveness over floats, strings, byte strings and `comptime_int`** is
-  never complete except by a wildcard.
+- **`usize` / `isize` are still compiler primitives on `main`**, with an opaque
+  pointer-sized width (`Const::PtrBits`). The spec says otherwise; see "A
+  deliberate gap".
+- **`int.<0>` is refused**, and a width over `65535` is caught by the `u16` slot
+  as ``70000` does not fit in `u16``, reported against the literal.
+- **A bare `int` / `uint` is not a type.** Unlike `Box` for `Box.<T>`, a family
+  name must carry its width — otherwise a forgotten `.<32>` becomes an inference
+  error somewhere else entirely.
+- **Widening does not apply to `distinct` numerics.** It is an integer rule; a
+  `distinct u8` is not a `u8` for this purpose, which is the point of `distinct`.
+- **`a_constant_is_comptime_unless_its_type_is_written`** and
+  **`a_constants_type_goes_before_the_binder`** were retargeted from `i32` to
+  `i8`, because a `u8` constant *does* now reach an `i32` by widening. Their
+  intent survives: a bare `5` reaches an `i8` and a pinned `u8` does not.
+- **A `const` generic parameter on a *type* declaration is still rejected.**
+  Unchanged by phase 5; the families are builtin constructors, not user types.
+- **Array lengths still do not go through the const evaluator** (`[SIZE * 2]T`).
+  Phase 6.
 
 ## Warnings
 
@@ -446,33 +278,32 @@ changed:
   for later calls — use absolute paths.
 - **`cargo test` does not rebuild `target/debug/nestc`.** Run `cargo build`
   before the examples loop or you are testing a stale binary.
-- **`rustfmt --edition 2024 <file>` follows `mod` declarations**, and reformats
-  the whole of any file you pass. Check `git diff --stat` afterwards and revert
-  what you did not edit. **Never** run `cargo fmt` with no arguments.
+- **Compare the clippy warning *set*, not the count.** A new warning and a fixed
+  one cancel out in a count. `cargo clippy --message-format=short`, strip line
+  numbers, `sort`, `diff` against the baseline.
+- **`rustfmt --edition 2024 <file>` follows `mod` declarations** and reformats
+  every file it reaches. **Never** run `cargo fmt` with no arguments.
 - **Regenerating snapshots**: `INSTA_UPDATE=always cargo test`, then
   `rm -f src/*/snapshots/*.snap.new` and
   `sed -i '' '/^assertion_line: /d' src/*/snapshots/*.snap`. Then **read every
-  diff** — diff against `git`, not against `.snap.new`.
+  diff** — against `git`, not against `.snap.new`.
 - **Many tests assert *exactly one* diagnostic.** Deliberate: the regression
   guard against cascades. Fix the cascade rather than loosening the assertion.
-- **`messages()` returns errors only; `warnings()` returns warnings.**
+- **A new intrinsic is a row in `sema/intrinsics.rs` first.**
 - **`#lang` discovery is by tag only.** Never hardcode a core type's name, file
-  or position. `core_is_an_ordinary_multi_file_package` and
-  `the_prelude_is_found_by_tag_not_by_name_or_path` both exist to fail if you do.
-- **A new intrinsic is a row in `sema/intrinsics.rs` first.** The `core`
-  declaration is rejected until the tag is known.
-- **`is_value_rhs` must stay in step with `collect::def_kind_of`.**
+  or position. The one place this was nearly broken this session was pinning
+  `DefId::USIZE` to a position in `PRIMITIVES` — that approach was abandoned.
 - **Nest syntax worth restating**: `f :: func () { … }`, not `func f() { … }`;
-  `let x: T := v`; primitives are `u32`/`i32`; an array literal is
-  `[_]T { a, b }`; match arms are comma-separated.
+  `let x: T := v`; an array literal is `[_]T { a, b }`; match arms are
+  comma-separated.
 - **Comments explain *why*, at length, and cite spec sections inline.**
-- **Cloned default arguments share their `IrId`s with the original.**
 
 ## User notes
 
 - Commits are **title-only**: no body, no co-author trailer, changes bundled as
   `feat: a + feat: b + fix: c`.
-- The user answered three of `design/roadmap.md`'s open questions in place:
-  `PTR_BITS` comes from the target and exists only inside the compiler; array
-  lengths through the const evaluator may be deferred; the `str` → `String`
-  conversion is decided after codegen works.
+- The user redesigned the integer representation three times mid-implementation
+  (one family → two families → `usize` as a core `distinct`). Each change was an
+  improvement and each is recorded above with its reason. Expect the design to
+  keep moving; commit green states often so a redesign costs one commit, not a
+  session.

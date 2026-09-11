@@ -19,46 +19,100 @@ Unit:              void   (the empty tuple; a function with no `-> T` returns vo
 Uninhabited:       never  (the type of an expression that does not return)
 ```
 
-Integers are one **generic family**, and `i32` and friends are sugar for it:
+Integers are **two generic families**, and `i32` and friends are sugar for them:
 
 ```
-int.<N, S>          N: usize   the bit width
-                    S: bool    signed
-i32   == int.<32, true>
-u8    == int.<8, false>
-usize == int.<PTR_BITS, false>
+int.<N>             N: u16     a signed integer N bits wide
+uint.<N>            N: u16     an unsigned one
+i32   == int.<32>
+u8    == uint.<8>
 ```
 
-`i8`/`i16`/`i32`/`i64` and `u8`/`u16`/`u32`/`u64` are the familiar cases of that
-family, so `u7`, `i24` and `u4096` are equally legal — a width `N` up to `65535`.
-`i1` is **not** a type; `u1` is spelled `bool`. Floats exist only at the widths
+`i8`/`i16`/`i32`/`i64` and `u8`/`u16`/`u32`/`u64` are the familiar cases, so `u7`,
+`i24` and `u4096` are equally legal — a width `N` up to `65535`. `i1` is **not** a
+type; `u1` is spelled `bool`, and `uint.<1>` is the same type as `bool` rather
+than a second one-bit integer. Floats exist only at the widths
 `f16`/`f32`/`f64`/`f80`/`f128`.
 
-The family exists so that the operations on integers can be **written once**.
+A width is a `u16` because `65535` is the largest legal one, and it is always a
+compile-time number: any constant that fits converts into one implicitly, and one
+that does not is an error where it is written.
+
+Signedness is **not** an argument. It selects which family a type belongs to,
+which is why there are two constructors rather than one `int.<N, S>`: nothing is
+ever generic over signedness, so an argument for it would buy an inference
+variable no program could solve, and would let a signed type and an unsigned one
+unify through it.
+
+The families exist so that the operations on integers can be **written once**.
 `wrapping_add` is not compiler syntax; it is an inherent method in `core`, on an
-`impl` over the whole family, exactly as `.len()` is an inherent method on
+`impl` over a whole family, exactly as `.len()` is an inherent method on
 `impl <T> []T`:
 
 ```nest
-impl <const N: usize, const S: bool> int.<N, S> {
+impl <const N: u16> int.<N> {
   wrapping_add :: #intrinsic func (self: Self, rhs: Self) -> Self
 }
 ```
 
 Per-width impls could not do this: `u4096` is a legal type, so there is no finite
-list to write out.
+list to write out. `Self` inside such an impl is the family member being
+implemented, which is what lets the signature say *same family, same width, no
+widening* without stating a bound.
 
-`i32` and `int.<32, true>` are **the same type**, not two types that convert. The
-short spelling is the ordinary one, and the generic form appears where a width has
-to be spoken about — an `impl` header, a bound, a reflection query.
+`i32` and `int.<32>` are **the same type**, not two types that convert. The short
+spelling is the ordinary one, and the generic form appears where a width has to be
+spoken about — an `impl` header, a bound, a reflection query.
 
-Pointer-sized `isize` / `usize` are members of the family whose width is the
-**target's**, written `PTR_BITS`: a compile-time constant the build supplies
-rather than a number the source picks. It is opaque to type identity, so `usize`
-and `u64` stay different types on a 64-bit target, exactly as `[N]T` and `[3]T`
-are different types inside a generic function. Use `isize`/`usize` for addresses,
-lengths, and indices (`.len()`, indexing, C interop sizes), and a fixed width
-otherwise.
+#### Widening
+
+A **narrower integer may stand where a wider one is wanted**, because no value is
+lost doing it. The reverse may not, because most values would be:
+
+```nest
+f :: func (n: u32) -> u32 { return n }
+g :: func (x: u16) -> u32 { return f(x) }   // fine
+h :: func (x: u32) -> u16 { return x }      // error
+```
+
+The rule is range containment, not "more bits", so the signed cases fall out of it
+rather than being special-cased:
+
+| from → to | |
+|---|---|
+| same signedness, wider | `u8` → `u32`, `i8` → `i64` — always |
+| unsigned → signed | only when **strictly** wider: `u8` → `i16` yes, `u8` → `i8` no |
+| signed → unsigned | never, at any width |
+
+A widening is exact, so it is a conversion the compiler inserts rather than one
+the program writes. A narrowing stays written down, as `cast`, because the program
+should say which values it meant to lose.
+
+A `const` generic parameter fills a slot on the same rule: a `<const N: u16>` is a
+good `u32` argument for the same reason a `u16` value is.
+
+#### Pointer-sized integers
+
+`isize` and `usize` are **not** compiler primitives, and not members of either
+family. They are declared in `core` as `distinct` types over the integer as wide
+as a pointer:
+
+```nest
+usize :: distinct uint.<PTR_BITS>
+isize :: distinct  int.<PTR_BITS>
+```
+
+`PTR_BITS` is a compile-time constant the build supplies, alongside `OS`, `ARCH`
+and `PROFILE` (§ target). Being `distinct` is what does the work: `usize` and
+`u64` have the same representation on a 64-bit machine and are still different
+types, so `impl usize` and `impl u64` cannot collide and a count of bytes cannot
+be handed to something that wanted a number of them.
+
+They take no part in widening, in either direction. Whether a `u64` fits a `usize`
+is the target's business, and a conversion that appeared on one machine and not
+another would be worse than one that never happens — so crossing into or out of a
+pointer-sized type is written down. Use `isize`/`usize` for addresses, lengths and
+indices (`.len()`, indexing, C interop sizes), and a fixed width otherwise.
 
 `str` is **not** a compiler primitive. It is declared in `core` as
 `#lang("str") distinct []u8` — a byte slice with a UTF-8 invariant, which is the

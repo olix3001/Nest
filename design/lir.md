@@ -447,7 +447,7 @@ Two details earn their place:
   between `3usize` and `3u8`, and those are different instantiations. `n` marks
   a negative value, because `-` is not safe in every object format.
 - **A primitive mangles as a primitive, even though it is sugar.** `i32` is
-  `int.<32, true>` in the type system, and mangling it that way would make every
+  `int.<32>` in the type system, and mangling it that way would make every
   symbol in every program longer to record something no two types disagree
   about. The sugar *is* the canonical spelling here.
 

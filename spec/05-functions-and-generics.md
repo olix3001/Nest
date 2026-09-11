@@ -279,12 +279,16 @@ zeros :: func <const N: usize> () -> [N]u8 { ... }      // value param used in a
   `Ty` may be **any primitive type** — an integer of any width, `bool`, `char`,
   `f32`. An **array length** is the one slot that fixes it: `[N]T` is a `usize`
   count (§3.2), so a parameter standing in one must be declared `usize`. That is
-  a property of the slot, not of `const` parameters. Restricting it to `usize` would be an arbitrary line: the parameter is a
-  compile-time value, every primitive has compile-time values, and the type
-  system already has to compare and substitute them. It is also load-bearing
-  rather than decorative — the integer family `int.<N, S>` (§3.1) is a `usize`
-  width *and* a `bool` signedness, so without `const S: bool` there is no one
-  family for the integer operations to be written over.
+  a property of the slot, not of `const` parameters. Restricting every parameter
+  to `usize` would be an arbitrary line: the parameter is a compile-time value,
+  every primitive has compile-time values, and the type system already has to
+  compare and substitute them. An **integer width** is the other fixed slot —
+  `int.<N>` takes a `u16` (§3.1) — and a `<const B: bool>` or `<const C: char>`
+  is an ordinary thing to want besides.
+
+  A parameter fills a slot on the **widening** rule (§3.1), not on equality: a
+  `<const N: u8>` is a good integer-width argument, and a `<const N: usize>` is
+  not.
 
   Aggregates are **not** const parameters: a struct or an array as a generic
   argument would put structural equality of arbitrary values into type identity,
