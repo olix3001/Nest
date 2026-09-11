@@ -108,14 +108,26 @@ pub struct MethodRes {
 
 /// The dispatch kind of a resolved [`MethodRes`], mirroring
 /// [`crate::ir::Dispatch`] without the IR's already-substituted types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MethodDispatch {
     /// A direct call to a known function.
     Static,
     /// Through the vtable of a `*dyn Trait` receiver; the payload is the trait.
     Virtual(DefId),
-    /// Through a type parameter's bound; the payload is the trait.
-    Generic(DefId),
+    /// Through a type parameter's bound.
+    Generic {
+        trait_def: DefId,
+        /// The trait's own generic arguments **as the bound wrote them**:
+        /// `<T: Add.<f64>>` gives `[f64]`.
+        ///
+        /// They are carried because they are part of *which impl* the bound
+        /// stands for, and monomorphization is the stage that has to pick one.
+        /// `impl Add.<f64> for Vec3` and `impl Add.<i32> for Vec3` are two
+        /// perfectly coherent impls (§4.9 — they do not overlap, because the
+        /// trait's arguments differ), and with only the trait to go on there is
+        /// nothing to tell them apart by.
+        args: Vec<Ty>,
+    },
 }
 
 /// What lowering must do to the receiver expression to hand it to the `self`
@@ -334,17 +346,17 @@ enum ArgBinding {
 /// being unified against, here it is a *pattern* being matched, and a pattern
 /// wants its holes named rather than numbered.
 ///
-/// Only the **self** type is resolved. The trait's own arguments
-/// (`impl Add.<f64> for Vec3`) are not, because the consumer has nothing to
-/// compare them against: an [`crate::ir::Dispatch::Generic`] call records the
-/// trait it goes through and not the arguments the bound was written with. Two
-/// impls of one trait for one self type differing only in those arguments are
-/// therefore beyond what monomorphization can currently tell apart — resolve
-/// them here when there is something to match them with.
 #[derive(Debug, Clone)]
 pub struct ImplTarget {
     /// The `for` target's type (`impl Add for Vec3` → `Vec3`).
     pub self_ty: Ty,
+    /// The trait's own generic arguments (`impl Add.<f64> for Vec3` → `[f64]`).
+    ///
+    /// They are what separates two impls that a self type alone cannot: `impl
+    /// Add.<f64> for Vec3` and `impl Add.<i32> for Vec3` do not overlap (§4.9)
+    /// and both apply to `Vec3`, so a call reached through a `<T: Add.<f64>>`
+    /// bound has to compare these to know which one it meant.
+    pub trait_args: Vec<Ty>,
 }
 
 /// Resolve every impl's target, in [`ImplTable::impls`] order.
@@ -370,6 +382,7 @@ pub fn resolve_impl_targets(
         let Some(ast) = asts.get(&imp.file) else {
             out.push(ImplTarget {
                 self_ty: Ty::Error,
+                trait_args: Vec::new(),
             });
             continue;
         };
@@ -395,7 +408,15 @@ pub fn resolve_impl_targets(
             float_values: HashMap::new(),
         };
         let self_ty = cx.ty_from_node_in(imp.file, imp.self_node);
-        out.push(ImplTarget { self_ty });
+        let trait_args = imp
+            .trait_args
+            .iter()
+            .map(|&n| cx.ty_from_node_in(imp.file, n))
+            .collect();
+        out.push(ImplTarget {
+            self_ty,
+            trait_args,
+        });
     }
     out
 }
@@ -974,7 +995,24 @@ impl Inferer<'_> {
             }
             if let Some(m) = self.ast.meta::<MethodRes>(node) {
                 let self_ty = self.cx.finalize(&m.self_ty, &mut || {});
-                self.ast.set_meta(node, MethodRes { self_ty, ..m });
+                // A bound's trait arguments may name the enclosing function's
+                // own generics, so they travel through the same sweep as
+                // everything else captured mid-inference.
+                let dispatch = match m.dispatch.clone() {
+                    MethodDispatch::Generic { trait_def, args } => MethodDispatch::Generic {
+                        trait_def,
+                        args: args.iter().map(|a| self.cx.finalize(a, &mut || {})).collect(),
+                    },
+                    other => other,
+                };
+                self.ast.set_meta(
+                    node,
+                    MethodRes {
+                        self_ty,
+                        dispatch,
+                        ..m
+                    },
+                );
             }
             if let Some(d) = self.ast.meta::<DynCoerce>(node) {
                 let concrete = self.cx.finalize(&d.concrete, &mut || {});
@@ -2553,8 +2591,19 @@ impl Inferer<'_> {
                 // A method on a bounded type parameter resolves in the bound:
                 // `<I: Summing>` makes `it.total()` mean `Summing.total`, with
                 // the concrete impl picked once `I` is instantiated.
-                if let Some(m) = self.bound_method_def(&recv, name.as_str()) {
-                    let d = self.method_dispatch(m, MethodDispatch::Generic);
+                if let Some((m, bound_args)) = self.bound_method_def(&recv, name.as_str()) {
+                    // The dispatch is generic only when the method really is a
+                    // trait's own declaration; `method_dispatch` is what decides
+                    // that for the virtual case, and the reason is the same one.
+                    let d = match self.defs.get(m).parent {
+                        Some(p) if self.defs.get(p).kind == DefKind::Trait => {
+                            MethodDispatch::Generic {
+                                trait_def: p,
+                                args: bound_args,
+                            }
+                        }
+                        _ => MethodDispatch::Static,
+                    };
                     return self.infer_method_call(callee, &recv, m, d, args, &targs);
                 }
                 // A method on a trait object resolves in the trait itself; which
@@ -3060,7 +3109,7 @@ impl Inferer<'_> {
 
     /// Resolve `name` through the trait bounds of a generic type parameter
     /// receiver (`<I: Summing>` → `it.total()` is `Summing.total`).
-    fn bound_method_def(&mut self, recv: &Ty, name: &str) -> Option<DefId> {
+    fn bound_method_def(&mut self, recv: &Ty, name: &str) -> Option<(DefId, Vec<Ty>)> {
         let s = self.autoderef(&self.cx.shallow(recv));
         let Ty::Nominal { def, .. } = s else {
             return None;
@@ -3085,11 +3134,32 @@ impl Inferer<'_> {
             }
             if let Some(&m) = self.defs.get(t).ns.members.get(&sym) {
                 if self.defs.get(m).kind == DefKind::Func {
-                    return Some(m);
+                    // The bound's own arguments — the `f64` of `T: Add.<f64>`.
+                    // They travel with the method because they are half of
+                    // *which* impl this bound stands for, and the impl is picked
+                    // long after this (see [`MethodDispatch::Generic`]).
+                    let args = self.bound_trait_args(file, bound);
+                    return Some((m, args));
                 }
             }
         }
         None
+    }
+
+    /// The trait arguments a bound was written with, as types.
+    ///
+    /// `<T: Summing>` gives an empty list, and so does a trait that takes no
+    /// arguments; `<T: Add.<f64>>` gives `[f64]`. An `<Assoc = T>` binding is
+    /// **not** one of them — it constrains a projection rather than filling a
+    /// parameter — which is the same line [`ImplInfo::trait_args`] draws.
+    fn bound_trait_args(&mut self, file: FileId, bound: NodeId) -> Vec<Ty> {
+        let NodeKind::GenericApply { args, .. } = self.asts[&file].node(bound).kind.clone() else {
+            return Vec::new();
+        };
+        args.iter()
+            .filter(|&&a| !matches!(self.asts[&file].node(a).kind, NodeKind::AssocBinding { .. }))
+            .map(|&a| self.ty_from_node_in(file, a))
+            .collect()
     }
 
     /// The individual trait nodes of a generic parameter's constraint, which is
@@ -5226,23 +5296,8 @@ impl Inferer<'_> {
         // `true` into a `<const N: usize>` is a mistake, and reporting it here —
         // where both the value and the declared type are in hand — is the only
         // place it reads as one.
-        let lit = match &kind {
-            NodeKind::Lit(lit) => Some(lit.clone()),
-            // `-3` in a signed slot. Nothing else is an operator a constant may
-            // be written with yet; a general expression needs the evaluator,
-            // which does not run this early (phase 6).
-            NodeKind::Unary {
-                op: crate::parser::ast::UnOp::Neg,
-                operand,
-            } => match &self.asts[&file].node(*operand).kind {
-                NodeKind::Lit(Lit::Int(n)) => Some(Lit::Int(-n.clone())),
-                NodeKind::Lit(Lit::Float(f)) => Some(Lit::Float(-f)),
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(lit) = lit {
-            return self.const_from_lit(file, node, &lit, want, what);
+        if let NodeKind::Lit(lit) = &kind {
+            return self.const_from_lit(file, node, lit, want, what);
         }
         match kind {
             // `[_]T` — the length is whatever the value supplies.
@@ -5262,12 +5317,172 @@ impl Inferer<'_> {
                     None => Const::Error,
                 }
             }
-            _ => {
+            // `[SIZE * 2]T`, `-3` — an expression built out of compile-time
+            // values with operators. It is **folded** here, by the same
+            // arithmetic the const evaluator runs on the IR (see
+            // [`crate::ir::const_eval::binary_values`]); only the walk differs,
+            // because there is no IR yet and a length is wanted before there is
+            // one.
+            //
+            // Everything that is not one of the forms above comes through here,
+            // so that the diagnostic naming what went wrong is written in one
+            // place — the fold knows whether it met a call, a `const` parameter
+            // under an operator, or something that is not a value at all, and a
+            // second "must be a literal or a constant" here would only ever say
+            // less.
+            _ => match self.const_operand(file, node, what, depth) {
+                Some(v) => self.const_from_value(file, node, v, want, what),
+                None => Const::Error,
+            },
+        }
+    }
+
+    /// The value of one operand inside a folded `const` expression.
+    ///
+    /// Deliberately **not** read at the slot's type: in `[SIZE * 2]T` the `2` is
+    /// a `comptime_int` and the arithmetic runs at arbitrary precision, exactly
+    /// as it does in a `::` binding. Only the finished value is read at `want`,
+    /// which is what makes `[SIZE * 2]T` and `LEN :: SIZE * 2` agree about what
+    /// they computed and about whether it fits.
+    ///
+    /// `None` means a diagnostic was reported.
+    fn const_operand(
+        &mut self,
+        file: FileId,
+        node: NodeId,
+        what: &'static str,
+        depth: u32,
+    ) -> Option<ConstValue> {
+        if depth > 32 {
+            self.report_in(file, node, format!("{what} may not refer to itself"));
+            return None;
+        }
+        let ast_kind = self.asts[&file].node(node).kind.clone();
+        match ast_kind {
+            NodeKind::Lit(Lit::Int(n)) => Some(ConstValue::Int(n)),
+            NodeKind::Lit(Lit::Float(f)) => Some(ConstValue::Float(f)),
+            NodeKind::Lit(Lit::Bool(b)) => Some(ConstValue::Bool(b)),
+            NodeKind::Lit(Lit::Char(c)) => Some(ConstValue::Char(c)),
+            NodeKind::Lit(Lit::Str(t)) => Some(ConstValue::Str(t)),
+            NodeKind::Lit(Lit::Bytes(b)) => Some(ConstValue::Bytes(b)),
+            NodeKind::AssocConst {
+                default: Some(v), ..
+            } => self.const_operand(file, v, what, depth + 1),
+            NodeKind::Unary { op, operand } => {
+                let v = self.const_operand(file, operand, what, depth + 1)?;
+                match crate::ir::const_eval::unary_op(op, &v) {
+                    Ok(v) => Some(v),
+                    Err(msg) => {
+                        self.report_in(file, node, msg);
+                        None
+                    }
+                }
+            }
+            NodeKind::Binary { op, lhs, rhs } => {
+                // `&&` / `||` short-circuit, and that is not a detail even here:
+                // the right operand of a guarded `&&` may be the one that would
+                // fail to evaluate. It is handled by the walk rather than by the
+                // shared arithmetic for exactly that reason.
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    let a = self.const_truth(file, lhs, what, depth + 1)?;
+                    if (op == BinOp::And) != a {
+                        return Some(ConstValue::Bool(a));
+                    }
+                    let b = self.const_truth(file, rhs, what, depth + 1)?;
+                    return Some(ConstValue::Bool(b));
+                }
+                let a = self.const_operand(file, lhs, what, depth + 1)?;
+                let b = self.const_operand(file, rhs, what, depth + 1)?;
+                match crate::ir::const_eval::binary_values(op, &a, &b) {
+                    Ok(v) => Some(v),
+                    Err(msg) => {
+                        self.report_in(file, node, msg);
+                        None
+                    }
+                }
+            }
+            NodeKind::Path { .. } | NodeKind::TypePath { .. } => {
+                let def = self.resolved_def_in(file, node)?;
+                let def = self.defs.resolve_alias(def);
+                let d = self.defs.get(def);
+                match d.kind {
+                    DefKind::Const => {
+                        let (cfile, cnode) = (d.file?, d.node?);
+                        let rhs = match self.asts[&cfile].node(cnode).kind.clone() {
+                            NodeKind::ConstBind { rhs, .. } => rhs,
+                            NodeKind::AssocConst {
+                                default: Some(rhs), ..
+                            } => rhs,
+                            _ => return None,
+                        };
+                        self.const_operand(cfile, rhs, what, depth + 1)
+                    }
+                    // A `const` generic parameter has no value until an
+                    // instantiation picks one, and a [`Const`] has no shape for
+                    // an unevaluated expression — `[N * 2]T` would have to stay
+                    // symbolic all the way to monomorphization. `[N]T` on its
+                    // own is fine and goes through the other branch; this is
+                    // only the combined form.
+                    DefKind::ConstParam => {
+                        let msg = format!(
+                            "`{}` is a `const` generic parameter, so it cannot be combined with \
+                             an operator in {what}: its value is not known until the function is \
+                             instantiated",
+                            d.name
+                        );
+                        self.report_in(file, node, msg);
+                        None
+                    }
+                    _ => {
+                        let msg = format!(
+                            "`{}` is a {} — {what} must be built from constant values",
+                            self.defs.canonical_string(def),
+                            d.kind.label()
+                        );
+                        self.report_in(file, node, msg);
+                        None
+                    }
+                }
+            }
+            // A call is the one form that needs a **body**, and a body is not
+            // compiled until its types are known: the const evaluator runs on
+            // the IR, the IR is built after inference, and this is inference
+            // asking. Naming the call through a `::` constant does not help —
+            // following the constant arrives right back here — so the limit is
+            // stated rather than worked around.
+            NodeKind::Call { .. } => {
                 let msg = format!(
-                    "{what} must be a literal, a constant, or a `const` generic parameter"
+                    "a call cannot be evaluated inside {what}: a function's body is not compiled \
+                     until after the types are known, and this is one of them"
                 );
                 self.report_in(file, node, msg);
-                Const::Error
+                None
+            }
+            _ => {
+                let msg = format!(
+                    "{what} must be a literal, a constant, a `const` generic parameter, or an \
+                     expression built from those"
+                );
+                self.report_in(file, node, msg);
+                None
+            }
+        }
+    }
+
+    /// One operand of `&&` / `||`, which must be a `bool`.
+    fn const_truth(
+        &mut self,
+        file: FileId,
+        node: NodeId,
+        what: &'static str,
+        depth: u32,
+    ) -> Option<bool> {
+        match self.const_operand(file, node, what, depth)? {
+            ConstValue::Bool(b) => Some(b),
+            other => {
+                let msg = format!("`{}` is not a `bool`", other.display());
+                self.report_in(file, node, msg);
+                None
             }
         }
     }
@@ -5284,17 +5499,43 @@ impl Inferer<'_> {
         want: &Ty,
         what: &'static str,
     ) -> Const {
+        let value = match lit {
+            Lit::Int(n) => ConstValue::Int(n.clone()),
+            Lit::Float(f) => ConstValue::Float(*f),
+            Lit::Bool(b) => ConstValue::Bool(*b),
+            Lit::Char(c) => ConstValue::Char(*c),
+            Lit::Str(t) => ConstValue::Str(t.clone()),
+            Lit::Bytes(b) => ConstValue::Bytes(b.clone()),
+        };
+        self.const_from_value(file, node, value, want, what)
+    }
+
+    /// Read a computed compile-time value at the type its slot is declared at,
+    /// or report why it cannot be one.
+    ///
+    /// Both halves are identity (§5, [`ConstArg`]): the value and the type it is
+    /// written at. This is also where the range is checked, for the same reason
+    /// a typed constant's is (§2.5) — it is the last point at which the
+    /// arbitrary-precision number is still in hand.
+    fn const_from_value(
+        &mut self,
+        file: FileId,
+        node: NodeId,
+        value: ConstValue,
+        want: &Ty,
+        what: &'static str,
+    ) -> Const {
         // The slot's type as a *primitive*: `usize` is `distinct uint.<PTR_BITS>`
         // (§3.1) and an array length is one, so a literal filling that slot has
         // to be read against what the `distinct` stands over. §2.4 is what makes
         // that right rather than a shortcut — a literal reaches a `distinct`
         // numeric with no written cast.
         let repr = self.numeric_repr(want);
-        let value = match (lit, &repr) {
-            (Lit::Int(n), Ty::Int { .. }) => {
+        let value = match (&value, &repr) {
+            (ConstValue::Int(n), Ty::Int { .. }) => {
                 // A width still symbolic — a parameter declared at `int.<N>`
                 // inside a generic that supplies `N` — has no range to check
-                // against yet, so the literal is taken as written and
+                // against yet, so the value is taken as written and
                 // monomorphization is left to reject it. Range-checking against
                 // a guessed width would reject programs that are fine.
                 let fits = repr
@@ -5305,20 +5546,19 @@ impl Inferer<'_> {
                     self.report_in(file, node, msg);
                     return Const::Error;
                 }
-                ConstValue::Int(n.clone())
+                value
             }
-            // A float parameter takes an integer literal too, the way a `f64`
-            // binding does.
-            (Lit::Int(n), Ty::Float(_)) => match n.to_f64() {
+            // A float slot takes an integer too, the way a `f64` binding does.
+            (ConstValue::Int(n), Ty::Float(_)) => match n.to_f64() {
                 Some(f) => ConstValue::Float(f),
                 None => {
                     self.report_in(file, node, "this integer is not representable as a float");
                     return Const::Error;
                 }
             },
-            (Lit::Float(f), Ty::Float(_)) => ConstValue::Float(*f),
-            (Lit::Bool(b), Ty::Bool) => ConstValue::Bool(*b),
-            (Lit::Char(c), Ty::Char) => ConstValue::Char(*c),
+            (ConstValue::Float(_), Ty::Float(_))
+            | (ConstValue::Bool(_), Ty::Bool)
+            | (ConstValue::Char(_), Ty::Char) => value,
             // An errored slot already reported; do not add to it.
             (_, Ty::Error) => return Const::Error,
             _ => {
@@ -5837,7 +6077,7 @@ fn binop_method(op: BinOp) -> &'static str {
 
 /// Apply an instantiation to one `const` argument: a `const` generic parameter
 /// becomes whatever the instantiation bound it to, and everything else — a known
-/// value, a variable, `PtrBits` — stands.
+/// value, a bare width, a variable — stands.
 fn subst_const(c: &Const, map: &Subst) -> Const {
     match c {
         Const::Param(d) => map.consts.get(d).cloned().unwrap_or_else(|| c.clone()),

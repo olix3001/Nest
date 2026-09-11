@@ -89,7 +89,7 @@ pub mod meta;
 pub mod mono;
 pub mod pretty;
 
-pub use const_eval::{ConstEval, ConstValue};
+pub use const_eval::ConstValue;
 pub use link::{Linked, link};
 pub use meta::{IrId, Meta};
 
@@ -368,6 +368,15 @@ pub enum Dispatch {
         trait_def: DefId,
         method: DefId,
         self_ty: Ty,
+        /// The trait's own generic arguments, **as the bound wrote them**:
+        /// `<T: Add.<f64>>` gives `[f64]`.
+        ///
+        /// The trait alone does not name an impl. `impl Add.<f64> for Vec3` and
+        /// `impl Add.<i32> for Vec3` do not overlap (§4.9) and both apply to
+        /// `Vec3`, so the arguments are the only thing that says which one this
+        /// call meant. They are in the *declaration's* terms, like `self_ty`,
+        /// and are substituted with it.
+        trait_args: Vec<Ty>,
     },
 }
 

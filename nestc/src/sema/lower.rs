@@ -1540,16 +1540,17 @@ impl Lowerer<'_> {
                 ret: Box::new(ty.clone()),
             },
         };
-        let dispatch = match res.dispatch {
+        let dispatch = match &res.dispatch {
             MethodDispatch::Static => Dispatch::Static,
             MethodDispatch::Virtual(trait_def) => Dispatch::Virtual {
-                trait_def,
+                trait_def: *trait_def,
                 method: res.method,
             },
-            MethodDispatch::Generic(trait_def) => Dispatch::Generic {
-                trait_def,
+            MethodDispatch::Generic { trait_def, args } => Dispatch::Generic {
+                trait_def: *trait_def,
                 method: res.method,
                 self_ty: res.self_ty.clone(),
+                trait_args: args.clone(),
             },
         };
         let head = callee;

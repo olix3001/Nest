@@ -84,9 +84,8 @@ pub struct ConstVar(pub u32);
 /// Since phase 5 a [`Const`] is also an *integer type's* argument: `i32` is
 /// `int.<32>` and `u8` is `uint.<8>`, and that width lives here (§3.1). The
 /// signedness does not — it chooses which of the two families the type belongs
-/// to, not what it is applied to. That is also why [`Const::PtrBits`] exists;
-/// see its own note for why it is a case of its own rather than the number the
-/// target happens to use.
+/// to, not what it is applied to. That is also why [`Const::Width`] is a case of
+/// its own rather than a value at a type; see its own note.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Const {
     /// A known value, at the type it was written at (see [`ConstArg`]).
@@ -157,22 +156,22 @@ impl Const {
         }
     }
 
-    /// A `usize`-typed bit width — the `N` of `int.<N>` / `uint.<N>`.
+    /// A bit width — the `N` of `int.<N>` / `uint.<N>`.
     ///
-    /// The type is `usize` and the value is a plain integer, which is what keeps
-    /// the representation from recursing: `usize`'s *own* width is
-    /// [`Const::PtrBits`], which carries no type at all, so descending through
-    /// `i32`'s width into `usize` into `PtrBits` terminates. A width typed as
-    /// some other `int.<…>` / `uint.<…>` would not.
+    /// The number is held **bare**, which is what keeps the representation from
+    /// recursing: a width written at a type would be written at `u16`, which is
+    /// `uint.<16>`, whose width would be written at `u16`, without end. See
+    /// [`Const::Width`].
     pub fn bits_of(n: u16) -> Const {
         Const::Width(n)
     }
 
-    /// The width in bits this const denotes, resolved against the target.
+    /// The width in bits this const denotes.
     ///
-    /// [`Const::PtrBits`] is where the target is consulted, and the only place
-    /// it may be: `usize` is 64 bits or 32 depending on the machine, and no
-    /// site that asks the question may decide it for itself (see [`Target`]).
+    /// The target is **not** consulted, and no site that asks this question may
+    /// consult one: a pointer-sized type is `distinct uint.<PTR_BITS>` over a
+    /// constant `core` supplies (§3.1), so its width arrives here as an ordinary
+    /// number like any other.
     ///
     /// `None` when the argument is still symbolic — inside a family impl
     /// (`impl <const N: usize> int.<N>`, and its `uint.<N>` twin) no width is
@@ -223,8 +222,11 @@ pub enum Ty {
     /// variable that no program could ever solve, and would let `int.<N>` and
     /// `uint.<N>` unify through it.
     ///
-    /// `i32`, `u8` and `usize` are sugar for particular widths, not separate
-    /// cases — see [`Ty::int`], [`Ty::usize`] and [`Const::PtrBits`].
+    /// `i32` and `u8` are sugar for particular widths, not separate cases — see
+    /// [`Ty::int`]. `usize` and `isize` are not sugar at all: they are
+    /// `distinct` declarations in `core` over `uint.<PTR_BITS>` / `int.<PTR_BITS>`
+    /// (§3.1), so they are [`Ty::Nominal`]s that happen to stand over one of
+    /// these.
     Int {
         signed: bool,
         width: Const,

@@ -381,7 +381,7 @@ impl<'a> ConstEval<'a> {
                 if self.unwinding() {
                     return Ok(ConstValue::Void);
                 }
-                self.unary(e.id, *op, v)
+                unary_op(*op, &v).map_err(|m| ConstError::new(e.id, m))
             }
 
             ExprKind::Call {
@@ -1025,120 +1025,15 @@ impl<'a> ConstEval<'a> {
         if self.unwinding() {
             return Ok(ConstValue::Void);
         }
-        match op {
-            BinOp::Eq => return Ok(ConstValue::Bool(a == b)),
-            BinOp::Ne => return Ok(ConstValue::Bool(a != b)),
-            _ => {}
+        let ints = matches!((&a, &b), (ConstValue::Int(_), ConstValue::Int(_)));
+        let value = binary_values(op, &a, &b).map_err(|m| ConstError::new(at, m))?;
+        // Only an integer result has a range to overrun. A comparison is a
+        // `bool` and a float saturates rather than wrapping, so neither has
+        // anything for the declared width to reject.
+        if ints {
+            return self.fits_result(at, value);
         }
-        if let (ConstValue::Int(x), ConstValue::Int(y)) = (&a, &b) {
-            return self.fits_result(at, Self::int_binary(at, op, x, y)?);
-        }
-        if let (ConstValue::Float(x), ConstValue::Float(y)) = (&a, &b) {
-            return Self::float_binary(at, op, *x, *y);
-        }
-        if let (ConstValue::Char(x), ConstValue::Char(y)) = (&a, &b) {
-            return match op {
-                BinOp::Lt => Ok(ConstValue::Bool(x < y)),
-                BinOp::Le => Ok(ConstValue::Bool(x <= y)),
-                BinOp::Gt => Ok(ConstValue::Bool(x > y)),
-                BinOp::Ge => Ok(ConstValue::Bool(x >= y)),
-                _ => Err(ConstError::new(
-                    at,
-                    "this operator does not apply to `char`",
-                )),
-            };
-        }
-        Err(ConstError::new(
-            at,
-            format!(
-                "cannot apply this operator to `{}` and `{}`",
-                a.display(),
-                b.display()
-            ),
-        ))
-    }
-
-    fn int_binary(at: IrId, op: BinOp, x: &BigInt, y: &BigInt) -> EvalResult {
-        // Division and remainder by zero are a *trap* at run time; at compile
-        // time there is nothing to trap, so they are an error with a reason.
-        let nonzero = |v: &BigInt| {
-            if v.is_zero() {
-                Err(ConstError::new(at, "division by zero"))
-            } else {
-                Ok(())
-            }
-        };
-        // A shift amount is a count, not a value: a negative or absurd one has
-        // no meaning rather than a wrapped one.
-        let shift_amount = |v: &BigInt| {
-            v.to_u32().filter(|n| *n < 4096).ok_or_else(|| {
-                ConstError::new(at, "shift amount is negative or unreasonably large")
-            })
-        };
-        let v = match op {
-            BinOp::Add => ConstValue::Int(x + y),
-            BinOp::Sub => ConstValue::Int(x - y),
-            BinOp::Mul => ConstValue::Int(x * y),
-            BinOp::Div => {
-                nonzero(y)?;
-                ConstValue::Int(x / y)
-            }
-            BinOp::Rem => {
-                nonzero(y)?;
-                ConstValue::Int(x % y)
-            }
-            BinOp::BitAnd => ConstValue::Int(x & y),
-            BinOp::BitOr => ConstValue::Int(x | y),
-            BinOp::BitXor => ConstValue::Int(x ^ y),
-            BinOp::Shl => ConstValue::Int(x << shift_amount(y)?),
-            BinOp::Shr => ConstValue::Int(x >> shift_amount(y)?),
-            BinOp::Lt => ConstValue::Bool(x < y),
-            BinOp::Le => ConstValue::Bool(x <= y),
-            BinOp::Gt => ConstValue::Bool(x > y),
-            BinOp::Ge => ConstValue::Bool(x >= y),
-            BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or => {
-                return Err(ConstError::new(at, "unexpected operator on integers"));
-            }
-        };
-        Ok(v)
-    }
-
-    fn float_binary(at: IrId, op: BinOp, x: f64, y: f64) -> EvalResult {
-        let v = match op {
-            BinOp::Add => ConstValue::Float(x + y),
-            BinOp::Sub => ConstValue::Float(x - y),
-            BinOp::Mul => ConstValue::Float(x * y),
-            BinOp::Div => ConstValue::Float(x / y),
-            BinOp::Rem => ConstValue::Float(x % y),
-            BinOp::Lt => ConstValue::Bool(x < y),
-            BinOp::Le => ConstValue::Bool(x <= y),
-            BinOp::Gt => ConstValue::Bool(x > y),
-            BinOp::Ge => ConstValue::Bool(x >= y),
-            _ => {
-                return Err(ConstError::new(
-                    at,
-                    "this operator does not apply to floats",
-                ));
-            }
-        };
-        Ok(v)
-    }
-
-    fn unary(&self, at: IrId, op: UnOp, v: ConstValue) -> EvalResult {
-        match (op, v) {
-            (UnOp::Neg, ConstValue::Int(n)) => Ok(ConstValue::Int(-n)),
-            (UnOp::Neg, ConstValue::Float(f)) => Ok(ConstValue::Float(-f)),
-            (UnOp::Not, ConstValue::Bool(b)) => Ok(ConstValue::Bool(!b)),
-            (UnOp::BitNot, ConstValue::Int(n)) => Ok(ConstValue::Int(!n)),
-            (UnOp::Ref | UnOp::RefMut, _) => Err(ConstError::new(
-                at,
-                "taking an address has no compile-time value",
-            )),
-            (_, other) => Err(ConstError::new(
-                at,
-                format!("cannot apply this operator to `{}`", other.display()),
-            )),
-        }
+        Ok(value)
     }
 
     /// A primitive operator that reached the IR as a tagged [`ExprKind::Call`].
@@ -1152,8 +1047,12 @@ impl<'a> ConstEval<'a> {
                 return Err(ConstError::new(at, "a binary operator wants two operands"));
             };
             match (a, b) {
-                (ConstValue::Int(x), ConstValue::Int(y)) => Self::int_binary(at, o, x, y),
-                (ConstValue::Float(x), ConstValue::Float(y)) => Self::float_binary(at, o, *x, *y),
+                (ConstValue::Int(x), ConstValue::Int(y)) => {
+                    int_binary(o, x, y).map_err(|m| ConstError::new(at, m))
+                }
+                (ConstValue::Float(x), ConstValue::Float(y)) => {
+                    float_binary(o, *x, *y).map_err(|m| ConstError::new(at, m))
+                }
                 _ => Err(ConstError::new(at, "this operator applies to numbers only")),
             }
         };
@@ -1169,11 +1068,11 @@ impl<'a> ConstEval<'a> {
             BuiltinOp::Shl => bin(BinOp::Shl),
             BuiltinOp::Shr => bin(BinOp::Shr),
             BuiltinOp::Neg => match args {
-                [v] => self.unary(at, UnOp::Neg, v.clone()),
+                [v] => unary_op(UnOp::Neg, v).map_err(|m| ConstError::new(at, m)),
                 _ => Err(ConstError::new(at, "`-` wants one operand")),
             },
             BuiltinOp::BitNot => match args {
-                [v] => self.unary(at, UnOp::BitNot, v.clone()),
+                [v] => unary_op(UnOp::BitNot, v).map_err(|m| ConstError::new(at, m)),
                 _ => Err(ConstError::new(at, "`~` wants one operand")),
             },
         }
@@ -1518,5 +1417,141 @@ fn const_arg_value(k: &crate::sema::ty::Const) -> Option<ConstValue> {
         Const::Width(n) => Some(ConstValue::Int((*n).into())),
         Const::Value(a) => Some(a.value.clone()),
         _ => None,
+    }
+}
+
+// ===< The arithmetic itself >===
+//
+// These four are free functions over [`ConstValue`]s, with no tree and no node
+// behind them, and they are deliberately the **only** implementation of what an
+// operator on compile-time values means.
+//
+// Two front ends reach them. This module walks the IR, which is where a `#const`
+// body and a `::` initializer are evaluated. Inference walks the **AST**, for
+// the one thing it needs a value for before there is any IR: a compile-time
+// value written inside a *type* — an array length `[SIZE * 2]T`, a `const`
+// generic argument. Those two walks cannot be shared (the trees differ, and one
+// runs before the other exists), but the semantics underneath them can be, and
+// must be: `SIZE * 2` reaching a different answer in a type than in a value
+// would be a language with two arithmetics.
+//
+// The error is a plain `String` rather than a [`ConstError`] for the same
+// reason: a message about `2 / 0` is the same message wherever it is written,
+// and only the *place* to report it differs. Each front end supplies its own.
+
+/// Apply `op` to two values that are already computed.
+///
+/// Short-circuiting `&&` / `||` are **not** here: their whole point is that the
+/// right operand may not be evaluated, so they belong to whichever walk can
+/// choose not to descend.
+pub fn binary_values(op: BinOp, a: &ConstValue, b: &ConstValue) -> Result<ConstValue, String> {
+    match op {
+        // Equality is structural and works on every shape, which is what lets
+        // it compare an aggregate or a variant without a case per kind.
+        BinOp::Eq => return Ok(ConstValue::Bool(a == b)),
+        BinOp::Ne => return Ok(ConstValue::Bool(a != b)),
+        _ => {}
+    }
+    match (a, b) {
+        (ConstValue::Int(x), ConstValue::Int(y)) => int_binary(op, x, y),
+        (ConstValue::Float(x), ConstValue::Float(y)) => float_binary(op, *x, *y),
+        // A `char` is ordered but has no arithmetic: `'a' + 1` is a question
+        // about encodings, and the answer is a written `$cast`.
+        (ConstValue::Char(x), ConstValue::Char(y)) => match op {
+            BinOp::Lt => Ok(ConstValue::Bool(x < y)),
+            BinOp::Le => Ok(ConstValue::Bool(x <= y)),
+            BinOp::Gt => Ok(ConstValue::Bool(x > y)),
+            BinOp::Ge => Ok(ConstValue::Bool(x >= y)),
+            _ => Err("this operator does not apply to `char`".into()),
+        },
+        _ => Err(format!(
+            "cannot apply this operator to `{}` and `{}`",
+            a.display(),
+            b.display()
+        )),
+    }
+}
+
+/// Integer arithmetic, at **arbitrary precision**. Whether the result fits the
+/// type it is being read at is a separate question, asked by the caller that
+/// knows which type that is.
+pub fn int_binary(op: BinOp, x: &BigInt, y: &BigInt) -> Result<ConstValue, String> {
+    // Division and remainder by zero are a *trap* at run time; at compile time
+    // there is nothing to trap, so they are an error with a reason.
+    let nonzero = |v: &BigInt| {
+        if v.is_zero() {
+            Err("division by zero".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    // A shift amount is a count, not a value: a negative or absurd one has no
+    // meaning rather than a wrapped one.
+    let shift_amount = |v: &BigInt| {
+        v.to_u32()
+            .filter(|n| *n < 4096)
+            .ok_or_else(|| "shift amount is negative or unreasonably large".to_string())
+    };
+    let v = match op {
+        BinOp::Add => ConstValue::Int(x + y),
+        BinOp::Sub => ConstValue::Int(x - y),
+        BinOp::Mul => ConstValue::Int(x * y),
+        BinOp::Div => {
+            nonzero(y)?;
+            ConstValue::Int(x / y)
+        }
+        BinOp::Rem => {
+            nonzero(y)?;
+            ConstValue::Int(x % y)
+        }
+        BinOp::BitAnd => ConstValue::Int(x & y),
+        BinOp::BitOr => ConstValue::Int(x | y),
+        BinOp::BitXor => ConstValue::Int(x ^ y),
+        BinOp::Shl => ConstValue::Int(x << shift_amount(y)?),
+        BinOp::Shr => ConstValue::Int(x >> shift_amount(y)?),
+        BinOp::Lt => ConstValue::Bool(x < y),
+        BinOp::Le => ConstValue::Bool(x <= y),
+        BinOp::Gt => ConstValue::Bool(x > y),
+        BinOp::Ge => ConstValue::Bool(x >= y),
+        BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or => {
+            return Err("unexpected operator on integers".into());
+        }
+    };
+    Ok(v)
+}
+
+/// Float arithmetic, at `f64`. A `comptime_float` is conceptually an `f128`
+/// (§1.5); narrowing it to what the host can compute with is a limit of this
+/// evaluator, not of the language.
+pub fn float_binary(op: BinOp, x: f64, y: f64) -> Result<ConstValue, String> {
+    let v = match op {
+        BinOp::Add => ConstValue::Float(x + y),
+        BinOp::Sub => ConstValue::Float(x - y),
+        BinOp::Mul => ConstValue::Float(x * y),
+        BinOp::Div => ConstValue::Float(x / y),
+        BinOp::Rem => ConstValue::Float(x % y),
+        BinOp::Lt => ConstValue::Bool(x < y),
+        BinOp::Le => ConstValue::Bool(x <= y),
+        BinOp::Gt => ConstValue::Bool(x > y),
+        BinOp::Ge => ConstValue::Bool(x >= y),
+        _ => return Err("this operator does not apply to floats".into()),
+    };
+    Ok(v)
+}
+
+/// Apply a prefix operator to a value that is already computed.
+pub fn unary_op(op: UnOp, v: &ConstValue) -> Result<ConstValue, String> {
+    match (op, v) {
+        (UnOp::Neg, ConstValue::Int(n)) => Ok(ConstValue::Int(-n)),
+        (UnOp::Neg, ConstValue::Float(f)) => Ok(ConstValue::Float(-f)),
+        (UnOp::Not, ConstValue::Bool(b)) => Ok(ConstValue::Bool(!b)),
+        (UnOp::BitNot, ConstValue::Int(n)) => Ok(ConstValue::Int(!n)),
+        (UnOp::Ref | UnOp::RefMut, _) => {
+            Err("taking an address has no compile-time value".into())
+        }
+        (_, other) => Err(format!(
+            "cannot apply this operator to `{}`",
+            other.display()
+        )),
     }
 }

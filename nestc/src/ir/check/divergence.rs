@@ -54,7 +54,7 @@ use crate::common::diagnostic::Diagnostic;
 use crate::sema::def::DefTable;
 use crate::sema::ty::Ty;
 
-use crate::ir::{Arm, Block, Expr, ExprKind, Function, IrId, Linked, Meta, Stmt, StmtKind};
+use crate::ir::{Block, Expr, ExprKind, Function, IrId, Linked, Meta, Stmt, StmtKind};
 
 /// Report every `-> never` function that could return.
 pub fn check(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagnostic>) {

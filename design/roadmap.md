@@ -456,6 +456,30 @@ function as it was written, rather than once per instantiation.
   for this pass, because a constant's value is wanted *during* inference and
   this pass runs long afterwards.
 
+### Fixed afterwards
+
+Four things the first cut of this phase got wrong or left out, all with tests:
+
+- **A computed array length** (`[SIZE * 2]T`) now works. §3.2 says a length is a
+  compile-time constant, and an expression over constants is one. It is folded
+  during inference — where a length is wanted — by the **same** arithmetic the
+  const evaluator runs on the IR: `ir::const_eval::binary_values` and its
+  neighbours are free functions over `ConstValue`s with no tree behind them, and
+  the two walks share them. A *call* still cannot stand there, and that is
+  stated rather than worked around: a body is not compiled until its types are
+  known, and this is inference asking.
+- **A generic with no finite set of instantiations** (`grow.<T>` calling
+  `grow.<Box.<T>>`) used to run the compiler out of stack. It is now reported,
+  once per declaration, against a depth budget.
+- **A bound's trait arguments** are carried to monomorphization.
+  `impl Conv.<i32> for Vec3` and `impl Conv.<bool> for Vec3` are coherent (§4.9)
+  and both apply to `Vec3`; with only the trait to go on, selection picked one
+  silently.
+- **Two impls of one trait for one type shared a symbol.** Their members have
+  the same name and the same canonical path, so the implemented trait is now
+  part of the symbol (`_NC4Vec3XN4ConvIi32E2to`) and of the name
+  (`Vec3.<as Conv.<i32>>.to`).
+
 ### What it does not do
 
 - **Dead-code elimination.** An unreached concrete function is still emitted and
@@ -467,14 +491,8 @@ function as it was written, rather than once per instantiation.
 - **Cross-compilation-unit generics.** A generic declaration is not a root: which
   instantiations of it exist is a question about its callers, and for a `@public`
   generic in a library, about a consumer this compilation cannot see.
-- **Two impls of one trait for one self type differing only in the trait's own
-  arguments** (`impl Add.<f64> for Vec3` beside `impl Add.<i32> for Vec3`).
-  `Dispatch::Generic` records the trait, not the arguments the bound was written
-  with, so there is nothing to match them against.
-- **A computed array length** (`[SIZE * 2]T`). Still rejected, and still not a
-  monomorphization question: the evaluator runs on the IR and a length is needed
-  during inference, before there is any. Lowering one expression on demand, or
-  an AST-level evaluator, is the shape of the fix.
+- **Cross-file instantiation sharing.** Two files asking for `id.<i32>` produce
+  one function, because the key is the symbol; two *compilations* do not.
 
 ---
 

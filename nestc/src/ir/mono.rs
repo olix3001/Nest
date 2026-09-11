@@ -129,10 +129,18 @@ pub fn run(
         queue: VecDeque::new(),
         emitted: HashMap::new(),
         done: HashSet::new(),
+        too_deep: HashSet::new(),
+        member_impl: impls
+            .impls
+            .iter()
+            .enumerate()
+            .filter(|(_, imp)| imp.trait_def.is_some())
+            .flat_map(|(i, imp)| imp.members.values().map(move |&m| (m, i)))
+            .collect(),
     };
 
     for root in roots(mono.meta, linked) {
-        mono.reach(linked, root, Vec::new());
+        mono.reach(linked, root, Vec::new(), 0);
     }
     while let Some(job) = mono.queue.pop_front() {
         let Some(original) = linked.get(job.origin).cloned() else {
@@ -141,9 +149,9 @@ pub fn run(
         let mut func = if job.args.is_empty() {
             original
         } else {
-            mono.instantiate(&original, job.def, &job.args)
+            mono.instantiate(linked, &original, job.def, &job.args)
         };
-        mono.rewrite(linked, &mut func);
+        mono.rewrite(linked, &mut func, job.depth);
         let file = linked.file_of(job.origin).unwrap_or(FileId(0));
         linked.insert(file, func);
     }
@@ -205,7 +213,29 @@ struct Job {
     /// arguments, `origin` itself when there are none.
     def: DefId,
     args: Vec<GenericArg>,
+    /// How many instantiations deep this one is: a root is 0, and a callee is
+    /// one more than the body it was found in. See [`INSTANTIATION_DEPTH`].
+    depth: u32,
 }
+
+/// How many instantiations deep the walk may go before giving up.
+///
+/// A generic function that calls itself at a *bigger* type has no fixed point:
+/// `grow.<T>` calling `grow.<Box.<T>>` asks for `Box.<Box.<T>>` next, and there
+/// is no argument set at which it stops. The program is legal to write and there
+/// is no finite program to emit for it, so the compiler has to say so rather
+/// than run until it dies — which, without this, it does: the types grow with
+/// the queue and the first thing to break is the stack, under the recursion in
+/// `subst_ty` or in mangling.
+///
+/// Plain recursion at the *same* arguments is not affected and needs no budget:
+/// the instantiation is already queued when its own body is walked, so it is
+/// found in `emitted` and the walk stops there.
+///
+/// 64 is deep enough that no honest program reaches it — a type nested 64 deep
+/// is not something anyone writes — and shallow enough to fail in well under a
+/// second.
+const INSTANTIATION_DEPTH: u32 = 64;
 
 struct Mono<'a> {
     defs: &'a mut DefTable,
@@ -228,6 +258,18 @@ struct Mono<'a> {
     /// Every def already queued or emitted, so a recursive generic function
     /// (`fact.<T>` calling itself) terminates.
     done: HashSet<DefId>,
+    /// Declarations already reported as having no finite set of instantiations,
+    /// so one runaway generic produces one diagnostic.
+    too_deep: HashSet<DefId>,
+    /// Which `impl` each member was declared in.
+    ///
+    /// Only a **trait** impl's members are here, and only because of naming: two
+    /// impls of one trait-with-arguments for one type — `impl Conv.<i32> for
+    /// Vec3` beside `impl Conv.<bool> for Vec3` — are coherent (§4.9), declare
+    /// the same member name, and share a canonical path. Without the trait in
+    /// the symbol they would share a symbol too, which is the one thing a
+    /// mangled name may not do.
+    member_impl: HashMap<DefId, usize>,
 }
 
 impl Mono<'_> {
@@ -239,6 +281,50 @@ impl Mono<'_> {
             .and_then(|f| self.meta.get::<Generics>(f.id))
             .map(|g| g.params)
             .unwrap_or_default()
+    }
+
+    /// The trait a method implements, with its arguments, or `None` for a free
+    /// function and for an inherent impl's method.
+    ///
+    /// This is what keeps two impls apart in a name. `impl Conv.<i32> for Vec3`
+    /// and `impl Conv.<bool> for Vec3` both declare `to`, both park it under
+    /// `Vec3`, and neither takes a generic argument of its own — so the
+    /// canonical path is the same for both and the symbol would be too.
+    ///
+    /// The impl's *own* generics are substituted out of the arguments first: for
+    /// `impl <T> Conv.<T> for Wrap.<T>` instantiated at `i32`, the qualifier is
+    /// `Conv.<i32>` and not `Conv.<T>`, because two instantiations of one impl
+    /// are two functions and have to be named as such.
+    fn trait_qualifier(
+        &self,
+        linked: &Linked,
+        origin: DefId,
+        args: &[GenericArg],
+    ) -> Option<Ty> {
+        let i = *self.member_impl.get(&origin)?;
+        let trait_def = self.impls.impls[i].trait_def?;
+        let trait_args = self.targets.get(i).map(|t| t.trait_args.clone())?;
+
+        // The impl's generics are the tail of the instantiation's arguments (see
+        // [`Generics::own`]), and they are what the impl's trait arguments are
+        // written in terms of.
+        let params = self.generics_of(linked, origin);
+        let own = self.own_count(linked, origin).min(params.len());
+        let mut subst = Subst::default();
+        for (p, a) in params[own..].iter().zip(args.iter().skip(own)) {
+            match a {
+                GenericArg::Ty(t) => {
+                    subst.tys.insert(*p, t.clone());
+                }
+                GenericArg::Const(k) => {
+                    subst.consts.insert(*p, k.clone());
+                }
+            }
+        }
+        Some(Ty::Nominal {
+            def: trait_def,
+            args: trait_args.iter().map(|t| subst_ty(&subst, t)).collect(),
+        })
     }
 
     /// How many of `def`'s generic parameters it declared itself (the rest being
@@ -253,7 +339,13 @@ impl Mono<'_> {
 
     /// Note that `origin` is reached with `args`, queueing it if this is the
     /// first time, and return the def its instantiation will have.
-    fn reach(&mut self, linked: &Linked, origin: DefId, args: Vec<GenericArg>) -> DefId {
+    fn reach(
+        &mut self,
+        linked: &Linked,
+        origin: DefId,
+        args: Vec<GenericArg>,
+        depth: u32,
+    ) -> DefId {
         // A bodyless declaration — an `extern("c") func` — is a symbol and a
         // signature and nothing else. It is reached, not instantiated.
         if args.is_empty() {
@@ -262,18 +354,26 @@ impl Mono<'_> {
             }
             if let Some(f) = linked.get(origin) {
                 let id = f.id;
-                self.stamp(id, origin, Vec::new(), 0);
+                let qual = self.trait_qualifier(linked, origin, &[]);
+                self.stamp(id, origin, Vec::new(), 0, qual.as_ref());
             }
             self.queue.push_back(Job {
                 origin,
                 def: origin,
                 args,
+                depth,
             });
             return origin;
         }
 
+        if depth >= INSTANTIATION_DEPTH {
+            self.report_too_deep(linked, origin);
+            return origin;
+        }
+
         let own = self.own_count(linked, origin);
-        let symbol = mangle(self.defs, &self.externs, origin, &args, own);
+        let qual = self.trait_qualifier(linked, origin, &args);
+        let symbol = mangle(self.defs, &self.externs, origin, &args, own, qual.as_ref());
         if let Some(&d) = self.emitted.get(&symbol) {
             return d;
         }
@@ -304,14 +404,52 @@ impl Mono<'_> {
         self.defs.get_mut(def).directives = self.defs.get(origin).directives.clone();
         self.emitted.insert(symbol, def);
         self.done.insert(def);
-        self.queue.push_back(Job { origin, def, args });
+        self.queue.push_back(Job {
+            origin,
+            def,
+            args,
+            depth,
+        });
         def
     }
 
+    /// Report a generic that has no finite set of instantiations, once per
+    /// declaration.
+    ///
+    /// Once, because the walk is a breadth-first queue: every sibling of the
+    /// call that ran out of depth is about to run out too, and one mistake
+    /// should not print sixty times.
+    fn report_too_deep(&mut self, linked: &Linked, origin: DefId) {
+        if !self.too_deep.insert(origin) {
+            return;
+        }
+        let name = self.defs.canonical_string(origin);
+        let mut d = Diagnostic::error(format!(
+            "`{name}` has no finite set of instantiations: it was still being instantiated \
+             {INSTANTIATION_DEPTH} levels deep"
+        ));
+        if let Some(span) = linked.get(origin).and_then(|f| self.meta.span(f.id)) {
+            d = d.with_primary(span, "this function instantiates itself at a larger type");
+        }
+        self.out.push(d.with_note(
+            "a generic that calls itself at a *different* argument — `f.<T>` calling \
+             `f.<Box.<T>>` — asks for a new function every time, so there is no finite \
+             program to emit"
+                .to_string(),
+        ));
+    }
+
     /// Record what a function is, and the two names it will be known by.
-    fn stamp(&mut self, id: IrId, origin: DefId, args: Vec<GenericArg>, own: usize) {
-        let symbol = mangle(self.defs, &self.externs, origin, &args, own);
-        let name = display_name(self.defs, origin, &args, own);
+    fn stamp(
+        &mut self,
+        id: IrId,
+        origin: DefId,
+        args: Vec<GenericArg>,
+        own: usize,
+        qual: Option<&Ty>,
+    ) {
+        let symbol = mangle(self.defs, &self.externs, origin, &args, own, qual);
+        let name = display_name(self.defs, origin, &args, own, qual);
         self.meta.set(
             id,
             Instance {
@@ -339,7 +477,13 @@ impl Mono<'_> {
     /// locals, which is what a local's def is: the place it was written. Their
     /// *types* differ and live on the fresh ids above; nothing else about a
     /// local does.
-    fn instantiate(&mut self, original: &Function, def: DefId, args: &[GenericArg]) -> Function {
+    fn instantiate(
+        &mut self,
+        linked: &Linked,
+        original: &Function,
+        def: DefId,
+        args: &[GenericArg],
+    ) -> Function {
         let params = self
             .meta
             .get::<Generics>(original.id)
@@ -369,7 +513,8 @@ impl Mono<'_> {
             subst: &subst,
         };
         cloner.visit_function(&mut func);
-        self.stamp(func.id, original.def, args.to_vec(), own);
+        let qual = self.trait_qualifier(linked, original.def, args);
+        self.stamp(func.id, original.def, args.to_vec(), own, qual.as_ref());
         func
     }
 
@@ -377,13 +522,17 @@ impl Mono<'_> {
 
     /// Walk an already-concrete function: resolve each call through a bound into
     /// a direct one, and queue every callee it reaches.
-    fn rewrite(&mut self, linked: &Linked, func: &mut Function) {
-        let mut r = Rewriter { mono: self, linked };
+    fn rewrite(&mut self, linked: &Linked, func: &mut Function, depth: u32) {
+        let mut r = Rewriter {
+            mono: self,
+            linked,
+            depth,
+        };
         r.visit_function(func);
     }
 
     /// Resolve one call and queue what it reaches.
-    fn rewrite_call(&mut self, linked: &Linked, e: &mut Expr) {
+    fn rewrite_call(&mut self, linked: &Linked, e: &mut Expr, depth: u32) {
         let recorded: Option<Vec<GenericArg>> = self.meta.get::<Instantiation>(e.id).map(|i| i.0);
         let callee_ty = self.meta.ty(call_callee_id(e).unwrap_or(e.id));
         let ExprKind::Call {
@@ -410,12 +559,14 @@ impl Mono<'_> {
                 trait_def,
                 method,
                 self_ty,
+                trait_args,
             } => {
-                let (trait_def, method, self_ty) = (*trait_def, *method, self_ty.clone());
+                let (trait_def, method) = (*trait_def, *method);
+                let (self_ty, trait_args) = (self_ty.clone(), trait_args.clone());
                 let call_args = recorded.unwrap_or_default();
-                match self.select(linked, trait_def, method, &self_ty, &call_args) {
+                match self.select(linked, trait_def, method, &self_ty, &trait_args, &call_args) {
                     Some((target, targs)) => {
-                        let def = self.reach(linked, target, targs);
+                        let def = self.reach(linked, target, targs, depth);
                         *dispatch = Dispatch::Static;
                         callee.kind = ExprKind::Global(def);
                     }
@@ -437,7 +588,7 @@ impl Mono<'_> {
                     Some(a) => a,
                     None => self.args_from_signature(linked, target, callee_ty.as_ref()),
                 };
-                let def = self.reach(linked, target, args);
+                let def = self.reach(linked, target, args, depth);
                 callee.kind = ExprKind::Global(def);
             }
         }
@@ -485,8 +636,11 @@ impl Mono<'_> {
     }
 
     /// Queue every method the vtable of `concrete` for `trait_def` will hold.
-    fn reach_vtable(&mut self, linked: &Linked, trait_def: DefId, concrete: &Ty) {
-        let Some((i, bindings)) = self.match_impl(trait_def, concrete) else {
+    fn reach_vtable(&mut self, linked: &Linked, trait_def: DefId, concrete: &Ty, depth: u32) {
+        // A vtable is built for a trait as a *type* (`*dyn Trait`), which has no
+        // arguments to give — `dyn Add.<f64>` would carry them in the type
+        // itself, and object safety is a separate question. Nothing to match.
+        let Some((i, bindings)) = self.match_impl(trait_def, concrete, &[]) else {
             return;
         };
         let mut members: Vec<DefId> = self.impls.impls[i].members.values().copied().collect();
@@ -501,7 +655,7 @@ impl Mono<'_> {
             // A vtable slot takes no generic arguments of its own — that is what
             // object safety guarantees — so the impl's are the whole list.
             let args = self.inherited_args(linked, m, &bindings);
-            self.reach(linked, m, args);
+            self.reach(linked, m, args, depth);
         }
     }
 
@@ -524,10 +678,11 @@ impl Mono<'_> {
         trait_def: DefId,
         method: DefId,
         self_ty: &Ty,
+        trait_args: &[Ty],
         call_args: &[GenericArg],
     ) -> Option<(DefId, Vec<GenericArg>)> {
         let name = self.defs.get(method).name.clone();
-        let (i, bindings) = self.match_impl(trait_def, self_ty)?;
+        let (i, bindings) = self.match_impl(trait_def, self_ty, trait_args)?;
         let target = self.impls.impls[i]
             .members
             .get(&name)
@@ -568,20 +723,32 @@ impl Mono<'_> {
     /// meant. Nothing else needs ranking here, because inference already proved
     /// the choice is unambiguous — this is re-deriving a settled answer, not
     /// making it again.
-    fn match_impl(&self, trait_def: DefId, self_ty: &Ty) -> Option<(usize, Subst)> {
+    fn match_impl(
+        &self,
+        trait_def: DefId,
+        self_ty: &Ty,
+        trait_args: &[Ty],
+    ) -> Option<(usize, Subst)> {
         // A method's `self` may be declared by pointer (`func (self: *Self)`),
         // and a `Dispatch::Generic` records the **parameter's** type — so the
         // receiver of `d.weight()` on a `*D` arrives here as `*Entity` while the
         // impl is written `impl Describe for Entity`. Try the type as written
         // first, so an impl really written for a pointer still wins, then
         // through it.
-        self.match_impl_exact(trait_def, self_ty).or_else(|| {
-            let inner = strip_ptr(self_ty);
-            (inner != *self_ty).then(|| self.match_impl_exact(trait_def, &inner))?
-        })
+        self.match_impl_exact(trait_def, self_ty, trait_args)
+            .or_else(|| {
+                let inner = strip_ptr(self_ty);
+                (inner != *self_ty)
+                    .then(|| self.match_impl_exact(trait_def, &inner, trait_args))?
+            })
     }
 
-    fn match_impl_exact(&self, trait_def: DefId, self_ty: &Ty) -> Option<(usize, Subst)> {
+    fn match_impl_exact(
+        &self,
+        trait_def: DefId,
+        self_ty: &Ty,
+        trait_args: &[Ty],
+    ) -> Option<(usize, Subst)> {
         let mut best: Option<(u8, usize, Subst)> = None;
         for (i, imp) in self.impls.impls.iter().enumerate() {
             if imp.trait_def != Some(trait_def) {
@@ -593,6 +760,26 @@ impl Mono<'_> {
             let mut bindings = Subst::default();
             if !match_ty(&imp.generics, &target.self_ty, self_ty, &mut bindings) {
                 continue;
+            }
+            // The trait's own arguments are the other half of the question, and
+            // the only half when two impls agree about the self type: `impl
+            // Add.<f64> for Vec3` beside `impl Add.<i32> for Vec3` is coherent
+            // (§4.9) and both match `Vec3`. A bound that wrote no arguments does
+            // not constrain them — a trait that takes none is the usual reason —
+            // so an empty list matches anything rather than only an impl that
+            // also wrote none.
+            if !trait_args.is_empty() {
+                if target.trait_args.len() != trait_args.len() {
+                    continue;
+                }
+                let ok = target
+                    .trait_args
+                    .iter()
+                    .zip(trait_args)
+                    .all(|(p, a)| match_ty(&imp.generics, p, a, &mut bindings));
+                if !ok {
+                    continue;
+                }
             }
             let score = if imp.self_is_generic() { 1 } else { 2 };
             if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
@@ -627,12 +814,15 @@ impl Mono<'_> {
 struct Rewriter<'a, 'b> {
     mono: &'b mut Mono<'a>,
     linked: &'b Linked,
+    /// How deep the function being walked is. Everything it reaches is one
+    /// deeper — see [`INSTANTIATION_DEPTH`].
+    depth: u32,
 }
 
 impl VisitorMut for Rewriter<'_, '_> {
     fn visit_expr(&mut self, expr: &mut Expr) {
         match &expr.kind {
-            ExprKind::Call { .. } => self.mono.rewrite_call(self.linked, expr),
+            ExprKind::Call { .. } => self.mono.rewrite_call(self.linked, expr, self.depth + 1),
             // A `*T` unsized to `*dyn Trait` is a call-graph edge with no call
             // in it: the vtable built for `concrete` holds that impl's methods,
             // and something will later jump through one of them. Nothing else in
@@ -641,7 +831,8 @@ impl VisitorMut for Rewriter<'_, '_> {
             ExprKind::DynCast { concrete, .. } => {
                 let concrete = concrete.clone();
                 if let Some(t) = dyn_trait(self.mono.meta, expr.id) {
-                    self.mono.reach_vtable(self.linked, t, &concrete);
+                    self.mono
+                        .reach_vtable(self.linked, t, &concrete, self.depth + 1);
                 }
             }
             _ => {}
@@ -685,7 +876,13 @@ fn dyn_trait(meta: &Meta, id: IrId) -> Option<DefId> {
 /// the type the impl is for, the function's own on the function. That is the
 /// same split the symbol is built from, and the reason is the same — a reader
 /// looking at `core.Vec.<i32>.push` should see the thing they wrote.
-fn display_name(defs: &DefTable, origin: DefId, args: &[GenericArg], own: usize) -> String {
+fn display_name(
+    defs: &DefTable,
+    origin: DefId,
+    args: &[GenericArg],
+    own: usize,
+    qual: Option<&Ty>,
+) -> String {
     let render = |args: &[GenericArg]| {
         let inner: Vec<String> = args
             .iter()
@@ -709,6 +906,15 @@ fn display_name(defs: &DefTable, origin: DefId, args: &[GenericArg], own: usize)
     for (i, seg) in path.iter().enumerate() {
         if i > 0 {
             out.push('.');
+        }
+        // `Vec3.<as Conv.<i32>>.to` — the pseudo-segment says which impl this
+        // member came from, in the same angle-bracketed style the IR dump
+        // already uses for `core.<impl []T>.len`. Two frames both labelled
+        // `Vec3.to` would be a worse dump than a longer one.
+        if i + 1 == path.len()
+            && let Some(t) = qual.filter(|_| path.len() >= 2)
+        {
+            out.push_str(&format!("<as {}>.", t.display(defs)));
         }
         out.push_str(seg);
         if i + 2 == path.len() && !inherited.is_empty() {
@@ -1005,10 +1211,18 @@ impl VisitorMut for Cloner<'_> {
                 *concrete = subst_ty(self.subst, concrete);
             }
             ExprKind::Call {
-                dispatch: Dispatch::Generic { self_ty, .. },
+                dispatch:
+                    Dispatch::Generic {
+                        self_ty,
+                        trait_args,
+                        ..
+                    },
                 ..
             } => {
                 *self_ty = subst_ty(self.subst, self_ty);
+                for a in trait_args.iter_mut() {
+                    *a = subst_ty(self.subst, a);
+                }
             }
             _ => {}
         }
@@ -1058,6 +1272,7 @@ fn mangle(
     origin: DefId,
     args: &[GenericArg],
     own: usize,
+    qual: Option<&Ty>,
 ) -> Symbol {
     let d = defs.get(origin);
     if let Some(link) = d.directives.iter().find(|x| x.is("link_name"))
@@ -1077,25 +1292,34 @@ fn mangle(
     let own = own.min(args.len());
     let (own_args, inherited) = args.split_at(own);
     let mut s = String::from("_NC");
-    for (i, seg) in path.iter().enumerate() {
+    // Every component but the last is the path to the member; the last is the
+    // member itself, and the trait qualifier goes between them.
+    let (head, member) = path.split_at(path.len() - 1);
+    for (i, seg) in head.iter().enumerate() {
         push_len(&mut s, seg.as_str());
         // The impl's arguments belong to the type the impl is for, which is the
         // component before the member.
-        if i + 2 == path.len() && !inherited.is_empty() {
+        if i + 1 == head.len() && !inherited.is_empty() {
             push_args(&mut s, defs, inherited);
         }
     }
-    // Nowhere to hang them (a free function reached through a blanket impl, a
-    // one-component path): they still have to be in the symbol, so they join the
-    // function's own.
-    if inherited.is_empty() || path.len() >= 2 {
-        if !own_args.is_empty() {
-            push_args(&mut s, defs, own_args);
-        }
-    } else {
-        let mut all = inherited.to_vec();
-        all.extend(own_args.iter().cloned());
-        push_args(&mut s, defs, &all);
+    // `X` + the trait: what this member implements, for the impls that a path
+    // alone cannot tell apart (see [`Mono::trait_qualifier`]). It is a letter, so
+    // the length-prefixed path before it ends unambiguously.
+    if let Some(t) = qual.filter(|_| !head.is_empty()) {
+        s.push('X');
+        push_ty(&mut s, defs, t);
+    }
+    push_len(&mut s, member[0].as_str());
+    // Nowhere to hang the impl's arguments (a one-component path — a free
+    // function reached through a blanket impl): they still have to be in the
+    // symbol, so they join the function's own.
+    let mut trailing = own_args.to_vec();
+    if head.is_empty() {
+        trailing.splice(0..0, inherited.iter().cloned());
+    }
+    if !trailing.is_empty() {
+        push_args(&mut s, defs, &trailing);
     }
     Symbol::new(&s)
 }

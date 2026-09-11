@@ -6504,8 +6504,8 @@ fn a_generic_impl_is_matched_against_the_concrete_self_type() {
          }\n",
     );
     let names = instances(&session);
-    assert!(names.contains(&"Wrap.<i32>.tag".to_string()), "{names:?}");
-    assert!(names.contains(&"Wrap.<bool>.tag".to_string()), "{names:?}");
+    assert!(names.contains(&"Wrap.<i32>.<as Show>.tag".to_string()), "{names:?}");
+    assert!(names.contains(&"Wrap.<bool>.<as Show>.tag".to_string()), "{names:?}");
 }
 
 /// A `const` generic parameter has no storage: it *is* the value the
@@ -6577,7 +6577,7 @@ fn a_dyn_coercion_reaches_the_impls_its_vtable_will_hold() {
          }\n",
     );
     let names = instances(&session);
-    assert!(names.contains(&"Rock.weight".to_string()), "{names:?}");
+    assert!(names.contains(&"Rock.<as Describe>.weight".to_string()), "{names:?}");
 }
 
 /// Every function carries the name it will have in the binary — reached or not.
@@ -6746,8 +6746,8 @@ fn an_operator_on_a_generic_impl_instantiates_per_argument() {
          }\n",
     );
     let names = instances(&session);
-    assert!(names.contains(&"Vec2.<i32>.add".to_string()), "{names:?}");
-    assert!(names.contains(&"Vec2.<u8>.add".to_string()), "{names:?}");
+    assert!(names.contains(&"Vec2.<i32>.<as core.Add.<Vec2.<i32>>>.add".to_string()), "{names:?}");
+    assert!(names.contains(&"Vec2.<u8>.<as core.Add.<Vec2.<u8>>>.add".to_string()), "{names:?}");
 }
 
 /// The invariant that keeps not-eliminating-dead-code honest: a generic
@@ -6792,4 +6792,252 @@ fn every_call_names_a_function_the_program_still_has() {
         names.contains(&"core.<impl []T>.<i32>.len".to_string()),
         "{names:?}"
     );
+}
+
+// ===< Computed compile-time values in a type >===
+
+/// `[SIZE * 2]T` is a compile-time constant (§3.2), so it is a length. It is
+/// folded by the same arithmetic the const evaluator runs on the IR; only the
+/// walk differs, because there is no IR yet and a length is wanted before there
+/// is one.
+#[test]
+fn an_array_length_may_be_a_constant_expression() {
+    let session = analyze_clean(
+        "SIZE: usize :: 4\n\
+         W: usize :: SIZE * 2 + 1\n\
+         @public buf :: func (x: [SIZE * 2]i32, y: [W]u8, z: [1 << 3]i32) -> usize {\n\
+         \x20 return x.len() + y.len() + z.len()\n\
+         }\n\
+         @public main :: func () { const a := 1 }\n",
+    );
+    let ir = crate::ir::pretty::program_to_string(
+        &session.defs,
+        &session.ir_meta,
+        &session.ir[&entry_file(&session)],
+    );
+    assert!(
+        ir.contains("buf(x: [8]i32, y: [9]u8, z: [8]i32)"),
+        "{ir}"
+    );
+}
+
+/// A folded length is the same **type** as the literal it works out to: the
+/// whole point of the length being part of the type (§3.2) is that `[SIZE * 2]T`
+/// and `[8]T` are one type, not two that happen to agree.
+#[test]
+fn a_folded_length_is_the_same_type_as_the_literal_it_equals() {
+    analyze_clean(
+        "SIZE: usize :: 4\n\
+         take :: func (x: [8]i32) -> i32 { return 0 }\n\
+         give :: func (x: [SIZE * 2]i32) -> i32 { return take(x) }\n",
+    );
+    assert_eq!(
+        first_error(
+            "SIZE: usize :: 4\n\
+             take :: func (x: [9]i32) -> i32 { return 0 }\n\
+             give :: func (x: [SIZE * 2]i32) -> i32 { return take(x) }\n"
+        ),
+        "type mismatch: expected `[9]i32`, found `[8]i32`"
+    );
+}
+
+/// A `const` generic argument is the other slot that takes a written value (§5).
+/// A **literal or a constant** reaches it; an *expression* does not, and that is
+/// a limit of the grammar rather than of the fold: inside `.<...>` a `>` is the
+/// closing bracket, so `repeat.<N * 2>` has nowhere to put one. Naming the
+/// constant is how it is written today.
+#[test]
+fn a_const_generic_argument_takes_a_named_constant() {
+    let session = analyze_clean(
+        "SIX: u16 :: 6\n\
+         repeat :: func <const W: u16> () -> u16 { return W }\n\
+         @public main :: func () { const a := repeat.<SIX>() }\n",
+    );
+    let names = instances(&session);
+    assert!(names.contains(&"repeat.<6>".to_string()), "{names:?}");
+}
+
+/// The arithmetic is the *same* arithmetic, so the errors are the same errors.
+#[test]
+fn a_folded_length_reports_what_the_evaluator_would() {
+    assert!(
+        first_error("f :: func (x: [4 / 0]i32) {}\n").contains("division by zero"),
+        "{}",
+        first_error("f :: func (x: [4 / 0]i32) {}\n")
+    );
+    assert!(
+        first_error("f :: func (x: [0 - 1]i32) {}\n").contains("does not fit in `usize`"),
+        "{}",
+        first_error("f :: func (x: [0 - 1]i32) {}\n")
+    );
+}
+
+/// A `const` generic parameter has no value until an instantiation picks one,
+/// and a `Const` has no shape for an unevaluated expression — so `[N]T` is fine
+/// and `[N * 2]T` is not. Saying which is better than silently picking a number.
+#[test]
+fn a_const_parameter_may_not_be_combined_with_an_operator_in_a_length() {
+    analyze_clean("f :: func <const N: usize> (x: [N]i32) -> [N]i32 { return x }\n");
+    assert!(
+        first_error("f :: func <const N: usize> (x: [N * 2]i32) {}\n")
+            .contains("cannot be combined with an operator"),
+        "{}",
+        first_error("f :: func <const N: usize> (x: [N * 2]i32) {}\n")
+    );
+}
+
+/// A call needs a **body**, and a body is not compiled until its types are
+/// known — which is what inference is doing when it asks for a length. Naming
+/// the call through a `::` constant does not help: following the constant
+/// arrives right back at the call. The diagnostic says so rather than suggesting
+/// something that does not work.
+#[test]
+fn a_call_cannot_be_a_length_even_through_a_constant() {
+    let direct = "#const\n\
+                  double :: func (n: usize) -> usize { return n * 2 }\n\
+                  f :: func (x: [double(4)]i32) {}\n";
+    assert!(
+        first_error(direct).contains("a function's body is not compiled"),
+        "{}",
+        first_error(direct)
+    );
+    let through = "#const\n\
+                   double :: func (n: usize) -> usize { return n * 2 }\n\
+                   LEN: usize :: double(4)\n\
+                   f :: func (x: [LEN]i32) {}\n";
+    assert!(
+        first_error(through).contains("a function's body is not compiled"),
+        "{}",
+        first_error(through)
+    );
+}
+
+/// A generic that calls itself at a **larger** type has no fixed point:
+/// `grow.<T>` calling `grow.<Box.<T>>` asks for a new function every time. There
+/// is no finite program to emit, and without a budget the compiler runs until
+/// its stack gives out — so it says so instead.
+#[test]
+fn a_generic_with_no_finite_instantiation_set_is_reported() {
+    let msgs: Vec<String> = analyze_mem(
+        &[(
+            "main",
+            "Box :: struct <T> { v: T }\n\
+             grow :: func <T> (x: T, n: i32) -> i32 {\n\
+             \x20 if n <= 0 { return 0 }\n\
+             \x20 return grow.<Box.<T>>(Box.<T> { v: x }, n - 1)\n\
+             }\n\
+             @public main :: func () { const a := grow.<i32>(1, 3) }\n",
+        )],
+        "main",
+    )
+    .diagnostics
+    .iter()
+    .map(|d| d.message.clone())
+    .collect();
+    // One mistake, one diagnostic: every sibling of the call that ran out of
+    // depth is about to run out too.
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert!(
+        msgs[0].contains("has no finite set of instantiations"),
+        "{msgs:?}"
+    );
+}
+
+/// Plain recursion at the *same* arguments needs no budget and must not trip it:
+/// the instantiation is already queued when its own body is walked.
+#[test]
+fn recursion_at_the_same_arguments_is_not_a_runaway() {
+    analyze_clean(
+        "chain :: func <T> (x: T, n: i32) -> T {\n\
+         \x20 if n <= 0 { return x }\n\
+         \x20 return chain.<T>(x, n - 1)\n\
+         }\n\
+         @public main :: func () { const r := chain.<u8>(1, 3) }\n",
+    );
+}
+
+/// A trait's own arguments are part of which impl a bound stands for. `impl
+/// Conv.<i32> for Vec3` and `impl Conv.<bool> for Vec3` do not overlap (§4.9)
+/// and both apply to `Vec3`, so with only the trait to go on there is nothing to
+/// tell them apart by — and picking one silently would be worse than any error.
+#[test]
+fn a_bounds_trait_arguments_choose_between_impls_of_one_trait() {
+    let session = analyze_clean(
+        "Conv :: trait <U> { to :: func (self: *Self) -> U }\n\
+         Vec3 :: struct { x: i32 }\n\
+         impl Conv.<i32> for Vec3 { to :: func (self: *Vec3) -> i32 { return 1 } }\n\
+         impl Conv.<bool> for Vec3 { to :: func (self: *Vec3) -> bool { return true } }\n\
+         use_i :: func <T: Conv.<i32>> (t: *T) -> i32 { return t.to() }\n\
+         use_b :: func <T: Conv.<bool>> (t: *T) -> bool { return t.to() }\n\
+         @public main :: func () {\n\
+         \x20 const v := Vec3 { x: 1 }\n\
+         \x20 const a := use_i(&v)\n\
+         \x20 const b := use_b(&v)\n\
+         }\n",
+    );
+    // Each instantiation reached the impl its bound named, which the return
+    // type of the call it makes is the visible proof of.
+    for (inst, want) in [("use_i.<Vec3>", "i32"), ("use_b.<Vec3>", "bool")] {
+        let body = instance_body(&session, inst);
+        let crate::ir::StmtKind::Return(Some(e)) = &body.stmts[0].kind else {
+            panic!("expected a `return`");
+        };
+        assert_eq!(
+            session.ir_meta.ty_or_error(e.id).display(&session.defs),
+            want
+        );
+    }
+}
+
+/// Those two impls also declare the **same member name** under the same type, so
+/// a symbol built from the canonical path alone would name one function twice.
+/// The implemented trait is part of the symbol for exactly this reason.
+#[test]
+fn two_impls_of_one_trait_do_not_share_a_symbol() {
+    let session = analyze_clean(
+        "Conv :: trait <U> { to :: func (self: *Self) -> U }\n\
+         Vec3 :: struct { x: i32 }\n\
+         impl Conv.<i32> for Vec3 { to :: func (self: *Vec3) -> i32 { return 1 } }\n\
+         impl Conv.<bool> for Vec3 { to :: func (self: *Vec3) -> bool { return true } }\n\
+         use_i :: func <T: Conv.<i32>> (t: *T) -> i32 { return t.to() }\n\
+         use_b :: func <T: Conv.<bool>> (t: *T) -> bool { return t.to() }\n\
+         @public main :: func () {\n\
+         \x20 const v := Vec3 { x: 1 }\n\
+         \x20 const a := use_i(&v)\n\
+         \x20 const b := use_b(&v)\n\
+         }\n",
+    );
+    assert_eq!(
+        symbol_of(&session, "Vec3.<as Conv.<i32>>.to"),
+        "_NC4Vec3XN4ConvIi32E2to"
+    );
+    assert_eq!(
+        symbol_of(&session, "Vec3.<as Conv.<bool>>.to"),
+        "_NC4Vec3XN4ConvIbE2to"
+    );
+    let mut symbols: Vec<String> = session
+        .linked
+        .funcs()
+        .filter_map(|f| session.ir_meta.get::<crate::ir::mono::Instance>(f.id))
+        .map(|i| i.symbol.to_string())
+        .collect();
+    let total = symbols.len();
+    symbols.sort();
+    symbols.dedup();
+    assert_eq!(symbols.len(), total, "two functions share a symbol");
+}
+
+/// An **inherent** impl's method takes no qualifier: there is no trait, and the
+/// path already names it uniquely.
+#[test]
+fn an_inherent_method_takes_no_trait_qualifier() {
+    let session = analyze_clean(
+        "Box :: struct <T> { v: T }\n\
+         impl <T> Box.<T> { @public get :: func (self: *Box.<T>) -> T { return self.v } }\n\
+         @public main :: func () {\n\
+         \x20 const a := Box.<i32> { v: 1 }\n\
+         \x20 const x := a.get()\n\
+         }\n",
+    );
+    assert_eq!(symbol_of(&session, "Box.<i32>.get"), "_NC3BoxIi32E3get");
 }

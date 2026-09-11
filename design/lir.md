@@ -471,6 +471,21 @@ function. That is what makes `core.Vec.<i32>.push` mangle as
 `_NC4core3VecIi32E4push` rather than hanging everything off the end. A path with
 nowhere to put them — a free function — takes them all on the function.
 
+A **trait impl's** member carries one more thing: `X` followed by the trait it
+implements, between the type and the member.
+
+```
+_NC 4Vec3 X N4ConvIi32E 2to        // Vec3.<as Conv.<i32>>.to
+```
+
+This is not decoration. `impl Conv.<i32> for Vec3` and `impl Conv.<bool> for
+Vec3` are two coherent impls (§4.9 — they do not overlap, because the trait's
+arguments differ), they declare the same member name, and that member has the
+same canonical path in both. Without the trait they would have the same symbol,
+which is the one thing a mangled name may not allow. An **inherent** impl's
+member takes no qualifier: there is no trait, and the path already names it
+uniquely.
+
 Nothing outside monomorphization may construct a symbol. A pass that needs one
 asks the instantiation it already holds.
 
