@@ -5,17 +5,18 @@ broke, what to run); this file is the *plan* (what is next, and what each step
 involves). When they disagree, the handoff is right about the past and this file
 is right about the future.
 
-Phases 0 and 1 are **complete**: the front end parses, resolves, infers, lowers
-to IR, validates the IR, and evaluates constants. 334 tests pass. Everything
-below is unbuilt.
+Phases 0 through 4 are **complete**: the front end parses, resolves, infers,
+lowers to IR, validates the IR, evaluates constants, splits the prelude, declares
+every intrinsic in `core`, and takes a `const` generic of any primitive type. 350
+tests pass. Phase 5 and everything after it is unbuilt.
 
 ## The order, at a glance
 
 | # | Phase | Depends on | Size | Why here |
 |---|---|---|---|---|
-| 2 | The prelude split | — | small | Self-contained, and every later phase adds names that have to land on one side of it |
-| 3 | `#intrinsic`, and retiring `$name` | 2 | medium | Cheaper before core grows; every later phase declares intrinsics |
-| 4 | `const` generics over any primitive | — | medium | Prerequisite for 5, useful alone |
+| 2 | The prelude split ✅ | — | small | Self-contained, and every later phase adds names that have to land on one side of it |
+| 3 | `#intrinsic`, and retiring `$name` ✅ | 2 | medium | Cheaper before core grows; every later phase declares intrinsics |
+| 4 | `const` generics over any primitive ✅ | — | medium | Prerequisite for 5, useful alone |
 | 5 | The integer family `int.<N, S>` | 3, 4 | large | The deepest type-system change; everything after it is easier |
 | 6 | Monomorphization | 5 | large | Was the old "Phase 2"; 5 changes what it must substitute |
 | 7 | Layout | 6 | medium | A generic type has no layout until its arguments are known |
@@ -37,7 +38,7 @@ Two rules hold for every phase below:
 
 ---
 
-## Phase 2 — The prelude split
+## Phase 2 — The prelude split ✅ **done** (`effcafa`)
 
 **Goal.** `core.prelude` is globbed into every file; the rest of `core` needs an
 explicit `import`. Spec §4.6 already states this.
@@ -75,9 +76,31 @@ works.
 import; a program writing `impl Add.<Vec3> for Vec3` needs `import <core/ops>`;
 the tag, not the path, is what the compiler looks for.
 
+**What it actually took.** Three things the plan did not list:
+
+- **`#lang` had to work on an `import` binding.** The prelude is a *namespace*
+  assembled by re-export, so the binding that names it is the only thing a tag
+  can sit on. The tag travels with the `RawImport` and is registered when the
+  import is wired, because the target namespace is not known before that.
+- **A `#lang` trait is selectable without importing its name.** `a + b` reaches
+  `Add` by tag, and gating that on `import <core/ops>` would have made `+`
+  require an import. The same rule covers the desugars that call a lang trait's
+  method by name — `for` calls `.into_iter()` / `.next()`, `.?` calls
+  `.branch()`. `in_scope_traits` no longer contains `Add`; `lang_traits` does.
+- **Imports have to be wired in dependency order.** Walking `<core/ops>` looks up
+  a *member* of the root, and that member is itself produced by re-export — so it
+  does not exist until `core.nest` is wired. An arbitrary `HashMap` order found
+  it about half the time. `wire_order` is a post-order DFS over the import graph,
+  tolerant of the cycles `core` already has.
+
+`core/str.nest` gets no namespace re-export from the root, and `panic.nest` was
+renamed `fail.nest`: the root exports each topic file as a namespace, and a
+namespace called `str` or `panic` beside the prelude's `str` *type* and `panic`
+*function* would be one name meaning two things.
+
 ---
 
-## Phase 3 — `#intrinsic`, and retiring `$name`
+## Phase 3 — `#intrinsic`, and retiring `$name` ✅ **done** (`cead807`)
 
 **Goal.** Every compiler-provided function is an ordinary bodyless declaration in
 `core` marked `#intrinsic`. The `$` sigil is removed from the language. Spec §6.4
@@ -126,9 +149,54 @@ down in core where a reader can see it.
 **Done when.** `$` is not a token; `packages/core` declares every intrinsic;
 `nestc examples/*.nest` is green; the spec's code blocks match what compiles.
 
+**What it actually took.** The plan's item 4 was **wrong**, and the user said so
+before the work started: it claimed `cast`, `transmute` and `panic` need special
+handling because their *signatures cannot say what they do*. All three are
+perfectly ordinary declarations:
+
+```nest
+@public cast      :: #intrinsic("cast") func <T, U> (x: U) -> T
+@public transmute :: #intrinsic("transmute") func <T, U> (x: U) -> T
+@public panic     :: #caller_location #intrinsic("panic") func (msg: str) -> never
+```
+
+`cast.<u8>(n)` pins `T` and infers `U` because `T` is written first — ordinary
+partial-turbofish inference, which already worked. `cast(n)` takes `T` from
+context — ordinary return-position inference. `panic` diverging is `-> never` in
+the signature, so `DIVERGING_INTRINSICS` is gone and *any* function returning
+`never` now ends a block. `#caller_location` was already a directive.
+
+What those three actually need is a **check** the signature cannot express, and
+that is a different claim: `transmute`'s same-size rule (phase 7, once there is
+layout), and `cast`'s legality rule. Neither is a signature exception.
+
+The two genuine exceptions are elsewhere, and both are in
+`sema::intrinsics::Special`:
+
+- **`make.<[]T>(n)` yields `[]mut T`.** The *mutability* is what the allocation
+  adds and no bound says "the same type, made mutable".
+- **`len(x)` takes an array or a slice.** No bound means "one of the two built-in
+  sequences".
+
+Other departures from the plan:
+
+- `#intrinsic` takes an **optional tag**: `#intrinsic("size_of")` names the
+  intrinsic, a bare `#intrinsic` defaults it to the declared name. The spec's
+  code blocks showed the bare form and the roadmap wanted the tag; both are
+  accepted, and the tag is what the compiler keys on, so `core` stays renameable.
+- Retiring `$` took the **comptime-item marker** with it. `$assert(...)` was how
+  the parser knew a call could stand among a struct's fields or a trait's
+  members. The shape decides it now: every declaration in those positions is
+  `name :: rhs` (or `name: ty`), so an identifier followed by `(`, `.`, `.<` or
+  `[` is a call. One token of lookahead — `Parser::at_comptime_item`.
+- The IR still prints `$name` for an [`ExprKind::Intrinsic`]. The IR is a compiler
+  artifact, not source: the sigil reads as "compiler primitive" there, and
+  keeping it left 135 snapshot lines untouched.
+- `$abort` had no spec entry and is gone; `core`'s two `.!` bodies call `panic`.
+
 ---
 
-## Phase 4 — `const` generics over any primitive type
+## Phase 4 — `const` generics over any primitive type ✅ **done** (`c99deac`)
 
 **Goal.** `const N: Ty` accepts any primitive `Ty`, not only `usize`. Spec §5
 already states this.
@@ -160,6 +228,37 @@ is wrong and would only show up in monomorphization, much later.
 
 **Done when.** `func <const B: bool> ()` type-checks and instantiates, `3u8` and
 `3usize` are different arguments, and every array-length test still passes.
+
+**What it actually took.** `Const::Value(u64)` became
+`Const::Value(Box<ConstArg>)`, a `ConstValue` **and** the `Ty` it was written at,
+which cost `Const` its `Copy`. Two things the plan did not list:
+
+- **The turbofish parser only accepted integer literals.** A `const` parameter
+  may be a `bool`, a `char` or a float, so `parse_generic_arg` had to accept any
+  primitive literal — and a leading `-`, which inside `.<...>` is part of the
+  literal rather than an operator, because there is no const-expression
+  arithmetic there.
+- **An array length is a `usize`, and that is a property of the slot.** Spec §5's
+  illustration wrote `func <const N: uint32> () -> [N]byte`, which under typed
+  identity produces `expected [4]i32, found [4]i32` at the call site — the length
+  argument is a `u32` and the annotation's is a `usize`. A `const` parameter
+  standing in a length slot is now required to be `usize`, reported at the
+  declaration, and the spec's illustration was corrected. The alternative — a
+  silent coercion at the length slot — would have put a hole in the identity rule
+  the phase exists to establish.
+
+Range is checked where the argument is written: `small.<300>()` on a
+`<const N: u8>` is refused with the arbitrary-precision literal still in hand,
+the same rule §2.5 applies to a typed constant.
+
+A `const` parameter is not only a value the body reads — it appears **in types**,
+so it takes part in type checking everywhere a type does. That is pinned by
+`a_const_parameter_in_a_type_is_checked_as_a_type`: `N` solved from a `[N]T`
+argument and carried into the return type, an explicit `.<4>` contradicting the
+call's own argument, a symbolic `[N]T` refusing a fixed-count literal, two
+distinct parameters being two distinct lengths, `[N][M]T`, and two
+instantiations in one expression. A mismatch is reported in the **lengths**
+(``expected `[4]u32`, found `[3]u32```), never in `N`.
 
 ---
 
@@ -276,7 +375,7 @@ tool translating a profile should keep talking to the compiler the same way.
 | Question | Owner | Blocks |
 |---|---|---|
 | What `overflow=` does in a **release** profile | the user | nothing — nestc takes it as input either way |
-| Whether `PTR_BITS` is spelled in the source, or only exists inside the compiler | the user | phase 5, cosmetically |
-| Array lengths through the const evaluator (`[SIZE * 2]T`) | design | phase 6 — a `Const::Unevaluated(DefId)` resolved post-link is the shape; **do not** bolt a second evaluator onto the AST |
-| The `str` → `String` / `[]T` → `Vec.<T>` conversion: a `From`-style trait or a `#lang` coercion | the user | `std`, which does not exist yet |
+| Whether `PTR_BITS` is spelled in the source, or only exists inside the compiler | the user | phase 5, cosmetically, **USER NOTE:** It should be defined by the target info, exists only inside the compiler |
+| Array lengths through the const evaluator (`[SIZE * 2]T`) | design | phase 6 — a `Const::Unevaluated(DefId)` resolved post-link is the shape; **do not** bolt a second evaluator onto the AST; This step can be deferred for the future |
+| The `str` → `String` / `[]T` → `Vec.<T>` conversion: a `From`-style trait or a `#lang` coercion | the user | `std`, which does not exist yet; This decision is left for after the codegen works. |
 | `#when` (conditional compilation) | the user | nothing yet; not in the parser, spec, or grammar |
