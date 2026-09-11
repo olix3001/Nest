@@ -1095,11 +1095,16 @@ impl Inferer<'_> {
     fn infer_composite_elems(&mut self, body: &crate::parser::ast::CompositeBody) {
         use crate::parser::ast::CompositeBody;
         match body {
-            CompositeBody::Named { fields, .. } => {
+            CompositeBody::Named { fields, spread } => {
                 for &f in fields {
                     if let NodeKind::FieldInit { value, .. } = self.ast.node(f).kind.clone() {
                         self.infer_expr(value);
                     }
+                }
+                // The spread is an element of the literal like any other: typed
+                // up front here, held to the target type in `check_record_body`.
+                if let Some(s) = spread {
+                    self.infer_expr(*s);
                 }
             }
             CompositeBody::Positional(elems) => {
@@ -1648,7 +1653,9 @@ impl Inferer<'_> {
             return;
         }
         match body {
-            CompositeBody::Named { fields, .. } => self.check_record_body(node, target, &fields),
+            CompositeBody::Named { fields, spread } => {
+                self.check_record_body(node, target, &fields, spread)
+            }
             CompositeBody::Positional(elems) => self.check_positional_body(node, target, &elems),
             CompositeBody::Repeat { value, count } => {
                 match self.autoderef(target) {
@@ -1682,15 +1689,29 @@ impl Inferer<'_> {
 
     /// `{ name: value, ... }` against a struct: every name must be one of the
     /// struct's fields, and every field must be given exactly once.
-    fn check_record_body(&mut self, node: NodeId, target: &Ty, fields: &[NodeId]) {
-        let Ty::Nominal { def, .. } = self.autoderef(target) else {
-            let msg = format!(
-                "`{}` is not a struct, so it cannot be built from named fields",
-                self.cx.resolve(target).display(self.defs)
-            );
-            self.report(node, msg);
-            return;
+    fn check_record_body(
+        &mut self,
+        node: NodeId,
+        target: &Ty,
+        fields: &[NodeId],
+        spread: Option<NodeId>,
+    ) {
+        // A record literal builds a **struct**. An enum is nominal too, and
+        // reaches here with no fields to miss, so the kind is what has to be
+        // checked rather than the shape — `E { ..e }` and `E { }` were both
+        // silently accepted while this only looked for `Ty::Nominal`.
+        let struct_def = match self.autoderef(target) {
+            Ty::Nominal { def, .. } if self.defs.get(def).kind == DefKind::Struct => def,
+            _ => {
+                let msg = format!(
+                    "`{}` is not a struct, so it cannot be built from named fields",
+                    self.cx.resolve(target).display(self.defs)
+                );
+                self.report(node, msg);
+                return;
+            }
         };
+        let def = struct_def;
         let mut seen: Vec<Symbol> = Vec::new();
         for &f in fields {
             let NodeKind::FieldInit { name, value } = self.ast.node(f).kind.clone() else {
@@ -1715,6 +1736,15 @@ impl Inferer<'_> {
             } else {
                 seen.push(name);
             }
+        }
+        // `..rest` supplies every field the literal did not write, and it must
+        // be a value of the type being built: a different struct that happened
+        // to have the remaining field names would otherwise build this one.
+        if let Some(s) = spread {
+            let sty = self.node_ty(s);
+            let want = self.autoderef(target);
+            self.expect(s, &sty, &want);
+            return;
         }
         // Every declared field must be initialized.
         let missing: Vec<String> = self

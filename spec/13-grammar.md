@@ -248,6 +248,7 @@ composite_literal =
   | '.' snake_ident [ '(' [ args ] ')' | '{' [ field_init { ',' field_init } ] '}' ]  // enum variant
 composite_body =
     [ field_init { ',' field_init } [ ',' '..' expr ] ]  // named   -> record / struct
+                                                        //   (also after '.{')
   | [ expr { ',' expr } ]                            // positional  -> array / tuple
   | expr ';' expr                                    // repeat: value ; count -> array
 field_init = identifier ':' expr

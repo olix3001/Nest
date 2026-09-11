@@ -27,14 +27,12 @@ use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
-use std::collections::HashSet;
-
 use crate::parser::ast::{
     AssignOp, Ast, BinOp, CompositeBody, NodeId, NodeKind, TryKind, VariantArgs, VariantPatArgs,
 };
 
 use super::def::{DefId, DefKind, DefTable, LangItems, Visibility};
-use super::{DefMeta, Resolution};
+use super::{DefMeta, Resolution, SpreadBase};
 
 /// Desugar every `for` / `.?` / `.!` in `file`.
 pub fn desugar_file(
@@ -90,10 +88,12 @@ impl Desugar<'_> {
             NodeKind::Assign { op, place, value } if op != AssignOp::Assign => {
                 self.lower_compound_assign(id, op, place, value)
             }
+            // A spread already bound to a temporary is this pass's own output;
+            // only a written one needs binding.
             NodeKind::CompositeLit {
                 ty,
                 body: CompositeBody::Named { fields, spread },
-            } if spread.is_some() => {
+            } if spread.is_some_and(|s| self.ast.meta::<SpreadBase>(s).is_none()) => {
                 self.lower_spread(id, ty, fields, spread.expect("checked"))
             }
             _ => {}
@@ -102,19 +102,20 @@ impl Desugar<'_> {
 
     // ===< `..` spread >===
 
-    /// `P { x: 5, ..rest }` → `{ __s :: rest  P { x: 5, y: __s.y, z: __s.z } }`.
+    /// `P { x: 5, ..rest }` → `{ __spread1 :: rest  P { x: 5, ..__spread1 } }`.
     ///
-    /// The spread is written once and read once *per missing field*, so it is
-    /// bound to a temporary first: `P { x: 5, ..Default.default() }` must call
-    /// `default` one time, not one time per field it fills.
+    /// Only the **temporary** is introduced here; the spread itself stays on the
+    /// literal and is expanded into field reads by lowering. The split is what
+    /// lets `.{ x: 5, ..rest }` work too: the fields a spread fills come from the
+    /// literal's type, and desugaring runs before there is one, while lowering
+    /// runs after inference has settled it.
     ///
-    /// Expanding here, rather than in lowering, is what makes the rest of the
-    /// compiler unaware of the form: inference sees an ordinary literal with
-    /// every field written, so field typing, privacy and the missing-field check
-    /// all apply to the filled-in reads exactly as they would to written ones.
-    /// The cost is that the **type must be named** — the field list comes from
-    /// the resolved `P`, and desugaring runs before inference, so `.{ ..rest }`
-    /// has nothing to enumerate.
+    /// Binding the temporary *here* rather than there is deliberate: a new local
+    /// needs a [`DefId`], and this is the pass that allocates them. It also gives
+    /// the "evaluated once" rule a place a reader can see it —
+    /// `P { x: 5, ..Default.default() }` calls `default` one time, not one time
+    /// per field it fills, because the call is bound to a name before any field
+    /// reads it.
     fn lower_spread(
         &mut self,
         id: NodeId,
@@ -123,91 +124,24 @@ impl Desugar<'_> {
         spread: NodeId,
     ) {
         let span = self.ast.node(id).span;
-        let Some(ty_node) = ty else {
-            self.report(
-                spread,
-                "a `..` spread needs the type named — write `P { ..rest }` rather than \
-                 `.{ ..rest }`, because the fields it fills come from the type",
-            );
-            return;
-        };
-        let Some(def) = self.type_head_def(ty_node) else {
-            // Resolution already reported the unknown type.
-            return;
-        };
-        let def = self.defs.resolve_alias(def);
-        if self.defs.get(def).kind != DefKind::Struct {
-            let msg = format!(
-                "a `..` spread needs a struct; `{}` is not one",
-                self.defs.canonical_string(def)
-            );
-            self.report(spread, msg);
-            return;
-        }
-        // Which fields the literal already wrote; the rest come from the spread.
-        let written: HashSet<Symbol> = fields
-            .iter()
-            .filter_map(|&f| match &self.ast.node(f).kind {
-                NodeKind::FieldInit { name, .. } => Some(name.clone()),
-                _ => None,
-            })
-            .collect();
-        let mut missing: Vec<Symbol> = self
-            .defs
-            .get(def)
-            .ns
-            .members
-            .iter()
-            .filter(|(n, m)| {
-                self.defs.get(**m).kind == DefKind::Field && !written.contains(*n)
-            })
-            .map(|(n, _)| n.clone())
-            .collect();
-        // `ns.members` is a hash map, so fix an order: the IR is keyed by name
-        // and does not care, but a snapshot and a diagnostic both read better
-        // when two compilations agree.
-        missing.sort();
-
         let name = self.fresh("spread");
         let (pat, local) = self.binding_pat(span, &name, false);
-        // The temporary is **typed**, with the literal's own type node: a spread
-        // must be a value of the type being built. Without this, `P { x: 1, ..q }`
-        // where `q` is some other struct that happens to have the remaining
-        // field names type-checks, and builds a `P` out of a `Q`.
         let bind = self.alloc(
             span,
-            NodeKind::LocalDecl {
-                is_const: true,
+            NodeKind::ConstBind {
                 pattern: pat,
-                ty: Some(ty_node),
-                value: spread,
+                rhs: spread,
             },
         );
-        let mut all = fields;
-        for field in missing {
-            let base = self.local_ref(span, &name, local);
-            let access = self.alloc(
-                span,
-                NodeKind::FieldAccess {
-                    base,
-                    name: field.clone(),
-                },
-            );
-            all.push(self.alloc(
-                span,
-                NodeKind::FieldInit {
-                    name: field,
-                    value: access,
-                },
-            ));
-        }
+        let base = self.local_ref(span, &name, local);
+        self.ast.set_meta(base, SpreadBase);
         let lit = self.alloc(
             span,
             NodeKind::CompositeLit {
-                ty: Some(ty_node),
+                ty,
                 body: CompositeBody::Named {
-                    fields: all,
-                    spread: None,
+                    fields,
+                    spread: Some(base),
                 },
             },
         );
@@ -218,19 +152,6 @@ impl Desugar<'_> {
                 tail: Some(lit),
             },
         );
-    }
-
-    /// The def a type node's head path resolved to.
-    fn type_head_def(&self, node: NodeId) -> Option<DefId> {
-        let node = match &self.ast.node(node).kind {
-            NodeKind::TypePath { .. } | NodeKind::Path { .. } => node,
-            NodeKind::GenericApply { base, .. } => *base,
-            _ => return None,
-        };
-        match self.ast.meta::<Resolution>(node)? {
-            Resolution::Def(d) => Some(d),
-            _ => None,
-        }
     }
 
     // ===< compound assignment >===

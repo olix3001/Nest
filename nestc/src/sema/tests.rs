@@ -4377,6 +4377,21 @@ f :: func () -> P { return P { x: 5, ..Default.default() } }
     // Any value of the type works; `Default` is a convention, not a requirement.
     analyze_clean("P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return P { x: 5, ..b } }\n");
     analyze_clean("P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return P { ..b } }\n");
+
+    // And the **inferred** literal spreads too. The fields a spread fills come
+    // from the literal's type, so the expansion waits for inference to settle
+    // it; only the temporary is bound before then.
+    let s = analyze_clean(
+        "P :: struct { x: i32, y: i32, z: i32 }\nf :: func (b: P) -> P { return .{ x: 5, ..b } }\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    assert!(ir.contains("y: (__spread1: P.y): i32"), "{ir}");
+    assert!(ir.contains("z: (__spread1: P.z): i32"), "{ir}");
+    analyze_clean("P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return .{ ..b } }\n");
+    analyze_clean(
+        "P :: struct { x: i32, y: i32 }\nf :: func (b: P) { const p: P := .{ x: 1, ..b } }\n",
+    );
 }
 
 #[test]
@@ -4391,17 +4406,17 @@ fn a_spread_is_checked_like_the_literal_it_stands_for() {
              f :: func (q: Q) -> P { return P { x: 1, ..q } }\n",
             "expected `P`, found `Q`",
         ),
-        // Only a struct has fields to spread.
+        (
+            "P :: struct { x: i32, y: i32 }\nQ :: struct { x: i32, y: i32 }\n\
+             f :: func (q: Q) -> P { return .{ x: 1, ..q } }\n",
+            "expected `P`, found `Q`",
+        ),
+        // Only a struct is built from named fields, spread or not. An enum is
+        // nominal too and reaches the same check with no fields to miss, so the
+        // kind is what decides.
         (
             "E :: enum { a, b }\nf :: func (e: E) -> E { return E { ..e } }\n",
-            "a `..` spread needs a struct",
-        ),
-        // The type must be named: the fields the spread fills come from it, and
-        // desugaring runs before inference, so `.{ ..rest }` has nothing to
-        // enumerate.
-        (
-            "P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return .{ x: 5, ..b } }\n",
-            "a `..` spread needs the type named",
+            "`E` is not a struct, so it cannot be built from named fields",
         ),
         // And without one, a literal still names every field.
         (

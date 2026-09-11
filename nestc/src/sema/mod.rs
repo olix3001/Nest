@@ -80,6 +80,11 @@ pub enum Resolution {
     Error,
 }
 
+/// Marks the temporary a `..` spread was bound to, so desugaring can tell its
+/// own output from a spread the program wrote (see `desugar::lower_spread`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpreadBase;
+
 /// Marks a node that *introduces* a definition, linking it to its [`DefId`] (and
 /// thus its canonical name). Attached by collection and by the resolver's local
 /// binding introduction.

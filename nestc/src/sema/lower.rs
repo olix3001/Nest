@@ -1375,6 +1375,80 @@ impl Lowerer<'_> {
         out
     }
 
+    /// Append a `Field` read off the spread temporary for every field `def`
+    /// declares that the literal did not write.
+    ///
+    /// Declaration order, because the IR's field list is read positionally by
+    /// everything downstream and two compilations should agree.
+    fn fill_from_spread(&mut self, spread: NodeId, def: DefId, out: &mut Vec<(Symbol, Expr)>) {
+        let written: Vec<Symbol> = out.iter().map(|(n, _)| n.clone()).collect();
+        for name in self.record_field_names(def) {
+            if written.contains(&name) {
+                continue;
+            }
+            let base = self.lower_expr(spread);
+            let field = self.field_def(def, &name);
+            let fty = self.field_ty_of(def, &name);
+            let read = self.expr(
+                spread,
+                fty,
+                ExprKind::Field {
+                    base: Box::new(base),
+                    name: name.clone(),
+                    def: field,
+                },
+            );
+            out.push((name, read));
+        }
+    }
+
+    /// The fields `def` declares, in declaration order.
+    fn record_field_names(&self, def: DefId) -> Vec<Symbol> {
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Vec::new();
+        };
+        let ast = &self.asts[&file];
+        let rhs = match ast.node(node).kind.clone() {
+            NodeKind::ConstBind { rhs, .. } => rhs,
+            _ => node,
+        };
+        let NodeKind::StructType {
+            kind: crate::parser::ast::StructKind::Record(fields),
+            ..
+        } = ast.node(rhs).kind.clone()
+        else {
+            return Vec::new();
+        };
+        fields
+            .iter()
+            .filter_map(|&f| match &ast.node(f).kind {
+                NodeKind::Field { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `DefKind::Field` def named `name` on struct `def`.
+    fn field_def(&self, def: DefId, name: &Symbol) -> Option<DefId> {
+        let m = *self.defs.get(def).ns.members.get(name)?;
+        (self.defs.get(m).kind == DefKind::Field).then_some(m)
+    }
+
+    /// The declared type of `def`'s field `name`, as inference stamped it.
+    fn field_ty_of(&self, def: DefId, name: &Symbol) -> Ty {
+        let Some(field) = self.field_def(def, name) else {
+            return Ty::Error;
+        };
+        let d = self.defs.get(field);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Ty::Error;
+        };
+        // Inference stamps a member's declared type on the `Field` node itself —
+        // the node the member's def points at — not on the type node inside it.
+        self.asts[&file].meta::<Ty>(node).unwrap_or(Ty::Error)
+    }
+
     /// The struct a call's callee names, when the callee is a type rather than a
     /// function — the construction form. `None` for an ordinary call.
     fn construct_target(&self, callee: NodeId, ty: &Ty) -> Option<DefId> {
@@ -1706,8 +1780,8 @@ impl Lowerer<'_> {
     /// the type is the authority here.
     fn lower_composite(&mut self, node: NodeId, body: &CompositeBody, ty: Ty) -> Expr {
         match body {
-            CompositeBody::Named { fields, .. } => {
-                let fields = fields
+            CompositeBody::Named { fields, spread } => {
+                let mut lowered: Vec<(Symbol, Expr)> = fields
                     .iter()
                     .filter_map(|&f| match self.ast.node(f).kind.clone() {
                         NodeKind::FieldInit { name, value } => Some((name, self.lower_expr(value))),
@@ -1717,7 +1791,17 @@ impl Lowerer<'_> {
                 match &ty {
                     Ty::Nominal { def, .. } => {
                         let def = *def;
-                        self.expr(node, ty, ExprKind::Construct { def, fields })
+                        // `..rest` supplies every field the literal did not
+                        // write. It is expanded **here**, and not in desugaring,
+                        // because the fields it fills come from the literal's
+                        // type — which `.{ x: 5, ..rest }` does not have until
+                        // inference has settled it. `rest` is already bound to a
+                        // temporary, so each read is a field of a name rather
+                        // than a re-evaluation.
+                        if let Some(s) = spread {
+                            self.fill_from_spread(*s, def, &mut lowered);
+                        }
+                        self.expr(node, ty, ExprKind::Construct { def, fields: lowered })
                     }
                     // Named fields on a non-struct: already diagnosed.
                     _ => self.expr(node, ty, ExprKind::Error),

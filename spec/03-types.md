@@ -254,6 +254,7 @@ impl Default for P {
 
 P { x: 5, ..Default.default() }     // y and z come from the default
 P { x: 5, ..base }                  // ...or from any other P
+.{ x: 5, ..base }                   // and the inferred form spreads too
 ```
 
 - The spread is **last**, and there is at most one: what followed it would have
@@ -262,11 +263,10 @@ P { x: 5, ..base }                  // ...or from any other P
   to have the remaining field names is a type error, not a conversion.
 - It is evaluated **once**, then read once per field it fills — so
   `..Default.default()` calls `default` a single time.
-- The **type must be named**: `P { ..rest }`, not `.{ ..rest }`. The fields a
-  spread fills come from the type, and the expansion happens before the literal
-  is typed.
-- Every rule that applies to a written field applies to a filled-in one, privacy
-  included: a spread cannot reach a field the literal could not have written.
+- Every rule that applies to a written field applies to a filled-in one: the
+  expansion is ordinary field reads off the temporary.
+- Named or inferred, both spread. The fields a spread fills come from the
+  literal's type, so `.{ x: 5, ..base }` works wherever the context supplies one.
 
 `Default` is an ordinary trait in `core`, found by its `#lang("default")` tag:
 
