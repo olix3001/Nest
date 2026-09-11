@@ -227,7 +227,7 @@ get :: func <T> (self: *Client, url: str) -> Result.<T, FetchError> {
   ...
 }
 
-zeros :: func <const N: uint32> () -> [N]byte { ... }   // value param used in a type
+zeros :: func <const N: usize> () -> [N]u8 { ... }      // value param used in a type
 ```
 
 - `T` — any type, unconstrained (most permissive). A type parameter needs no kind
@@ -241,7 +241,9 @@ zeros :: func <const N: uint32> () -> [N]byte { ... }   // value param used in a
   `<const N: usize>` is never mistaken for a trait bound.
 
   `Ty` may be **any primitive type** — an integer of any width, `bool`, `char`,
-  `f32`. Restricting it to `usize` would be an arbitrary line: the parameter is a
+  `f32`. An **array length** is the one slot that fixes it: `[N]T` is a `usize`
+  count (§3.2), so a parameter standing in one must be declared `usize`. That is
+  a property of the slot, not of `const` parameters. Restricting it to `usize` would be an arbitrary line: the parameter is a
   compile-time value, every primitive has compile-time values, and the type
   system already has to compare and substitute them. It is also load-bearing
   rather than decorative — the integer family `int.<N, S>` (§3.1) is a `usize`

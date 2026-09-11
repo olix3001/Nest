@@ -5,7 +5,7 @@
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 
-use super::ast::{NodeId, NodeKind, StructKind, VariantPayload};
+use super::ast::{Lit, NodeId, NodeKind, StructKind, VariantPayload};
 use super::lexer::TokenKind;
 use super::parse::Parser;
 
@@ -172,16 +172,15 @@ impl Parser {
     }
 
     /// One turbofish argument: a `name = type` associated-type binding, a `_`
-    /// hole, an integer literal filling a `const` parameter, or a type.
+    /// hole, a literal filling a `const` parameter, or a type.
     fn parse_generic_arg(&mut self) -> NodeId {
-        // `zeros.<4>()` — a value argument for a `<const N: usize>` parameter
-        // (§5). Only a literal is accepted here; a named constant reaches a
-        // `const` slot as an ordinary path, handled by the type branch below.
-        if let Some(TokenKind::Int(n)) = self.peek() {
-            let n = n.clone();
-            let span = self.cur_span();
-            self.bump();
-            return self.alloc(span, NodeKind::Lit(crate::parser::ast::Lit::Int(n)));
+        // `zeros.<4>()`, `pick.<true>()`, `sep.<','>()` — a value argument for a
+        // `<const N: Ty>` parameter (§5). A `const` parameter's type may be any
+        // primitive, so any primitive literal may stand here; a named constant
+        // reaches a `const` slot as an ordinary path, handled by the type branch
+        // below.
+        if let Some(lit) = self.const_arg_lit() {
+            return lit;
         }
         // `Item = type` — an associated-type constraint. A plain type is never
         // followed by `=` inside `.<...>`, so `ident '='` is unambiguous.
@@ -550,6 +549,45 @@ impl Parser {
                 members,
             },
         )
+    }
+
+    /// A primitive literal standing in a `const` generic slot, or `None` if the
+    /// argument is not one.
+    ///
+    /// A leading `-` is part of the literal here rather than an operator: there
+    /// is no const-expression arithmetic inside `.<...>` (§5), so the only thing
+    /// a `-` can begin is a negative number.
+    fn const_arg_lit(&mut self) -> Option<NodeId> {
+        let start = self.cur_span();
+        let negated = matches!(self.peek(), Some(TokenKind::Minus));
+        let at = if negated { 1 } else { 0 };
+        let lit = match self.peek_nth(at)? {
+            TokenKind::Int(n) => Lit::Int(n.clone()),
+            TokenKind::Float(f) => Lit::Float(f.value),
+            // Only a number can be negated; `-true` is not a shape to accept and
+            // then diagnose.
+            TokenKind::TrueKw if !negated => Lit::Bool(true),
+            TokenKind::FalseKw if !negated => Lit::Bool(false),
+            TokenKind::Char(c) if !negated => Lit::Char(*c),
+            _ => return None,
+        };
+        if negated {
+            self.bump();
+        }
+        let end = self.cur_span();
+        self.bump();
+        let node = self.alloc(end, NodeKind::Lit(lit));
+        Some(if negated {
+            self.alloc(
+                start.to(end),
+                NodeKind::Unary {
+                    op: crate::parser::ast::UnOp::Neg,
+                    operand: node,
+                },
+            )
+        } else {
+            node
+        })
     }
 
     /// One trait member: an `assert(...)` comptime item, or a `name :: rhs`

@@ -42,6 +42,10 @@ use crate::parser::ast::{
 };
 
 use super::builtins::{self, Applies, BuiltinOp, BuiltinRow};
+use num_traits::ToPrimitive;
+
+use crate::ir::ConstValue;
+
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::impls::{ImplInfo, ImplTable};
 use super::ty::{Const, FloatWidth, InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
@@ -1688,11 +1692,13 @@ impl Inferer<'_> {
             // A sized array wants exactly its length; an unsolved length (a
             // `[_]T`, or a variable flowing in) is *decided* by this literal.
             Ty::Array { len, inner, .. } => {
-                let n = match self.cx.shallow_const(&len) {
-                    Const::Value(l) => l as usize,
-                    Const::Error => elems.len(),
-                    other => {
-                        let count = Const::Value(elems.len() as u64);
+                let shallow = self.cx.shallow_const(&len);
+                let n = match shallow.value() {
+                    Some(l) => l as usize,
+                    None if matches!(shallow, Const::Error) => elems.len(),
+                    None => {
+                        let other = shallow;
+                        let count = Const::len(elems.len() as u64);
                         if self.cx.unify_const(&other, &count).is_err() {
                             let msg = format!(
                                 "this literal has {} element(s) but the array is `[{}]`",
@@ -3140,18 +3146,19 @@ impl Inferer<'_> {
     /// Read one explicit `.<...>` argument in a `const` parameter's slot, and
     /// check it against the parameter's declared type.
     fn const_arg(&mut self, param: DefId, arg: NodeId) -> Const {
-        let k = self.const_len_in(self.file, arg);
-        // The argument is a value, so it must fit the parameter's type — the
-        // only place a `const` parameter's `: usize` is enforced.
+        // The declared type is what the argument is read *at*: a `3` in a
+        // `<const N: u8>` slot is a `u8`, and that is half of the argument's
+        // identity (§5, [`ConstArg`]).
         let declared = self.const_param_ty(param);
-        if !matches!(declared, Ty::Error) && !declared.is_int() {
+        if !matches!(declared, Ty::Error) && !declared.is_primitive() {
             let msg = format!(
-                "a `const` generic parameter must have an integer type, not `{}`",
+                "a `const` generic parameter must have a primitive type, not `{}`",
                 declared.display(self.defs)
             );
             self.report(arg, msg);
+            return Const::Error;
         }
-        k
+        self.const_value_in(self.file, arg, &declared, "a `const` argument", 0)
     }
 
     /// The declared type of a `<const N: T>` parameter — what `N` is worth as a
@@ -3159,23 +3166,30 @@ impl Inferer<'_> {
     /// Check one `<const N: T>` declaration.
     ///
     /// A `const` generic is a compile-time *value* that takes part in type
-    /// identity — `[3]i32` and `[4]i32` are different types (§3.2, §5) — and
-    /// [`Const`] represents exactly one kind of value: an unsigned integer.
-    /// Admitting a struct or an array here would mean teaching that little
-    /// lattice structured values, structural equality, and a mangling, for no
-    /// gain the language asks for. So anything but an integer is rejected at the
-    /// declaration rather than silently degrading to a `Const::Error` at the
-    /// first use.
+    /// identity — `[3]i32` and `[4]i32` are different types (§3.2, §5) — and the
+    /// declared type may be **any primitive**: an integer of any width, `bool`,
+    /// `char`, a float. Restricting it to `usize` would be an arbitrary line,
+    /// and it is load-bearing rather than decorative: the integer family
+    /// `int.<N, S>` (§3.1) is a `usize` width *and* a `bool` signedness, so
+    /// without `const S: bool` there is no one family for the integer operations
+    /// to be written over.
+    ///
+    /// Aggregates are not admitted. A struct or an array as a generic argument
+    /// would put structural equality of arbitrary values into type identity,
+    /// which is a much larger promise than comparing two primitives — so it is
+    /// rejected at the declaration rather than silently degrading to a
+    /// `Const::Error` at the first use.
     fn check_const_param(&mut self, node: NodeId) {
         let NodeKind::GenericConstParam { name, ty } = self.ast.node(node).kind.clone() else {
             return;
         };
         let t = self.ty_from_node(ty);
-        if matches!(self.cx.shallow(&t), Ty::Int { .. } | Ty::Error) {
+        let shallow = self.cx.shallow(&t);
+        if shallow.is_primitive() || matches!(shallow, Ty::Error) {
             return;
         }
         let msg = format!(
-            "a `const` generic parameter must have an integer type, but `{name}` is `{}`",
+            "a `const` generic parameter must have a primitive type, but `{name}` is `{}`",
             self.cx.resolve(&t).display(self.defs)
         );
         self.report(node, msg);
@@ -3302,8 +3316,8 @@ impl Inferer<'_> {
                 // `[N]T` with `N` a `const` parameter: the instantiation says
                 // what `N` is here.
                 len: match len {
-                    Const::Param(d) => map.consts.get(d).copied().unwrap_or(*len),
-                    other => *other,
+                    Const::Param(d) => map.consts.get(d).cloned().unwrap_or_else(|| len.clone()),
+                    other => other.clone(),
                 },
                 mutable: *mutable,
                 inner: Box::new(self.subst_type_params(inner, map)),
@@ -4367,49 +4381,156 @@ impl Inferer<'_> {
     /// a `[4]T`. Anything else (an arithmetic expression, say) has no
     /// const-evaluator behind it yet and is a diagnostic.
     fn const_len_in(&mut self, file: FileId, node: NodeId) -> Const {
-        self.const_len_depth(file, node, 0)
+        self.const_value_in(file, node, &Ty::usize(), "an array length", 0)
     }
 
-    fn const_len_depth(&mut self, file: FileId, node: NodeId, depth: u32) -> Const {
+    /// Read a compile-time value written in a type — an array length, or an
+    /// explicit `const` generic argument — **at** the type `want`.
+    ///
+    /// `want` is not a check bolted on afterwards; it is half of what the value
+    /// *is* (§5, [`ConstArg`]). An array length is always a `usize`, and a
+    /// `<const B: bool>` argument is a `bool`, so the literal `3` and the
+    /// literal `true` each arrive already knowing which.
+    ///
+    /// Four things can stand here (§3.2, §5): a literal, a `const` generic
+    /// parameter — which stays symbolic until monomorphization — a named
+    /// constant, followed one hop to its right-hand side so `SIZE :: 4` makes
+    /// `[SIZE]T` a `[4]T`, and the hole `[_]T`, whose length a composite literal
+    /// fills in. Anything else (an arithmetic expression, say) has no
+    /// const-evaluator behind it yet and is a diagnostic.
+    fn const_value_in(
+        &mut self,
+        file: FileId,
+        node: NodeId,
+        want: &Ty,
+        what: &'static str,
+        depth: u32,
+    ) -> Const {
         // A constant that names itself would otherwise loop forever.
         if depth > 8 {
-            self.report_in(file, node, "array length refers to itself");
+            let msg = format!("{what} may not refer to itself");
+            self.report_in(file, node, msg);
             return Const::Error;
         }
-        match self.asts[&file].node(node).kind.clone() {
-            NodeKind::Lit(Lit::Int(n)) => match u64::try_from(&n) {
-                Ok(v) => Const::Value(v),
-                Err(_) => {
-                    self.report_in(file, node, "array length does not fit in a `usize`");
-                    Const::Error
-                }
+        let kind = self.asts[&file].node(node).kind.clone();
+        // A literal has to agree with the type the slot is declared at. Reading
+        // `true` into a `<const N: usize>` is a mistake, and reporting it here —
+        // where both the value and the declared type are in hand — is the only
+        // place it reads as one.
+        let lit = match &kind {
+            NodeKind::Lit(lit) => Some(lit.clone()),
+            // `-3` in a signed slot. Nothing else is an operator a constant may
+            // be written with yet; a general expression needs the evaluator,
+            // which does not run this early (phase 6).
+            NodeKind::Unary {
+                op: crate::parser::ast::UnOp::Neg,
+                operand,
+            } => match &self.asts[&file].node(*operand).kind {
+                NodeKind::Lit(Lit::Int(n)) => Some(Lit::Int(-n.clone())),
+                NodeKind::Lit(Lit::Float(f)) => Some(Lit::Float(-f)),
+                _ => None,
             },
+            _ => None,
+        };
+        if let Some(lit) = lit {
+            return self.const_from_lit(file, node, &lit, want);
+        }
+        match kind {
             // `[_]T` — the length is whatever the value supplies.
             NodeKind::TypeHole => self.cx.fresh_const(),
             NodeKind::Path { .. } | NodeKind::TypePath { .. } => {
                 match self.resolved_def_in(file, node) {
-                    Some(def) => self.const_len_of_def(file, node, def, depth),
+                    Some(def) => self.const_of_def(file, node, def, want, what, depth),
                     // Unresolved: name resolution already complained.
                     None => Const::Error,
                 }
             }
             _ => {
-                self.report_in(
-                    file,
-                    node,
-                    "an array length must be an integer literal, a constant, or a `const` generic parameter",
+                let msg = format!(
+                    "{what} must be a literal, a constant, or a `const` generic parameter"
                 );
+                self.report_in(file, node, msg);
                 Const::Error
             }
         }
     }
 
-    /// The length a definition standing in a `[len]T` denotes.
-    fn const_len_of_def(&mut self, file: FileId, node: NodeId, def: DefId, depth: u32) -> Const {
+    /// Turn a literal into a [`Const`] of type `want`, or report why it cannot be
+    /// one. Range is checked here for the same reason it is checked for a typed
+    /// constant (§2.5): this is where the arbitrary-precision number is still in
+    /// hand.
+    fn const_from_lit(&mut self, file: FileId, node: NodeId, lit: &Lit, want: &Ty) -> Const {
+        let value = match (lit, want) {
+            (Lit::Int(n), Ty::Int { signed, width }) => {
+                if !super::ty::int_fits(n, *signed, *width, self.target) {
+                    let msg = format!("`{n}` does not fit in `{}`", want.display(self.defs));
+                    self.report_in(file, node, msg);
+                    return Const::Error;
+                }
+                ConstValue::Int(n.clone())
+            }
+            // A float parameter takes an integer literal too, the way a `f64`
+            // binding does.
+            (Lit::Int(n), Ty::Float(_)) => match n.to_f64() {
+                Some(f) => ConstValue::Float(f),
+                None => {
+                    self.report_in(file, node, "this integer is not representable as a float");
+                    return Const::Error;
+                }
+            },
+            (Lit::Float(f), Ty::Float(_)) => ConstValue::Float(*f),
+            (Lit::Bool(b), Ty::Bool) => ConstValue::Bool(*b),
+            (Lit::Char(c), Ty::Char) => ConstValue::Char(*c),
+            // An errored slot already reported; do not add to it.
+            (_, Ty::Error) => return Const::Error,
+            _ => {
+                let msg = format!(
+                    "a `const` argument of type `{}` cannot be written this way",
+                    want.display(self.defs)
+                );
+                self.report_in(file, node, msg);
+                return Const::Error;
+            }
+        };
+        Const::known(want.clone(), value)
+    }
+
+    /// The value a definition standing in a `const` slot denotes.
+    fn const_of_def(
+        &mut self,
+        file: FileId,
+        node: NodeId,
+        def: DefId,
+        want: &Ty,
+        what: &'static str,
+        depth: u32,
+    ) -> Const {
         let def = self.defs.resolve_alias(def);
         let d = self.defs.get(def);
         match d.kind {
-            DefKind::ConstParam => Const::Param(def),
+            DefKind::ConstParam => {
+                // A `const` parameter stays symbolic until monomorphization, so
+                // the one thing checkable here is its *type*, and it has to be
+                // the slot's. An array length is a `usize` (§3.2), so
+                // `func <const N: u32> () -> [N]i32` is a mistake — and one
+                // worth catching at the declaration, because the alternative is
+                // a `[4]i32` that does not equal `[4]i32` at the call site.
+                let declared = self.const_param_ty(def);
+                if !matches!(declared, Ty::Error)
+                    && !matches!(want, Ty::Error)
+                    && declared != *want
+                {
+                    let msg = format!(
+                        "`{}` is a `const {}`, but {what} must be a `{}`",
+                        self.defs.get(def).name,
+                        declared.display(self.defs),
+                        want.display(self.defs)
+                    );
+                    self.report_in(file, node, msg);
+                    return Const::Error;
+                }
+                Const::Param(def)
+            }
             DefKind::Const => {
                 let (Some(cfile), Some(cnode)) = (d.file, d.node) else {
                     return Const::Error;
@@ -4418,11 +4539,11 @@ impl Inferer<'_> {
                 else {
                     return Const::Error;
                 };
-                self.const_len_depth(cfile, rhs, depth + 1)
+                self.const_value_in(cfile, rhs, want, what, depth + 1)
             }
             _ => {
                 let msg = format!(
-                    "`{}` is a {} — an array length must be a constant value",
+                    "`{}` is a {} — {what} must be a constant value",
                     self.defs.canonical_string(def),
                     d.kind.label()
                 );

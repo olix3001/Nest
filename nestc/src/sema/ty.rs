@@ -26,6 +26,7 @@ use std::collections::HashMap;
 
 use crate::common::symbol::Symbol;
 use crate::common::options::Target;
+use crate::ir::const_eval::ConstValue;
 use crate::parser::ast::NodeId;
 
 use super::def::DefId;
@@ -93,19 +94,19 @@ pub enum TyVarKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConstVar(pub u32);
 
-/// A compile-time *value* appearing inside a type — today only an array length
-/// (§3.2 `[N]T`, §5 `<const N: usize>`).
+/// A compile-time *value* appearing inside a type — an array length (§3.2
+/// `[N]T`) or a `const` generic argument (§5 `<const N: Ty>`).
 ///
-/// Lengths take part in type identity: `[3]i32` and `[4]i32` are different
-/// types, so they need their own tiny unification lattice alongside [`Ty`]'s.
-/// A [`Const::Param`] is the symbolic stand-in for a `const` generic parameter
+/// These take part in type identity: `[3]i32` and `[4]i32` are different types,
+/// so they need their own tiny unification lattice alongside [`Ty`]'s. A
+/// [`Const::Param`] is the symbolic stand-in for a `const` generic parameter
 /// that survives all the way to monomorphization; a [`Const::Var`] is the
 /// inference variable a call site instantiates it to, or the hole `[_]T` leaves
 /// for a literal to fill.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Const {
-    /// A known value.
-    Value(u64),
+    /// A known value, at the type it was written at (see [`ConstArg`]).
+    Value(Box<ConstArg>),
     /// An as-yet-uninstantiated `const` generic parameter, by its [`DefId`].
     Param(DefId),
     /// An unsolved inference variable.
@@ -115,19 +116,54 @@ pub enum Const {
     Error,
 }
 
+/// A known `const` argument: a value **and the type it was written at**.
+///
+/// Both halves are identity (§5). `Foo.<3u8>` and `Foo.<3usize>` are different
+/// instantiations, and comparing only the values would collapse them into one —
+/// a mistake nothing would catch until monomorphization tried to emit a single
+/// body for two different argument types.
+///
+/// The value is [`ConstValue`], the const evaluator's own representation, rather
+/// than a second one invented here: the evaluator already produces exactly these
+/// and a `const` argument is the same kind of thing a `::` binding holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstArg {
+    pub ty: Ty,
+    pub value: ConstValue,
+}
+
 impl Const {
-    /// The value, when it is already known.
-    pub fn value(self) -> Option<u64> {
+    /// A known value of type `ty`.
+    pub fn known(ty: Ty, value: ConstValue) -> Const {
+        Const::Value(Box::new(ConstArg { ty, value }))
+    }
+
+    /// A `usize`-typed length — what an array length always is (§3.2).
+    pub fn len(n: u64) -> Const {
+        Const::known(Ty::usize(), ConstValue::Int(n.into()))
+    }
+
+    /// The value as a length, when it is already a known non-negative integer.
+    pub fn value(&self) -> Option<u64> {
         match self {
-            Const::Value(n) => Some(n),
+            Const::Value(a) => match &a.value {
+                ConstValue::Int(n) => u64::try_from(n).ok(),
+                _ => None,
+            },
             _ => None,
         }
     }
 
-    /// A short, human-readable rendering (`3`, `N`, `?c1`, `_`).
+    /// A short, human-readable rendering (`3`, `true`, `N`, `?c1`, `_`).
     pub fn display(&self, defs: &super::def::DefTable) -> String {
         match self {
-            Const::Value(n) => n.to_string(),
+            Const::Value(a) => match &a.value {
+                ConstValue::Int(n) => n.to_string(),
+                ConstValue::Bool(b) => b.to_string(),
+                ConstValue::Char(c) => format!("{c:?}"),
+                ConstValue::Float(f) => f.to_string(),
+                other => format!("{other:?}"),
+            },
             Const::Param(d) => defs.get(*d).name.to_string(),
             Const::Var(v) => format!("?c{}", v.0),
             Const::Error => "_".into(),
@@ -227,6 +263,21 @@ impl Ty {
     /// Whether this (already-resolved) type is a float.
     pub fn is_float(&self) -> bool {
         matches!(self, Ty::Float(_))
+    }
+
+    /// Whether this (already-resolved) type is a **primitive**: a scalar the
+    /// compiler knows the values of without consulting a declaration.
+    ///
+    /// This is the admissible set for a `const` generic parameter (§5). The line
+    /// is not arbitrary: a primitive has compile-time values the type system
+    /// already compares and substitutes, while an aggregate as a generic
+    /// argument would put structural equality of arbitrary values into type
+    /// identity — a much larger promise.
+    pub fn is_primitive(&self) -> bool {
+        matches!(
+            self,
+            Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Char
+        )
     }
 
     /// A short, human-readable rendering (`i32`, `*mut Foo`, `(A, B)`, `?3`).
@@ -612,10 +663,10 @@ impl InferCtxt {
 
     /// Follow bound const variables to the current representative.
     pub fn shallow_const(&self, k: &Const) -> Const {
-        let mut cur = *k;
+        let mut cur = k.clone();
         while let Const::Var(v) = cur {
-            match self.const_subst[v.0 as usize] {
-                Some(bound) => cur = bound,
+            match &self.const_subst[v.0 as usize] {
+                Some(bound) => cur = bound.clone(),
                 None => return Const::Var(v),
             }
         }
@@ -628,14 +679,17 @@ impl InferCtxt {
     pub fn unify_const(&mut self, a: &Const, b: &Const) -> Result<(), (Const, Const)> {
         let a = self.shallow_const(a);
         let b = self.shallow_const(b);
-        match (a, b) {
+        match (&a, &b) {
             // An errored length absorbs, so one bad `[expr]T` does not cascade.
             (Const::Error, _) | (_, Const::Error) => Ok(()),
             (Const::Var(x), Const::Var(y)) if x == y => Ok(()),
             (Const::Var(v), other) | (other, Const::Var(v)) => {
-                self.const_subst[v.0 as usize] = Some(other);
+                self.const_subst[v.0 as usize] = Some((*other).clone());
                 Ok(())
             }
+            // Both halves of a known argument are identity (§5): `3u8` and
+            // `3usize` are different arguments, so comparing the values alone
+            // would make `Foo.<3u8>` and `Foo.<3usize>` one type.
             (Const::Value(x), Const::Value(y)) if x == y => Ok(()),
             (Const::Param(x), Const::Param(y)) if x == y => Ok(()),
             _ => Err((a, b)),
@@ -1192,6 +1246,62 @@ pub fn primitive_ty(name: &str) -> Option<Ty> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_const_arguments_type_is_half_its_identity() {
+        // §5: `3u8` and `3usize` are **different** arguments. The values are
+        // equal and the types are not, and comparing only the values would make
+        // `Foo.<3u8>` and `Foo.<3usize>` one type — a collapse nothing would
+        // catch until monomorphization tried to emit one body for two different
+        // argument types.
+        let three_usize = Const::len(3);
+        let three_u8 = Const::known(
+            Ty::Int {
+                signed: false,
+                width: IntWidth::Fixed(8),
+            },
+            ConstValue::Int(3.into()),
+        );
+        let mut cx = InferCtxt::new();
+        assert!(cx.unify_const(&three_usize, &three_usize).is_ok());
+        assert!(cx.unify_const(&three_u8, &three_u8).is_ok());
+        assert!(
+            cx.unify_const(&three_usize, &three_u8).is_err(),
+            "`3usize` and `3u8` must not unify"
+        );
+
+        // Different values at one type disagree too, which is the rule that
+        // makes `[3]i32` and `[4]i32` different types.
+        assert!(cx.unify_const(&Const::len(3), &Const::len(4)).is_err());
+
+        // A variable takes whichever it meets first, and keeps the type with it.
+        let v = cx.fresh_const();
+        assert!(cx.unify_const(&v, &three_u8).is_ok());
+        assert_eq!(cx.shallow_const(&v), three_u8);
+        assert!(cx.unify_const(&v, &three_usize).is_err());
+    }
+
+    #[test]
+    fn a_const_parameter_admits_every_primitive_and_no_aggregate() {
+        // §5: the admissible set is the primitives. `bool` is load-bearing — the
+        // integer family `int.<N, S>` is a `usize` width and a `bool` signedness
+        // (§3.1) — and an aggregate is excluded because structural equality of
+        // arbitrary values is a much larger promise than comparing two scalars.
+        for name in ["usize", "u8", "i64", "f32", "bool", "char"] {
+            let t = primitive_ty(name).expect(name);
+            assert!(t.is_primitive(), "`{name}` should be admissible");
+        }
+        assert!(!Ty::Void.is_primitive());
+        assert!(
+            !Ty::Array {
+                len: Const::len(3),
+                mutable: false,
+                inner: Box::new(Ty::Bool),
+            }
+            .is_primitive()
+        );
+        assert!(!Ty::Tuple(vec![Ty::Bool, Ty::Bool]).is_primitive());
+    }
 
     #[test]
     fn primitive_parsing() {

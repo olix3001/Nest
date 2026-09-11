@@ -4959,23 +4959,25 @@ fn named_argument_rules_are_enforced() {
 }
 
 #[test]
-fn a_const_generic_parameter_must_be_an_integer() {
-    // `Const` represents one kind of compile-time value: an unsigned integer.
-    // The check is at the *declaration*, so a parameter that is declared and
-    // never used is still rejected, and an `impl`'s generics — which belong to
-    // no function — are covered too.
+fn a_const_generic_parameter_must_be_a_primitive() {
+    // §5: the declared type may be **any primitive**, and an aggregate is
+    // rejected — a struct or an array as a generic argument would put structural
+    // equality of arbitrary values into type identity. The check is at the
+    // *declaration*, so a parameter that is declared and never used is still
+    // rejected, and an `impl`'s generics — which belong to no function — are
+    // covered too.
     for (src, needle) in [
         (
             "Point :: struct { x: i32, y: i32 }\nf :: func <const X: Point> () {}\n",
-            "a `const` generic parameter must have an integer type, but `X` is `Point`",
+            "a `const` generic parameter must have a primitive type, but `X` is `Point`",
         ),
         (
-            "f :: func <const B: bool> () {}\n",
-            "a `const` generic parameter must have an integer type, but `B` is `bool`",
+            "f :: func <const A: [3]i32> () {}\n",
+            "a `const` generic parameter must have a primitive type",
         ),
         (
             "T :: struct { a: i32 }\nimpl <const X: T> T { m :: func (self: *Self) {} }\n",
-            "a `const` generic parameter must have an integer type",
+            "a `const` generic parameter must have a primitive type",
         ),
     ] {
         let s = analyze_mem(&[("main", src)], "main");
@@ -4984,6 +4986,66 @@ fn a_const_generic_parameter_must_be_an_integer() {
     // The integer case that the language actually uses stays clean.
     let s = analyze_clean("{ len } :: import <core/slice>\nf :: func <const N: usize> (a: [N]i32) -> usize { return len(a) }\n");
     assert!(!s.has_errors(), "{:#?}", s.diagnostics);
+}
+
+#[test]
+fn a_const_generic_parameter_may_be_any_primitive() {
+    // §5: an integer of any width, `bool`, `char`, a float. `bool` is the one
+    // that is load-bearing rather than convenient — the integer family
+    // `int.<N, S>` (§3.1) is a `usize` width *and* a `bool` signedness.
+    analyze_clean(
+        "pick :: func <const B: bool> (a: i32, b: i32) -> i32 { if B { return a }\n  return b }\n\
+         f :: func () -> i32 { return pick.<true>(1, 2) }\n",
+    );
+    analyze_clean(
+        "sep :: func <const C: char> () -> char { return C }\n\
+         f :: func () -> char { return sep.<\',\'>() }\n",
+    );
+    analyze_clean(
+        "scale :: func <const X: f32> (v: f32) -> f32 { return X }\n\
+         f :: func () -> f32 { return scale.<1.5>(2.0) }\n",
+    );
+    // A narrow integer parameter is checked against its declared width where the
+    // argument is written — the one place the arbitrary-precision literal is
+    // still in hand.
+    analyze_clean(
+        "small :: func <const N: u8> () -> u8 { return N }\nf :: func () -> u8 { return small.<255>() }\n",
+    );
+    assert!(
+        first_error(
+            "small :: func <const N: u8> () -> u8 { return N }\nf :: func () -> u8 { return small.<300>() }\n"
+        )
+        .contains("`300` does not fit in `u8`")
+    );
+    // A signed slot takes a negative literal; an unsigned one does not.
+    analyze_clean(
+        "neg :: func <const N: i8> () -> i8 { return N }\nf :: func () -> i8 { return neg.<-3>() }\n",
+    );
+    assert!(
+        first_error(
+            "pos :: func <const N: u8> () -> u8 { return N }\nf :: func () -> u8 { return pos.<-3>() }\n"
+        )
+        .contains("does not fit in `u8`")
+    );
+}
+
+#[test]
+fn a_const_argument_must_match_the_type_of_its_slot() {
+    // The argument is read *at* the declared type, so a literal of the wrong
+    // kind is reported where it is written rather than typed as something else.
+    assert!(
+        first_error(
+            "f :: func <const N: usize> () -> usize { return N }\ng :: func () -> usize { return f.<true>() }\n"
+        )
+        .contains("a `const` argument of type `usize` cannot be written this way")
+    );
+    // An array length is the one slot whose type is fixed: `[N]T` is a `usize`
+    // count (§3.2). A parameter of another type standing in one is caught at the
+    // declaration — the alternative is a `[4]i32` that does not equal `[4]i32`.
+    assert!(
+        first_error("zeros :: func <const N: u32> () -> [N]i32 { return .{ 0; 4 } }\n")
+            .contains("`N` is a `const u32`, but an array length must be a `usize`")
+    );
 }
 
 #[test]
