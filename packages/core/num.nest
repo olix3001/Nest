@@ -1,4 +1,6 @@
-// Inherent methods on the integer families.
+{ PTR_BITS } :: import "target.nest"
+
+// The integer families, and the pointer-sized types defined over them.
 //
 // An integer is a member of one of two families (§3.1): `int.<N>` for the signed
 // widths and `uint.<N>` for the unsigned ones, with `N` the width in bits. `i32`
@@ -10,7 +12,11 @@
 // is no finite list of widths to write `wrapping_add` out for; without a generic
 // self type there is no way to give it to every integer at all. The array impl in
 // `slice.nest` is the same shape with one parameter: `impl <T, const N: usize>
-// [N]T` is to `[3]i32` what `impl <const N: usize> int.<N>` is to `i32`.
+// [N]T` is to `[3]i32` what `impl <const N: u16> int.<N>` is to `i32`.
+//
+// The width parameter is a `u16` because §3.1 caps a width at 65535 — a width is
+// a compile-time number and never anything else, so the smallest type that holds
+// every legal one is the honest declaration.
 //
 // The two families are written out separately rather than as one family with a
 // signedness argument. Signedness is not something anything is ever generic over
@@ -34,7 +40,23 @@
 // `#intrinsic` declaration is an ordinary bodyless function and an impl member
 // may be exactly that, so there is nothing for a wrapper to add.
 
-impl <const N: usize> int.<N> {
+// The pointer-sized integers (§3.1). They are **defined here**, not built into
+// the compiler: `usize` is a `distinct` type over the unsigned integer as wide
+// as a pointer, and `PTR_BITS` is what the build says that width is.
+//
+// `distinct` is doing the real work (§2.4). `usize` and `u64` have the same
+// representation on a 64-bit machine and are still different types, so
+// `impl usize` and `impl u64` cannot collide and a count of bytes cannot be
+// handed to something expecting a number of them. Being a `distinct` is also
+// what keeps it out of implicit widening: a `u32` reaching a `usize` is written
+// down, which it has to be, because whether it fits is the target's business.
+//
+// The compiler finds them by tag, never by name, so a `core` that spells them
+// differently still works.
+@public #lang("usize") usize :: distinct uint.<PTR_BITS>
+@public #lang("isize") isize :: distinct  int.<PTR_BITS>
+
+impl <const N: u16> int.<N> {
   // Wrapping arithmetic (§6.6): the result is reduced modulo 2^N, which is what
   // the machine instruction does. This is the *stated* overflow behaviour, as
   // against the `+` operator, whose overflow is a separate question the language
@@ -44,7 +66,7 @@ impl <const N: usize> int.<N> {
   @public wrapping_sub :: #intrinsic("wrapping_sub") func (self: Self, rhs: Self) -> Self
 }
 
-impl <const N: usize> uint.<N> {
+impl <const N: u16> uint.<N> {
   @public wrapping_add :: #intrinsic("wrapping_add") func (self: Self, rhs: Self) -> Self
   @public wrapping_sub :: #intrinsic("wrapping_sub") func (self: Self, rhs: Self) -> Self
 }

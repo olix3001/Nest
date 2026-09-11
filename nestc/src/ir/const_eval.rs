@@ -1197,7 +1197,9 @@ impl<'a> ConstEval<'a> {
     /// through is what keeps it from silently producing an unchecked constant
     /// if that ever changes.
     fn int_parts_at(&self, at: IrId, to: &Ty) -> Result<(bool, u32), ConstError> {
-        to.int_parts(self.target).ok_or_else(|| {
+        // `usize` is a `distinct` over a plain integer, so the representation is
+        // what has a width — the same hop `fits_result` makes.
+        self.repr_of(to).int_parts().ok_or_else(|| {
             ConstError::new(
                 at,
                 format!(
@@ -1383,7 +1385,7 @@ impl<'a> ConstEval<'a> {
         let declared = self.meta.ty_or_error(at);
         // A symbolic `int.<N, S>` has no range to check against, so there is
         // nothing to say until monomorphization picks the width.
-        let Some((signed, bits)) = self.repr_of(&declared).int_parts(self.target) else {
+        let Some((signed, bits)) = self.repr_of(&declared).int_parts() else {
             return Ok(value);
         };
         if int_fits(n, signed, bits) {

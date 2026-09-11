@@ -27,7 +27,28 @@
 pub struct Target {
     /// The width in bits of `isize` / `usize` and of a pointer.
     pub pointer_bits: u32,
+    /// The operating system being targeted, as a program sees it.
+    pub os: &'static str,
+    /// The processor architecture being targeted.
+    pub arch: &'static str,
 }
+
+/// The operating systems `-C os=` accepts. A fixed list rather than free text
+/// for the same reason an unknown `-C` key is an error: a typo would otherwise
+/// compile a different program silently.
+pub const OSES: &[&str] = &["linux", "macos", "windows", "freebsd", "none"];
+
+/// The architectures `-C arch=` accepts.
+pub const ARCHES: &[&str] = &["x86_64", "aarch64", "riscv64", "wasm32"];
+
+/// The build profiles `-C profile=` accepts.
+///
+/// This is the profile's **name**, carried so a program can read it, and
+/// nothing more. It is not a contradiction of the note above: what that refuses
+/// is the *compiler* deriving behaviour from a profile — deciding for itself
+/// that a release build wraps on overflow. Handing the name through to source,
+/// where a program may branch on it, decides nothing here.
+pub const PROFILES: &[&str] = &["debug", "release"];
 
 impl Target {
     /// A 64-bit target — the only one the bootstrap compiles for.
@@ -37,7 +58,11 @@ impl Target {
     /// 32-bit target is caught once that target can be selected, whereas
     /// assuming 32 now would refuse a program that is correct on every machine
     /// the compiler can currently produce code for.
-    pub const HOST_64: Target = Target { pointer_bits: 64 };
+    pub const HOST_64: Target = Target {
+        pointer_bits: 64,
+        os: "linux",
+        arch: "x86_64",
+    };
 }
 
 impl Default for Target {
@@ -84,10 +109,29 @@ impl OverflowMode {
 }
 
 /// Everything a build decides for the compiler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     pub target: Target,
     pub overflow: OverflowMode,
+    /// The build profile's name; see [`PROFILES`].
+    pub profile: &'static str,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            target: Target::default(),
+            overflow: OverflowMode::default(),
+            profile: "debug",
+        }
+    }
+}
+
+/// Match `value` against a fixed list, returning the `'static` spelling.
+fn one_of(list: &[&'static str], key: &str, value: &str) -> Result<&'static str, String> {
+    list.iter().copied().find(|v| *v == value).ok_or_else(|| {
+        format!("`{key}` must be one of {}, not `{value}`", list.join(", "))
+    })
 }
 
 impl Options {
@@ -111,6 +155,9 @@ impl Options {
                 }
                 self.target.pointer_bits = bits;
             }
+            "os" => self.target.os = one_of(OSES, "os", value)?,
+            "arch" => self.target.arch = one_of(ARCHES, "arch", value)?,
+            "profile" => self.profile = one_of(PROFILES, "profile", value)?,
             other => return Err(format!("unknown setting `{other}`")),
         }
         Ok(())
@@ -120,9 +167,12 @@ impl Options {
     /// prints, so a build tool can check what its profile actually resolved to.
     pub fn render(&self) -> String {
         format!(
-            "overflow={}\npointer-width={}\n",
+            "arch={}\noverflow={}\nos={}\npointer-width={}\nprofile={}\n",
+            self.target.arch,
             self.overflow.name(),
-            self.target.pointer_bits
+            self.target.os,
+            self.target.pointer_bits,
+            self.profile
         )
     }
 }

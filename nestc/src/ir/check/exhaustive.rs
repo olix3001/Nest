@@ -984,7 +984,7 @@ impl Cx<'_> {
             // A symbolic `int.<N, S>` has no finite range, so it falls to the
             // same answer a `comptime_int` gets: nothing but a wildcard covers
             // it, which is the only honest reading of a width not yet chosen.
-            ty @ Ty::Int { .. } => match ty.int_parts(self.target) {
+            ty @ Ty::Int { .. } => match ty.int_parts() {
                 Some((signed, bits)) => int_bounds(signed, bits),
                 None => (BigInt::from(i128::MIN), BigInt::from(i128::MAX)),
             },

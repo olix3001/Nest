@@ -1,0 +1,43 @@
+// What the build is targeting, as types a program can match on.
+//
+// These are ordinary enums. The compiler does not know them — it generates
+// `target.nest` beside this file naming one variant of each, and that generated
+// file is part of `core`, so the only name coupling is between two files of the
+// same package rather than between the compiler and a library's vocabulary.
+//
+// They are enums rather than strings because the whole point of asking is to
+// branch: `match OS { Os.Windows => …, _ => … }` is exhaustively checked, and a
+// string comparison against `"widnows"` is not.
+//
+// A variant's name is the setting's name with each `_`-separated word
+// capitalized — `x86_64` is `X86_64`, `macos` is `Macos`. That one rule is what
+// the generator applies, so adding a target means adding a variant here and a
+// spelling to the compiler's list, with nothing in between to keep in step.
+
+// The operating system, or `Bare` for a freestanding target with none.
+@public Os :: enum {
+  Linux,
+  Macos,
+  Windows,
+  Freebsd,
+  Bare,
+}
+
+// The processor architecture.
+@public Arch :: enum {
+  X86_64,
+  Aarch64,
+  Riscv64,
+  Wasm32,
+}
+
+// The build profile's name.
+//
+// The compiler has no opinion about what a profile *means* — whether a release
+// build wraps on overflow is the build tool's decision, handed to `nestc` as a
+// resolved setting (§ options). This is only the name, carried so a program can
+// read it.
+@public Profile :: enum {
+  Debug,
+  Release,
+}

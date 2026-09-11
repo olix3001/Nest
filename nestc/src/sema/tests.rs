@@ -441,7 +441,8 @@ fn literal_defaults_to_isize_without_context() {
         file,
         |k| matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 7.into()),
     );
-    assert_eq!(ty, Ty::isize());
+    // `isize` is a `core` declaration now, so name it the way a program does.
+    assert_eq!(ty.display(&session.defs), "isize");
 }
 
 #[test]
@@ -5600,7 +5601,10 @@ fn a_pointer_sized_constant_is_checked_against_the_target() {
 main :: func () {}
 ";
     assert!(messages_for(src, Target::HOST_64).is_empty());
-    let msgs = messages_for(src, Target { pointer_bits: 32 });
+    let msgs = messages_for(src, Target {
+            pointer_bits: 32,
+            ..Target::HOST_64
+        });
     assert!(msgs.iter().any(|m| m.contains("does not fit")), "{msgs:#?}");
 }
 
@@ -6019,9 +6023,12 @@ fn the_sugar_and_the_integer_family_name_one_type() {
             "f :: func (x: uint.<0>) {}\n",
             "an integer width must be between 1 and 65535, not `0`",
         ),
+        // 65535 is `u16::MAX`, so a width past it is caught by the slot's own
+        // range check and reported against the literal, which is the better
+        // anchor anyway.
         (
             "f :: func (x: uint.<70000>) {}\n",
-            "an integer width must be between 1 and 65535, not `70000`",
+            "`70000` does not fit in `u16`",
         ),
     ] {
         assert_eq!(first_error(src), msg);
@@ -6053,8 +6060,15 @@ fn a_family_impl_gives_every_width_the_method() {
     // A method is reachable from inside a family impl's own generic too: `N` is
     // symbolic there and stays symbolic.
     analyze_clean(
-        "f :: func <const N: usize> (x: int.<N>, y: int.<N>) -> int.<N> \
+        "f :: func <const N: u16> (x: int.<N>, y: int.<N>) -> int.<N> \
          { return x.wrapping_add(y) }\n",
+    );
+    // A width is a `u16`, so a narrower parameter widens into the slot and a
+    // wider one does not (§3.1).
+    analyze_clean("f :: func <const N: u8> (x: uint.<N>) -> uint.<N> { return x }\n");
+    assert_eq!(
+        first_error("f :: func <const N: usize> (x: int.<N>) {}\n"),
+        "`N` is a `const usize`, but an integer width must be a `u16`"
     );
 }
 
