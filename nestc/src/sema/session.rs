@@ -53,14 +53,21 @@ pub fn default_core_path() -> String {
 /// stale entry meant `x: string` resolved to a primitive with no `Ty`, silently
 /// becoming an error type with no diagnostic.
 ///
-/// The width-parameterized primitives are **not** listed here: the signed /
+/// The width-parameterized *spellings* are **not** listed here: the signed /
 /// unsigned integers `i<N>` / `u<N>` (arbitrary `N` in `1..=65535`, `i1`
 /// excluded, `u1` an alias of `bool`) and the floats `f16`/`f32`/`f64`/`f80`/
 /// `f128`. There are far too many to pre-register, so the resolver synthesizes
 /// each on first use and interns it into the builtins scope (see
 /// `sema::resolve`). `isize`/`usize` are the only pointer-sized integers; there
 /// is no bare `int`/`uint`.
-pub const PRIMITIVES: &[&str] = &["bool", "char", "isize", "never", "usize", "void"];
+/// `int` and `uint` are the two integer **families** (§3.1): generic type
+/// constructors taking one `const N: usize` width, of which every `i<N>` /
+/// `u<N>` is an instance. They are fixed names rather than synthesized ones
+/// because they carry no width in the name — `int.<32>` *is* `i32`, written
+/// with the width as an argument instead of as spelling.
+pub const PRIMITIVES: &[&str] = &[
+    "bool", "char", "int", "isize", "never", "uint", "usize", "void",
+];
 
 /// Resolves `import "spec"` file specifiers to a stable key and source text.
 ///

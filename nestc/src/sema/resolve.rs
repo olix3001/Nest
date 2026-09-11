@@ -799,7 +799,15 @@ impl Resolver<'_> {
             _ => return None,
         };
         match self.lookup_unqualified(&seg)? {
-            Resolution::Def(d) => Some(self.defs.resolve_alias(d)),
+            Resolution::Def(d) => {
+                let d = self.defs.resolve_alias(d);
+                // `int` / `uint` name a family, not a type, so an `impl
+                // <const N: usize> int.<N>` has no named head — it is structural,
+                // like `impl <T> []T`. Saying so here is what sends `Self` to the
+                // alias collection bound to the whole `int.<N>` expression
+                // instead of to the bare constructor, which carries no width.
+                (!self.defs.get(d).is_int_family()).then_some(d)
+            }
             _ => None,
         }
     }

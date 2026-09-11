@@ -229,6 +229,18 @@ impl Def {
         self.alias.unwrap_or(self.id)
     }
 
+    /// Whether this def is one of the two integer **family constructors**,
+    /// `int` or `uint` (§3.1).
+    ///
+    /// They are primitives like `bool` and `usize`, but unlike those they are
+    /// not types on their own: `int` names a family and only `int.<N>` names a
+    /// member of it. Every place that asks "does this name a type?" has to say
+    /// no for these — otherwise `impl <const N: usize> int.<N>` binds `Self` to
+    /// the *constructor*, and the width the impl is generic over is lost.
+    pub fn is_int_family(&self) -> bool {
+        self.kind == DefKind::Primitive && matches!(self.name.as_str(), "int" | "uint")
+    }
+
     /// The intrinsic tag this definition claims, if it is marked `#intrinsic`
     /// (§6.4, §9).
     ///

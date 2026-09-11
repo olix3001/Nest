@@ -3248,11 +3248,10 @@ impl Inferer<'_> {
     /// A `const` generic is a compile-time *value* that takes part in type
     /// identity — `[3]i32` and `[4]i32` are different types (§3.2, §5) — and the
     /// declared type may be **any primitive**: an integer of any width, `bool`,
-    /// `char`, a float. Restricting it to `usize` would be an arbitrary line,
-    /// and it is load-bearing rather than decorative: the integer family
-    /// `int.<N, S>` (§3.1) is a `usize` width *and* a `bool` signedness, so
-    /// without `const S: bool` there is no one family for the integer operations
-    /// to be written over.
+    /// `char`, a float. Restricting it to `usize` would be an arbitrary line —
+    /// `<const B: bool>` and `<const C: char>` are both ordinary things to want
+    /// — though the integer families `int.<N>` / `uint.<N>` (§3.1) use only the
+    /// `usize` case, their width.
     ///
     /// Aggregates are not admitted. A struct or an array as a generic argument
     /// would put structural equality of arbitrary values into type identity,
@@ -3345,6 +3344,14 @@ impl Inferer<'_> {
                 }
                 self.collect_generic_params(inner, out, consts)
             }
+            // `int.<N>` — the width is a `const` parameter exactly as an array
+            // length is, and this is what freshens the *impl's* `N` at a call on
+            // `a.wrapping_add(b)`: the method declares no generics of its own, so
+            // the only place `N` is ever found is here, in its signature.
+            Ty::Int {
+                width: Const::Param(d),
+                ..
+            } if !consts.contains(d) => consts.push(*d),
             Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } => {
                 self.collect_generic_params(inner, out, consts)
             }
@@ -3395,12 +3402,16 @@ impl Inferer<'_> {
             } => Ty::Array {
                 // `[N]T` with `N` a `const` parameter: the instantiation says
                 // what `N` is here.
-                len: match len {
-                    Const::Param(d) => map.consts.get(d).cloned().unwrap_or_else(|| len.clone()),
-                    other => other.clone(),
-                },
+                len: subst_const(len, map),
                 mutable: *mutable,
                 inner: Box::new(self.subst_type_params(inner, map)),
+            },
+            // `int.<N>` with `N` a `const` parameter — the same substitution an
+            // array length gets, and for the same reason: this is what turns the
+            // family impl's symbolic `Self` into the width the call site has.
+            Ty::Int { signed, width } => Ty::Int {
+                signed: *signed,
+                width: subst_const(width, map),
             },
             Ty::Tuple(elems) => Ty::Tuple(
                 elems
@@ -4550,6 +4561,63 @@ impl Inferer<'_> {
         }
     }
 
+    /// `int.<N>` / `uint.<N>` — one member of an integer family (§3.1).
+    ///
+    /// The width is an ordinary `const` argument, read by the same
+    /// [`Inferer::const_value_in`] that reads an array length, so a literal
+    /// (`int.<32>`), a named constant (`int.<WORD>`) and a `const` generic
+    /// parameter (`int.<N>`, inside the family impl) all reach it by the one
+    /// path. That is also what makes `int.<32>` and `i32` the *same* type
+    /// rather than two that convert: both end as `Ty::Int` with the same width.
+    ///
+    /// The family name must carry its argument. `Box` may be written for
+    /// `Box.<T>` and have its parameter inferred, but a bare `int` would be an
+    /// integer of no particular width, and the only thing that could solve it
+    /// is a use site — so it would turn every forgotten `.<32>` into an
+    /// inference error somewhere else. Saying so here, where the name is, is
+    /// the better diagnostic.
+    fn int_family_ty(
+        &mut self,
+        file: FileId,
+        node: NodeId,
+        signed: bool,
+        generic_args: &[NodeId],
+    ) -> Ty {
+        let family = if signed { "int" } else { "uint" };
+        let [arg] = generic_args else {
+            let msg = format!(
+                "`{family}` is a family of integer types and needs its width: \
+                 write `{family}.<N>`"
+            );
+            self.report_in(file, node, msg);
+            return Ty::Error;
+        };
+        let width = self.const_value_in(file, *arg, &Ty::usize(), "an integer width", 0);
+
+        // A written-out width has to obey the same rules the `i<N>` / `u<N>`
+        // spellings do, or the two ways of naming one type would disagree about
+        // which types exist. In particular `uint.<1>` is `bool`, exactly as `u1`
+        // is (§3.1) — if it were a distinct one-bit integer instead, `u1` and
+        // `uint.<1>` would be different types and the sugar would be a lie.
+        //
+        // A width that is still symbolic cannot be checked here; the family impl
+        // is generic over every legal `N`, and monomorphization is where a bad
+        // one becomes visible.
+        match width.value() {
+            Some(1) if !signed => Ty::Bool,
+            Some(1) => {
+                self.report_in(file, *arg, "a 1-bit signed integer is not a type".to_string());
+                Ty::Error
+            }
+            Some(n) if n == 0 || n > 65535 => {
+                let msg = format!("an integer width must be between 1 and 65535, not `{n}`");
+                self.report_in(file, *arg, msg);
+                Ty::Error
+            }
+            _ => Ty::Int { signed, width },
+        }
+    }
+
     /// Resolve a `TypePath` (or bare `Path` in type position) to a [`Ty`] from
     /// the def its head names.
     fn typepath_ty(&mut self, file: FileId, node: NodeId, generic_args: &[NodeId]) -> Ty {
@@ -4559,7 +4627,13 @@ impl Inferer<'_> {
         let kind = self.defs.get(def).kind;
         match kind {
             DefKind::Primitive => {
-                primitive_ty(self.defs.get(def).name.as_str()).unwrap_or(Ty::Error)
+                let name = self.defs.get(def).name.clone();
+                match name.as_str() {
+                    "int" | "uint" => {
+                        self.int_family_ty(file, node, name.as_str() == "int", generic_args)
+                    }
+                    other => primitive_ty(other).unwrap_or(Ty::Error),
+                }
             }
             DefKind::Struct | DefKind::Enum | DefKind::Trait => {
                 let mut args: Vec<Ty> = generic_args
@@ -5237,4 +5311,14 @@ fn binop_lang(op: BinOp) -> &'static str {
 fn binop_method(op: BinOp) -> &'static str {
     // For every operator trait in the table the method name equals the tag.
     binop_lang(op)
+}
+
+/// Apply an instantiation to one `const` argument: a `const` generic parameter
+/// becomes whatever the instantiation bound it to, and everything else — a known
+/// value, a variable, `PtrBits` — stands.
+fn subst_const(c: &Const, map: &Subst) -> Const {
+    match c {
+        Const::Param(d) => map.consts.get(d).cloned().unwrap_or_else(|| c.clone()),
+        other => other.clone(),
+    }
 }

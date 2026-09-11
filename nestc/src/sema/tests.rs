@@ -5985,3 +5985,94 @@ fn a_constant_arithmetic_result_must_fit_its_type() {
     let ir = ir_text("P: u8 :: cast.<u8>(200 * 2)\nmain :: func () {}\n");
     assert!(ir.contains("// = 144"), "{ir}");
 }
+
+/// `int.<N>` and `uint.<N>` are the integer **families** (§3.1), and the `i<N>` /
+/// `u<N>` spellings are sugar for members of them — the *same* types, not two
+/// that convert.
+#[test]
+fn the_sugar_and_the_integer_family_name_one_type() {
+    analyze_clean(
+        "same  :: func (a: int.<32>) -> i32 { return a }\n\
+         bytes :: func (b: uint.<8>) -> u8 { return b }\n\
+         back  :: func (c: u8) -> uint.<8> { return c }\n",
+    );
+    // `u1` is `bool` (§3.1), so `uint.<1>` has to be `bool` too — otherwise the
+    // two spellings would name different types and the sugar would be a lie.
+    analyze_clean("f :: func (b: uint.<1>) -> bool { return b }\n");
+    assert_eq!(
+        first_error("f :: func (b: int.<1>) -> bool { return b }\n"),
+        "a 1-bit signed integer is not a type"
+    );
+    // A family name is not a type on its own: it needs its width.
+    assert_eq!(
+        first_error("f :: func (x: int) -> int { return x }\n"),
+        "`int` is a family of integer types and needs its width: write `int.<N>`"
+    );
+    for (src, msg) in [
+        (
+            "f :: func (x: uint.<0>) {}\n",
+            "an integer width must be between 1 and 65535, not `0`",
+        ),
+        (
+            "f :: func (x: uint.<70000>) {}\n",
+            "an integer width must be between 1 and 65535, not `70000`",
+        ),
+    ] {
+        assert_eq!(first_error(src), msg);
+    }
+}
+
+/// The reason the families exist: an operation written **once** over every width
+/// is an operation on every integer type at once.
+///
+/// `u4096` is a legal type, so there is no finite list of widths to write
+/// `wrapping_add` out for — a per-width impl could not reach it, which is what
+/// makes the generic self type load-bearing rather than tidy.
+#[test]
+fn a_family_impl_gives_every_width_the_method() {
+    let s = analyze_clean(
+        "a :: func (x: u8, y: u8) -> u8 { return x.wrapping_add(y) }\n\
+         b :: func (x: i64, y: i64) -> i64 { return x.wrapping_sub(y) }\n\
+         c :: func (x: u4096, y: u4096) -> u4096 { return x.wrapping_add(y) }\n\
+         d :: func (x: i7, y: i7) -> i7 { return x.wrapping_add(y) }\n\
+         e :: func (x: usize, y: usize) -> usize { return x.wrapping_sub(y) }\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    // The impl's `N` is solved per call site, so each one is at its own width.
+    assert!(ir.contains("$wrapping_add(x: u8, y: u8): u8"), "{ir}");
+    assert!(ir.contains("$wrapping_sub(x: i64, y: i64): i64"), "{ir}");
+    assert!(ir.contains("$wrapping_add(x: u4096, y: u4096): u4096"), "{ir}");
+
+    // A method is reachable from inside a family impl's own generic too: `N` is
+    // symbolic there and stays symbolic.
+    analyze_clean(
+        "f :: func <const N: usize> (x: int.<N>, y: int.<N>) -> int.<N> \
+         { return x.wrapping_add(y) }\n",
+    );
+}
+
+/// `Self` in a family impl is the member being implemented, so the signature
+/// `func (self: Self, rhs: Self) -> Self` means *same family, same width*.
+/// Nothing widens and nothing crosses signedness.
+#[test]
+fn a_family_method_does_not_mix_widths_or_signedness() {
+    for (src, msg) in [
+        (
+            "f :: func (a: u8, b: u16) -> u8 { return a.wrapping_add(b) }\n",
+            "type mismatch: expected `u8`, found `u16`",
+        ),
+        (
+            "f :: func (a: i32, b: u32) -> i32 { return a.wrapping_add(b) }\n",
+            "type mismatch: expected `i32`, found `u32`",
+        ),
+        // The pointer-sized types are their own, and this is the call-site face
+        // of that: `usize` does not accept a `u64` even where both are 64 bits.
+        (
+            "f :: func (a: usize, b: u64) -> usize { return a.wrapping_add(b) }\n",
+            "type mismatch: expected `usize`, found `u64`",
+        ),
+    ] {
+        assert_eq!(first_error(src), msg, "{src}");
+    }
+}

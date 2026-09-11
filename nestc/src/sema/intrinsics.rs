@@ -92,6 +92,13 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // `never`, so divergence is in the signature rather than in a table here.
     plain("panic"),
     plain("assert"),
+    // Integer arithmetic with a stated overflow behaviour (§6.6). These are the
+    // inherent methods on the two integer families in `core/num.nest`, and they
+    // need no `Special`: `func (self: Self, rhs: Self) -> Self` inside
+    // `impl <const N: usize> int.<N>` says everything — same family, same width,
+    // no widening — because `Self` is the family member being implemented.
+    plain("wrapping_add"),
+    plain("wrapping_sub"),
     // The collector (§6.4.1). All three yield `void`.
     plain("gc_collect"),
     plain("gc_keep_alive"),

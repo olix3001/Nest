@@ -1,0 +1,50 @@
+// Inherent methods on the integer families.
+//
+// An integer is a member of one of two families (§3.1): `int.<N>` for the signed
+// widths and `uint.<N>` for the unsigned ones, with `N` the width in bits. `i32`
+// is `int.<32>` and `u8` is `uint.<8>` — the same type, written with the width as
+// spelling instead of as an argument — so a method written here for every `N` is
+// a method on every integer type at once.
+//
+// That is the whole reason the families exist. `u4096` is a legal type, so there
+// is no finite list of widths to write `wrapping_add` out for; without a generic
+// self type there is no way to give it to every integer at all. The array impl in
+// `slice.nest` is the same shape with one parameter: `impl <T, const N: usize>
+// [N]T` is to `[3]i32` what `impl <const N: usize> int.<N>` is to `i32`.
+//
+// The two families are written out separately rather than as one family with a
+// signedness argument. Signedness is not something anything is ever generic over
+// — no operation here would read it — so making it an argument would buy an
+// inference variable no program could solve, and would let a signed type and an
+// unsigned one unify through it. Two impls is the honest shape; each one is a
+// handful of lines.
+//
+// The coherence rule is why these can only live in `core`: an inherent impl may
+// only be written in the package that defines the type, and the primitive types
+// belong to `core` (§4.9).
+//
+// `Self` inside each impl is the family member being implemented — `int.<N>` for
+// that same `N` — which is what lets every signature below say "same family, same
+// width, no widening" without stating a bound. A `wrapping_add` that took a
+// different width, or returned one, could not be written. That is also why these
+// need no entry in the compiler's `Special` table: unlike `make` and `len`, whose
+// rules no signature can state, everything true of these *is* in the signature.
+//
+// Each method is the intrinsic itself, not a wrapper around a free one. An
+// `#intrinsic` declaration is an ordinary bodyless function and an impl member
+// may be exactly that, so there is nothing for a wrapper to add.
+
+impl <const N: usize> int.<N> {
+  // Wrapping arithmetic (§6.6): the result is reduced modulo 2^N, which is what
+  // the machine instruction does. This is the *stated* overflow behaviour, as
+  // against the `+` operator, whose overflow is a separate question the language
+  // answers elsewhere — the point of the name is that a reader sees which was
+  // meant at the call site.
+  @public wrapping_add :: #intrinsic("wrapping_add") func (self: Self, rhs: Self) -> Self
+  @public wrapping_sub :: #intrinsic("wrapping_sub") func (self: Self, rhs: Self) -> Self
+}
+
+impl <const N: usize> uint.<N> {
+  @public wrapping_add :: #intrinsic("wrapping_add") func (self: Self, rhs: Self) -> Self
+  @public wrapping_sub :: #intrinsic("wrapping_sub") func (self: Self, rhs: Self) -> Self
+}
