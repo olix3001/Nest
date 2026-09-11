@@ -313,6 +313,8 @@ pub fn infer_file(
     // decides whether a `comptime_str` variable may become a given type, and
     // `str` is found by `#lang` tag, which unification cannot do.
     let str_ty = str_lang_ty(defs, lang);
+    // `usize` / `isize`, for the same reason and by the same route.
+    let ptr_ints = ptr_int_lang_tys(defs, lang);
     // Each pass below gets its own inference context: a `const` generic solved
     // for one function says nothing about the next.
     macro_rules! fresh {
@@ -333,6 +335,7 @@ pub fn infer_file(
                     let mut cx = InferCtxt::new();
                     cx.set_numeric_distincts(numeric_distincts.clone());
                     cx.set_str_ty(str_ty.clone());
+                    cx.set_ptr_int_tys(ptr_ints.clone());
                     cx
                 },
                 env: HashMap::new(),
@@ -438,6 +441,22 @@ fn str_lang_ty(defs: &DefTable, lang: &LangItems) -> Option<Ty> {
     })
 }
 
+/// The `#lang("usize")` and `#lang("isize")` types, or `None` when `core`
+/// declares neither.
+///
+/// Both or nothing: they are declared together in `core/num.nest` and a `core`
+/// with one and not the other is malformed in a way this pass has no useful
+/// answer for.
+fn ptr_int_lang_tys(defs: &DefTable, lang: &LangItems) -> Option<(Ty, Ty)> {
+    let nominal = |tag: &str| {
+        lang.get(tag).map(|def| Ty::Nominal {
+            def: defs.resolve_alias(def),
+            args: Vec::new(),
+        })
+    };
+    Some((nominal("usize")?, nominal("isize")?))
+}
+
 /// The `#lang("location")` type, or `None` when the program declares no such
 /// item.
 ///
@@ -457,6 +476,48 @@ fn location_lang_ty(defs: &DefTable, lang: &LangItems) -> Option<Ty> {
 /// Follows the chain, so a `distinct` over a `distinct` over an integer counts.
 /// Resolution has already run, so each step is a def lookup rather than a
 /// syntactic guess: the inner type node resolves either to a primitive — in
+/// The width argument of an `int.<N>` / `uint.<N>` written as a `distinct`'s
+/// representation, when it is a compile-time number this early.
+///
+/// This pass runs **before** inference — it exists so unification can answer
+/// "may this literal become that `distinct`?", which it is asked during
+/// inference — so it cannot use the ordinary const machinery. What it can do is
+/// the two cases that actually occur: a literal (`distinct uint.<8>`) and one
+/// hop to a constant's literal (`distinct uint.<PTR_BITS>`, which is how `core`
+/// defines `usize`). Anything else is left unknown, and the type simply is not
+/// treated as a numeric `distinct`.
+fn family_inner(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    ast: &Ast,
+    node: NodeId,
+) -> Option<u16> {
+    let NodeKind::TypePath { generic_args, .. } = &ast.node(node).kind else {
+        return None;
+    };
+    let &arg = generic_args.first()?;
+    /// The literal `u16` a node denotes, following at most one constant.
+    fn width_of(defs: &DefTable, asts: &HashMap<FileId, Ast>, ast: &Ast, n: NodeId) -> Option<u16> {
+        if let NodeKind::Lit(Lit::Int(v)) = &ast.node(n).kind {
+            return u16::try_from(v).ok();
+        }
+        let Some(Resolution::Def(d)) = ast.meta::<Resolution>(n) else {
+            return None;
+        };
+        let d = defs.get(defs.resolve_alias(d));
+        let (file, node) = (d.file?, d.node?);
+        let cast = asts.get(&file)?;
+        let NodeKind::ConstBind { rhs, .. } = &cast.node(node).kind else {
+            return None;
+        };
+        match &cast.node(*rhs).kind {
+            NodeKind::Lit(Lit::Int(v)) => u16::try_from(v).ok(),
+            _ => None,
+        }
+    }
+    width_of(defs, asts, ast, arg)
+}
+
 /// which case its name gives the family — or to another type def to follow.
 fn numeric_distincts(defs: &DefTable, asts: &HashMap<FileId, Ast>) -> HashMap<DefId, Ty> {
     /// The inner type node of `def`, if `def` is a `distinct` type.
@@ -494,11 +555,20 @@ fn numeric_distincts(defs: &DefTable, asts: &HashMap<FileId, Ast>) -> HashMap<De
             let next = defs.resolve_alias(next);
             let nd = defs.get(next);
             if nd.kind == DefKind::Primitive {
-                // The primitive itself, not just its family: a literal
-                // settling on this `distinct` type has to fit that width.
-                kind = match super::ty::primitive_ty(nd.name.as_str()) {
-                    Some(t @ (Ty::Int { .. } | Ty::Float(_))) => Some(t),
-                    _ => None,
+                // A family constructor carries its width as an argument, so the
+                // name alone does not give the type — `uint.<PTR_BITS>` is what
+                // `usize` stands over, and reading it is what makes that
+                // declaration in `core` real rather than decorative.
+                kind = match nd.name.as_str() {
+                    fam @ ("int" | "uint") => {
+                        family_inner(defs, asts, ast, inner).map(|w| Ty::int(w, fam == "int"))
+                    }
+                    // The primitive itself, not just its family: a literal
+                    // settling on this `distinct` type has to fit that width.
+                    other => match super::ty::primitive_ty(other) {
+                        Some(t @ (Ty::Int { .. } | Ty::Float(_))) => Some(t),
+                        _ => None,
+                    },
                 };
                 break;
             }
@@ -890,7 +960,8 @@ impl Inferer<'_> {
                 if let Ty::Nominal { args, .. } = self.cx.shallow(&rty) {
                     if let Some(elem) = args.first() {
                         let elem = elem.clone();
-                        self.expect(range, &elem, &Ty::usize());
+                        let want = self.usize_ty();
+                        self.expect(range, &elem, &want);
                     }
                 }
                 // A sub-slice of anything sliceable is a read-only slice of its
@@ -1682,7 +1753,8 @@ impl Inferer<'_> {
                 }
                 // The repeat count is a length, not an element.
                 let cty = self.node_ty(count);
-                self.expect(count, &cty, &Ty::usize());
+                let want = self.usize_ty();
+                self.expect(count, &cty, &want);
             }
         }
     }
@@ -1778,7 +1850,7 @@ impl Inferer<'_> {
                     None if matches!(shallow, Const::Error) => elems.len(),
                     None => {
                         let other = shallow;
-                        let count = Const::len(elems.len() as u64);
+                        let count = Const::len(elems.len() as u64, self.usize_ty());
                         if self.cx.unify_const(&other, &count).is_err() {
                             let msg = format!(
                                 "this literal has {} element(s) but the array is `[{}]`",
@@ -3248,10 +3320,10 @@ impl Inferer<'_> {
     /// is decided entirely on the two types, exactly as it would be for a value
     /// of the declared type reaching the same slot.
     fn const_ty_widens(&mut self, declared: &Ty, want: &Ty) -> bool {
-        if is_ptr_sized(declared) || is_ptr_sized(want) {
+        if self.is_ptr_sized(declared) || self.is_ptr_sized(want) {
             return false;
         }
-        match (declared.int_parts(self.target), want.int_parts(self.target)) {
+        match (declared.int_parts(), want.int_parts()) {
             (Some(from), Some(to)) => super::ty::int_widens(from, to),
             _ => false,
         }
@@ -3573,7 +3645,7 @@ impl Inferer<'_> {
         // here — and nothing to reach it today, since a literal can only settle
         // on a width the call site already fixed.
         let settled = self.numeric_repr(resolved);
-        let Some((signed, bits)) = settled.int_parts(self.target) else {
+        let Some((signed, bits)) = settled.int_parts() else {
             return;
         };
         if super::ty::int_fits(&value, signed, bits) {
@@ -3587,6 +3659,20 @@ impl Inferer<'_> {
         // The const evaluator checks the same conversion again, on the `$cast`
         // this node lowers to. Mark the node so it does not say it twice.
         self.ast.set_meta(node, RangeReported);
+    }
+
+    /// `usize` — the `#lang("usize")` declaration in `core` (§3.1).
+    ///
+    /// [`Ty::Error`] when there is none. That is not a silent failure: a program
+    /// without a `core` has already been told so, and every use of the result
+    /// here is a slot that accepts an error type without cascading.
+    fn usize_ty(&self) -> Ty {
+        self.cx.usize_ty().unwrap_or(Ty::Error)
+    }
+
+    /// Whether `ty` is one of the two pointer-sized `distinct`s.
+    fn is_ptr_sized(&self, ty: &Ty) -> bool {
+        is_ptr_sized(self.lang, self.defs, ty)
     }
 
     /// The primitive a settled type is checked against: itself, or — for a
@@ -4608,7 +4694,22 @@ impl Inferer<'_> {
             self.report_in(file, node, msg);
             return Ty::Error;
         };
-        let width = self.const_value_in(file, *arg, &Ty::usize(), "an integer width", 0);
+        // A width is read at `u16` (§3.1 caps it at 65535), and it is *normalized*
+        // to a bare `Const::Width` rather than kept as the value that was read.
+        // That is what makes `int.<32>` and `i32` the same type down to the
+        // representation: `i32` is built by `primitive_ty` with a bare width, and
+        // a written `int.<32>` would otherwise carry a `u16`-typed `Const::Value`
+        // that compares unequal to it.
+        let read = self.const_value_in(file, *arg, &super::ty::width_ty(), "an integer width", 0);
+        let width = match read.value() {
+            Some(n) => match u16::try_from(n) {
+                Ok(n) => Const::Width(n),
+                // Out of a `u16` entirely; the range arm below names the bound.
+                Err(_) => Const::Width(0),
+            },
+            // Still symbolic — a `const` parameter inside the family impl.
+            None => read.clone(),
+        };
 
         // A written-out width has to obey the same rules the `i<N>` / `u<N>`
         // spellings do, or the two ways of naming one type would disagree about
@@ -4626,7 +4727,11 @@ impl Inferer<'_> {
                 Ty::Error
             }
             Some(n) if n == 0 || n > 65535 => {
-                let msg = format!("an integer width must be between 1 and 65535, not `{n}`");
+                // `read`, not `width`: the number the *program* wrote is what the
+                // message has to name, and a value too large for a `u16` was
+                // clamped above.
+                let wrote = read.value().unwrap_or(n);
+                let msg = format!("an integer width must be between 1 and 65535, not `{wrote}`");
                 self.report_in(file, *arg, msg);
                 Ty::Error
             }
@@ -4751,7 +4856,8 @@ impl Inferer<'_> {
     /// a `[4]T`. Anything else (an arithmetic expression, say) has no
     /// const-evaluator behind it yet and is a diagnostic.
     fn const_len_in(&mut self, file: FileId, node: NodeId) -> Const {
-        self.const_value_in(file, node, &Ty::usize(), "an array length", 0)
+        let want = self.usize_ty();
+        self.const_value_in(file, node, &want, "an array length", 0)
     }
 
     /// Read a compile-time value written in a type — an array length, or an
@@ -4844,8 +4950,11 @@ impl Inferer<'_> {
                 // check against yet, so the literal is taken as written and
                 // monomorphization is left to reject it. Range-checking against
                 // a guessed width would reject programs that are fine.
-                let fits = want
-                    .int_parts(self.target)
+                // `usize` is a `distinct`, and an array length is one, so the
+                // range a literal is checked against is the representation's.
+                let fits = self
+                    .numeric_repr(want)
+                    .int_parts()
                     .is_none_or(|(signed, bits)| super::ty::int_fits(n, signed, bits));
                 if !fits {
                     let msg = format!("`{n}` does not fit in `{}`", want.display(self.defs));
@@ -5089,10 +5198,10 @@ impl Inferer<'_> {
     fn try_int_widen(&mut self, node: NodeId, actual: &Ty, expected: &Ty) -> bool {
         let got = self.cx.shallow(actual);
         let want = self.cx.shallow(expected);
-        if is_ptr_sized(&got) || is_ptr_sized(&want) {
+        if self.is_ptr_sized(&got) || self.is_ptr_sized(&want) {
             return false;
         }
-        let (Some(from), Some(to)) = (got.int_parts(self.target), want.int_parts(self.target))
+        let (Some(from), Some(to)) = (got.int_parts(), want.int_parts())
         else {
             return false;
         };
@@ -5137,7 +5246,7 @@ impl Inferer<'_> {
         let to = self.cx.resolve(expected);
         let range = Ty::Nominal {
             def: self.defs.resolve_alias(range),
-            args: vec![Ty::usize()],
+            args: vec![self.usize_ty()],
         };
         self.ast.set_meta(node, SliceCoerce { to, range });
         true
@@ -5384,14 +5493,15 @@ fn subst_const(c: &Const, map: &Subst) -> Const {
 }
 
 
-/// Whether `ty` is `usize` / `isize` — an integer whose width is the target's
-/// rather than one the program wrote.
-fn is_ptr_sized(ty: &Ty) -> bool {
-    matches!(
-        ty,
-        Ty::Int {
-            width: Const::PtrBits,
-            ..
-        }
-    )
+/// Whether `ty` is `usize` / `isize` — a pointer-sized `distinct` whose width is
+/// the target's rather than one the program wrote.
+fn is_ptr_sized(lang: &LangItems, defs: &DefTable, ty: &Ty) -> bool {
+    let Ty::Nominal { def, .. } = ty else {
+        return false;
+    };
+    let def = defs.resolve_alias(*def);
+    ["usize", "isize"]
+        .iter()
+        .filter_map(|t| lang.get(t))
+        .any(|d| defs.resolve_alias(d) == def)
 }

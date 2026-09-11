@@ -92,17 +92,20 @@ pub struct ConstVar(pub u32);
 pub enum Const {
     /// A known value, at the type it was written at (see [`ConstArg`]).
     Value(Box<ConstArg>),
-    /// The target's pointer width in bits — the `N` that `usize` and `isize`
-    /// stand for, and **opaque to type identity**.
+    /// A bare integer **width** in bits — the `N` of `int.<N>` / `uint.<N>`.
     ///
-    /// This is deliberately *not* `Value(64)` on a 64-bit target. If the width
-    /// of `usize` were folded to a number here then `usize` and `u64` would be
-    /// the same type: `impl usize` and `impl u64` would collide, and changing
-    /// the target would silently change which types a program has. Keeping it
-    /// opaque means the type system never learns the number and so can never
-    /// equate the two; only layout resolves it, through [`Const::bits`], and
-    /// layout is downstream of every identity question.
-    PtrBits,
+    /// A width is a `u16` (§3.1 caps a width at 65535), and it is a case of its
+    /// own rather than a [`Const::Value`] at type `u16` for a structural reason:
+    /// a `Value` carries the [`Ty`] it was written at, and that `Ty` for a width
+    /// would be `u16` — which is itself `uint.<16>`, whose width would carry a
+    /// `u16`, without end. Holding the number bare is what makes the
+    /// representation finite.
+    ///
+    /// It is also what a width *is*. Nothing stores one at run time, so any
+    /// compile-time integer that fits converts into one implicitly, and one that
+    /// does not is an error where it is written.
+    Width(u16),
+
     /// An as-yet-uninstantiated `const` generic parameter, by its [`DefId`].
     Param(DefId),
     /// An unsolved inference variable.
@@ -134,14 +137,19 @@ impl Const {
         Const::Value(Box::new(ConstArg { ty, value }))
     }
 
-    /// A `usize`-typed length — what an array length always is (§3.2).
-    pub fn len(n: u64) -> Const {
-        Const::known(Ty::usize(), ConstValue::Int(n.into()))
+    /// A length — what an array length always is (§3.2), at the `usize` the
+    /// caller found.
+    ///
+    /// The type is handed in because `usize` is a `core` declaration and this
+    /// module has no def table to look one up in.
+    pub fn len(n: u64, usize_ty: Ty) -> Const {
+        Const::known(usize_ty, ConstValue::Int(n.into()))
     }
 
     /// The value as a length, when it is already a known non-negative integer.
     pub fn value(&self) -> Option<u64> {
         match self {
+            Const::Width(n) => Some(*n as u64),
             Const::Value(a) => match &a.value {
                 ConstValue::Int(n) => u64::try_from(n).ok(),
                 _ => None,
@@ -158,7 +166,7 @@ impl Const {
     /// `i32`'s width into `usize` into `PtrBits` terminates. A width typed as
     /// some other `int.<…>` / `uint.<…>` would not.
     pub fn bits_of(n: u16) -> Const {
-        Const::known(Ty::usize(), ConstValue::Int(n.into()))
+        Const::Width(n)
     }
 
     /// The width in bits this const denotes, resolved against the target.
@@ -171,13 +179,9 @@ impl Const {
     /// (`impl <const N: usize> int.<N>`, and its `uint.<N>` twin) no width is
     /// known until monomorphization, and every caller has to say what it does
     /// then rather than invent a number.
-    pub fn bits(&self, target: Target) -> Option<u32> {
+    pub fn bits(&self) -> Option<u32> {
         match self {
-            Const::PtrBits => Some(target.pointer_bits),
-            Const::Value(a) => match &a.value {
-                ConstValue::Int(n) => u32::try_from(n).ok(),
-                _ => None,
-            },
+            Const::Width(n) => Some(*n as u32),
             _ => None,
         }
     }
@@ -192,11 +196,7 @@ impl Const {
                 ConstValue::Float(f) => f.to_string(),
                 other => format!("{other:?}"),
             },
-            // Named, not numbered: the number is exactly what this case
-            // refuses to commit to. In practice `Ty::display` spells the whole
-            // type `usize` / `isize` before ever reaching here, so this shows
-            // up only if a width is rendered on its own.
-            Const::PtrBits => "PTR_BITS".into(),
+            Const::Width(n) => n.to_string(),
             Const::Param(d) => defs.get(*d).name.to_string(),
             Const::Var(v) => format!("?c{}", v.0),
             Const::Error => "_".into(),
@@ -302,22 +302,6 @@ impl Ty {
         Ty::int(8, false)
     }
 
-    /// `isize` — the default for an unconstrained integer literal.
-    pub fn isize() -> Ty {
-        Ty::Int {
-            signed: true,
-            width: Const::PtrBits,
-        }
-    }
-
-    /// `usize`.
-    pub fn usize() -> Ty {
-        Ty::Int {
-            signed: false,
-            width: Const::PtrBits,
-        }
-    }
-
     /// Whether this (already-resolved) type is an integer.
     pub fn is_int(&self) -> bool {
         matches!(self, Ty::Int { .. })
@@ -332,9 +316,9 @@ impl Ty {
     /// half that can be missing. A caller getting `None` has to decide what
     /// "not known until monomorphization" means for it; there is no number it
     /// could be given that would not be a guess.
-    pub fn int_parts(&self, target: Target) -> Option<(bool, u32)> {
+    pub fn int_parts(&self) -> Option<(bool, u32)> {
         match self {
-            Ty::Int { signed, width } => Some((*signed, width.bits(target)?)),
+            Ty::Int { signed, width } => Some((*signed, width.bits()?)),
             _ => None,
         }
     }
@@ -363,25 +347,18 @@ impl Ty {
     pub fn display(&self, defs: &super::def::DefTable) -> String {
         match self {
             Ty::Var(v) => format!("?{}", v.0),
-            // Print the sugar whenever both arguments are known, and the
-            // generic form only when one is not. A diagnostic about `i32` must
-            // never say `int.<32, true>` — that is the spelling the *compiler*
-            // chose, not the one the program did — while inside the family
-            // impl there is no sugar to print, because `N` and `S` really are
-            // the arguments there.
-            Ty::Int { signed, width } => match width {
-                Const::PtrBits => (if *signed { "isize" } else { "usize" }).to_string(),
-                // `value`, not `bits`: rendering a type must not need a target,
-                // and the one width that would need one — `PtrBits` — was
-                // already spelled by the arm above.
-                w => match w.value() {
-                    Some(n) => format!("{}{n}", if *signed { 'i' } else { 'u' }),
-                    None => format!(
-                        "{}.<{}>",
-                        if *signed { "int" } else { "uint" },
-                        w.display(defs)
-                    ),
-                },
+            // Print the sugar when the width is known, the family form when it
+            // is not. A diagnostic about `i32` must never say `int.<32>` — that
+            // is the spelling the *compiler* chose, not the one the program did
+            // — while inside a family impl there is no sugar to print, because
+            // `N` really is the argument there.
+            Ty::Int { signed, width } => match width.bits() {
+                Some(n) => format!("{}{n}", if *signed { 'i' } else { 'u' }),
+                None => format!(
+                    "{}.<{}>",
+                    if *signed { "int" } else { "uint" },
+                    width.display(defs)
+                ),
             },
             Ty::Float(w) => match w {
                 FloatWidth::F16 => "f16",
@@ -584,6 +561,9 @@ pub struct InferCtxt {
     /// is an ordinary [`Ty::Nominal`] here — found by tag, never by name, so
     /// only the caller can say which one it is (§1.5).
     str_ty: Option<Ty>,
+    /// The `#lang("usize")` / `#lang("isize")` types. See
+    /// [`InferCtxt::set_ptr_int_tys`].
+    ptr_ints: Option<(Ty, Ty)>,
 }
 
 impl InferCtxt {
@@ -603,6 +583,26 @@ impl InferCtxt {
     /// [`InferCtxt::set_numeric_distincts`].
     pub fn set_str_ty(&mut self, ty: Option<Ty>) {
         self.str_ty = ty;
+    }
+
+    /// Record the `#lang("usize")` / `#lang("isize")` types, in that order.
+    ///
+    /// They are ordinary `distinct` declarations in `core` (§3.1) rather than
+    /// primitives, so — exactly as for `str` — unification cannot find them: it
+    /// has no def table and cannot do a `#lang` lookup. The one place it needs
+    /// them is defaulting an unconstrained integer literal to `isize`.
+    pub fn set_ptr_int_tys(&mut self, tys: Option<(Ty, Ty)>) {
+        self.ptr_ints = tys;
+    }
+
+    /// `usize`, when `core` declared one.
+    pub fn usize_ty(&self) -> Option<Ty> {
+        self.ptr_ints.as_ref().map(|(u, _)| u.clone())
+    }
+
+    /// `isize`, when `core` declared one.
+    pub fn isize_ty(&self) -> Option<Ty> {
+        self.ptr_ints.as_ref().map(|(_, i)| i.clone())
     }
 
     /// Whether `ty` is one of the three types a string literal may become
@@ -777,11 +777,10 @@ impl InferCtxt {
             // would make `Foo.<3u8>` and `Foo.<3usize>` one type.
             (Const::Value(x), Const::Value(y)) if x == y => Ok(()),
             (Const::Param(x), Const::Param(y)) if x == y => Ok(()),
-            // The pointer width agrees with itself and with **nothing else** —
-            // not even with the number the target happens to use. That is the
-            // whole of what keeps `usize` from being `u64`: the two differ here,
-            // in the one place a width is ever compared.
-            (Const::PtrBits, Const::PtrBits) => Ok(()),
+            // Two widths agree when they are the same number. A width carries no
+            // type to compare, because a width has only one type (§3.1).
+            (Const::Width(x), Const::Width(y)) if x == y => Ok(()),
+
             _ => Err((a, b)),
         }
     }
@@ -1139,7 +1138,10 @@ impl InferCtxt {
         match ty {
             Ty::Var(v) => {
                 let default = match self.kind(v) {
-                    TyVarKind::Int => Some(Ty::isize()),
+                    // `isize` is a `core` declaration now, so a program with no
+                    // `core` has nothing to default to; `Ty::Error` there is
+                    // already the shape for "reported elsewhere".
+                    TyVarKind::Int => Some(self.isize_ty().unwrap_or(Ty::Error)),
                     TyVarKind::Float => Some(Ty::Float(FloatWidth::F64)),
                     // A string literal nothing pinned is a `str`. When the
                     // program has no `#lang("str")` item there is nothing to
@@ -1206,6 +1208,12 @@ impl InferCtxt {
             other => other,
         }
     }
+}
+
+/// The type an integer **width** is read at (§3.1): a `u16`, because a width is
+/// capped at 65535 and nothing wider could ever be a legal one.
+pub fn width_ty() -> Ty {
+    Ty::int(16, false)
 }
 
 /// Whether every value of one integer type is a value of another — the rule for
@@ -1342,8 +1350,6 @@ pub fn primitive_ty(name: &str) -> Option<Ty> {
         // is what makes a diverging call sit in any expression position without
         // the type checker special-casing it (§3.1).
         "never" => return Some(Ty::Never),
-        "isize" => return Some(Ty::isize()),
-        "usize" => return Some(Ty::usize()),
         _ => {}
     }
     let (signed, digits) = match name.split_at(1) {
@@ -1386,18 +1392,28 @@ pub fn primitive_ty(name: &str) -> Option<Ty> {
 mod tests {
     use super::*;
 
+    /// A stand-in for `usize` in this module's tests.
+    ///
+    /// `usize` is a `core` declaration now (§3.1), so there is no `usize` to
+    /// name without a session — and these tests are about the lattice, not about
+    /// `core`. Anything nominal serves; the source-level behaviour is pinned by
+    /// `sema::tests` instead, where a real `core` is loaded.
+    fn a_nominal() -> Ty {
+        Ty::Nominal {
+            def: DefId(0),
+            args: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_const_arguments_type_is_half_its_identity() {
-        // §5: `3u8` and `3usize` are **different** arguments. The values are
+        // §5: `3usize` and `3u8` are **different** arguments. The values are
         // equal and the types are not, and comparing only the values would make
         // `Foo.<3u8>` and `Foo.<3usize>` one type — a collapse nothing would
         // catch until monomorphization tried to emit one body for two different
         // argument types.
-        let three_usize = Const::len(3);
-        let three_u8 = Const::known(
-            Ty::u8(),
-            ConstValue::Int(3.into()),
-        );
+        let three_usize = Const::len(3, a_nominal());
+        let three_u8 = Const::known(Ty::u8(), ConstValue::Int(3.into()));
         let mut cx = InferCtxt::new();
         assert!(cx.unify_const(&three_usize, &three_usize).is_ok());
         assert!(cx.unify_const(&three_u8, &three_u8).is_ok());
@@ -1408,7 +1424,10 @@ mod tests {
 
         // Different values at one type disagree too, which is the rule that
         // makes `[3]i32` and `[4]i32` different types.
-        assert!(cx.unify_const(&Const::len(3), &Const::len(4)).is_err());
+        assert!(
+            cx.unify_const(&Const::len(3, a_nominal()), &Const::len(4, a_nominal()))
+                .is_err()
+        );
 
         // A variable takes whichever it meets first, and keeps the type with it.
         let v = cx.fresh_const();
@@ -1417,20 +1436,34 @@ mod tests {
         assert!(cx.unify_const(&v, &three_usize).is_err());
     }
 
+    /// A width is a bare number, not a value at a type — which is what keeps the
+    /// representation finite: a width typed `u16` would be a `uint.<16>` whose
+    /// width is typed `u16`, without end.
+    #[test]
+    fn a_width_is_a_bare_number() {
+        assert_eq!(Const::bits_of(32), Const::Width(32));
+        assert_eq!(Ty::int(32, true).int_parts(), Some((true, 32)));
+
+        let mut cx = InferCtxt::new();
+        assert!(cx.unify(&Ty::int(32, true), &Ty::int(32, true)).is_ok());
+        assert!(cx.unify(&Ty::int(32, true), &Ty::int(64, true)).is_err());
+        assert!(cx.unify(&Ty::int(32, true), &Ty::int(32, false)).is_err());
+    }
+
     #[test]
     fn a_const_parameter_admits_every_primitive_and_no_aggregate() {
-        // §5: the admissible set is the primitives. `bool` is load-bearing — the
-        // integer family `int.<N, S>` is a `usize` width and a `bool` signedness
-        // (§3.1) — and an aggregate is excluded because structural equality of
-        // arbitrary values is a much larger promise than comparing two scalars.
-        for name in ["usize", "u8", "i64", "f32", "bool", "char"] {
+        // §5: the admissible set is the primitives. `bool` is load-bearing —
+        // `<const B: bool>` is an ordinary thing to want — and an aggregate is
+        // excluded because structural equality of arbitrary values is a much
+        // larger promise than comparing two scalars.
+        for name in ["u16", "u8", "i64", "f32", "bool", "char"] {
             let t = primitive_ty(name).expect(name);
             assert!(t.is_primitive(), "`{name}` should be admissible");
         }
         assert!(!Ty::Void.is_primitive());
         assert!(
             !Ty::Array {
-                len: Const::len(3),
+                len: Const::len(3, a_nominal()),
                 mutable: false,
                 inner: Box::new(Ty::Bool),
             }
@@ -1439,60 +1472,25 @@ mod tests {
         assert!(!Ty::Tuple(vec![Ty::Bool, Ty::Bool]).is_primitive());
     }
 
-    /// `usize` is `uint.<PTR_BITS>`, and `PTR_BITS` is opaque: the type
-    /// system never learns the number, so `usize` and `u64` stay two types on a
-    /// 64-bit target.
-    ///
-    /// This is the phase's central invariant. If it ever fails, `impl usize`
-    /// and `impl u64` collide and changing the target silently changes which
-    /// types a program has — which is why the check is on identity *and* on
-    /// unification, the two places a collapse could happen.
-    #[test]
-    fn usize_is_not_u64_though_the_target_is_64_bit() {
-        let target = Target::HOST_64;
-        let u64_ty = Ty::int(64, false);
-
-        // Layout may read the width; identity may not.
-        assert_eq!(Ty::usize().int_parts(target), Some((false, 64)));
-        assert_eq!(u64_ty.int_parts(target), Some((false, 64)));
-
-        assert_ne!(Ty::usize(), u64_ty, "`usize` and `u64` must not be equal");
-        assert_ne!(Ty::isize(), Ty::int(64, true));
-
-        let mut cx = InferCtxt::new();
-        assert!(cx.unify(&Ty::usize(), &Ty::usize()).is_ok());
-        assert!(
-            cx.unify(&Ty::usize(), &u64_ty).is_err(),
-            "`usize` must not unify with `u64`"
-        );
-        // …and they are not merely distinct, they are distinct in the *width*:
-        // the signedness agrees, so nothing but `PtrBits` separates them.
-        assert!(cx.unify(&Ty::usize(), &Ty::isize()).is_err());
-    }
-
-    /// The sugar and the family spelling are **one type**, not two that convert
-    /// (roadmap phase 5, item 2's precondition): `i32` is `int.<32>` down
-    /// to the representation, so nothing downstream has to know which spelling
-    /// the program used.
+    /// The sugar and the family spelling are **one type**, not two that convert:
+    /// `i32` is `int.<32>` down to the representation.
     #[test]
     fn the_sugar_and_the_family_are_one_type() {
         assert_eq!(
             primitive_ty("i32"),
             Some(Ty::Int {
                 signed: true,
-                width: Const::bits_of(32),
+                width: Const::Width(32),
             })
         );
 
-        // And it renders back as the sugar, never as the arguments the
-        // compiler chose for it.
+        // And it renders back as the sugar, never as the argument the compiler
+        // chose for it.
         let defs = super::super::def::DefTable::new();
         assert_eq!(Ty::int(32, true).display(&defs), "i32");
         assert_eq!(Ty::int(7, false).display(&defs), "u7");
-        assert_eq!(Ty::usize().display(&defs), "usize");
-        assert_eq!(Ty::isize().display(&defs), "isize");
 
-        // A symbolic argument has no sugar to print, so the generic form shows.
+        // A symbolic width has no sugar to print, so the family form shows.
         let mut cx = InferCtxt::new();
         let open = Ty::Int {
             signed: true,
@@ -1516,7 +1514,10 @@ mod tests {
             primitive_ty("u7"),
             Some(Ty::int(7, false))
         );
-        assert_eq!(primitive_ty("usize"), Some(Ty::usize()));
+        // `usize` is no longer a primitive: it is a `distinct` declared in
+        // `core` (§3.1), reached by name through the prelude like `str`.
+        assert_eq!(primitive_ty("usize"), None);
+        assert_eq!(primitive_ty("isize"), None);
         assert_eq!(primitive_ty("f80"), Some(Ty::Float(FloatWidth::F80)));
         assert_eq!(primitive_ty("u1"), Some(Ty::Bool));
         assert_eq!(primitive_ty("i1"), None);
@@ -1532,13 +1533,17 @@ mod tests {
         assert_eq!(cx.resolve(&v), Ty::Bool);
     }
 
+    /// An unconstrained integer literal defaults to `isize` — the one the
+    /// context was told about, since `isize` is a `core` declaration and this
+    /// module cannot name it.
     #[test]
     fn int_literal_defaults_to_isize() {
         let mut cx = InferCtxt::new();
+        cx.set_ptr_int_tys(Some((a_nominal(), a_nominal())));
         let lit = cx.fresh_of(TyVarKind::Int);
         let mut amb = false;
         let out = cx.finalize(&lit, &mut || amb = true);
-        assert_eq!(out, Ty::isize());
+        assert_eq!(out, a_nominal());
         assert!(!amb);
     }
 

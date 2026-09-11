@@ -27,6 +27,11 @@
 @public { ControlFlow } :: import "control.nest"
 @public { str } :: import "str.nest"
 
+// `usize` / `isize` are ordinary declarations in `num.nest` (§3.1), not compiler
+// primitives, so the prelude is what makes them nameable without an import — the
+// same way `str` is.
+@public { usize, isize } :: import "num.nest"
+
 // The three intrinsics §6.4 puts here. `cast` appears wherever a conversion is
 // written, `panic` wherever something must not happen, and `size_of` in enough
 // signatures and constants to earn its place; the rest of `core/mem` and all of
