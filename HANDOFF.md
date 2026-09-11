@@ -117,17 +117,27 @@ The user raised four things and answered a design question on each. All are buil
   The lowering cannot go through the default cache (`Lowerer::defaults`), which
   lowers each default once and clones it: every call would get the *declaration's*
   position. `lower_args` checks for it and builds the value from the call site.
-- **`Default` and the `..` spread** (`8de2d87`). The user chose Rust-style over
-  field defaults: a literal never silently omits a field. `core.Default` is a
-  `#lang("default")` trait, and `P { x: 5, ..rest }` fills the rest. It is
-  **desugared** (`desugar::lower_spread`) into `{ __spread1 :: rest  P { x: 5,
-  y: __spread1.y } }`, so inference sees an ordinary complete literal and every
-  rule — privacy, field typing, missing-field — applies to the filled-in reads.
-  The temporary is **typed** with the literal's own type node, which is what
-  makes `P { x: 1, ..q }` a `Q`-is-not-a-`P` error rather than a silent build.
-  Cost of desugaring early: the **type must be named**, so `.{ ..rest }` is
-  refused — the field list comes from the resolved type and desugaring runs
-  before inference.
+- **`Default` and the `..` spread** (`8de2d87`, `822bff9`). The user chose
+  Rust-style over field defaults: a literal never silently omits a field.
+  `core.Default` is a `#lang("default")` trait, and both `P { x: 5, ..rest }`
+  and `.{ x: 5, ..rest }` fill the rest.
+
+  The work is **split across two passes**, and that split is the whole design.
+  `desugar::lower_spread` binds the temporary — `{ __spread1 :: rest  P { x: 5,
+  ..__spread1 } }` — because a new local needs a `DefId` and desugaring is the
+  pass that allocates them; it is also what gives "evaluated once" a place a
+  reader can see, since the call is bound to a name before any field reads it.
+  `Lowerer::fill_from_spread` then expands the spread into `Field` reads off
+  that temporary, because the fields a spread fills come from the literal's
+  **type**, and `.{ … }` has none until inference has settled it.
+
+  The first cut expanded everything in desugaring and so had to refuse
+  `.{ ..rest }`. Moving only the expansion to lowering removed the restriction
+  with one code path for both spellings.
+
+  A spread is held to the type being built (`check_record_body` expects it
+  against the target), so `P { x: 1, ..q }` with `q: Q` is a type error and not
+  a silent build.
 - **A constant's type goes before the binder** (`ab4ebc6`). `MAX_BYTE: u8 :: 100`,
   and `#static count: usize :: 0` / `#static scratch: [4096]u8`, and a trait's
   `MAX: i32` / `MIN: i32 :: 0`. The point, in the user's words, is that
@@ -196,6 +206,18 @@ Everything in the previous handoffs' lists still stands. New this session:
   reverted by hand. The typed-constant form and the alias form are the same shape
   until you know what the RHS *means*, which is the whole reason the syntax
   changed — a migration script cannot know it either.
+- **Expanding the `..` spread entirely in desugaring.** It needs the struct's
+  field list, which comes from the literal's type, and desugaring runs before
+  inference — so the named form worked and `.{ ..rest }` had to be refused. Bind
+  the temporary there (it needs a `DefId`) and expand in lowering (it has the
+  type). Do not reach for a mutable `DefTable` in lowering; nothing needs one.
+- **Removing the non-struct check with the desugar it lived in.** `E { ..e }`
+  went quiet, because an enum is `Ty::Nominal` too and has no fields to miss.
+  `check_record_body` now requires `DefKind::Struct` — which also closed a
+  pre-existing hole where `E { }` was silently accepted.
+- **Reading a field's declared type off its type node.** `stamp_member_types`
+  stamps it on the **`Field` node itself**, the node the member's def points at.
+  Reading the inner type node gave `<error>` for every spread-filled field.
 - **Checking trait conformance in `impls.rs`.** That pass runs before inference,
   so there are no types to compare. Completeness belongs there; matching does not.
 - **Comparing a trait method against an impl method without aligning their
@@ -223,7 +245,7 @@ Everything in the previous handoffs' lists still stands. New this session:
 | An array length must be a `usize`, checked at the declaration | §3.2 makes it a `usize` count. Typed const identity otherwise produces `expected [4]i32, found [4]i32`. Spec §5's illustration was corrected to match |
 | `#caller_location` is a default argument, never anything else | A default is filled in at the call site, which is the whole of why it names the caller. Elsewhere it could only mean "the position of this expression" |
 | `Default` + `..` spread, not struct field defaults | The user's call: a literal never silently omits a field, and `..` is the visible token that says "and the rest from here" |
-| The spread is desugared before inference | Every rule that applies to a written field then applies to a filled-in one, free. The price is that the type must be named |
+| The spread binds its temporary in desugaring and expands in lowering | The temporary needs a `DefId` (desugaring allocates those); the expansion needs the literal's type (only inference has it). Splitting is what lets `.{ ..rest }` work |
 | `NAME: T :: value`, `#static NAME: T [:: value]`, `MAX: i32 [:: default]` | The type before the binder is what leaves `NAME :: type` a type alias unconditionally |
 | A `#static` must write its type | A region is storage; storage has a width, and the zeroed form has no initializer to infer one from |
 | Conformance is checked in inference | It is a question about types, and `impls::build` runs before there are any |
@@ -378,9 +400,10 @@ checked at all — its *value* is not known until monomorphization.
 Everything in the previous handoff's list still holds except where noted. New or
 changed:
 
-- **A `..` spread needs the type named.** `.{ x: 5, ..rest }` is refused; write
-  `P { x: 5, ..rest }`. Lifting this means moving the expansion after inference,
-  which needs a synthetic local and so a mutable `DefTable` in lowering.
+- **A struct literal does not check field privacy**, spread or written:
+  `field_ty` looks a field up by name without consulting visibility, so a
+  literal outside the declaring namespace can name a private field. Pre-existing
+  and unrelated to the spread, which inherits whatever the written form does.
 - **`Location` is not in the prelude**, so declaring a `#caller_location`
   parameter costs `{ Location } :: import <core/loc>`. `panic` needs no import
   because it carries the parameter itself.

@@ -271,7 +271,7 @@ Not a phase: four questions the user answered and the work that followed, in
 | Decision | Shape |
 |---|---|
 | `#caller_location` is an expression, legal only as a **default argument** | `func (loc: Location := #caller_location)`, `Location` a `#lang("location")` struct in `core/loc.nest` |
-| No struct field defaults; `Default` and `..` instead | `P { x: 5, ..Default.default() }`, desugared to explicit field reads off one temporary |
+| No struct field defaults; `Default` and `..` instead | `P { x: 5, ..Default.default() }` and `.{ x: 5, ..rest }`; the temporary is bound in desugaring, the field reads expanded in lowering |
 | A constant's type goes **before** the binder | `NAME: T :: value`, `#static NAME: T [:: value]`, `MAX: i32 [:: default]` — so `NAME :: type` is a type alias always |
 | An impl's members are checked against the trait's **types**, not just their presence | `Inferer::check_impl_conformance` |
 
