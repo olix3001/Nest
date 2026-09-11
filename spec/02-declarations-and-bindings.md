@@ -207,6 +207,22 @@ id.is_valid()   // ok — CatId's own
 s.is_valid()    // error: no method `is_valid` on `str`
 ```
 
+An inherited method has its **`Self` rebound to the distinct type**. The method
+was written over `T`, so a `func (self: Self) -> Self` on `T` would otherwise
+hand back a `T` — and the distinction would evaporate on the first call, which is
+exactly what `distinct` exists to prevent:
+
+```
+Meters :: distinct f64
+
+m + m           // Meters, not f64
+n.wrapping_add(k)   // on a `usize`: a `usize`, not `uint.<PTR_BITS>`
+```
+
+The rebinding is a reinterpretation and nothing else: the two types have one
+representation, so it costs nothing at run time and the function being called is
+still the one declared over `T`.
+
 The asymmetry is the point. A `distinct T` is `T` plus an invariant and some
 extra operations, so everything `T` can do it can do; the operations that assume
 the invariant stay off `T`, where the invariant does not hold. Inheriting in both

@@ -9,10 +9,10 @@ Phases 0 through 4 are **complete**: the front end parses, resolves, infers,
 lowers to IR, validates the IR, evaluates constants, splits the prelude, declares
 every intrinsic in `core`, and takes a `const` generic of any primitive type. A
 round of language decisions on top of that — `#caller_location`, `Default`, the
-binding syntax, trait conformance — is recorded below. Phase 5 built the integer
-families and implicit widening on top of that; what remains of it is moving
-`usize` into `core`. **371 tests pass.** Phase 6 and everything after it is
-unbuilt.
+binding syntax, trait conformance — is recorded below. **Phase 5 is done**: the
+integer families, implicit widening, `usize` as a `core` declaration, and the
+`Self` rebinding that `distinct` had always been missing. **376 tests pass.**
+Phase 6 and everything after it is unbuilt.
 
 ## The order, at a glance
 
@@ -290,7 +290,7 @@ global.
 
 ---
 
-## Phase 5 — The integer families `int.<N>` / `uint.<N>` 🟡 **mostly done**
+## Phase 5 — The integer families `int.<N>` / `uint.<N>` ✅ **done** (`6248d22`, `13ffe2d`, `cb85833`, `bac8491`)
 
 **Goal.** Integers are two generic families: `int.<N>` (signed) and `uint.<N>`
 (unsigned), with `N: u16` the width in bits. `i32`, `u8` are sugar. Spec §3.1.
@@ -327,51 +327,60 @@ reachable any other way.
       only when strictly wider. A `const` parameter fills a slot on the same
       rule. Lowers to the existing exact implicit `$cast`.
 
-### What is left — `usize` into `core`
+### `usize` into `core` (`bac8491`)
 
-The user's design, settled but **not landed**. WIP lives on the branch
-`phase5-usize-in-core` (`90d57b1`), which does **not** build clean.
-
-`usize` and `isize` stop being primitives and become `core` declarations:
+`usize` and `isize` are no longer primitives. They are `core` declarations:
 
 ```nest
-usize :: distinct uint.<PTR_BITS>
-isize :: distinct  int.<PTR_BITS>
+usize :: #lang("usize") distinct uint.<PTR_BITS>
+isize :: #lang("isize") distinct int.<PTR_BITS>
 ```
 
-with `PTR_BITS` coming from a compiler-generated `core/target.nest` that also
-supplies `OS`, `ARCH` and `PROFILE` as values of `Os` / `Arch` / `Profile` —
-enums declared by hand in `core/os.nest`. The generated file is a **member of
-core** rather than a package of its own, so that it can name those enums: the
-coupling is then between two files of one package instead of between the compiler
-and a library's vocabulary.
+`PTR_BITS` comes from `core/target.nest`, which the **compiler generates** from
+`Options` and which also supplies `OS`, `ARCH` and `PROFILE` as values of `Os` /
+`Arch` / `Profile` — enums written by hand in `core/os.nest`. The generated file
+is a *member of core* rather than a package of its own, precisely so it can name
+those enums: the coupling is then between two files of one package instead of
+between the compiler and a library's vocabulary.
 
-Three things make it work, and one of them is not obvious:
+Four things made it work:
 
-1. **A width is a bare `u16`** (`Const::Width(u16)`), not a `Const::Value` at
-   type `u16`. A `Value` carries the `Ty` it was written at, and that `Ty` for a
-   width would be `u16` — itself `uint.<16>`, whose width carries a `u16`,
-   without end. Holding the number bare is what makes the representation finite,
-   and it is what lets `usize` be defined in terms of a width at all.
-2. `Ty::usize()` can no longer be built context-free, so it is injected into
-   `InferCtxt` by `#lang` tag exactly as `str` already is
+1. **A width is a bare `u16`** (`Const::Width`), not a `Const::Value` at type
+   `u16`. A `Value` carries the `Ty` it was written at, and that `Ty` would be
+   `u16` — itself `uint.<16>`, whose width carries a `u16`, without end. Bare is
+   what makes the representation finite, and what lets `usize` be defined in
+   terms of a width at all.
+2. `Ty::usize()` can no longer be built context-free, so the two types are
+   injected into `InferCtxt` by `#lang` tag exactly as `str` already was
    (`set_ptr_int_tys`), and `Const::len` takes the type as an argument.
-3. `numeric_distincts` has to *read* `distinct uint.<PTR_BITS>` — one literal or
-   one hop to a constant — or core's declaration would be decorative.
+3. `numeric_distincts` **reads** `distinct uint.<PTR_BITS>` — one literal or one
+   hop to a constant — so core's declaration is real rather than decorative.
+4. **`Self` is rebound for an inherited method.** See below; this is the one
+   that mattered most.
 
-**The gaps that stopped it**, each independent and each real:
+**The target no longer enters the type system at all.** `Target` was threaded
+through `Inferer`, `ConstEval` and the exhaustiveness checker purely to resolve a
+pointer width; with the width arriving as an ordinary constant through `core`,
+every one of those fields became dead and was removed. Layout (phase 7) will want
+the target again, but the *type* layer no longer does.
 
-- **`Ty::is_primitive` is false for a nominal `distinct`**, so
-  `impl <T, const N: usize> [N]T` in `slice.nest` is rejected with "a `const`
-  generic parameter must have a primitive type". `check_const_param` has to
-  resolve the numeric-distinct representation first.
-- **The const evaluator cannot evaluate an enum variant**, so
-  `OS: Os :: Os.Linux` in the generated file fails with "`Linux` has no
-  compile-time value". This is the largest of the three and is not really about
-  integers at all.
-- **A width read from a constant** (`uint.<PTR_BITS>`) reports "an integer width
-  must be a literal, a constant, or a `const` generic parameter" — an ordering
-  problem between the import binding and `const_of_def`, not yet diagnosed.
+### `Self` rebinding, which had been missing all along
+
+A `distinct D :: T` inherits `T`'s methods, and those methods are written in terms
+of `T`. Before this, `d.dup()` on a `func (self: Self) -> Self` returned **`T`** —
+the distinction evaporated on the first inherited call. Only the *builtin
+operator rows* avoided it, by computing `Output` from the self type as written,
+which is why `Meters + Meters -> Meters` worked while a real trait impl did not.
+
+`Inferer::infer_method_call_rebound` fixes it: the signature is instantiated and
+the `self` parameter unified **in the representation's terms** — that is what
+solves a generic representation's own parameters, as when `str` inherits from
+`impl <T> []T` — and only then is every occurrence of the representation replaced
+by the distinct type. The callee keeps its real signature in the IR, because the
+function being called really is the one declared over the representation.
+
+This is what gives `usize` `wrapping_add` returning a `usize` with **no impl of
+its own**, and it is a fix to `distinct` in general, not to integers.
 
 **Risks** (the two that remain from the original three; display churn is
 settled):
@@ -385,8 +394,16 @@ settled):
 
 **Done when.** `x.wrapping_add(y)` works for `u8`, `i64` *and* `u7` ✅; `i32` and
 `int.<32>` are the same type ✅; snapshots show the sugar ✅; `usize` is not `u64`
-✅ (as a primitive today, as a `distinct` once the above lands); `usize` is
-declared in `core` ❌.
+✅; `usize` is declared in `core` ✅. **376 tests pass.**
+
+**Still open, and deliberately not done**: moving `+`, `-` and the rest out of
+`sema::builtins` into real `Add` / `Sub` trait impls in `core` with `#intrinsic`
+bodies. It was proposed as the way to make operators return `Self` for `usize` —
+but the `Self` rebinding above already does that, so the move is now pure
+cleanup rather than a correctness fix. Its cost is not small: floats are not a
+family, so it is ~50 impl blocks, plus a selection path that rebinds `Self` for
+obligations (a different path from method calls) and a lowering change to keep
+`i32 + i32` a primitive `Binary` rather than a call.
 
 ---
 

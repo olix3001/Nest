@@ -102,11 +102,26 @@ usize :: distinct uint.<PTR_BITS>
 isize :: distinct  int.<PTR_BITS>
 ```
 
-`PTR_BITS` is a compile-time constant the build supplies, alongside `OS`, `ARCH`
-and `PROFILE` (§ target). Being `distinct` is what does the work: `usize` and
+`PTR_BITS` is a compile-time constant the build supplies, from `core/target` —
+a module the compiler generates, alongside `OS`, `ARCH` and `PROFILE`. Those
+three are values of `Os` / `Arch` / `Profile`, enums declared in `core/os`, so a
+program branches on them exhaustively rather than comparing strings:
+
+```nest
+{ OS } :: import <core/target>
+{ Os } :: import <core/os>
+
+newline :: func () -> str {
+  return OS.match { .Windows => "\r\n", _ => "\n" }
+}
+``` Being `distinct` is what does the work: `usize` and
 `u64` have the same representation on a 64-bit machine and are still different
 types, so `impl usize` and `impl u64` cannot collide and a count of bytes cannot
 be handed to something that wanted a number of them.
+
+Being `distinct` also means they **inherit** the families' methods with `Self`
+rebound to the pointer-sized type (§2.4), so `n.wrapping_add(m)` on a `usize` is
+a `usize` and needs no impl of its own.
 
 They take no part in widening, in either direction. Whether a `u64` fits a `usize`
 is the target's business, and a conversion that appeared on one machine and not

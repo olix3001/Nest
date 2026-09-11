@@ -6170,3 +6170,118 @@ fn a_const_parameter_widens_into_a_wider_slot() {
         "type mismatch: expected `u16`, found `u32`"
     );
 }
+
+/// §3.1: `usize` and `isize` are **not** compiler primitives. They are
+/// `distinct` declarations in `core` over the integer as wide as a pointer, and
+/// the width comes from `PTR_BITS` — a constant the compiler generates rather
+/// than a number the type system knows.
+#[test]
+fn usize_is_declared_in_core_over_the_pointer_width() {
+    let session = analyze_clean("f :: func (n: usize) -> usize { return n }\n");
+    let usize_def = session
+        .lang_items
+        .get("usize")
+        .expect("`core` must declare a `#lang(\"usize\")`");
+    let id = session.defs.resolve_alias(usize_def);
+    let d = session.defs.get(id);
+    assert_eq!(d.name.as_str(), "usize");
+    assert_ne!(d.kind, crate::sema::def::DefKind::Primitive, "{:?}", d.kind);
+    assert!(
+        session.defs.canonical_string(id).starts_with("core."),
+        "`usize` must be declared in `core`, not synthesized"
+    );
+
+    // It still *prints* as `usize`: a diagnostic must name what the program
+    // wrote, not the path `core` happens to use.
+    assert_eq!(
+        first_error("f :: func (n: usize) -> bool { return n }\n"),
+        "type mismatch: expected `bool`, found `usize`"
+    );
+}
+
+/// The whole point of the `distinct`: `usize` and `u64` have one representation
+/// on a 64-bit target and are still two types.
+#[test]
+fn usize_is_not_u64_though_both_are_64_bits_wide() {
+    for src in [
+        "f :: func (n: usize) -> u64 { return n }\n",
+        "f :: func (n: u64) -> usize { return n }\n",
+        "f :: func (n: isize) -> i64 { return n }\n",
+        // Not reachable by widening either, in either direction: the width is
+        // the target's, so a coercion depending on it would come and go with
+        // the machine.
+        "f :: func (n: u32) -> usize { return n }\n",
+    ] {
+        assert!(
+            first_error(src).contains("type mismatch"),
+            "{src} -> {}",
+            first_error(src)
+        );
+    }
+}
+
+/// The build's own settings are readable from a program, as `core` declarations
+/// rather than as compiler magic.
+#[test]
+fn the_target_module_describes_the_build() {
+    analyze_clean(
+        "{ PTR_BITS } :: import <core/target>\n\
+         bits :: func () -> u16 { return PTR_BITS }\n",
+    );
+    // `PTR_BITS` is what `usize` is defined over, so an ordinary program has to
+    // be able to use it as an integer width too.
+    analyze_clean(
+        "{ PTR_BITS } :: import <core/target>\n\
+         f :: func (x: uint.<PTR_BITS>) -> uint.<PTR_BITS> { return x }\n",
+    );
+    // `OS` / `ARCH` / `PROFILE` are enum values, so a program branches on them
+    // exhaustively instead of comparing strings.
+    analyze_clean(
+        "{ OS } :: import <core/target>\n\
+         { Os } :: import <core/os>\n\
+         linux :: func () -> bool { return OS.match { .Linux => true, _ => false } }\n",
+    );
+}
+
+/// §2.4: a method reached through a `distinct` type's representation is rebound,
+/// so `Self` is the distinct type and not what it stands over.
+///
+/// Without this a `distinct` evaporates on its first inherited call. It is also
+/// why `usize` gets `wrapping_add` returning a `usize` with no impl of its own:
+/// it inherits the family's, rebound.
+#[test]
+fn an_inherited_method_rebinds_self_to_the_distinct_type() {
+    analyze_clean(
+        "Dup :: trait { dup :: func (self: Self) -> Self }\n\
+         Base :: struct { n: i32 }\n\
+         impl Dup for Base { dup :: func (self: Base) -> Base { return self } }\n\
+         D :: distinct Base\n\
+         f :: func (d: D) -> D { return d.dup() }\n",
+    );
+    analyze_clean(
+        "f :: func (a: usize, b: usize) -> usize { return a.wrapping_add(b) }\n\
+         g :: func (a: isize, b: isize) -> isize { return a.wrapping_sub(b) }\n",
+    );
+    // Rebound means rebound: the representation is not the result type.
+    assert_eq!(
+        first_error("f :: func (a: usize, b: usize) -> u64 { return a.wrapping_add(b) }\n"),
+        "type mismatch: expected `u64`, found `usize`"
+    );
+}
+
+/// Operators keep `Self` too, which is what makes the `distinct` worth having:
+/// arithmetic on a `usize` is a `usize`, not the integer it stands over.
+#[test]
+fn operators_on_a_pointer_sized_type_yield_that_type() {
+    analyze_clean(
+        "a :: func (x: usize, y: usize) -> usize { return x + y }\n\
+         b :: func (x: usize, y: usize) -> usize { return x * y - y }\n\
+         c :: func (x: isize, y: isize) -> isize { return x / y }\n\
+         d :: func (x: usize) -> usize { return x & 7 | 1 }\n\
+         e :: func (x: usize, y: usize) -> bool { return x < y && x == y }\n",
+    );
+    assert_eq!(
+        first_error("f :: func (x: usize, y: usize) -> u64 { return x + y }\n"),
+        "type mismatch: expected `u64`, found `usize`"
+    );
+}
