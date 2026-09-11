@@ -249,9 +249,9 @@ too, so a constant and the same expression at run time are the same number:
 
 ```
 A :: 400
-X :: u8 := cast.<u8>(A)        // 144 — the low 8 bits, as at run time
-Y :: u8 := cast.<u8>(300)      // 44
-Z :: f32 := cast.<f32>(3.5e40) // inf
+X: u8 :: cast.<u8>(A)          // 144 — the low 8 bits, as at run time
+Y: u8 :: cast.<u8>(300)        // 44
+Z: f32 :: cast.<f32>(3.5e40)   // inf
 ```
 
 The conversion the **compiler inserts** to settle an untyped literal on the type

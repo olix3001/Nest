@@ -236,7 +236,7 @@ fn only_the_prelude_is_globbed_into_every_file() {
     // an explicit `import`. The prelude carries the names a program that writes
     // no imports at all has to be able to read.
     analyze_clean(
-        "GREET :: str := \"hi\"\n\
+        "GREET: str :: \"hi\"\n\
          f :: func (o: Option.<i32>, r: Result.<i32, i32>) -> ControlFlow.<i32, i32> { return .proceed(1) }\n",
     );
 
@@ -2000,15 +2000,15 @@ fn an_operator_in_a_const_function_is_not_a_call_to_check() {
 
 #[test]
 fn a_trait_may_declare_associated_constants() {
-    // `MAX :: i32` reads as it looks: a constant of type `i32` that every impl
+    // `MAX: i32` reads as it looks: a constant of type `i32` that every impl
     // supplies. It parses as a *type* on the right of `::`, not as a bodyless
     // `func` — which is what it used to become, giving a signature with a
     // parameter named `i32`.
     use crate::ir::TypeDefKind;
     let src = "\
 Bounded :: trait {
-  MAX :: i32
-  MIN :: i32 := 0
+  MAX: i32
+  MIN: i32 :: 0
   clamp :: func (self: *Self, n: i32) -> i32
 }
 ";
@@ -2057,8 +2057,8 @@ Bounded :: trait {
 fn an_impl_supplies_an_associated_constant() {
     let src = "\
 Bounded :: trait {
-  MAX :: i32
-  MIN :: i32 := 0
+  MAX: i32
+  MIN: i32 :: 0
   clamp :: func (self: *Self, n: i32) -> i32
 }
 S :: struct { v: i32 }
@@ -2076,7 +2076,7 @@ f :: func (s: *S) -> i32 { return s.clamp(5) }
 fn an_associated_constant_default_is_checked_against_its_type() {
     // The default is an expression with a declared type, so it is its own little
     // inference problem — and a mismatched one is a type error like any other.
-    let src = "T :: trait { MAX :: i32 := true }\n";
+    let src = "T :: trait { MAX: i32 :: true }\n";
     let msgs = messages(src);
     assert!(
         msgs.iter().any(|m| m.contains("type mismatch")),
@@ -2089,7 +2089,7 @@ fn a_trait_with_an_associated_constant_is_not_object_safe() {
     // A vtable holds code, not values, and every impl would want a different
     // one. Reported at the coercion, like every other object-safety rule.
     let src = "\
-T :: trait { MAX :: i32
+T :: trait { MAX: i32
   go :: func (self: *Self) -> i32 }
 S :: struct { n: i32 }
 impl T for S { MAX :: 1
@@ -2114,8 +2114,8 @@ T :: trait {
   a :: func (self: *Self) -> i32
   b :: func (self: *Self) -> i32
   Item :: type
-  MAX :: i32
-  MIN :: i32 := 0
+  MAX: i32
+  MIN: i32 :: 0
   d :: func (self: *Self) -> i32 { return 1 }
 }
 S :: struct { n: i32 }
@@ -2142,7 +2142,7 @@ fn a_complete_impl_is_accepted() {
     let src = "\
 T :: trait {
   Item :: type
-  MAX :: i32
+  MAX: i32
   a :: func (self: *Self) -> i32
   d :: func (self: *Self) -> i32 { return 1 }
 }
@@ -4400,7 +4400,7 @@ fn an_using_field_must_be_a_struct() {
 #[test]
 fn a_namespace_scope_let_is_rejected() {
     assert!(first_error("let G: i32 := 0\n").contains("no meaning at namespace scope"));
-    analyze_clean("#static G :: i32 := 0\n");
+    analyze_clean("#static G: i32 :: 0\n");
 }
 
 /// `#static` decorates a `::` binding, not a `let` — the one form works at
@@ -4414,15 +4414,15 @@ fn static_decorates_a_const_binding_not_a_let() {
         first_error("f :: func () {\n  #static let n: i32 := 0\n}\n")
             .contains("decorates a `::` binding, not a `let`")
     );
-    analyze_clean("f :: func () {\n  #static n :: i32 := 0\n  n = n + 1\n}\n");
+    analyze_clean("f :: func () {\n  #static n: i32 :: 0\n  n = n + 1\n}\n");
 }
 
 /// The directive is what decides how a `::` RHS reads. Without it `[4]u8` is a
 /// type alias; with it, it is the region's type and the region is zeroed.
 #[test]
 fn a_static_rhs_is_a_type_not_a_value() {
-    analyze_clean("#static scratch :: [4]u8\n");
-    analyze_clean("#static count :: u32 := 0\n");
+    analyze_clean("#static scratch: [4]u8\n");
+    analyze_clean("#static count: u32 :: 0\n");
 }
 
 #[test]
@@ -5392,7 +5392,7 @@ fn a_constant_may_be_the_result_of_a_const_function() {
   }
   return acc
 }
-FACT5 :: u32 := factorial(5)
+FACT5: u32 :: factorial(5)
 main :: func () {}
 ";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
@@ -5415,8 +5415,8 @@ Color :: enum { red, green }
   if n > 10 { return 10 }
   return n
 }
-A :: i32 := pick(.green)
-B :: i32 := clamp(42)
+A: i32 :: pick(.green)
+B: i32 :: clamp(42)
 main :: func () {}
 ";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
@@ -5430,14 +5430,14 @@ main :: func () {}
 #[test]
 fn a_static_initializer_is_evaluated_and_a_missing_one_is_zeroed() {
     let src = "\
-#static count :: u32 := 6 * 7
-#static scratch :: [4]u8
+#static count: u32 :: 6 * 7
+#static scratch: [4]u8
 main :: func () {}
 ";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
     let ir = ir_text(src);
     assert!(ir.contains("// = 42"), "{ir}");
-    assert!(ir.contains("scratch :: [4]u8 = zeroed"), "{ir}");
+    assert!(ir.contains("scratch: [4]u8 = zeroed"), "{ir}");
 }
 
 /// A constant is its value, so a callee that is not `#const` has no moment at
@@ -5446,7 +5446,7 @@ main :: func () {}
 fn a_constant_may_not_call_a_runtime_function() {
     let src = "\
 read :: func () -> i32 { return 1 }
-A :: i32 := read()
+A: i32 :: read()
 main :: func () {}
 ";
     let msgs = messages(src);
@@ -5461,8 +5461,8 @@ main :: func () {}
 #[test]
 fn a_constant_may_not_read_a_static_region() {
     let src = "\
-#static count :: u32 := 1
-A :: u32 := count
+#static count: u32 :: 1
+A: u32 :: count
 main :: func () {}
 ";
     let msgs = messages(src);
@@ -5476,8 +5476,8 @@ main :: func () {}
 #[test]
 fn a_constant_defined_in_terms_of_itself_is_reported() {
     let src = "\
-A :: i32 := B
-B :: i32 := A
+A: i32 :: B
+B: i32 :: A
 main :: func () {}
 ";
     let msgs = messages(src);
@@ -5497,7 +5497,7 @@ fn a_const_evaluation_that_does_not_finish_is_reported() {
   while true { i = i + 1 }
   return i
 }
-A :: i32 := spin()
+A: i32 :: spin()
 main :: func () {}
 ";
     let msgs = messages(src);
@@ -5509,7 +5509,7 @@ main :: func () {}
 /// value named.
 #[test]
 fn a_typed_constant_that_does_not_fit_is_reported() {
-    let msgs = messages("A :: u8 := 300\nmain :: func () {}\n");
+    let msgs = messages("A: u8 :: 300\nmain :: func () {}\n");
     assert!(msgs.iter().any(|m| m.contains("does not fit")), "{msgs:#?}");
 }
 
@@ -5520,7 +5520,7 @@ fn a_typed_constant_that_does_not_fit_is_reported() {
 /// [`Target`](crate::common::target::Target) differs between the two runs.
 #[test]
 fn a_pointer_sized_constant_is_checked_against_the_target() {
-    let src = "A :: usize := 5_000_000_000
+    let src = "A: usize :: 5_000_000_000
 main :: func () {}
 ";
     assert!(messages_for(src, Target::HOST_64).is_empty());
@@ -5531,7 +5531,7 @@ main :: func () {}
 /// Division by zero traps at run time; at compile time there is nothing to trap.
 #[test]
 fn a_constant_division_by_zero_is_reported() {
-    let msgs = messages("A :: i32 := 1 / 0\nmain :: func () {}\n");
+    let msgs = messages("A: i32 :: 1 / 0\nmain :: func () {}\n");
     assert!(
         msgs.iter().any(|m| m.contains("division by zero")),
         "{msgs:#?}"
@@ -5542,8 +5542,8 @@ fn a_constant_division_by_zero_is_reported() {
 #[test]
 fn a_constant_may_not_take_an_address() {
     let src = "\
-X :: i32 := 1
-A :: *i32 := &X
+X: i32 :: 1
+A: *i32 :: &X
 main :: func () {}
 ";
     let msgs = messages(src);
@@ -5556,7 +5556,7 @@ main :: func () {}
 fn a_struct_constant_is_stored_in_declaration_order() {
     let src = "\
 P :: struct { x: i32, y: i32 }
-A :: P := .{ y: 2, x: 1 }
+A: P :: .{ y: 2, x: 1 }
 main :: func () {}
 ";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
@@ -5567,13 +5567,86 @@ main :: func () {}
 /// writing the type pins it instead.
 #[test]
 fn a_constant_is_comptime_unless_its_type_is_written() {
-    assert!(ir_text("A :: 42\nmain :: func () {}\n").contains("const A :: comptime_int"));
-    assert!(ir_text("A :: u8 := 42\nmain :: func () {}\n").contains("const A :: u8"));
+    assert!(ir_text("A :: 42\nmain :: func () {}\n").contains("const A: comptime_int"));
+    assert!(ir_text("A: u8 :: 42\nmain :: func () {}\n").contains("const A: u8"));
     // Pinned means pinned: a `u8` constant is not silently an `i32`.
-    let msgs = messages("A :: u8 := 5\nmain :: func () { const x: i32 := A }\n");
+    let msgs = messages("A: u8 :: 5\nmain :: func () { const x: i32 := A }\n");
     assert!(
         msgs.iter().any(|m| m.contains("type mismatch")),
         "{msgs:#?}"
+    );
+}
+
+/// §2.5: a constant's type goes **before** the `::`, which is what leaves
+/// `name :: type` meaning a type alias unconditionally.
+#[test]
+fn a_constants_type_goes_before_the_binder() {
+    // The three forms, and the one rule that tells them apart.
+    analyze_clean("VALUE :: 100\nf :: func () -> i32 { return VALUE }\n");
+    analyze_clean("VALUE: u8 :: 100\nf :: func () -> u8 { return VALUE }\n");
+    analyze_clean("Alias :: u8\nf :: func (x: Alias) -> u8 { return x }\n");
+
+    // A pinned constant is range-checked with the literal's exact value in hand.
+    assert!(first_error("VALUE: u8 :: 300\n").contains("does not fit in `u8`"));
+    // ...and it is pinned: a `u8` constant is not silently an `i32`.
+    assert!(
+        messages("A: u8 :: 5\nmain :: func () { const x: i32 := A }\n")
+            .iter()
+            .any(|m| m.contains("type mismatch"))
+    );
+
+    // The retired spelling is named rather than left as "unexpected".
+    assert!(
+        first_error("VALUE :: u8 := 100\n")
+            .contains("a constant's type goes before the `::`")
+    );
+    // And a written type needs a value to pin.
+    assert!(
+        first_error("VALUE: u8\n").contains("a typed constant needs a value")
+    );
+}
+
+/// §2.6: a `#static` is a region, so its type is required — a region whose size
+/// depended on who read it would be no region at all.
+#[test]
+fn a_static_names_a_region_and_must_say_how_wide() {
+    analyze_clean("#static COUNT: usize :: 0\nf :: func () { COUNT = COUNT + 1 }\n");
+    analyze_clean("#static SCRATCH: [8]u8\nf :: func () {}\n");
+    // Inside a function, this is the only way to name a region: `let` and
+    // `const` are run-time bindings and cannot outlive the call.
+    analyze_clean("f :: func () {\n  #static CALLS: usize :: 0\n  CALLS = CALLS + 1\n}\n");
+
+    assert!(
+        first_error("#static COUNT :: 0\n").contains("a `#static` needs an explicit type")
+    );
+    assert!(
+        first_error("#static let G: i32 := 0\n")
+            .contains("decorates a `::` binding, not a `let`")
+    );
+}
+
+/// §3.4: a trait declares an associated constant with its type; an impl supplies
+/// the value, and may repeat the type or leave it out.
+#[test]
+fn an_associated_constant_writes_its_type_before_the_binder() {
+    // Requirement, default, and both impl spellings.
+    analyze_clean(
+        "T :: trait { MAX: i32 }\nS :: struct { n: i32 }\nimpl T for S { MAX :: 100 }\n",
+    );
+    analyze_clean(
+        "T :: trait { MAX: i32 }\nS :: struct { n: i32 }\nimpl T for S { MAX: i32 :: 100 }\n",
+    );
+    analyze_clean("T :: trait { MIN: i32 :: 0 }\nS :: struct { n: i32 }\nimpl T for S { }\n");
+    // An inherent impl may carry one too.
+    analyze_clean(
+        "S :: struct { n: i32 }\nimpl S { LIMIT: u8 :: 9 }\nf :: func () -> u8 { return S.LIMIT }\n",
+    );
+    // An associated **type** keeps `::`, because it is the other thing: both
+    // `Output :: type` and `Output :: Vec3` are `name :: <a type>`.
+    analyze_clean(
+        "T :: trait { Output :: type\n  f :: func (self: Self) -> Self.Output }\n\
+         S :: struct { n: i32 }\n\
+         impl T for S { Output :: i32\n  f :: func (self: S) -> i32 { return 1 } }\n",
     );
 }
 
@@ -5662,7 +5735,7 @@ main :: func () {
 ";
     analyze_clean(src);
     let ir = ir_text(src);
-    assert!(ir.contains("const A :: comptime_str"), "{ir}");
+    assert!(ir.contains("const A: comptime_str"), "{ir}");
     assert!(ir.contains("(A: []u8)"), "{ir}");
     assert!(ir.contains("(A: core.str)"), "{ir}");
 }
@@ -5671,9 +5744,9 @@ main :: func () {
 /// time — so the const evaluator is what performs it.
 #[test]
 fn a_string_constant_is_transcoded_to_chars_at_compile_time() {
-    let ir = ir_text("CHARS :: []char := \"hé\"\nmain :: func () {}\n");
+    let ir = ir_text("CHARS: []char :: \"hé\"\nmain :: func () {}\n");
     assert!(ir.contains("// = { 'h', 'é' }"), "{ir}");
-    let ir = ir_text("BYTES :: []u8 := \"hi\"\nmain :: func () {}\n");
+    let ir = ir_text("BYTES: []u8 :: \"hi\"\nmain :: func () {}\n");
     assert!(ir.contains("// = b\"hi\""), "{ir}");
 }
 
@@ -5696,7 +5769,7 @@ fn a_byte_string_is_a_byte_slice() {
         "RAW :: b\"\\x00\\xffok\"\nbytes :: func (b: []u8) {}\nmain :: func () { bytes(RAW) }\n";
     analyze_clean(src);
     let ir = ir_text(src);
-    assert!(ir.contains("const RAW :: []u8"), "{ir}");
+    assert!(ir.contains("const RAW: []u8"), "{ir}");
     assert!(ir.contains("// = b\"\\x00\\xffok\""), "{ir}");
     // It is not a `str`, and no conversion makes it one implicitly.
     let msg = first_error("f :: func (s: str) {}\nmain :: func () { f(b\"hi\") }\n");
@@ -5729,12 +5802,12 @@ fn an_inserted_conversion_must_be_exact() {
 #[test]
 fn a_written_cast_may_lose_precision() {
     analyze_clean("main :: func () {\n  let x: u32 := 30423\n  let y: u8 := cast.<u8>(x)\n}\n");
-    let ir = ir_text("A :: 400\nX :: u8 := cast.<u8>(A)\nmain :: func () {}\n");
+    let ir = ir_text("A :: 400\nX: u8 :: cast.<u8>(A)\nmain :: func () {}\n");
     assert!(ir.contains("// = 144"), "{ir}");
-    let ir = ir_text("Y :: u8 := cast.<u8>(300)\nmain :: func () {}\n");
+    let ir = ir_text("Y: u8 :: cast.<u8>(300)\nmain :: func () {}\n");
     assert!(ir.contains("// = 44"), "{ir}");
     // The float direction too: what the program asked for is what it gets.
-    let ir = ir_text("Z :: f32 := cast.<f32>(3.5e40)\nmain :: func () {}\n");
+    let ir = ir_text("Z: f32 :: cast.<f32>(3.5e40)\nmain :: func () {}\n");
     assert!(ir.contains("// = inf"), "{ir}");
 }
 
@@ -5742,19 +5815,19 @@ fn a_written_cast_may_lose_precision() {
 /// to get wrong: a constant, where the evaluator is what performs the cast.
 #[test]
 fn a_constant_conversion_is_checked_and_a_written_one_is_not() {
-    let msgs = messages("B :: u8 := 300\nmain :: func () {}\n");
+    let msgs = messages("B: u8 :: 300\nmain :: func () {}\n");
     assert!(msgs.iter().any(|m| m.contains("does not fit")), "{msgs:#?}");
     // Exactly one diagnostic: inference and the evaluator both check this
     // conversion, and one mistake gets one message.
     assert_eq!(msgs.len(), 1, "{msgs:#?}");
-    assert!(messages("B :: u8 := cast.<u8>(300)\nmain :: func () {}\n").is_empty());
+    assert!(messages("B: u8 :: cast.<u8>(300)\nmain :: func () {}\n").is_empty());
 }
 
 /// A `f32` constant stores what an `f32` holds, so the constant and the same
 /// expression at run time are the same number.
 #[test]
 fn a_narrowed_float_constant_stores_the_narrowed_value() {
-    let ir = ir_text("E :: f32 := 0.1\nmain :: func () {}\n");
+    let ir = ir_text("E: f32 :: 0.1\nmain :: func () {}\n");
     assert!(ir.contains("// = 0.10000000149011612"), "{ir}");
 }
 
@@ -5764,7 +5837,7 @@ fn a_narrowed_float_constant_stores_the_narrowed_value() {
 #[test]
 fn a_string_conversion_is_always_exact() {
     let ir = ir_text(
-        "A :: []u8 := \"héllo\"\nB :: []char := \"héllo\"\nC :: str := \"héllo\"\nmain :: func () {}\n",
+        "A: []u8 :: \"héllo\"\nB: []char :: \"héllo\"\nC: str :: \"héllo\"\nmain :: func () {}\n",
     );
     assert!(ir.contains("// = b\"h\\xc3\\xa9llo\""), "{ir}");
     assert!(ir.contains("// = { 'h', 'é', 'l', 'l', 'o' }"), "{ir}");
@@ -5799,7 +5872,7 @@ fn a_literal_settling_on_a_distinct_numeric_is_range_checked() {
 /// value would decide on the language's behalf that arithmetic wraps.
 #[test]
 fn a_constant_arithmetic_result_must_fit_its_type() {
-    let msgs = messages("P :: u8 := 200 * 2\nmain :: func () {}\n");
+    let msgs = messages("P: u8 :: 200 * 2\nmain :: func () {}\n");
     assert!(
         msgs.iter()
             .any(|m| m.contains("`400` does not fit in `u8`")),
@@ -5807,7 +5880,7 @@ fn a_constant_arithmetic_result_must_fit_its_type() {
     );
     // A `distinct` numeric is checked against what it stands over.
     let msgs =
-        messages("HttpPort :: distinct u16\nQ :: HttpPort := 400 * 200\nmain :: func () {}\n");
+        messages("HttpPort :: distinct u16\nQ: HttpPort :: 400 * 200\nmain :: func () {}\n");
     assert!(
         msgs.iter()
             .any(|m| m.contains("`80000` does not fit in `HttpPort`")),
@@ -5818,6 +5891,6 @@ fn a_constant_arithmetic_result_must_fit_its_type() {
     let ir = ir_text("BIG :: 200 * 2\nmain :: func () {}\n");
     assert!(ir.contains("// = 400"), "{ir}");
     // And the low bits are still one written cast away.
-    let ir = ir_text("P :: u8 := cast.<u8>(200 * 2)\nmain :: func () {}\n");
+    let ir = ir_text("P: u8 :: cast.<u8>(200 * 2)\nmain :: func () {}\n");
     assert!(ir.contains("// = 144"), "{ir}");
 }

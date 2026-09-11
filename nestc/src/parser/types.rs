@@ -627,40 +627,45 @@ impl Parser {
         }
         let start = self.cur_span();
         let pattern = self.parse_pattern();
+        // `MAX: i32` — an associated **constant** requirement — and
+        // `MIN: i32 :: 0`, the same with a default an impl may omit (§3.4). The
+        // type goes before the `::` here for the reason it does everywhere else:
+        // it leaves `Output :: type` and `Output :: Vec3` meaning what they look
+        // like, with no second reading.
+        if self.eat(&TokenKind::Colon) {
+            let ty = self.parse_type();
+            let mut end = self.node_span(ty);
+            let default = if self.eat(&TokenKind::ColonColon) {
+                let d = self.parse_expr();
+                end = self.node_span(d);
+                Some(d)
+            } else {
+                None
+            };
+            let rhs = self.alloc(
+                self.node_span(ty).to(end),
+                NodeKind::AssocConst { ty, default },
+            );
+            return self.alloc(start.to(end), NodeKind::ConstBind { pattern, rhs });
+        }
         self.expect(&TokenKind::ColonColon);
 
         let rhs = if self.at_contextual("type") {
             self.parse_assoc_type()
         } else {
             let directives = self.parse_directives();
-            // A trait member is a method signature, an associated type, or an
-            // associated constant. Only the first begins with `func` (or the
-            // `extern` that may precede it), so anything else is a *type* —
-            // `MAX :: i32` — and reading it as a bodyless `func` produced a
-            // signature with a parameter named `i32`.
+            // What is left after `::` is a method signature, or a *type* — an
+            // associated-type binding such as `Output :: Vec3`. An associated
+            // constant is spelled with its type before the `::` and was handled
+            // above, so nothing here has to guess between the two any more.
             if self.at(&TokenKind::FuncKw) || self.at(&TokenKind::ExternKw) {
                 self.parse_func_expr(directives)
             } else {
-                self.parse_assoc_const()
+                self.parse_type()
             }
         };
         let span = start.to(self.node_span(rhs));
         self.alloc(span, NodeKind::ConstBind { pattern, rhs })
-    }
-
-    /// The `T [ ':=' default ]` RHS of an associated-constant binding.
-    pub(crate) fn parse_assoc_const(&mut self) -> NodeId {
-        let start = self.cur_span();
-        let ty = self.parse_type();
-        let mut end = self.node_span(ty);
-        let default = if self.eat(&TokenKind::ColonEq) {
-            let d = self.parse_expr();
-            end = self.node_span(d);
-            Some(d)
-        } else {
-            None
-        };
-        self.alloc(start.to(end), NodeKind::AssocConst { ty, default })
     }
 
     /// The `type [ ':' bounds ]` RHS of an associated-type binding.

@@ -6,7 +6,7 @@
 @public
 Describe :: trait {
   // An associated constant: every impl supplies one, unless the trait does.
-  SIDES :: i32 := 0
+  SIDES: i32 :: 0
   describe :: func (self: *Self) -> i32
 }
 

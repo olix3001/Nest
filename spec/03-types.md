@@ -145,8 +145,8 @@ one specific behaviour regardless says so in the source, with `wrapping_add`,
 (§2.5), so one whose arithmetic does not fit its type is an error in every build:
 
 ```nest
-P :: u8 := 200 * 2                  // error: `400` does not fit in `u8`
-P :: u8 := cast.<u8>(200 * 2)       // 144 — the low bits, asked for in writing
+P: u8 :: 200 * 2                    // error: `400` does not fit in `u8`
+P: u8 :: cast.<u8>(200 * 2)         // 144 — the low bits, asked for in writing
 BIG :: 200 * 2                      // 400 — a comptime_int has no width
 ```
 
@@ -400,8 +400,8 @@ ToJson :: trait {
 }
 
 Bounded :: trait {
-  MAX :: i32           // every impl must supply a value
-  MIN :: i32 := 0      // ...unless the trait supplies one
+  MAX: i32             // every impl must supply a value
+  MIN: i32 :: 0        // ...unless the trait supplies one
   clamp :: func (self: *Self, n: i32) -> i32
 }
 
@@ -412,12 +412,18 @@ impl Bounded for Volume {
 ```
 
 - `Self` names the implementing type.
-- An **associated constant** is `Name :: T`, and reads as it looks: a constant of
-  type `T` that every impl supplies. A trait may give it a **default** with
-  `:=`, which an impl may then omit — exactly as a method may have a default
-  body. It is `:=` and not `=` for the reason §5.2 gives for parameter defaults:
-  every `=` in the grammar is assignment to an existing place or an
-  associated-*type* constraint, and this introduces what a binding holds.
+- An **associated constant** is `Name: T`, and reads as it looks: a constant of
+  type `T` that every impl supplies. A trait may give it a **default** by adding
+  `:: value`, which an impl may then omit — exactly as a method may have a
+  default body.
+
+  An impl writes `MAX :: 100`: the type is already fixed by the trait, so
+  repeating it says nothing. Writing it anyway — `MAX: i32 :: 100` — is allowed
+  and means the same thing.
+
+  An associated **type** keeps the other shape, because it *is* the other thing:
+  `Output :: type` declares one and `Output :: Vec3` binds it, both of which are
+  `name :: <a type>`, which is what that shape means everywhere (§2.5).
   A trait that declares one is **not object-safe** (see below).
 - A type implements a trait through an anonymous impl namespace introduced by the
   `impl` keyword: `impl ToJson for CatImage { ... }`. The target is written in the

@@ -206,7 +206,7 @@ impl Parser {
             }
             _ if decorated => {
                 // Any decorated statement that is not a `let`/`const` is a `::`
-                // binding — `#static calls :: uint := 0`, the function-local form
+                // binding — `#static calls: uint :: 0`, the function-local form
                 // of §2.6, among them.
                 let is_static = self.has_directive(&directives, "static");
                 let cb = self.parse_const_bind(is_static);
@@ -353,49 +353,63 @@ impl Parser {
     fn parse_const_bind(&mut self, static_storage: bool) -> NodeId {
         let start = self.cur_span();
         let pattern = self.parse_pattern();
+        // `NAME: T :: value` — a **typed constant** (§2.5) — and
+        // `#static NAME: T [:: value]` — a **region** (§2.6). The type comes
+        // before the `::`, and that is the whole point: it leaves `NAME :: T`
+        // meaning a type alias in every case, with no second rule for when a
+        // `:=` happens to follow.
+        if self.eat(&TokenKind::Colon) {
+            let ty = self.parse_type();
+            let mut end = self.node_span(ty);
+            let value = if self.eat(&TokenKind::ColonColon) {
+                let v = self.parse_expr();
+                end = self.node_span(v);
+                Some(v)
+            } else {
+                // A static is storage, and storage is zeroed; every other
+                // binding is its value and has nowhere to get one from.
+                if !static_storage {
+                    self.error(
+                        start.to(end),
+                        "a typed constant needs a value: write `NAME: T :: value`",
+                    );
+                }
+                None
+            };
+            let rhs = self.alloc(
+                self.node_span(ty).to(end),
+                NodeKind::AssocConst {
+                    ty,
+                    default: value,
+                },
+            );
+            return self.alloc(start.to(end), NodeKind::ConstBind { pattern, rhs });
+        }
         self.expect(&TokenKind::ColonColon);
-        // `#static name :: T [ ':=' init ]` (§2.6). The directive is what decides
-        // how to read the RHS: without it `name :: [4096]u8` is a *type alias*
-        // and `name :: 0` is a value, because a `::` RHS holds either and only
-        // its shape says which. A static declares neither — it declares a
-        // **region**, so the RHS is its type and the value, if any, comes after
-        // `:=`. That is exactly the associated-constant shape (`MAX :: i32 :=
-        // 100`), and it reuses the same parse.
-        let rhs = if static_storage {
-            self.parse_assoc_const()
-        } else {
-            self.typed_const_rhs()
-        };
+        // A region has a width, and the zeroed form has no initializer to infer
+        // one from, so the type is required rather than optional (§2.6).
+        if static_storage {
+            let span = start.to(self.cur_span());
+            self.error(
+                span,
+                "a `#static` needs an explicit type: write `#static NAME: T :: value`, \
+                 or `#static NAME: T` for a zeroed region",
+            );
+        }
+        let rhs = self.parse_const_rhs();
+        // The retired spelling. `A: u8 :: 5` said the same thing this used to
+        // parse, and it is worth naming rather than leaving as "unexpected".
+        if self.at(&TokenKind::ColonEq) {
+            self.bump();
+            let value = self.parse_expr();
+            self.error(
+                self.node_span(rhs).to(self.node_span(value)),
+                "a constant's type goes before the `::`: write `NAME: T :: value`",
+            );
+        }
         self.alloc(
             start.to(self.node_span(rhs)),
             NodeKind::ConstBind { pattern, rhs },
-        )
-    }
-
-    /// The RHS of an ordinary `::` binding, admitting the **typed constant**
-    /// form `A :: u8 := 5` (§2.5).
-    ///
-    /// A constant with no declared type keeps its literal's comptime-ness and
-    /// settles per use site, which is usually what is wanted; writing the type
-    /// pins it instead. The two are told apart by what follows: `A :: u8` is a
-    /// type alias, and `A :: u8 := 5` is a `u8` constant. So the RHS is parsed
-    /// first and only *then* re-read as a type, when a `:=` turns out to follow
-    /// it — the same `T := value` shape an associated constant and a `#static`
-    /// region already use, so there is one rule for where a written type goes.
-    fn typed_const_rhs(&mut self) -> NodeId {
-        let rhs = self.parse_const_rhs();
-        if !self.at(&TokenKind::ColonEq) {
-            return rhs;
-        }
-        self.bump();
-        let value = self.parse_expr();
-        let span = self.node_span(rhs).to(self.node_span(value));
-        self.alloc(
-            span,
-            NodeKind::AssocConst {
-                ty: rhs,
-                default: Some(value),
-            },
         )
     }
 
@@ -412,7 +426,7 @@ impl Parser {
             self.error(
                 start,
                 "`#static` decorates a `::` binding, not a `let`: write \
-                 `#static name :: T := value`",
+                 `#static name: T :: value`",
             );
         }
     }

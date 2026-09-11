@@ -141,7 +141,7 @@ impl Collector<'_> {
     /// that belongs to an enclosing call, and at namespace scope there is no
     /// call. Every namespace binding is `::` — immutable by default, and a
     /// program-lifetime **mutable region** when `#static` decorates it
-    /// (`#static count :: uint := 0`, §2.6).
+    /// (`#static count: uint :: 0`, §2.6).
     fn check_namespace_binding(&mut self, item: NodeId, _directives: &[NodeId]) {
         if !matches!(self.ast.node(item).kind, NodeKind::LocalDecl { .. }) {
             return;
@@ -149,7 +149,7 @@ impl Collector<'_> {
         self.report(
             item,
             "a `let` / `const` has no meaning at namespace scope; use `::` for a constant, \
-             or `#static name :: T := value` for a mutable region",
+             or `#static name: T :: value` for a mutable region",
         );
     }
 

@@ -85,8 +85,10 @@ impl Printer<'_> {
             }
             let _ = write!(tags, " {}", directive_str(d));
         }
+        // `name: T`, the spelling the source uses now that a constant's type goes
+        // before the binder (§2.5): `:: ` here would read as a type alias.
         let head = format!(
-            "{}{tags} {} :: {}",
+            "{}{tags} {}: {}",
             if g.mutable { "static" } else { "const" },
             g.name,
             self.ty(g.id)

@@ -138,7 +138,7 @@ pub struct Program {
 }
 
 /// One namespace- or impl-scope value definition: a constant `A :: 5`, or the
-/// program-lifetime region `#static count :: u32 := 0` (§2.6).
+/// program-lifetime region `#static count: u32 :: 0` (§2.6).
 ///
 /// These reach the IR for the same reason [`TypeDef`]s do: a use of one lowers
 /// to an [`ExprKind::Global`], which is only a *name*. Everything downstream

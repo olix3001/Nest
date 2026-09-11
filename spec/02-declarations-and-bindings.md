@@ -41,20 +41,29 @@ and an `i64` in another. A string literal behaves the same way — `GREETING ::
 "hi"` is a `comptime_str`, and one use of it may be a `str` and another a `[]u8`
 (§1.5).
 
-To **pin** a constant to one type, write the type and give the value after `:=`:
+To **pin** a constant to one type, write the type **before** the `::`:
 
 ```
 MAX      :: 100            // comptime_int; settles per use site
-MAX_BYTE :: u8 := 100      // a u8 everywhere, and only a u8
+MAX_BYTE: u8 :: 100        // a u8 everywhere, and only a u8
 ```
 
-This is the same `T := value` shape an associated constant (§3.4) and a
-`#static` region (§2.6) use. Writing the type is what tells `name :: u8` (a type
-alias) from `name :: u8 := 5` (a `u8` constant): a `::` RHS holds either a value
-or a type, and a bare type is an alias.
+This is the same `name: T :: value` shape an associated constant (§3.4) and a
+`#static` region (§2.6) use, so there is one rule for where a written type goes:
+
+| form | meaning |
+|------|---------|
+| `name :: value` | a constant; a literal keeps its comptime-ness |
+| `name: T :: value` | a constant pinned to `T` |
+| `name :: T` | a **type alias** — always |
+
+Putting the type first is what keeps that last row unconditional. Written after
+the `::` it would have to be told from an alias by whether something followed
+it, so `name :: u8` and `name :: u8 := 5` meant two different kinds of thing
+three tokens apart.
 
 A pinned constant is range-checked against its type with the literal's exact
-value in hand, so `MAX_BYTE :: u8 := 300` is rejected rather than wrapped.
+value in hand, so `MAX_BYTE: u8 :: 300` is rejected rather than wrapped.
 
 ### Evaluation
 
@@ -65,7 +74,7 @@ it may only name other constants, `const` generic parameters, and calls to
 
 ```
 #const next_pow2 :: func (n: u32) -> u32 { ... }
-CAPACITY :: u32 := next_pow2(1000)
+CAPACITY: u32 :: next_pow2(1000)
 ```
 
 Evaluation runs an interpreter over the same subset `#const` admits: integers,
@@ -79,12 +88,12 @@ reported against a step budget.
 
 Integer arithmetic is **exact**, and where the result has a width it must fit
 it. A `comptime_int` has no width, so `BIG :: 200 * 2` is `400`; but
-`P :: u8 := 200 * 2` multiplies *at* `u8`, and `400` is not a `u8`:
+`P: u8 :: 200 * 2` multiplies *at* `u8`, and `400` is not a `u8`:
 
 ```
 BIG :: 200 * 2               // 400 — a comptime_int has no width
-P   :: u8 := 200 * 2         // error: `400` does not fit in `u8`
-P   :: u8 := cast.<u8>(200 * 2)   // 144 — the low bits, asked for in writing
+P:   u8 :: 200 * 2           // error: `400` does not fit in `u8`
+P:   u8 :: cast.<u8>(200 * 2)     // 144 — the low bits, asked for in writing
 ```
 
 The same holds for a `distinct` numeric, checked against what it stands over
@@ -293,23 +302,26 @@ A program-lifetime **mutable region** is declared by putting the `#static`
 directive on a `::` binding:
 
 ```
-#static request_count :: uint := 0
-#static scratch :: [4096]u8                    // no initializer -> zeroed
+#static request_count: usize :: 0
+#static scratch: [4096]u8                      // no initializer -> zeroed
 ```
 
-The directive decides how the right-hand side reads. Without it, `name :: 0` is a
-value and `name :: [4096]u8` is a *type alias* — a `::` RHS holds either, and
-only its shape says which. A static declares neither: it declares a **region**,
-so its RHS is the region's **type**, and the initial contents, if any, follow
-`:=`. That is the same `T := value` shape a typed constant (§2.5) and an
-associated constant (§3.4) use, so there is one rule for where a written type
-goes.
+A static declares a **region**, so the type is written first and the initial
+contents, if any, follow the `::`. That is the same `name: T :: value` shape a
+typed constant (§2.5) and an associated constant (§3.4) use, so there is one rule
+for where a written type goes.
+
+The `#static` directive is what says the name is a region rather than a
+constant; the shape does not have to. It composes with the other directives a
+region can carry — a link section, an offset — the way any directive does.
 
 - `#static` names a single memory region that lives for the whole program and is
   **shared** by all code that can see the name. It is the only namespace-scope
   mutable binding.
-- The **type is required**. A region is storage, and storage has a width; the
-  zeroed form has no initializer to infer one from.
+- The **type is required**, always. A region is storage and storage has a width;
+  the zeroed form has no initializer to infer one from, and a static with a
+  `comptime_int` in it would be a region whose size depended on who read it.
+  `#static count :: 0` is an error, not an inferred `isize`.
 - The initializer must be a constant expression — it is written into the
   program's initialized data, so it has to be computable at compile time. It may
   be **omitted**, in which case the region is zeroed (the one binding form that
@@ -321,10 +333,13 @@ goes.
 
 ```
 tick :: func () {
-  #static calls :: uint := 0
+  #static calls: usize :: 0
   calls = calls + 1
 }
 ```
+
+That is the *only* way to declare a static inside a function: `let` and `const`
+are run-time bindings, so neither can name a region that outlives the call.
 
 - A `#static` is **shared global state**: the language performs no
   synchronization, so concurrent access is a data race unless mediated by std

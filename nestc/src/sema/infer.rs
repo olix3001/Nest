@@ -146,7 +146,7 @@ pub enum RecvAdjust {
 ///
 /// The two checks overlap on purpose and neither is redundant: inference catches
 /// a literal at the site it is written, with the best span, and the evaluator
-/// catches everything *computed* (`A :: u8 := 200 * 2`), which inference never
+/// catches everything *computed* (`A: u8 :: 200 * 2`), which inference never
 /// sees a value for. They only ever meet on a bare literal, and this is what
 /// keeps that meeting from producing two diagnostics for one mistake.
 ///
@@ -3551,7 +3551,7 @@ impl Inferer<'_> {
     ///
     /// - `A :: 5` — the initializer decides, and a numeric literal stays
     ///   `comptime_int` so each use site can settle it for itself (§2.5).
-    /// - `#static c :: u32 := 0`, `MAX :: i32 := 100` — the **type is declared**
+    /// - `#static c: u32 :: 0`, `MAX: i32 :: 100` — the **type is declared**
     ///   and the initializer is checked against it. A static must be typed this
     ///   way: it is storage, and storage cannot be `comptime_int`. Its
     ///   initializer may also be absent, the region being zeroed (§2.6).
@@ -3648,7 +3648,7 @@ impl Inferer<'_> {
                 Some(d) => self.def_ty(d),
                 None => Ty::Error,
             },
-            // `#static count :: u32 := 0` (§2.6) and an associated constant
+            // `#static count: u32 :: 0` (§2.6) and an associated constant
             // share this RHS shape: a **declared type** with an optional `:=`
             // initializer. The type is written, so there is nothing to infer
             // from the initializer — and for a static there may be no

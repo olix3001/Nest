@@ -31,9 +31,10 @@ attribute   = '@' identifier [ '(' [ attr_arg { ',' attr_arg } ] ')' ]
 directive   = '#' ( identifier | 'const' ) [ '(' [ arg { ',' arg } ] ')' ] { directive }
 comptime_item = call                               // e.g. assert(...)  (returns void)
 
-const_bind  = pattern '::' const_rhs
+const_bind  = pattern [ ':' type ] '::' const_rhs
+            | '#static' ... identifier ':' type [ '::' expr ]   // zeroed if omitted
 const_rhs   = expr
-            | type_expr [ ':=' expr ]     // typed: constant, assoc const, static
+            | type_expr                   // a type alias / assoc-type binding
             | func_expr
             | trait_expr
             | namespace_expr
@@ -47,11 +48,14 @@ tags a core-library item as a language item (see
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.13).
 
 `const_bind` is the single `::` binding form; the RHS category (value, type,
-func, trait, namespace, import) determines what is bound. Its `type ':=' expr`
-form is a **typed** binding — a pinned constant (§2.5), an associated constant
-(§3.4), or, under `#static`, a program-lifetime mutable region (§2.6); under
-`#static` the RHS is *always* read this way, so `#static s :: [4]u8` declares a
-zeroed region rather than a type alias. A `field_item` inside a
+func, trait, namespace, import) determines what is bound. A type written
+**before** the `::` makes it a **typed** binding — a pinned constant (§2.5), an
+associated constant (§3.4), or, under `#static`, a program-lifetime mutable
+region (§2.6). That is what leaves `name :: type` meaning a type alias in every
+case: `#static s: [4]u8` is a zeroed region and `s :: [4]u8` is an alias, and
+the two are told apart by the directive and the colon rather than by what
+follows three tokens later. A `#static` **must** write its type. A `field_item`
+inside a
 struct/enum/trait/namespace body may also be a `comptime_item` (e.g.
 `assert(...)`). A `local_decl` at namespace scope is rejected outright: `let`
 binds a stack slot and there is no call there — use `::`, with `#static` for a
@@ -91,7 +95,7 @@ trait_expr    = { directive } 'trait' [ generics ] '{' { trait_member } '}'
 trait_member  = method_sig | assoc_type | assoc_const
 method_sig    = identifier '::' 'func' [ generics ] '(' [ params ] ')' [ '->' type ]
 assoc_type    = identifier '::' 'type' [ ':' bounds ]  // e.g. Item :: type: Iterator + Clone
-assoc_const   = identifier '::' type [ ':=' expr ]     // e.g. MAX :: i32 := 100
+assoc_const   = identifier ':' type [ '::' expr ]      // e.g. MAX: i32 :: 100
 bounds        = type { '+' type }                      // trait bounds only; bare `type` kind is not a bound
 
 type        = type_core

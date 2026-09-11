@@ -1161,7 +1161,7 @@ impl<'a> ConstEval<'a> {
 
     fn intrinsic(&mut self, e: &Expr, name: &Symbol, args: &[Expr]) -> EvalResult {
         match name.as_str() {
-            // Every typed constant reaches here: `A :: u8 := 5` lowers the `5`
+            // Every typed constant reaches here: `A: u8 :: 5` lowers the `5`
             // as a `comptime_int` and casts it, which is how the conversion is
             // made explicit rather than silent (§2.5).
             "cast" => {
@@ -1349,7 +1349,7 @@ impl<'a> ConstEval<'a> {
 
     /// Reject an arithmetic result the type it was computed at cannot hold.
     ///
-    /// `P :: u8 := 200 * 2` multiplies **at `u8`** — the operands were settled
+    /// `P: u8 :: 200 * 2` multiplies **at `u8`** — the operands were settled
     /// on `u8` before the multiply — so `400` is not a `u8` constant, and
     /// storing it would make the compiler claim a byte holds four hundred.
     /// Refusing is the same answer division by zero already gets, for the same

@@ -290,7 +290,7 @@ impl Lowerer<'_> {
             return None;
         };
         // Two RHS shapes reach here. `A :: 5` is the value itself. `#static c ::
-        // u32 := 0` and an impl's `MAX :: i32 := 100` write the *type* first and
+        // u32 := 0` and an impl's `MAX: i32 :: 100` write the *type* first and
         // the value after `:=` — and a static may write no value at all, in
         // which case the region is zeroed and there is nothing to lower.
         let init = match self.ast.node(rhs).kind.clone() {
@@ -299,7 +299,7 @@ impl Lowerer<'_> {
         };
         let id = self.id(node);
         // The type inference stamped on the *binding*, not the initializer's:
-        // `#static c :: u32 := 0` is a `u32` region however the literal on the
+        // `#static c: u32 :: 0` is a `u32` region however the literal on the
         // right would have defaulted on its own.
         self.meta.set_ty(id, self.ty(node));
         self.meta.set_directives(id, directives);
