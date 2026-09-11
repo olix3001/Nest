@@ -315,6 +315,17 @@ pub fn infer_file(
     // The set of trait defs a use site in this file may select impls of: only
     // in-scope traits are candidates (§ trait selection, Rust-style).
     let in_scope_traits = in_scope_traits(defs, prelude_globs, file_ns);
+    // A `#lang`-tagged trait is always selectable, imported or not (§4.6). The
+    // operator traits are the reason: `a + b` reaches `Add` **by its tag**, so
+    // the compiler is the one that named it, and gating that on the program
+    // having written `import <core/ops>` would make `+` require an import. The
+    // name is still needed to *write* `impl Add.<Vec3> for Vec3`, and to call
+    // `x.add(y)` by name — neither goes through impl selection by tag.
+    let lang_traits: HashSet<DefId> = lang
+        .iter()
+        .map(|(_, &d)| defs.resolve_alias(d))
+        .filter(|&d| defs.get(d).kind == DefKind::Trait)
+        .collect();
     // Every `func` with a body is its own inference problem. A bodyless
     // `extern("c") func` joins them: it has no body to check, but it is a real
     // symbol whose *signature* still has to be typed for calls to it — and for
@@ -358,6 +369,7 @@ pub fn infer_file(
                 lang,
                 impls,
                 in_scope_traits: &in_scope_traits,
+                lang_traits: &lang_traits,
                 file,
                 target,
                 cx: {
@@ -574,6 +586,9 @@ struct Inferer<'a> {
     impls: &'a ImplTable,
     /// Traits selectable at this file's use sites (see [`in_scope_traits`]).
     in_scope_traits: &'a HashSet<DefId>,
+    /// Traits carrying a `#lang` tag. Selectable everywhere, because the
+    /// compiler — not the program — is what named them.
+    lang_traits: &'a HashSet<DefId>,
     file: FileId,
     /// The machine being compiled for. Only `isize` / `usize` depend on it
     /// today, through [`IntWidth::bits`](super::ty::IntWidth::bits).
@@ -1870,7 +1885,7 @@ impl Inferer<'_> {
         if matches!(s, Ty::Error) {
             return Select::Error;
         }
-        if !self.in_scope_traits.contains(&trait_def) {
+        if !self.in_scope_traits.contains(&trait_def) && !self.lang_traits.contains(&trait_def) {
             return if is_var(&s) {
                 Select::Defer
             } else {
@@ -2720,7 +2735,13 @@ impl Inferer<'_> {
                 // An impl that does not override the member still provides it
                 // when the trait declared a default body (§ trait defaults).
                 Some(td) => {
-                    if !self.in_scope_traits.contains(&td) {
+                    // A `#lang` trait's methods are reachable wherever the
+                    // language's own syntax reaches them: `for` desugars to
+                    // `.into_iter()` / `.next()` and `.?` to `.branch()`, and
+                    // those calls are indistinguishable from written ones by the
+                    // time they get here. Gating them on the program having
+                    // imported `<core/iter>` would make `for` require an import.
+                    if !self.in_scope_traits.contains(&td) && !self.lang_traits.contains(&td) {
                         continue;
                     }
                     imp.members

@@ -36,6 +36,11 @@ pub struct RawImport {
     /// Whether the binding is `@public` (re-exports what it brings in).
     pub reexport: bool,
     pub target: RawTarget,
+    /// A `#lang("tag")` written on the binding, registered against the imported
+    /// namespace once it is known. The prelude is the reason this exists (§4.6):
+    /// `core.prelude` is a namespace assembled by re-export, so the binding that
+    /// names it is the only thing a tag can sit on.
+    pub lang: Option<Symbol>,
     pub span: Span,
 }
 
@@ -61,6 +66,7 @@ pub struct ImportDecl {
     pub scope: DefId,
     pub reexport: bool,
     pub target: ImportTarget,
+    pub lang: Option<Symbol>,
     pub span: Span,
 }
 
@@ -96,6 +102,17 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
             ImportTarget::Broken => None,
         };
         let base = base.map(|d| session.defs.resolve_alias(d));
+        // A `#lang` tag on the binding names the *target* namespace, not the
+        // alias: whoever looks the tag up wants the members, and an alias that
+        // mirrors them is one hop of indirection with nothing on the other side.
+        if let (Some(tag), Some(base)) = (imp.lang.clone(), base) {
+            match session.lang_items.set(tag.clone(), base) {
+                Some(prev) if prev != base => {
+                    session.error(file, imp.span, format!("duplicate `#lang(\"{tag}\")` item"));
+                }
+                _ => session.defs.get_mut(base).lang = Some(tag),
+            }
+        }
         // Disjoint field borrows: reading `asts` while mutating `defs`.
         let Session { asts, defs, .. } = &mut *session;
         let ast = &asts[&file];

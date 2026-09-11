@@ -6,6 +6,13 @@
 // in scope. For `i32` that impl is a builtin; for `Vec3` it is the user impl
 // below, whose `Output :: Vec3` binding is what the projection resolves the
 // `+` expression's type to.
+//
+// The *name* `Add` needs an import: only `core.prelude` is globbed into every
+// file (§4.6), and the operator traits are deliberately not in it. Writing
+// `a + b` does not need the import — that finds `Add` by its `#lang` tag —
+// but writing the impl does.
+
+{ Add } :: import <core/ops>
 
 Vec3 :: struct {
   x: i32,

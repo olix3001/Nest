@@ -8,17 +8,27 @@
 // needs by `#lang` tag, never by name or by path, so swapping this package out
 // swaps the language's operators and control flow with it.
 //
-// This file only re-exports. Every declaration lives in a topic file, and the
-// prelude globs this root's `@public` members into every file's outermost scope.
+// This file only re-exports, and it re-exports **namespaces**, not members: the
+// root of `core` is a table of contents, so `import <core/ops>` names the `ops`
+// namespace below and `<core/cmp>` names `cmp`. Only `prelude` is globbed into
+// every file, and only because it carries the `#lang("prelude")` tag the
+// compiler looks for (§4.6).
 //
 // Signatures are illustrative in places — there is no codegen yet.
 
-@public * :: import "ops.nest"
-@public * :: import "cmp.nest"
-@public * :: import "control.nest"
-@public * :: import "option.nest"
-@public * :: import "result.nest"
-@public * :: import "iter.nest"
-@public * :: import "range.nest"
-@public * :: import "slice.nest"
-@public * :: import "str.nest"
+@public
+#lang("prelude")
+prelude :: import "prelude.nest"
+
+@public ops     :: import "ops.nest"
+@public cmp     :: import "cmp.nest"
+@public control :: import "control.nest"
+@public option  :: import "option.nest"
+@public result  :: import "result.nest"
+@public iter    :: import "iter.nest"
+@public range   :: import "range.nest"
+@public slice   :: import "slice.nest"
+
+// `str.nest` gets no namespace re-export: its one public member is `str`, which
+// the prelude already exports, and a `str` namespace sitting beside the `str`
+// type would read as the same name meaning two things.

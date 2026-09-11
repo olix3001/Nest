@@ -231,6 +231,101 @@ fn core_is_an_ordinary_multi_file_package() {
 }
 
 #[test]
+fn only_the_prelude_is_globbed_into_every_file() {
+    // §4.6: `core.prelude` is globbed into every file; the rest of `core` needs
+    // an explicit `import`. The prelude carries the names a program that writes
+    // no imports at all has to be able to read.
+    analyze_clean(
+        "GREET :: str := \"hi\"\n\
+         f :: func (o: Option.<i32>, r: Result.<i32, i32>) -> ControlFlow.<i32, i32> { return .proceed(1) }\n",
+    );
+
+    // The operator traits are deliberately *not* in it: the name is needed only
+    // in order to write an impl.
+    assert_eq!(
+        first_error("impl Add for i32 { Output :: i32  add :: func (self: i32, rhs: i32) -> i32 { return self } }\n"),
+        "cannot resolve name `Add`"
+    );
+
+    // One import away, it resolves — `ops` is a public member of the package
+    // root, reached the way any package's sub-namespace is.
+    analyze_clean(
+        "{ Add } :: import <core/ops>\n\
+         V :: struct { n: i32 }\n\
+         impl Add for V { Output :: V  add :: func (self: V, rhs: V) -> V { return self } }\n\
+         use :: func (a: V, b: V) -> V { return a + b }\n",
+    );
+}
+
+#[test]
+fn an_operator_needs_no_import_even_though_its_trait_does() {
+    // The two halves of §4.6's operator rule. `a + b` reaches `Add` by its
+    // `#lang` tag, so it works in a file that imports nothing — and so do the
+    // desugars that go through a lang trait by name (`for` calls `into_iter` and
+    // `next`, `.?` calls `branch`), which is the same rule seen from the method
+    // side.
+    analyze_clean(
+        "sum :: func (a: i32, b: i32) -> i32 { return a + b }\n\
+         count :: func (xs: []i32) -> i32 {\n  let mut n := 0\n  for x in xs { n = n + x }\n  return n\n}\n\
+         first :: func (o: Option.<i32>) -> Option.<i32> { const v := o.?\n  return .some(v) }\n",
+    );
+}
+
+#[test]
+fn the_prelude_is_found_by_tag_not_by_name_or_path() {
+    // The same promise `core_is_an_ordinary_multi_file_package` makes about
+    // `#lang` items, made about the prelude: the namespace is found by its tag,
+    // so a `core` that spells it differently — a binding called `bag`, in a file
+    // called `misc.nest` — still globs.
+    let loader = MemLoader::new()
+        .with("main", "f :: func () -> Widget { return Widget { n: 1 } }\n")
+        .with(
+            "fakecore",
+            "@public\n#lang(\"prelude\")\nbag :: import \"misc.nest\"\n",
+        )
+        .with("misc", "@public Widget :: struct { n: i32 }\n");
+    let mut session = Session::with_loader(Box::new(loader));
+    session.register_package("core", "fakecore");
+    let file = session.load_entry("main").unwrap();
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+
+    // A `core` with no prelude tag at all is not an error — it globs nothing.
+    let loader = MemLoader::new()
+        .with("main", "f :: func () -> Widget { return Widget { n: 1 } }\n")
+        .with("fakecore", "@public Widget :: struct { n: i32 }\n");
+    let mut session = Session::with_loader(Box::new(loader));
+    session.register_package("core", "fakecore");
+    let file = session.load_entry("main").unwrap();
+    analyze(&mut session, file);
+    assert!(
+        diag_contains(&session, "cannot resolve name `Widget`"),
+        "{:#?}",
+        session.diagnostics
+    );
+}
+
+#[test]
+fn a_package_member_import_sees_the_targets_own_re_exports() {
+    // `<core/ops>` names a member that `core.nest` produces by re-export, so the
+    // walk only finds it once that file's own imports are wired. Wiring runs in
+    // import order for exactly this reason; an arbitrary order found `ops`
+    // roughly half the time.
+    let loader = MemLoader::new()
+        .with("main", "{ triple } :: import <pkg/math>\nf :: func () -> isize { return triple(1) }\n")
+        .with("pkgroot", "@public math :: import \"mathfile.nest\"\n")
+        .with(
+            "mathfile",
+            "@public triple :: func (n: isize) -> isize { return n }\n",
+        );
+    let mut session = Session::with_loader(Box::new(loader));
+    session.register_package("pkg", "pkgroot");
+    let file = session.load_entry("main").unwrap();
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+#[test]
 fn lang_items_collected_from_core() {
     let session = analyze_mem(&[("main", "x :: func () {}")], "main");
     for tag in [
@@ -3117,6 +3212,8 @@ fn ir_snap_user_operators_reach_their_impls() {
     // equality, the four relations through the one `Ord.cmp`, and indexing on
     // both sides of an assignment.
     let src = "\
+{ Neg, BitNot, Shl, Index, IndexMut } :: import <core/ops>
+{ Eq, Ord, Ordering } :: import <core/cmp>
 Bits :: struct { w: i32 }
 impl Neg for Bits { Output :: Bits  neg :: func (self: Bits) -> Bits { return self } }
 impl BitNot for Bits { Output :: Bits  bitnot :: func (self: Bits) -> Bits { return self } }
@@ -3145,6 +3242,7 @@ fn an_operator_operand_is_checked_against_the_impls_own_signature() {
     // operator decided — it is that no impl of `Shl.<Bits>` exists, which is
     // what the operands being free to differ makes it possible to say.
     let src = "\
+{ Shl } :: import <core/ops>
 Bits :: struct { w: i32 }
 impl Shl.<i32> for Bits { Output :: Bits  shl :: func (self: Bits, rhs: i32) -> Bits { return self } }
 f :: func (a: Bits, b: Bits) -> Bits { return a << b }
@@ -3161,7 +3259,7 @@ fn two_impls_on_one_type_may_each_bind_output() {
     // park an `Output` there. Neither redeclares the other: the projection goes
     // through the impl that bound it.
     analyze_clean(
-        "V :: struct { n: i32 }\nimpl Add for V { Output :: V  add :: func (self: V, rhs: V) -> V { return self } }\nimpl Mul for V { Output :: V  mul :: func (self: V, rhs: V) -> V { return self } }\nf :: func (a: V, b: V) -> V { return a + b * a }\n",
+        "{ Add, Mul } :: import <core/ops>\nV :: struct { n: i32 }\nimpl Add for V { Output :: V  add :: func (self: V, rhs: V) -> V { return self } }\nimpl Mul for V { Output :: V  mul :: func (self: V, rhs: V) -> V { return self } }\nf :: func (a: V, b: V) -> V { return a + b * a }\n",
     );
 }
 
@@ -3308,7 +3406,7 @@ fn a_trait_impl_needs_the_trait_or_the_type_to_be_its_own() {
     // identically with no way to prefer either.
     assert!(
         first_error(
-            "impl Eq for Option.<i32> { eq :: func (self: Option.<i32>, rhs: Option.<i32>) -> bool { return true } }\n"
+            "{ Eq } :: import <core/cmp>\nimpl Eq for Option.<i32> { eq :: func (self: Option.<i32>, rhs: Option.<i32>) -> bool { return true } }\n"
         )
         .contains("both belong to other packages"),
     );
@@ -3320,7 +3418,7 @@ fn a_trait_impl_needs_the_trait_or_the_type_to_be_its_own() {
     // though its head does not: `Cfg` is what makes this impl this package's
     // business.
     analyze_clean(
-        "Cfg :: struct { n: i32 }\nimpl Eq for Result.<i32, Cfg> {\n  eq :: func (self: Result.<i32, Cfg>, rhs: Result.<i32, Cfg>) -> bool { return true }\n}\n",
+        "{ Eq } :: import <core/cmp>\nCfg :: struct { n: i32 }\nimpl Eq for Result.<i32, Cfg> {\n  eq :: func (self: Result.<i32, Cfg>, rhs: Result.<i32, Cfg>) -> bool { return true }\n}\n",
     );
 }
 
@@ -3339,6 +3437,7 @@ fn analyze1(src: &str) -> Session {
 
 /// A user `impl Add for Vec3` whose `Output` is `Vec3`.
 const VEC3_ADD: &str = "\
+{ Add } :: import <core/ops>
 Vec3 :: struct { x: i32 }
 impl Add for Vec3 {
   Output :: Vec3
@@ -3517,6 +3616,7 @@ fn generic_impl_serves_a_family_and_projects_via_its_argument() {
     // `Output = Wrap.<T>` resolves to `Wrap.<i32>` — the impl (and its
     // projection) is chosen by the generic argument.
     let src = "\
+{ Add } :: import <core/ops>
 Wrap :: struct <T> { v: T }
 impl <T> Add for Wrap.<T> {
   Output :: Wrap.<T>
@@ -3568,6 +3668,7 @@ fn two_equally_specific_impls_are_ambiguous() {
     // also an orphan-rule violation — the point here is only that selection
     // reports the tie rather than silently picking one.)
     let src = "\
+{ Add } :: import <core/ops>
 impl Add for i32 { Output :: i32  add :: func (self: i32, rhs: i32) -> i32 { return self } }
 f :: func (a: i32, b: i32) -> i32 { return a + b }
 ";
@@ -3587,6 +3688,7 @@ fn several_impls_matching_an_unknown_self_defer_rather_than_conflict() {
     // would also break every obligation whose self type is solved later (a `.?`
     // learns its `FromResidual` impl from the function's return type).
     let src = "\
+{ Add } :: import <core/ops>
 Foo :: struct { n: i32 }
 Bar :: struct { n: i32 }
 impl Add for Foo { Output :: Foo  add :: func (self: Foo, rhs: Foo) -> Foo { return self } }
@@ -3643,6 +3745,7 @@ fn comparing_primitives_needs_no_impl() {
 fn comparing_a_user_type_requires_eq() {
     // `==` on a user struct witnesses `Eq`; provided, it type-checks.
     let ok = "\
+{ Eq } :: import <core/cmp>
 Id :: struct { n: i32 }
 impl Eq for Id { eq :: func (self: Id, rhs: Id) -> bool { return true } }
 f :: func (a: Id, b: Id) -> bool { return a == b }
@@ -3690,9 +3793,10 @@ f :: func () { let xs := Vector.new() }
 
 #[test]
 fn only_in_scope_traits_are_selection_candidates() {
-    // `core.Add` is always in scope (prelude); a user trait defined in another
-    // file is a candidate only where it is imported by name. The candidate set
-    // is exactly what impl selection filters on.
+    // A user trait defined in another file is a candidate only where it is
+    // imported by name. The candidate set is exactly what impl selection filters
+    // on — with one standing exception, checked below: a `#lang` trait is
+    // selectable everywhere, because the compiler is what named it.
     let lib = "@public MyTrait :: trait { m :: func (self: Self) -> i32 }\n";
 
     // The entry namespace-imports `lib` (so `MyTrait` is loaded but not brought
@@ -3719,11 +3823,15 @@ fn only_in_scope_traits_are_selection_candidates() {
         &ns_import.prelude_globs,
         ns_import.files[&entry].ns,
     );
-    assert!(set.contains(&add), "Add is always in scope via the prelude");
+    // `Add` lives in `core.ops`, which the prelude does not export (§4.6), so it
+    // is *not* a nameable trait here — and `a + b` still works, because operator
+    // selection reaches it by `#lang` tag rather than through this set.
+    assert!(!set.contains(&add), "core.ops is not globbed into every file");
     assert!(
         !set.contains(&mytrait),
         "a merely-loaded trait is not in scope"
     );
+    analyze_clean("f :: func (a: i32, b: i32) -> i32 { return a + b }\n");
 
     // Selectively importing `MyTrait` makes it a candidate.
     let selective = analyze_mem(
@@ -4804,7 +4912,7 @@ fn try_propagate_converts_a_residual_through_a_user_impl() {
     // The whole point of `FromResidual` being its own trait: an `Io` residual
     // reaches a `Cfg`-returning function because an impl says how.
     analyze_clean(
-        "Io :: struct { n: i32 }\nCfg :: struct { n: i32 }\nimpl <T> FromResidual.<Io> for Result.<T, Cfg> {\n  from_residual :: func (r: Io) -> Result.<T, Cfg> { return .err(Cfg { n: r.n }) }\n}\nread :: func () -> Result.<i32, Io> { return .err(Io { n: 1 }) }\nload :: func () -> Result.<i32, Cfg> {\n  const v := read().?\n  return .ok(v)\n}\n",
+        "{ FromResidual } :: import <core/control>\nIo :: struct { n: i32 }\nCfg :: struct { n: i32 }\nimpl <T> FromResidual.<Io> for Result.<T, Cfg> {\n  from_residual :: func (r: Io) -> Result.<T, Cfg> { return .err(Cfg { n: r.n }) }\n}\nread :: func () -> Result.<i32, Io> { return .err(Io { n: 1 }) }\nload :: func () -> Result.<i32, Cfg> {\n  const v := read().?\n  return .ok(v)\n}\n",
     );
 }
 

@@ -438,11 +438,22 @@ impl Collector<'_> {
             ImportPath::File(spec) => RawTarget::File(spec),
         };
         let span = self.ast.node(bind).span;
+        // An `import` binding may carry a `#lang` tag, and the prelude is why
+        // (§4.6): `core.prelude` is a *namespace*, so the only thing there is to
+        // tag is the binding that names it. The tag cannot be registered here —
+        // the target file may not be collected yet, and the namespace it names
+        // is only known once the import is wired — so it travels with the
+        // [`RawImport`] and [`super::imports::wire`] registers it.
+        let lang = self.pending.iter().find_map(|d| match d.args.first() {
+            Some(DirectiveArg::Str(s)) if d.is("lang") => Some(s.clone()),
+            _ => None,
+        });
         self.imports.push(RawImport {
             pattern,
             scope,
             reexport: vis.public,
             target,
+            lang,
             span,
         });
     }

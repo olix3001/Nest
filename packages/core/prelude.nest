@@ -1,0 +1,28 @@
+// The prelude — the one namespace in `core` that is in scope without an import.
+//
+// The compiler globs this namespace's `@public` members into every file's
+// outermost scope (§4.6). **Nothing else in `core` is globbed**: `Add`,
+// `Iterator`, `Ordering` and the rest need `import <core/ops>` and friends, like
+// any other package's names.
+//
+// Membership is decided by one question: *does a program that writes no imports
+// at all need this name to be readable?* `Option`, `Result` and `ControlFlow`
+// appear in signatures everywhere and two of them are what `.?` / `.!` desugar
+// to; `str` is the type of every string literal. The operator traits fail the
+// test — `a + b` finds `Add` by its `#lang` tag, never by name, so the name is
+// needed only in order to *write* an impl, which is a deliberate act that can
+// afford a line of import.
+//
+// Globbing all of `core` instead would make every name core ever adds a name
+// that can collide with a program's own, in every file, forever. That is why a
+// prelude is small in every language that has one.
+//
+// This file only re-exports; every member is declared in the topic file that
+// owns it. The compiler finds this namespace by the `#lang("prelude")` tag on
+// the binding in `core.nest`, never by name or by path, so a `core` laid out
+// differently still works.
+
+@public { Option } :: import "option.nest"
+@public { Result } :: import "result.nest"
+@public { ControlFlow } :: import "control.nest"
+@public { str } :: import "str.nest"

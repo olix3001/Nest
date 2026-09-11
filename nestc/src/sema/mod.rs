@@ -232,12 +232,10 @@ pub fn analyze_source(name: &str, src: &str, packages: &[(&str, &str)]) -> Sessi
 /// Run the full pipeline over `entry` (already parsed into `session.asts`) and
 /// every file it transitively imports.
 pub fn analyze(session: &mut Session, entry: FileId) {
-    // The prelude globs `core`'s public members into every scope, so `core` must
-    // be collected before anything resolves against it.
+    // The prelude is globbed into every scope, so `core` must be collected
+    // before anything resolves against it.
     if let Some(core_root) = session.load_package("core") {
         collect_reachable(session, vec![core_root]);
-        let core_ns = session.files[&core_root].ns;
-        session.prelude_globs.push(core_ns);
     }
 
     // Collect the entry file and its transitive imports.
@@ -245,8 +243,18 @@ pub fn analyze(session: &mut Session, entry: FileId) {
 
     // The remaining stages run over every collected file (core included).
     let files: Vec<FileId> = session.files.keys().copied().collect();
-    for &file in &files {
+    for file in wire_order(session, &files) {
         imports::wire(session, file);
+    }
+
+    // Only `core.prelude` is globbed into every file — the rest of `core` needs
+    // an explicit `import` (§4.6). It is found by its `#lang("prelude")` tag,
+    // never by name or path, so a `core` laid out differently still works; and
+    // the lookup has to happen *after* wiring, because the tag sits on an
+    // `import` binding whose target namespace is only known once wired.
+    if let Some(prelude) = session.lang_items.get("prelude") {
+        let prelude = session.defs.resolve_alias(prelude);
+        session.prelude_globs.push(prelude);
     }
     for &file in &files {
         resolve_one(session, file);
@@ -376,11 +384,57 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
                 scope: raw.scope,
                 reexport: raw.reexport,
                 target,
+                lang: raw.lang,
                 span: raw.span,
             });
         }
         session.files.get_mut(&file).unwrap().imports = decls;
     }
+}
+
+/// The order to wire imports in: every file before the files that import it.
+///
+/// Wiring is order-sensitive in one case, and it is the case `<core/ops>` is:
+/// walking a package path (§4.5) looks up a *member* of the target namespace,
+/// and a member that the target itself produces by re-export (`@public ops ::
+/// import "ops.nest"`) does not exist until that file is wired. A glob or a
+/// whole-namespace bind has no such dependency — it names the namespace, not
+/// something inside it — which is why an arbitrary order worked until `core`
+/// stopped globbing.
+///
+/// A post-order DFS over the import graph gives the order. Import cycles are
+/// legal (`option.nest` and `control.nest` are one), so a file already being
+/// visited is left where it is: something in a cycle has to be wired first, and
+/// which one is arbitrary by construction.
+fn wire_order(session: &Session, files: &[FileId]) -> Vec<FileId> {
+    fn visit(
+        session: &Session,
+        file: FileId,
+        seen: &mut std::collections::HashSet<FileId>,
+        out: &mut Vec<FileId>,
+    ) {
+        if !seen.insert(file) {
+            return;
+        }
+        let Some(meta) = session.files.get(&file) else {
+            return;
+        };
+        for imp in &meta.imports {
+            match imp.target {
+                ImportTarget::File(f) | ImportTarget::PackageMember(f, _) => {
+                    visit(session, f, seen, out)
+                }
+                ImportTarget::Broken => {}
+            }
+        }
+        out.push(file);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(files.len());
+    for &file in files {
+        visit(session, file, &mut seen, &mut out);
+    }
+    out
 }
 
 /// Load a [`RawImport`]'s target once, returning the resolved [`ImportTarget`]
