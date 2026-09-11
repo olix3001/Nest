@@ -237,6 +237,68 @@ pub struct ArgOrder {
     pub args: Vec<Option<NodeId>>,
 }
 
+/// The generic parameters one declaration is generic over, in the **fixed
+/// order** every instantiation of it is written in.
+///
+/// The order is: the parameters the declaration itself lists (`func <const N,
+/// T>`), then any its signature mentions that it did not list — an enclosing
+/// `impl`'s `<T>`, which a method is just as generic over without declaring —
+/// in first-seen order. That is exactly the order
+/// [`Inferer::instantiate_parts`] binds them in, and the two are built by the
+/// same code so they cannot drift apart.
+///
+/// An empty list is the interesting case: it is what makes a function
+/// *concrete*, and therefore what monomorphization keys on to decide that a
+/// function needs no instantiation of its own. Note that a parameter used only
+/// in the **body** (`func <T> () -> usize { return $size_of.<T>() }`) is listed
+/// too — it is declared, so it is in the first half — which is why this is
+/// recorded rather than recomputed from the signature later.
+#[derive(Debug, Clone)]
+pub struct Generics {
+    /// Every parameter, declared ones first.
+    pub params: Vec<DefId>,
+    /// How many of [`params`](Generics::params) the declaration listed itself.
+    /// The rest are the enclosing `impl`'s.
+    ///
+    /// The split matters exactly once, and it matters a lot there: when
+    /// monomorphization turns a call on a bound into a call on the impl that
+    /// satisfied it, the two halves come from different places. The method's own
+    /// arguments come from the **call site** — the trait's declaration and the
+    /// impl's must list the same ones, so they line up by position — while the
+    /// impl's come from *matching* the impl's target against the concrete self
+    /// type. Without the split there is no way to tell which is which.
+    pub own: usize,
+}
+
+/// One generic argument: what a call site bound one [`Generics`] entry to.
+///
+/// The two halves of §5's single positional list — `<T>` takes a type,
+/// `<const N: u16>` takes a value — stay apart here because they are different
+/// things to substitute into and because a mangled symbol encodes them
+/// differently (`design/lir.md` §7).
+#[derive(Debug, Clone, PartialEq)]
+pub enum GenericArg {
+    Ty(Ty),
+    Const(Const),
+}
+
+/// What one call site instantiated its callee's [`Generics`] with, in the same
+/// order.
+///
+/// Stamped on the call's **callee** node — the path for a free call, the
+/// `recv.m` field access for a method call — which is the same node
+/// [`MethodRes`] and [`ArgOrder`] hang off, so lowering reads all three from one
+/// place.
+///
+/// This is recorded rather than recovered because only this stage knows it.
+/// Monomorphization could in principle unify the callee's declared signature
+/// against the type the call settled on and read the arguments back out of the
+/// result, but that answer is wrong wherever the signature does not mention a
+/// parameter (`$size_of.<T>()`), and it re-derives — with a second
+/// implementation, free to disagree — something inference computed exactly once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Instantiation(pub Vec<GenericArg>);
+
 /// What binding a call's arguments to its parameters produced.
 enum ArgBinding {
     /// A purely positional call: use the arguments exactly as written, and let
@@ -249,6 +311,93 @@ enum ArgBinding {
     /// checked against the signature afterwards — every such check would be a
     /// second complaint about the same mistake.
     Failed,
+}
+
+/// One `impl`'s target, resolved out of syntax into types.
+///
+/// [`ImplTable`] stores the impl's self type and trait arguments as **AST
+/// nodes**, because it is built before there is anything to resolve them
+/// against; turning a node into a [`Ty`] is what `ty_from_node` does, and that
+/// belongs to inference. Every use during inference therefore resolves them
+/// afresh, inside the inference context whose variables the candidate's
+/// generics are freshened into.
+///
+/// Monomorphization needs the same answer and has none of that machinery: it
+/// runs after the ASTs have done their work, holds a concrete self type, and
+/// wants to know which impl matches it. So the resolution is done once, here,
+/// and the result kept.
+///
+/// The impl's own generics stay **rigid** — a `<T>` is a
+/// [`Ty::Nominal`] naming the type parameter, a `<const N>` a [`Const::Param`]
+/// — rather than being freshened into variables. That is the difference between
+/// this and what selection does during inference: there the impl is a candidate
+/// being unified against, here it is a *pattern* being matched, and a pattern
+/// wants its holes named rather than numbered.
+///
+/// Only the **self** type is resolved. The trait's own arguments
+/// (`impl Add.<f64> for Vec3`) are not, because the consumer has nothing to
+/// compare them against: an [`crate::ir::Dispatch::Generic`] call records the
+/// trait it goes through and not the arguments the bound was written with. Two
+/// impls of one trait for one self type differing only in those arguments are
+/// therefore beyond what monomorphization can currently tell apart — resolve
+/// them here when there is something to match them with.
+#[derive(Debug, Clone)]
+pub struct ImplTarget {
+    /// The `for` target's type (`impl Add for Vec3` → `Vec3`).
+    pub self_ty: Ty,
+}
+
+/// Resolve every impl's target, in [`ImplTable::impls`] order.
+///
+/// Runs after inference for the ordinary reason a stage runs after another: it
+/// borrows the finished [`ImplTable`] and produces a value beside it, rather
+/// than mutating the table every use site is already reading.
+pub fn resolve_impl_targets(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    diags: &mut Vec<Diagnostic>,
+    lang: &LangItems,
+    impls: &ImplTable,
+) -> Vec<ImplTarget> {
+    // No selection happens here — only `ty_from_node`, which reads syntax and
+    // the def table. The two trait sets and the context's `#lang` wiring exist
+    // for the solver, so an empty pair and a plain context are the honest
+    // inputs rather than an approximation of a file's scope.
+    let empty: HashSet<DefId> = HashSet::new();
+    let mut out = Vec::with_capacity(impls.impls.len());
+    for i in 0..impls.impls.len() {
+        let imp = impls.impls[i].clone();
+        let Some(ast) = asts.get(&imp.file) else {
+            out.push(ImplTarget {
+                self_ty: Ty::Error,
+            });
+            continue;
+        };
+        let mut cx = Inferer {
+            defs,
+            asts,
+            ast,
+            diags,
+            lang,
+            impls,
+            in_scope_traits: &empty,
+            lang_traits: &empty,
+            in_default: false,
+            file: imp.file,
+            cx: InferCtxt::new(),
+            env: HashMap::new(),
+            types: HashMap::new(),
+            ret: Ty::Void,
+            breaks: Vec::new(),
+            alias_stack: Vec::new(),
+            const_stack: Vec::new(),
+            int_values: HashMap::new(),
+            float_values: HashMap::new(),
+        };
+        let self_ty = cx.ty_from_node_in(imp.file, imp.self_node);
+        out.push(ImplTarget { self_ty });
+    }
+    out
 }
 
 /// Infer types for every function body in `file`, annotating each expression
@@ -738,6 +887,42 @@ impl Inferer<'_> {
             // The body's tail value is the function's result.
             self.expect_return(b, &bty, &ret);
         }
+        self.stamp_generics(func);
+    }
+
+    /// Record what this function is generic over, in the order every
+    /// instantiation of it is written in (see [`Generics`]).
+    ///
+    /// The two halves are the declaration's own `<...>` list and whatever else
+    /// its signature mentions — an enclosing `impl <T> Vec.<T>`'s `T`, which
+    /// `push` is every bit as generic over without declaring it. They are
+    /// collected here in exactly the order [`Inferer::instantiate_parts`] binds
+    /// them, so a call site's [`Instantiation`] lines up with this list by
+    /// position.
+    fn stamp_generics(&mut self, func: NodeId) {
+        let NodeKind::FuncExpr { generics, .. } = self.ast.node(func).kind.clone() else {
+            return;
+        };
+        let mut order: Vec<DefId> = generics
+            .iter()
+            .filter(|&&g| {
+                matches!(
+                    self.ast.node(g).kind,
+                    NodeKind::GenericTypeParam { .. } | NodeKind::GenericConstParam { .. }
+                )
+            })
+            .filter_map(|&g| self.def_of(g))
+            .collect();
+        let own = order.len();
+        let sig = self.func_sig_ty(func);
+        let (mut tys, mut consts) = (Vec::new(), Vec::new());
+        self.collect_generic_params(&sig, &mut tys, &mut consts);
+        for d in tys.into_iter().chain(consts) {
+            if !order.contains(&d) {
+                order.push(d);
+            }
+        }
+        self.ast.set_meta(func, Generics { params: order, own });
     }
 
     /// Discharge the queued trait/projection obligations to a fixpoint, then
@@ -799,6 +984,24 @@ impl Inferer<'_> {
                 let to = self.cx.finalize(&sc.to, &mut || {});
                 let range = self.cx.finalize(&sc.range, &mut || {});
                 self.ast.set_meta(node, SliceCoerce { to, range });
+            }
+            // A call site's generic arguments are variables when they are
+            // recorded — `id(x)`'s `T` is solved by the argument, which is
+            // checked *after* the instantiation — so they finalize here with
+            // every other mid-inference fact. Monomorphization keys its
+            // instances on these, and a `?3` in a key would make two instances
+            // out of one.
+            if let Some(Instantiation(args)) = self.ast.meta::<Instantiation>(node) {
+                let args = args
+                    .iter()
+                    .map(|a| match a {
+                        GenericArg::Ty(t) => GenericArg::Ty(self.cx.finalize(t, &mut || {})),
+                        GenericArg::Const(k) => {
+                            GenericArg::Const(self.cx.finalize_const(k, &mut || {}))
+                        }
+                    })
+                    .collect();
+                self.ast.set_meta(node, Instantiation(args));
             }
         }
     }
@@ -2417,7 +2620,7 @@ impl Inferer<'_> {
         if let Some(def) = self.resolved_def(callee) {
             if self.defs.get(def).kind == DefKind::Func {
                 let sig = self.func_def_ty(def);
-                let (inst, map) = self.instantiate_parts(&sig, def, &targs);
+                let (inst, map) = self.instantiate_parts(callee, &sig, def, &targs);
                 // `Trait.member(args)` — a trait method named through the trait
                 // rather than called on a value. Nothing here says what `Self`
                 // is, so it becomes a variable the context solves.
@@ -3201,7 +3404,7 @@ impl Inferer<'_> {
         rebind: Option<(Ty, Ty)>,
     ) -> Ty {
         let sig = self.func_def_ty(method);
-        let inst = self.instantiate_with(&sig, method, targs);
+        let inst = self.instantiate_with(callee, &sig, method, targs);
         // Dispatching through a trait object or a bound reaches the trait's
         // *declaration*, whose `Self` is the trait's own nominal. For this call
         // `Self` is the receiver, so say so rather than leaving the signature
@@ -3304,15 +3507,25 @@ impl Inferer<'_> {
     /// A missing argument, a `_` hole, or an `<Assoc = T>` binding leaves that
     /// parameter to inference, so `id.<i32>(x)` and `id(x)` differ only in how
     /// much was pinned up front. Too many arguments is an error.
-    fn instantiate_with(&mut self, sig: &Ty, def: DefId, targs: &[NodeId]) -> Ty {
-        self.instantiate_parts(sig, def, targs).0
+    fn instantiate_with(&mut self, at: NodeId, sig: &Ty, def: DefId, targs: &[NodeId]) -> Ty {
+        self.instantiate_parts(at, sig, def, targs).0
     }
 
     /// [`Inferer::instantiate_with`], also returning the substitution it built,
     /// for callers that need to talk about a parameter it freshened (a static
     /// trait call needs the trait's own arguments — see
     /// [`Inferer::open_trait_self`]).
-    fn instantiate_parts(&mut self, sig: &Ty, def: DefId, targs: &[NodeId]) -> (Ty, Subst) {
+    ///
+    /// `at` is the node the instantiation is recorded on: the call's callee, so
+    /// that monomorphization can read this call site's generic arguments back
+    /// without re-deriving them (see [`Instantiation`]).
+    fn instantiate_parts(
+        &mut self,
+        at: NodeId,
+        sig: &Ty,
+        def: DefId,
+        targs: &[NodeId],
+    ) -> (Ty, Subst) {
         // Type and const parameters share one positional list (§5): in
         // `func <const N: usize, T>`, `.<4, i32>` pins `N` then `T`.
         let params = self.func_generic_param_defs(def);
@@ -3335,6 +3548,13 @@ impl Inferer<'_> {
         for &a in targs {
             self.record_generic_arg(a);
         }
+        // The declaration's own parameters come first, in declaration order;
+        // everything the signature mentions that the declaration did not list
+        // follows, in first-seen order. This is the one place that order is
+        // decided, and [`Generics`] is built from the same two halves — a call
+        // site's arguments and the declaration's parameters line up by position
+        // because they are produced here, together.
+        let mut order: Vec<DefId> = params.clone();
         let mut map = Subst::default();
         for (i, &p) in params.iter().enumerate() {
             let arg = explicit
@@ -3360,12 +3580,32 @@ impl Inferer<'_> {
         let (mut rest, mut rest_consts) = (Vec::new(), Vec::new());
         self.collect_generic_params(sig, &mut rest, &mut rest_consts);
         for d in rest {
+            if !order.contains(&d) {
+                order.push(d);
+            }
             map.tys.entry(d).or_insert_with(|| self.cx.fresh());
         }
         for d in rest_consts {
+            if !order.contains(&d) {
+                order.push(d);
+            }
             if let std::collections::hash_map::Entry::Vacant(e) = map.consts.entry(d) {
                 e.insert(self.cx.fresh_const());
             }
+        }
+        // Record what this call site bound each parameter to. The arguments are
+        // still variables here — `id(x)`'s `T` is solved by the argument below,
+        // not above — so they travel through `finalize_metas` with every other
+        // mid-inference fact before lowering reads them.
+        if !order.is_empty() {
+            let args = order
+                .iter()
+                .map(|d| match map.consts.get(d) {
+                    Some(k) => GenericArg::Const(k.clone()),
+                    None => GenericArg::Ty(map.tys.get(d).cloned().unwrap_or(Ty::Error)),
+                })
+                .collect();
+            self.ast.set_meta(at, Instantiation(args));
         }
         let inst = self.subst_type_params(sig, &map);
         (inst, map)

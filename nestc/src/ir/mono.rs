@@ -1,0 +1,1304 @@
+//! Monomorphization: turning a generic program into a concrete one.
+//!
+//! A generic function is not code. `func <T> (x: T) -> T` describes a *family*
+//! of functions, one per `T` any call site chooses, and a machine can be handed
+//! only a member of that family — the parameter has to have a size before
+//! anything can be pushed onto a stack for it. This pass is where the family
+//! becomes its members: it walks the call graph from the program's entry points,
+//! records every distinct set of generic arguments a function is reached with,
+//! and emits one concrete [`Function`] per set.
+//!
+//! # What it decides, and why it is the one that decides it
+//!
+//! Three things happen here that nothing else can do:
+//!
+//! 1. **Identity.** "The `push` for `Vec.<i32>`" is a different function from
+//!    "the `push` for `Vec.<f64>`", and this is where they become two
+//!    [`DefId`]s. Every later stage can then talk about a function without also
+//!    carrying the arguments it was instantiated with.
+//! 2. **Names.** Because identity is decided here, the *symbol* is too
+//!    (`design/lir.md` §7). A mangled name has one job — be injective — and it
+//!    is the encoding of the instantiation key, so computing it anywhere else
+//!    would mean deriving the key a second time, from a second implementation
+//!    free to disagree. A disagreement between the two is a duplicate symbol or
+//!    a missing one.
+//! 3. **Dispatch through a bound.** `t.total()` on a `<T: Summing>` is an
+//!    [`Dispatch::Generic`] call: the trait is known, the impl is not, because
+//!    which impl applies is a question about `T`, and `T` is not a type yet.
+//!    Once it is, the question has an answer, and answering it is the last thing
+//!    standing between the IR and a program whose every call has a callee.
+//!
+//! # Where the arguments come from
+//!
+//! Not from here. Inference already worked out what each call site instantiated
+//! its callee with — that *is* what inferring a call is — and it recorded the
+//! answer as an [`Instantiation`] on the call, against the callee's
+//! [`Generics`]. This pass reads the pair back.
+//!
+//! The alternative would be to unify the callee's declared signature against the
+//! type the call settled on and recover the arguments from the result. That is a
+//! second implementation of something already computed once, and it is wrong
+//! wherever the signature does not mention a parameter — `func <T> () -> usize {
+//! return $size_of.<T>() }` has no `T` anywhere in `func() -> usize`.
+//!
+//! # What the walk is for
+//!
+//! Not dead-code elimination. Whether to drop a function nothing calls is a
+//! decision about the artifact being built — a library keeps its public surface
+//! where an executable does not — and it is not this pass's to make. Every
+//! concrete function is emitted and every one gets a symbol.
+//!
+//! What the walk decides is narrower, and is the thing that genuinely cannot be
+//! decided any other way: **which instantiations exist**. There is no list of
+//! them to enumerate; `Vec.<i32>` exists because something asked for it.
+//!
+//! That is also why the roots are every concrete function rather than `main`
+//! (see [`roots`]): since nothing is dropped, everything emitted must have the
+//! callees it names, and a generic declaration does not survive this pass.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use crate::common::diagnostic::Diagnostic;
+use crate::common::source::FileId;
+use crate::common::symbol::Symbol;
+use crate::parser::ast::Lit;
+use crate::sema::def::{DefId, DefKind, DefTable};
+use crate::sema::impls::ImplTable;
+use crate::sema::infer::{GenericArg, Generics, ImplTarget, Instantiation, RangeReported};
+use crate::sema::ty::{Const, ConstArg, FloatWidth, Ty};
+
+use super::const_eval::ConstValue;
+use super::{
+    Arm, Binding, Block, Dispatch, Expr, ExprKind, Function, ImplicitCast, IrId, Linked, Meta,
+    Pattern, PatternKind, VisitorMut, walk_block_mut, walk_expr_mut, walk_function_mut,
+    walk_pattern_mut, walk_stmt_mut,
+};
+
+/// What one [`Function`] in the monomorphized program *is*: an instantiation of
+/// a declaration, and the two names it will be known by.
+///
+/// Stamped on the function's [`IrId`] rather than held as a field for the reason
+/// every other cross-shape fact is metadata (see [`super::meta`]): it is
+/// computed by this pass and read by the ones after it, and putting it in
+/// [`Function`] would mean every earlier stage constructing a value it has no
+/// answer for.
+#[derive(Debug, Clone)]
+pub struct Instance {
+    /// The declaration this instantiates. Equal to the function's own `def` when
+    /// nothing was instantiated — a concrete function is its own only instance,
+    /// and saying so uniformly is what lets a consumer read this on *every*
+    /// function instead of asking first whether there is one.
+    pub origin: DefId,
+    /// What each of the declaration's [`Generics`] was bound to, in that order.
+    /// Empty for a concrete function.
+    pub args: Vec<GenericArg>,
+    /// The unmangled name, with the arguments written out
+    /// (`core.Vec.push.<i32>`). For dumps, diagnostics and profiles; dropped at
+    /// codegen.
+    pub name: String,
+    /// The name the linker sees. **This** is what the program is keyed by from
+    /// here on (`design/lir.md` §7).
+    pub symbol: Symbol,
+}
+
+/// Monomorphize `linked` in place: instantiate every generic function reached
+/// from the program's entry points, resolve every call through a bound, and give
+/// every function a symbol.
+///
+/// `defs` is taken mutably because an instantiation is a **new definition**: it
+/// has a name no source wrote and needs a [`DefId`] of its own, since that is
+/// what [`Linked`] is keyed by.
+pub fn run(
+    defs: &mut DefTable,
+    meta: &Meta,
+    linked: &mut Linked,
+    impls: &ImplTable,
+    targets: &[ImplTarget],
+) -> Vec<Diagnostic> {
+    let mut mono = Mono {
+        defs,
+        meta,
+        impls,
+        targets,
+        out: Vec::new(),
+        externs: linked
+            .funcs()
+            .filter(|f| f.extern_abi.is_some())
+            .map(|f| f.def)
+            .collect(),
+        queue: VecDeque::new(),
+        emitted: HashMap::new(),
+        done: HashSet::new(),
+    };
+
+    for root in roots(mono.meta, linked) {
+        mono.reach(linked, root, Vec::new());
+    }
+    while let Some(job) = mono.queue.pop_front() {
+        let Some(original) = linked.get(job.origin).cloned() else {
+            continue;
+        };
+        let mut func = if job.args.is_empty() {
+            original
+        } else {
+            mono.instantiate(&original, job.def, &job.args)
+        };
+        mono.rewrite(linked, &mut func);
+        let file = linked.file_of(job.origin).unwrap_or(FileId(0));
+        linked.insert(file, func);
+    }
+
+    // A generic declaration is not code, and now that its instantiations exist
+    // there is nothing it could be emitted as. Dropping it is also what makes
+    // the promise checkable: **no `Dispatch::Generic` survives**, and the only
+    // place one could still be hiding is the body of a function that was never
+    // going to be compiled.
+    let generic: Vec<DefId> = linked
+        .defs()
+        .filter(|&d| !mono.generics_of(linked, d).is_empty())
+        .collect();
+    for def in generic {
+        linked.remove(def);
+    }
+
+    mono.out
+}
+
+/// The functions the walk starts from: **every concrete function the
+/// compilation declares**.
+///
+/// That is wider than "the program's entry points", and deliberately so. This
+/// pass does not drop what nothing calls — whether to is a decision about the
+/// artifact being built, not about types, and a library keeps its public surface
+/// where an executable does not. But a function that *is* emitted must have
+/// everything it calls, and a generic declaration does not survive this pass: if
+/// an unreached `f` calls `len.<[]u8>` and the walk never visited `f`, `f` would
+/// be left naming a function that no longer exists.
+///
+/// So the rule is the one that follows from not eliminating anything: every
+/// function that will be emitted is a root. When dead-code elimination arrives
+/// the set narrows by itself, to `main` and the `extern` symbols the outside
+/// world can call — the walk here does not change, only what is kept.
+///
+/// A **generic** declaration is not a root. There is no instantiation of it to
+/// emit, and which ones exist is a question about its callers — for a `@public`
+/// generic in a library, about a consumer this compilation cannot see. Cross
+/// compilation-unit generics are a separate problem and this is the shape of it.
+fn roots(meta: &Meta, linked: &Linked) -> Vec<DefId> {
+    linked
+        .funcs()
+        .filter(|f| {
+            meta.get::<Generics>(f.id)
+                .is_none_or(|g| g.params.is_empty())
+        })
+        .map(|f| f.def)
+        .collect()
+}
+
+// ===< The driver >===
+
+/// One instantiation waiting to be emitted.
+struct Job {
+    /// The declaration being instantiated.
+    origin: DefId,
+    /// The def the instantiation will be known by — a fresh one when there are
+    /// arguments, `origin` itself when there are none.
+    def: DefId,
+    args: Vec<GenericArg>,
+}
+
+struct Mono<'a> {
+    defs: &'a mut DefTable,
+    meta: &'a Meta,
+    impls: &'a ImplTable,
+    targets: &'a [ImplTarget],
+    out: Vec<Diagnostic>,
+    /// Every function declared `extern("c")`. Its symbol is its bare name —
+    /// that is what C expects — so mangling has to know, and the [`Function`] is
+    /// not always in hand where a symbol is computed.
+    externs: HashSet<DefId>,
+    queue: VecDeque<Job>,
+    /// Instantiation key → the def emitted for it. The key is the **symbol**,
+    /// which is exactly the right thing to deduplicate on: a mangled name's one
+    /// job is to be injective, so two argument sets share a symbol precisely
+    /// when they are the same instantiation (`design/lir.md` §7). Keying on the
+    /// arguments themselves would need a `Hash` on [`Ty`], which it does not
+    /// have — a `const` argument may hold a float.
+    emitted: HashMap<Symbol, DefId>,
+    /// Every def already queued or emitted, so a recursive generic function
+    /// (`fact.<T>` calling itself) terminates.
+    done: HashSet<DefId>,
+}
+
+impl Mono<'_> {
+    /// What `def` is generic over, or an empty list when it is concrete or
+    /// inference never reached it.
+    fn generics_of(&self, linked: &Linked, def: DefId) -> Vec<DefId> {
+        linked
+            .get(def)
+            .and_then(|f| self.meta.get::<Generics>(f.id))
+            .map(|g| g.params)
+            .unwrap_or_default()
+    }
+
+    /// How many of `def`'s generic parameters it declared itself (the rest being
+    /// the enclosing impl's) — see [`Generics::own`].
+    fn own_count(&self, linked: &Linked, def: DefId) -> usize {
+        linked
+            .get(def)
+            .and_then(|f| self.meta.get::<Generics>(f.id))
+            .map(|g| g.own)
+            .unwrap_or(0)
+    }
+
+    /// Note that `origin` is reached with `args`, queueing it if this is the
+    /// first time, and return the def its instantiation will have.
+    fn reach(&mut self, linked: &Linked, origin: DefId, args: Vec<GenericArg>) -> DefId {
+        // A bodyless declaration — an `extern("c") func` — is a symbol and a
+        // signature and nothing else. It is reached, not instantiated.
+        if args.is_empty() {
+            if !self.done.insert(origin) {
+                return origin;
+            }
+            if let Some(f) = linked.get(origin) {
+                let id = f.id;
+                self.stamp(id, origin, Vec::new(), 0);
+            }
+            self.queue.push_back(Job {
+                origin,
+                def: origin,
+                args,
+            });
+            return origin;
+        }
+
+        let own = self.own_count(linked, origin);
+        let symbol = mangle(self.defs, &self.externs, origin, &args, own);
+        if let Some(&d) = self.emitted.get(&symbol) {
+            return d;
+        }
+        // An instantiation is a definition the source never wrote. It keeps the
+        // declaration's canonical path — a diagnostic about it should name the
+        // function the programmer can see — and carries what makes it *this* one
+        // in its [`Instance`].
+        let d = self.defs.get(origin);
+        let (name, vis, parent, file, span, node, canonical) = (
+            d.name.clone(),
+            d.vis,
+            d.parent,
+            d.file,
+            d.span,
+            d.node,
+            d.canonical.clone(),
+        );
+        let def = self.defs.alloc(
+            name,
+            DefKind::Func,
+            vis,
+            parent,
+            file,
+            span,
+            node,
+            canonical,
+        );
+        self.defs.get_mut(def).directives = self.defs.get(origin).directives.clone();
+        self.emitted.insert(symbol, def);
+        self.done.insert(def);
+        self.queue.push_back(Job { origin, def, args });
+        def
+    }
+
+    /// Record what a function is, and the two names it will be known by.
+    fn stamp(&mut self, id: IrId, origin: DefId, args: Vec<GenericArg>, own: usize) {
+        let symbol = mangle(self.defs, &self.externs, origin, &args, own);
+        let name = display_name(self.defs, origin, &args, own);
+        self.meta.set(
+            id,
+            Instance {
+                origin,
+                args,
+                name,
+                symbol,
+            },
+        );
+    }
+
+    // ===< Emitting one instantiation >===
+
+    /// Clone `original`'s body into a concrete function, with every occurrence of
+    /// its generic parameters replaced by `args`.
+    ///
+    /// The clone is a **renumbering**: every node gets a fresh [`IrId`] and the
+    /// facts hung off the old one are copied across with their types
+    /// substituted. It cannot share ids with the declaration, because the one
+    /// fact that differs between two instantiations is precisely the per-node
+    /// type, and that is keyed by id.
+    ///
+    /// What is deliberately *not* renumbered is a **local's [`DefId`]**. Two
+    /// instantiations of a function share one declaration for each of its
+    /// locals, which is what a local's def is: the place it was written. Their
+    /// *types* differ and live on the fresh ids above; nothing else about a
+    /// local does.
+    fn instantiate(&mut self, original: &Function, def: DefId, args: &[GenericArg]) -> Function {
+        let params = self
+            .meta
+            .get::<Generics>(original.id)
+            .map(|g| g.params)
+            .unwrap_or_default();
+        let mut subst = Subst::default();
+        for (p, a) in params.iter().zip(args) {
+            match a {
+                GenericArg::Ty(t) => {
+                    subst.tys.insert(*p, t.clone());
+                }
+                GenericArg::Const(k) => {
+                    subst.consts.insert(*p, k.clone());
+                }
+            }
+        }
+
+        let mut func = original.clone();
+        func.def = def;
+        let own = self
+            .meta
+            .get::<Generics>(original.id)
+            .map(|g| g.own)
+            .unwrap_or(0);
+        let mut cloner = Cloner {
+            meta: self.meta,
+            subst: &subst,
+        };
+        cloner.visit_function(&mut func);
+        self.stamp(func.id, original.def, args.to_vec(), own);
+        func
+    }
+
+    // ===< Walking a concrete function >===
+
+    /// Walk an already-concrete function: resolve each call through a bound into
+    /// a direct one, and queue every callee it reaches.
+    fn rewrite(&mut self, linked: &Linked, func: &mut Function) {
+        let mut r = Rewriter { mono: self, linked };
+        r.visit_function(func);
+    }
+
+    /// Resolve one call and queue what it reaches.
+    fn rewrite_call(&mut self, linked: &Linked, e: &mut Expr) {
+        let recorded: Option<Vec<GenericArg>> = self.meta.get::<Instantiation>(e.id).map(|i| i.0);
+        let callee_ty = self.meta.ty(call_callee_id(e).unwrap_or(e.id));
+        let ExprKind::Call {
+            callee,
+            builtin,
+            dispatch,
+            ..
+        } = &mut e.kind
+        else {
+            return;
+        };
+        // A builtin operator *is* a machine instruction. There is no function on
+        // the other end of it, so there is nothing to instantiate and nothing to
+        // name — the same O(1) escape every other pass over calls takes.
+        if builtin.is_some() {
+            return;
+        }
+        match dispatch {
+            // Which function a vtable slot holds is a property of the vtable,
+            // not of the call: it stays as it is, and the impls that fill the
+            // slots are reached through the `*dyn` coercion that built them.
+            Dispatch::Virtual { .. } => {}
+            Dispatch::Generic {
+                trait_def,
+                method,
+                self_ty,
+            } => {
+                let (trait_def, method, self_ty) = (*trait_def, *method, self_ty.clone());
+                let call_args = recorded.unwrap_or_default();
+                match self.select(linked, trait_def, method, &self_ty, &call_args) {
+                    Some((target, targs)) => {
+                        let def = self.reach(linked, target, targs);
+                        *dispatch = Dispatch::Static;
+                        callee.kind = ExprKind::Global(def);
+                    }
+                    // Inference proved an impl exists — that is what satisfying
+                    // the bound *was* — so failing to find one here is a defect
+                    // in this pass, not in the program. Saying so is better than
+                    // leaving a call the next stage will trip over silently.
+                    None => self.report_unresolved(e.id, trait_def, &self_ty),
+                }
+            }
+            Dispatch::Static => {
+                let ExprKind::Global(target) = callee.kind else {
+                    return;
+                };
+                if !linked.contains(target) {
+                    return;
+                }
+                let args = match recorded {
+                    Some(a) => a,
+                    None => self.args_from_signature(linked, target, callee_ty.as_ref()),
+                };
+                let def = self.reach(linked, target, args);
+                callee.kind = ExprKind::Global(def);
+            }
+        }
+    }
+
+    /// Recover a call's generic arguments from the shape of its callee.
+    ///
+    /// The ordinary route is the [`Instantiation`] inference recorded, and it is
+    /// the one to trust. An **operator** call has none: `a + b` picks its impl
+    /// through trait selection rather than through the generic-instantiation
+    /// path, so nothing along the way had an argument list to record. What it
+    /// does have is the callee's type, reconstructed by lowering from the
+    /// already-concrete operands — so matching the declaration's signature
+    /// against it says what each parameter must be.
+    ///
+    /// This is exactly the derivation the recorded form exists to avoid, kept as
+    /// the narrow fallback it is sound for: here both signatures are in hand and
+    /// the arguments all appear in them, which is the case the recorded form
+    /// covers and this one cannot.
+    fn args_from_signature(
+        &self,
+        linked: &Linked,
+        target: DefId,
+        concrete: Option<&Ty>,
+    ) -> Vec<GenericArg> {
+        let params = self.generics_of(linked, target);
+        if params.is_empty() {
+            return Vec::new();
+        }
+        let (Some(f), Some(concrete)) = (linked.get(target), concrete) else {
+            return Vec::new();
+        };
+        let Some(declared) = self.meta.ty(f.id) else {
+            return Vec::new();
+        };
+        let mut bindings = Subst::default();
+        match_ty(&params, &declared, concrete, &mut bindings);
+        params
+            .iter()
+            .map(|p| match bindings.consts.get(p) {
+                Some(k) => GenericArg::Const(k.clone()),
+                None => GenericArg::Ty(bindings.tys.get(p).cloned().unwrap_or(Ty::Error)),
+            })
+            .collect()
+    }
+
+    /// Queue every method the vtable of `concrete` for `trait_def` will hold.
+    fn reach_vtable(&mut self, linked: &Linked, trait_def: DefId, concrete: &Ty) {
+        let Some((i, bindings)) = self.match_impl(trait_def, concrete) else {
+            return;
+        };
+        let mut members: Vec<DefId> = self.impls.impls[i].members.values().copied().collect();
+        // A `HashMap`'s iteration order varies between runs, and every queued
+        // job is a definition allocated in the order it was queued. Sorting is
+        // what keeps two builds of one program identical.
+        members.sort();
+        for m in members {
+            if self.defs.get(m).kind != DefKind::Func || !linked.contains(m) {
+                continue;
+            }
+            // A vtable slot takes no generic arguments of its own — that is what
+            // object safety guarantees — so the impl's are the whole list.
+            let args = self.inherited_args(linked, m, &bindings);
+            self.reach(linked, m, args);
+        }
+    }
+
+    // ===< Selecting the impl a bound stood for >===
+
+    /// Turn a call on a bound into the function it really calls.
+    ///
+    /// `self_ty` is concrete by now — that is what instantiating the enclosing
+    /// function did to it — so the search is a *match* rather than a unification:
+    /// each candidate impl's target is a pattern whose holes are its own
+    /// generics, and matching binds them.
+    ///
+    /// The returned arguments are the two halves of [`Generics`] joined back
+    /// together: the method's own come from the call site (the trait's
+    /// declaration and the impl's list the same ones, so they line up by
+    /// position), the impl's from the match.
+    fn select(
+        &mut self,
+        linked: &Linked,
+        trait_def: DefId,
+        method: DefId,
+        self_ty: &Ty,
+        call_args: &[GenericArg],
+    ) -> Option<(DefId, Vec<GenericArg>)> {
+        let name = self.defs.get(method).name.clone();
+        let (i, bindings) = self.match_impl(trait_def, self_ty)?;
+        let target = self.impls.impls[i]
+            .members
+            .get(&name)
+            .copied()
+            // An impl that does not override the method still supplies it when
+            // the trait declared a default body. The default's code belongs to
+            // the trait, so that is the function to call.
+            .filter(|&m| linked.contains(m))
+            .unwrap_or(method);
+        if !linked.contains(target) {
+            return None;
+        }
+        let own = self.own_count(linked, target);
+        let mut args: Vec<GenericArg> = call_args.iter().take(own).cloned().collect();
+        args.extend(self.inherited_args(linked, target, &bindings));
+        Some((target, args))
+    }
+
+    /// The arguments `target` inherits from the impl it belongs to, read out of
+    /// the match that selected that impl.
+    fn inherited_args(&self, linked: &Linked, target: DefId, bindings: &Subst) -> Vec<GenericArg> {
+        let params = self.generics_of(linked, target);
+        let own = self.own_count(linked, target);
+        params[own.min(params.len())..]
+            .iter()
+            .map(|p| match bindings.consts.get(p) {
+                Some(k) => GenericArg::Const(k.clone()),
+                None => GenericArg::Ty(bindings.tys.get(p).cloned().unwrap_or(Ty::Error)),
+            })
+            .collect()
+    }
+
+    /// The impl of `trait_def` whose target matches `self_ty`, and what matching
+    /// it bound the impl's generics to.
+    ///
+    /// A concrete target beats a blanket one (`impl <T> Trait for T`), exactly
+    /// as it does during inference: the specific answer is the one the program
+    /// meant. Nothing else needs ranking here, because inference already proved
+    /// the choice is unambiguous — this is re-deriving a settled answer, not
+    /// making it again.
+    fn match_impl(&self, trait_def: DefId, self_ty: &Ty) -> Option<(usize, Subst)> {
+        // A method's `self` may be declared by pointer (`func (self: *Self)`),
+        // and a `Dispatch::Generic` records the **parameter's** type — so the
+        // receiver of `d.weight()` on a `*D` arrives here as `*Entity` while the
+        // impl is written `impl Describe for Entity`. Try the type as written
+        // first, so an impl really written for a pointer still wins, then
+        // through it.
+        self.match_impl_exact(trait_def, self_ty).or_else(|| {
+            let inner = strip_ptr(self_ty);
+            (inner != *self_ty).then(|| self.match_impl_exact(trait_def, &inner))?
+        })
+    }
+
+    fn match_impl_exact(&self, trait_def: DefId, self_ty: &Ty) -> Option<(usize, Subst)> {
+        let mut best: Option<(u8, usize, Subst)> = None;
+        for (i, imp) in self.impls.impls.iter().enumerate() {
+            if imp.trait_def != Some(trait_def) {
+                continue;
+            }
+            let Some(target) = self.targets.get(i) else {
+                continue;
+            };
+            let mut bindings = Subst::default();
+            if !match_ty(&imp.generics, &target.self_ty, self_ty, &mut bindings) {
+                continue;
+            }
+            let score = if imp.self_is_generic() { 1 } else { 2 };
+            if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
+                best = Some((score, i, bindings));
+            }
+        }
+        best.map(|(_, i, b)| (i, b))
+    }
+
+    fn report_unresolved(&mut self, at: IrId, trait_def: DefId, self_ty: &Ty) {
+        let mut d = Diagnostic::error(format!(
+            "internal: no impl of `{}` for `{}` at monomorphization",
+            self.defs.canonical_string(trait_def),
+            self_ty.display(self.defs)
+        ));
+        if let Some(span) = self.meta.span(at) {
+            d = d.with_primary(span, "this call has no callee");
+        }
+        self.out.push(d.with_note(
+            "the bound was satisfied during inference, so this is a compiler defect".to_string(),
+        ));
+    }
+}
+
+// ===< The walk over one concrete function >===
+
+/// Walks a concrete function, handing every call to [`Mono::rewrite_call`].
+///
+/// It is a [`VisitorMut`] rather than a hand-written recursion so that a node
+/// shape added to the IR later reaches this pass by default instead of silently
+/// not being walked.
+struct Rewriter<'a, 'b> {
+    mono: &'b mut Mono<'a>,
+    linked: &'b Linked,
+}
+
+impl VisitorMut for Rewriter<'_, '_> {
+    fn visit_expr(&mut self, expr: &mut Expr) {
+        match &expr.kind {
+            ExprKind::Call { .. } => self.mono.rewrite_call(self.linked, expr),
+            // A `*T` unsized to `*dyn Trait` is a call-graph edge with no call
+            // in it: the vtable built for `concrete` holds that impl's methods,
+            // and something will later jump through one of them. Nothing else in
+            // the program mentions those methods, so without this they would
+            // never be instantiated and the vtable would have holes.
+            ExprKind::DynCast { concrete, .. } => {
+                let concrete = concrete.clone();
+                if let Some(t) = dyn_trait(self.mono.meta, expr.id) {
+                    self.mono.reach_vtable(self.linked, t, &concrete);
+                }
+            }
+            _ => {}
+        }
+        walk_expr_mut(self, expr);
+    }
+}
+
+/// The id of a call's callee expression, which is where its instantiated
+/// signature was stamped.
+fn call_callee_id(e: &Expr) -> Option<IrId> {
+    match &e.kind {
+        ExprKind::Call { callee, .. } => Some(callee.id),
+        _ => None,
+    }
+}
+
+/// The value type behind any number of pointers.
+fn strip_ptr(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Ptr { inner, .. } => strip_ptr(inner),
+        other => other.clone(),
+    }
+}
+
+/// The trait a `*dyn Trait` coercion erased to, read off the node's own type.
+fn dyn_trait(meta: &Meta, id: IrId) -> Option<DefId> {
+    match meta.ty(id)? {
+        Ty::Ptr { inner, .. } => match *inner {
+            Ty::Dyn(d) => Some(d),
+            _ => None,
+        },
+        Ty::Dyn(d) => Some(d),
+        _ => None,
+    }
+}
+
+/// The name a dump, a diagnostic or a profile shows (`core.Vec.<i32>.push`).
+///
+/// The arguments are placed where they were written: the enclosing impl's on
+/// the type the impl is for, the function's own on the function. That is the
+/// same split the symbol is built from, and the reason is the same — a reader
+/// looking at `core.Vec.<i32>.push` should see the thing they wrote.
+fn display_name(defs: &DefTable, origin: DefId, args: &[GenericArg], own: usize) -> String {
+    let render = |args: &[GenericArg]| {
+        let inner: Vec<String> = args
+            .iter()
+            .map(|a| match a {
+                GenericArg::Ty(t) => t.display(defs),
+                GenericArg::Const(k) => k.display(defs),
+            })
+            .collect();
+        format!(".<{}>", inner.join(", "))
+    };
+    let d = defs.get(origin);
+    let path: Vec<String> = if d.canonical.is_empty() {
+        vec![d.name.to_string()]
+    } else {
+        d.canonical.iter().map(|s| s.to_string()).collect()
+    };
+    let own = own.min(args.len());
+    let (own_args, inherited) = args.split_at(own);
+
+    let mut out = String::new();
+    for (i, seg) in path.iter().enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        out.push_str(seg);
+        if i + 2 == path.len() && !inherited.is_empty() {
+            out.push_str(&render(inherited));
+        }
+    }
+    if !own_args.is_empty() {
+        out.push_str(&render(own_args));
+    }
+    // Nowhere to hang the impl's arguments — a one-component path — so they
+    // join the function's rather than vanish.
+    if !inherited.is_empty() && path.len() < 2 {
+        out.push_str(&render(inherited));
+    }
+    out
+}
+
+// ===< Substitution, and matching >===
+
+/// A binding of generic parameters to what they stand for.
+#[derive(Debug, Clone, Default)]
+struct Subst {
+    tys: HashMap<DefId, Ty>,
+    consts: HashMap<DefId, Const>,
+}
+
+/// Replace every generic parameter in `ty` by what `subst` binds it to.
+///
+/// A parameter this substitution says nothing about is left alone rather than
+/// erased: a nested generic's parameters travel through here untouched on their
+/// way to their own instantiation.
+fn subst_ty(subst: &Subst, ty: &Ty) -> Ty {
+    match ty {
+        Ty::Nominal { def, args } if args.is_empty() => {
+            subst.tys.get(def).cloned().unwrap_or_else(|| ty.clone())
+        }
+        Ty::Nominal { def, args } => Ty::Nominal {
+            def: *def,
+            args: args.iter().map(|a| subst_ty(subst, a)).collect(),
+        },
+        Ty::Int { signed, width } => Ty::Int {
+            signed: *signed,
+            width: subst_const(subst, width),
+        },
+        Ty::Ptr { mutable, inner } => Ty::Ptr {
+            mutable: *mutable,
+            inner: Box::new(subst_ty(subst, inner)),
+        },
+        Ty::Slice { mutable, inner } => Ty::Slice {
+            mutable: *mutable,
+            inner: Box::new(subst_ty(subst, inner)),
+        },
+        Ty::Array {
+            len,
+            mutable,
+            inner,
+        } => Ty::Array {
+            len: subst_const(subst, len),
+            mutable: *mutable,
+            inner: Box::new(subst_ty(subst, inner)),
+        },
+        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_ty(subst, e)).collect()),
+        Ty::Func { params, ret } => Ty::Func {
+            params: params.iter().map(|p| subst_ty(subst, p)).collect(),
+            ret: Box::new(subst_ty(subst, ret)),
+        },
+        other => other.clone(),
+    }
+}
+
+fn subst_const(subst: &Subst, k: &Const) -> Const {
+    match k {
+        Const::Param(d) => subst.consts.get(d).cloned().unwrap_or_else(|| k.clone()),
+        _ => k.clone(),
+    }
+}
+
+/// Match `pattern` — an impl's target, whose holes are the defs in `holes` —
+/// against the concrete `ty`, recording what each hole must be.
+///
+/// This is one-way on purpose. Inference unifies, because there both sides may
+/// have unknowns; here the right-hand side is a type the program settled on and
+/// the only question is what the impl's generics would have to be for it to
+/// apply. A hole that is asked to be two different things makes the match fail,
+/// which is what keeps `impl <T> Pair.<T, T>` from matching `Pair.<i32, f64>`.
+fn match_ty(holes: &[DefId], pattern: &Ty, ty: &Ty, out: &mut Subst) -> bool {
+    if let Ty::Nominal { def, args } = pattern
+        && args.is_empty()
+        && holes.contains(def)
+    {
+        return match out.tys.get(def) {
+            Some(prev) => prev == ty,
+            None => {
+                out.tys.insert(*def, ty.clone());
+                true
+            }
+        };
+    }
+    match (pattern, ty) {
+        (Ty::Nominal { def: a, args: xs }, Ty::Nominal { def: b, args: ys }) => {
+            a == b
+                && xs.len() == ys.len()
+                && xs.iter().zip(ys).all(|(x, y)| match_ty(holes, x, y, out))
+        }
+        (
+            Ty::Int {
+                signed: a,
+                width: x,
+            },
+            Ty::Int {
+                signed: b,
+                width: y,
+            },
+        ) => a == b && match_const(holes, x, y, out),
+        (
+            Ty::Ptr {
+                mutable: a,
+                inner: x,
+            },
+            Ty::Ptr {
+                mutable: b,
+                inner: y,
+            },
+        )
+        | (
+            Ty::Slice {
+                mutable: a,
+                inner: x,
+            },
+            Ty::Slice {
+                mutable: b,
+                inner: y,
+            },
+        ) => a == b && match_ty(holes, x, y, out),
+        (
+            Ty::Array {
+                len: n,
+                mutable: a,
+                inner: x,
+            },
+            Ty::Array {
+                len: m,
+                mutable: b,
+                inner: y,
+            },
+        ) => a == b && match_const(holes, n, m, out) && match_ty(holes, x, y, out),
+        (Ty::Tuple(xs), Ty::Tuple(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| match_ty(holes, x, y, out))
+        }
+        (
+            Ty::Func {
+                params: xs,
+                ret: rx,
+            },
+            Ty::Func {
+                params: ys,
+                ret: ry,
+            },
+        ) => {
+            xs.len() == ys.len()
+                && xs.iter().zip(ys).all(|(x, y)| match_ty(holes, x, y, out))
+                && match_ty(holes, rx, ry, out)
+        }
+        (a, b) => a == b,
+    }
+}
+
+fn match_const(holes: &[DefId], pattern: &Const, k: &Const, out: &mut Subst) -> bool {
+    if let Const::Param(d) = pattern
+        && holes.contains(d)
+    {
+        return match out.consts.get(d) {
+            Some(prev) => prev == k,
+            None => {
+                out.consts.insert(*d, k.clone());
+                true
+            }
+        };
+    }
+    // A width written as `int.<32>` and one written `i32` are the same type
+    // (§3.1), and both normalize to a bare width — so comparing the numbers is
+    // comparing the types, with no target consulted.
+    match (pattern.value(), k.value()) {
+        (Some(a), Some(b)) => a == b,
+        _ => pattern == k,
+    }
+}
+
+// ===< Cloning one body into one instantiation >===
+
+/// Renumbers a cloned body and substitutes its types (see
+/// [`Mono::instantiate`]).
+struct Cloner<'a> {
+    meta: &'a Meta,
+    subst: &'a Subst,
+}
+
+impl Cloner<'_> {
+    /// A fresh id carrying `old`'s facts, with every type substituted.
+    fn renumber(&self, old: IrId) -> IrId {
+        let new = self.meta.fresh();
+        if let Some(span) = self.meta.span(old) {
+            self.meta.set_span(new, span);
+        }
+        if let Some(ty) = self.meta.ty(old) {
+            self.meta.set_ty(new, subst_ty(self.subst, &ty));
+        }
+        let directives = self.meta.directives(old);
+        if !directives.is_empty() {
+            self.meta.set_directives(new, directives);
+        }
+        if self.meta.has::<ImplicitCast>(old) {
+            self.meta.set(new, ImplicitCast);
+        }
+        if self.meta.has::<RangeReported>(old) {
+            self.meta.set(new, RangeReported);
+        }
+        // A nested call's own generic arguments travel with it, substituted: a
+        // `push` inside `Vec.<T>.extend` is instantiated at `T`, and this is
+        // where `T` becomes the argument the enclosing instantiation chose.
+        if let Some(Instantiation(args)) = self.meta.get::<Instantiation>(old) {
+            let args = args
+                .iter()
+                .map(|a| match a {
+                    GenericArg::Ty(t) => GenericArg::Ty(subst_ty(self.subst, t)),
+                    GenericArg::Const(k) => GenericArg::Const(subst_const(self.subst, k)),
+                })
+                .collect();
+            self.meta.set(new, Instantiation(args));
+        }
+        new
+    }
+
+    fn binding(&self, b: &mut Binding) {
+        b.id = self.renumber(b.id);
+    }
+}
+
+impl VisitorMut for Cloner<'_> {
+    fn visit_function(&mut self, func: &mut Function) {
+        func.id = self.renumber(func.id);
+        for p in &mut func.params {
+            p.id = self.renumber(p.id);
+        }
+        walk_function_mut(self, func);
+    }
+
+    fn visit_block(&mut self, block: &mut Block) {
+        block.id = self.renumber(block.id);
+        walk_block_mut(self, block);
+    }
+
+    fn visit_stmt(&mut self, stmt: &mut super::Stmt) {
+        stmt.id = self.renumber(stmt.id);
+        walk_stmt_mut(self, stmt);
+    }
+
+    fn visit_arm(&mut self, arm: &mut Arm) {
+        arm.id = self.renumber(arm.id);
+        crate::ir::walk_arm_mut(self, arm);
+    }
+
+    fn visit_pattern(&mut self, pattern: &mut Pattern) {
+        pattern.id = self.renumber(pattern.id);
+        // The two forms that carry a `Binding` of their own: the walk below
+        // reaches sub-*patterns*, and a binding is not one.
+        match &mut pattern.kind {
+            PatternKind::At { binding, .. } => self.binding(binding),
+            PatternKind::Slice {
+                rest: Some(Some(b)),
+                ..
+            } => self.binding(b),
+            _ => {}
+        }
+        walk_pattern_mut(self, pattern);
+    }
+
+    fn visit_expr(&mut self, expr: &mut Expr) {
+        expr.id = self.renumber(expr.id);
+        match &mut expr.kind {
+            // A `const` generic parameter has no storage: it *is* the value the
+            // instantiation chose, and this is the point at which it becomes
+            // one. Leaving it as a name would leave the IR referring to a
+            // parameter that no longer exists.
+            ExprKind::ConstParam(def) => {
+                if let Some(lit) = self.subst.consts.get(def).and_then(const_lit) {
+                    expr.kind = ExprKind::Lit(lit);
+                }
+            }
+            // The two expression forms that carry a type of their own. Both are
+            // written in the declaration's terms and both have to arrive in the
+            // instantiation's.
+            ExprKind::DynCast { concrete, .. } => {
+                *concrete = subst_ty(self.subst, concrete);
+            }
+            ExprKind::Call {
+                dispatch: Dispatch::Generic { self_ty, .. },
+                ..
+            } => {
+                *self_ty = subst_ty(self.subst, self_ty);
+            }
+            _ => {}
+        }
+        walk_expr_mut(self, expr);
+    }
+}
+
+/// The literal a `const` argument becomes where its parameter was used as a
+/// value.
+fn const_lit(k: &Const) -> Option<Lit> {
+    match k {
+        Const::Width(n) => Some(Lit::Int((*n).into())),
+        Const::Value(a) => match &a.value {
+            ConstValue::Int(n) => Some(Lit::Int(n.clone())),
+            ConstValue::Float(f) => Some(Lit::Float(*f)),
+            ConstValue::Bool(b) => Some(Lit::Bool(*b)),
+            ConstValue::Char(c) => Some(Lit::Char(*c)),
+            ConstValue::Str(s) => Some(Lit::Str(s.clone())),
+            ConstValue::Bytes(b) => Some(Lit::Bytes(b.clone())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// ===< Mangling (`design/lir.md` §7) >===
+
+/// The symbol `origin` instantiated at `args` will have in the object file.
+///
+/// The scheme is Itanium-flavoured because the length-prefixed form is easy to
+/// demangle and uses only characters every object format accepts. Its one
+/// requirement is **injectivity**: two instantiations a linker could confuse must
+/// encode differently, and the same instantiation reached twice must encode the
+/// same way. Everything else is secondary to that.
+///
+/// `@link_name("...")` wins outright when it is present — the program named the
+/// symbol, and a mangled version of a name someone chose for a C library to find
+/// is of no use to anyone. An `extern` function with no `@link_name` mangles to
+/// its bare name, because that is what C expects.
+///
+/// The arguments are split where [`Generics::own`] says: the enclosing impl's go
+/// on the type the impl is for, the function's own on the function, so
+/// `core.Vec.<i32>.push` mangles the way `design/lir.md` §7 writes it.
+fn mangle(
+    defs: &DefTable,
+    externs: &HashSet<DefId>,
+    origin: DefId,
+    args: &[GenericArg],
+    own: usize,
+) -> Symbol {
+    let d = defs.get(origin);
+    if let Some(link) = d.directives.iter().find(|x| x.is("link_name"))
+        && let Some(crate::sema::def::DirectiveArg::Str(name)) = link.args.first()
+    {
+        return name.clone();
+    }
+    let path = if d.canonical.is_empty() {
+        vec![d.name.clone()]
+    } else {
+        d.canonical.clone()
+    };
+    if args.is_empty() && externs.contains(&origin) {
+        return d.name.clone();
+    }
+
+    let own = own.min(args.len());
+    let (own_args, inherited) = args.split_at(own);
+    let mut s = String::from("_NC");
+    for (i, seg) in path.iter().enumerate() {
+        push_len(&mut s, seg.as_str());
+        // The impl's arguments belong to the type the impl is for, which is the
+        // component before the member.
+        if i + 2 == path.len() && !inherited.is_empty() {
+            push_args(&mut s, defs, inherited);
+        }
+    }
+    // Nowhere to hang them (a free function reached through a blanket impl, a
+    // one-component path): they still have to be in the symbol, so they join the
+    // function's own.
+    if inherited.is_empty() || path.len() >= 2 {
+        if !own_args.is_empty() {
+            push_args(&mut s, defs, own_args);
+        }
+    } else {
+        let mut all = inherited.to_vec();
+        all.extend(own_args.iter().cloned());
+        push_args(&mut s, defs, &all);
+    }
+    Symbol::new(&s)
+}
+
+fn push_len(s: &mut String, text: &str) {
+    s.push_str(&text.len().to_string());
+    s.push_str(text);
+}
+
+fn push_args(s: &mut String, defs: &DefTable, args: &[GenericArg]) {
+    s.push('I');
+    for a in args {
+        match a {
+            GenericArg::Ty(t) => push_ty(s, defs, t),
+            GenericArg::Const(k) => push_const(s, defs, k),
+        }
+    }
+    s.push('E');
+}
+
+/// Encode one type argument.
+///
+/// A primitive mangles **as a primitive** even though it is sugar: `i32` is
+/// `int.<32>` in the type system, and encoding it that way would make every
+/// symbol in every program longer to record something no two types disagree
+/// about. The sugar is the canonical spelling here.
+fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
+    match ty {
+        Ty::Int { signed, width } => match width.bits() {
+            Some(n) => {
+                s.push(if *signed { 'i' } else { 'u' });
+                s.push_str(&n.to_string());
+            }
+            // A width still symbolic at this point is a defect, not a program
+            // error; encode it so the symbol stays injective rather than
+            // silently picking a number.
+            None => s.push('Z'),
+        },
+        Ty::Float(w) => {
+            s.push('f');
+            s.push_str(match w {
+                FloatWidth::F16 => "16",
+                FloatWidth::F32 => "32",
+                FloatWidth::F64 => "64",
+                FloatWidth::F80 => "80",
+                FloatWidth::F128 => "128",
+            });
+        }
+        Ty::Bool => s.push('b'),
+        Ty::Char => s.push('c'),
+        Ty::Void => s.push('v'),
+        Ty::Never => s.push('N'),
+        Ty::Ptr { mutable, inner } => {
+            s.push('P');
+            if *mutable {
+                s.push('m');
+            }
+            push_ty(s, defs, inner);
+        }
+        Ty::Slice { mutable, inner } => {
+            s.push('S');
+            if *mutable {
+                s.push('m');
+            }
+            push_ty(s, defs, inner);
+        }
+        Ty::Array { len, inner, .. } => {
+            s.push('A');
+            s.push_str(&len.value().map(|n| n.to_string()).unwrap_or_default());
+            push_ty(s, defs, inner);
+        }
+        Ty::Tuple(elems) => {
+            s.push('T');
+            for e in elems {
+                push_ty(s, defs, e);
+            }
+            s.push('E');
+        }
+        Ty::Func { params, ret } => {
+            s.push('F');
+            for p in params {
+                push_ty(s, defs, p);
+            }
+            s.push('E');
+            push_ty(s, defs, ret);
+        }
+        Ty::Dyn(d) => {
+            s.push('D');
+            for seg in &defs.get(*d).canonical {
+                push_len(s, seg.as_str());
+            }
+            s.push('E');
+        }
+        // The pointer-sized integers have an encoding of their own, `is` / `us`,
+        // rather than the path of the `core` declaration they are (§3.1). They
+        // stand exactly where a primitive stands, they are in every other
+        // program, and `4core5isizeIE` in every symbol that touches one would be
+        // noise. Keyed on the `#lang` tag, never the name, so `core` may still
+        // spell them however it likes.
+        Ty::Nominal { def, args }
+            if args.is_empty()
+                && defs
+                    .get(*def)
+                    .lang
+                    .as_ref()
+                    .is_some_and(|l| matches!(l.as_str(), "usize" | "isize")) =>
+        {
+            s.push_str(
+                if defs.get(*def).lang.as_ref().unwrap().as_str() == "isize" {
+                    "is"
+                } else {
+                    "us"
+                },
+            );
+        }
+        // `N` + the length-prefixed path + the arguments in `I ... E`.
+        //
+        // Two details here are repairs to `design/lir.md` §7's table, both in
+        // service of the one thing a mangled name has to be — injective — and
+        // both recorded there:
+        //
+        // - The **`N`** is what keeps a path from being read as the tail of the
+        //   encoding before it. An integer is a letter followed by digits, and a
+        //   path component starts with digits, so `i324core3Foo` would be either
+        //   `i32` then `core.Foo` or `i324` then something. With `N`, every type
+        //   encoding starts with a letter and the ambiguity cannot arise.
+        // - The arguments are written `I ... E` **even when there are none**,
+        //   because the list is what tells a reader where the path stops.
+        //   Without it `N4core6OptionN4core6Option` could be one four-component
+        //   path or two two-component ones.
+        Ty::Nominal { def, args } => {
+            s.push('N');
+            let d = defs.get(*def);
+            let path = if d.canonical.is_empty() {
+                vec![d.name.clone()]
+            } else {
+                d.canonical.clone()
+            };
+            for seg in &path {
+                push_len(s, seg.as_str());
+            }
+            s.push('I');
+            for a in args {
+                push_ty(s, defs, a);
+            }
+            s.push('E');
+        }
+        Ty::ComptimeInt => s.push_str("Ci"),
+        Ty::ComptimeFloat => s.push_str("Cf"),
+        Ty::ComptimeStr => s.push_str("Cs"),
+        Ty::Var(_) | Ty::Error => s.push('Z'),
+    }
+}
+
+/// Encode one `const` argument.
+///
+/// It carries **its type**. A `const` parameter may be any primitive (§5), so
+/// `K3` would be ambiguous between `3usize` and `3u8`, and those are different
+/// instantiations.
+///
+/// A numeric value is prefixed `p` or `n` for its sign. The `n` is
+/// `design/lir.md` §7's, and for its reason: `-` is not safe in every object
+/// format. The `p` is the repair that makes the encoding injective — a width is
+/// digits and a value is digits, so `Ku167` would be `u16` at `7` or `u167` at
+/// nothing. One letter between them settles it, and the sign has to be written
+/// anyway.
+fn push_const(s: &mut String, defs: &DefTable, k: &Const) {
+    s.push('K');
+    match k {
+        // A width is a bare `u16` and carries no type of its own (§3.1); it is
+        // spelled as one here because that is the type a program writes it at.
+        Const::Width(n) => {
+            s.push_str("u16p");
+            s.push_str(&n.to_string());
+        }
+        Const::Value(a) => {
+            let ConstArg { ty, value } = &**a;
+            push_ty(s, defs, ty);
+            match value {
+                ConstValue::Int(n) => {
+                    if n.sign() == num_bigint::Sign::Minus {
+                        s.push('n');
+                        s.push_str(&(-n).to_string());
+                    } else {
+                        s.push('p');
+                        s.push_str(&n.to_string());
+                    }
+                }
+                ConstValue::Bool(b) => s.push(if *b { '1' } else { '0' }),
+                ConstValue::Char(c) => {
+                    s.push('p');
+                    s.push_str(&(*c as u32).to_string());
+                }
+                ConstValue::Float(f) => {
+                    s.push('p');
+                    s.push_str(&f.to_bits().to_string());
+                }
+                // An aggregate is not an admissible `const` argument (§5), so
+                // reaching here is a defect. `Z` keeps the symbol injective
+                // among the values that do arrive rather than inventing one.
+                _ => s.push('Z'),
+            }
+        }
+        _ => s.push('Z'),
+    }
+}

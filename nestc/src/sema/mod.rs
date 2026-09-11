@@ -291,6 +291,22 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     for &file in &files {
         lower_one(session, file);
     }
+    // Resolve each impl's target into types and keep the table. Inference is
+    // done with it; monomorphization is not — choosing the impl for a
+    // `Dispatch::Generic` call is a search over exactly this (see
+    // [`infer::ImplTarget`]).
+    let impl_targets = {
+        let Session {
+            defs,
+            asts,
+            diagnostics,
+            lang_items,
+            ..
+        } = &mut *session;
+        infer::resolve_impl_targets(defs, asts, diagnostics, lang_items, &impls)
+    };
+    session.impls = impls;
+    session.impl_targets = impl_targets;
     // Everything past this point is whole-program: reachability starts at
     // `main`, exhaustiveness needs every variant of an enum declared elsewhere,
     // monomorphization collects instantiations across files. Merge the per-file
@@ -305,6 +321,44 @@ pub fn analyze(session: &mut Session, entry: FileId) {
         &session.ir_meta,
         &session.linked,
     );
+    session.diagnostics.extend(diags);
+
+    // Monomorphization. It runs **after** the checks and not before, because
+    // every one of them wants to report against the program as it was written:
+    // a mistake inside `func <T>` is one mistake, and an instantiation of that
+    // function per call site would make it one per call site. The two
+    // exceptions are the checks that could not be made yet at all — see below.
+    //
+    // A compilation that has already reported an error is left alone. Its IR
+    // describes a program that does not type-check, so walking it would at best
+    // find nothing new and at worst report a defect in this pass for a defect in
+    // the program.
+    if !session.has_errors() {
+        monomorphize(session);
+    }
+}
+
+/// Instantiate every generic function, and re-run the checks that were deferred
+/// waiting for exactly that.
+fn monomorphize(session: &mut Session) {
+    let before: std::collections::HashSet<DefId> = session.linked.defs().collect();
+    let Session {
+        defs,
+        ir_meta,
+        linked,
+        impls,
+        impl_targets,
+        ..
+    } = &mut *session;
+    let mut diags = crate::ir::mono::run(defs, ir_meta, linked, impls, impl_targets);
+
+    // The `#const` check defers every call in a generic body: which function it
+    // reaches is a question about the instantiation, and there were none. Now
+    // there are, so the calls it skipped are ordinary static ones — and only the
+    // instantiations are re-checked, because everything else was already judged
+    // once above.
+    let fresh: Vec<DefId> = linked.defs().filter(|d| !before.contains(d)).collect();
+    crate::ir::check::constness::check_only(defs, ir_meta, linked, &fresh, &mut diags);
     session.diagnostics.extend(diags);
 }
 

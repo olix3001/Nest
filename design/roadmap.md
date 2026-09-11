@@ -21,8 +21,8 @@ Phase 6 and everything after it is unbuilt.
 | 2 | The prelude split ✅ | — | small | Self-contained, and every later phase adds names that have to land on one side of it |
 | 3 | `#intrinsic`, and retiring `$name` ✅ | 2 | medium | Cheaper before core grows; every later phase declares intrinsics |
 | 4 | `const` generics over any primitive ✅ | — | medium | Prerequisite for 5, useful alone |
-| 5 | The integer families `int.<N>` / `uint.<N>` | 3, 4 | large | The deepest type-system change; everything after it is easier |
-| 6 | Monomorphization | 5 | large | Was the old "Phase 2"; 5 changes what it must substitute |
+| 5 | The integer families `int.<N>` / `uint.<N>` ✅ | 3, 4 | large | The deepest type-system change; everything after it is easier |
+| 6 | Monomorphization ✅ | 5 | large | Was the old "Phase 2"; 5 changes what it must substitute |
 | 7 | Layout | 6 | medium | A generic type has no layout until its arguments are known |
 | 8 | LIR: shape and control flow | 7 | large | `design/lir.md` §1–4 |
 | 9 | LIR: defer, drops, safepoints | 8 | large | `design/lir.md` §3, 5, 6 |
@@ -407,21 +407,74 @@ obligations (a different path from method calls) and a lowering change to keep
 
 ---
 
-## Phase 6 — Monomorphization
+## Phase 6 — Monomorphization ✅ **done**
 
 **Goal.** A concrete program: every generic function instantiated per distinct
 argument set, every instantiation named. This was the old "Phase 2"; phase 5
 moved ahead of it because it changes what has to be substituted.
 
-**Work.** Walk the call graph from the entry points; instantiate through
-`Linked::insert`; key each instantiation by its arguments; assign the symbol per
-`design/lir.md` §7. Two carried to-dos: a generic `#const` function's calls must
-be **re-checked** once concrete (`Dispatch::Generic` defers today, in both
-`check::constness` and the evaluator), and a `const` argument substituted into a
-`#const` body turns a `ConstParam` into a value the evaluator can finally read.
-
 **Done when.** No `Dispatch::Generic` survives; every function has a symbol; the
-deferred const checks run.
+deferred const checks run. All three hold.
+
+### What is built
+
+The pass is `nestc/src/ir/mono.rs`, and it runs after the `ir::check` passes —
+deliberately, so that a mistake inside `func <T>` is reported once, against the
+function as it was written, rather than once per instantiation.
+
+- **Arguments are read, not re-derived.** Inference already works out what each
+  call site instantiates its callee with; it now records that as an
+  `Instantiation` on the call, against a `Generics` list stamped on the callee.
+  The pair is built by one piece of code (`instantiate_parts`), so the order
+  cannot drift. Re-deriving the arguments by unifying signatures would be a
+  second implementation free to disagree, and it is *wrong* wherever the
+  signature does not mention a parameter — `func <T> () -> usize { return
+  $size_of.<T>() }` has no `T` in `func() -> usize`.
+- **`Generics` records the split** between the parameters a declaration lists
+  itself and the ones it inherits from its enclosing `impl`. A method is generic
+  over `impl <T> Vec.<T>`'s `T` without declaring it, and the two halves come
+  from different places when a bound is resolved.
+- **Instantiation is a renumbering.** The body is cloned with fresh `IrId`s and
+  the facts hung off the old ones copied across with their types substituted;
+  ids cannot be shared, because the one fact that differs between two
+  instantiations is the per-node type and that is keyed by id. A **local's
+  `DefId` is not** renumbered: two instantiations share one declaration per
+  local, which is what a local's def is.
+- **`Dispatch::Generic` is resolved** by matching the now-concrete self type
+  against each candidate impl's target, which is a one-way match (holes are the
+  impl's generics) rather than a unification. The targets are resolved out of
+  syntax once, after inference, into `infer::ImplTarget`, because `ty_from_node`
+  belongs to inference and monomorphization has none of that machinery.
+- **A `*dyn Trait` coercion reaches the impls its vtable will hold.** Nothing
+  else in the program names them, so without it the vtable would have holes.
+- **Symbols** follow `design/lir.md` §7, which this phase amended in two places
+  to make the scheme actually injective (an `N` before a nominal path, a sign
+  letter before a numeric `const` value).
+- **Both carried to-dos are done.** `check::constness::check_only` re-runs over
+  exactly the new instantiations, and the const **evaluator** binds a `<const
+  N>` argument from the call's `Instantiation` — which it does without waiting
+  for this pass, because a constant's value is wanted *during* inference and
+  this pass runs long afterwards.
+
+### What it does not do
+
+- **Dead-code elimination.** An unreached concrete function is still emitted and
+  still gets a symbol; dropping it is a decision about the artifact being built,
+  not about types. That is also why the walk's roots are every *concrete*
+  function rather than `main`: since nothing is dropped, everything emitted must
+  still have the callees it names, and a generic declaration does not survive the
+  pass. When dead-code elimination arrives the set narrows by itself.
+- **Cross-compilation-unit generics.** A generic declaration is not a root: which
+  instantiations of it exist is a question about its callers, and for a `@public`
+  generic in a library, about a consumer this compilation cannot see.
+- **Two impls of one trait for one self type differing only in the trait's own
+  arguments** (`impl Add.<f64> for Vec3` beside `impl Add.<i32> for Vec3`).
+  `Dispatch::Generic` records the trait, not the arguments the bound was written
+  with, so there is nothing to match them against.
+- **A computed array length** (`[SIZE * 2]T`). Still rejected, and still not a
+  monomorphization question: the evaluator runs on the IR and a length is needed
+  during inference, before there is any. Lowering one expression on demand, or
+  an AST-level evaluator, is the shape of the fix.
 
 ---
 

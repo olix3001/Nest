@@ -38,6 +38,30 @@ pub fn program_to_string(defs: &DefTable, meta: &Meta, program: &Program) -> Str
     p.out
 }
 
+/// Render the **monomorphized** whole-program view.
+///
+/// Where [`program_to_string`] shows one file as lowering left it, this shows
+/// the program as monomorphization made it: every function concrete, and each
+/// headed by the two names it will be known by (`design/lir.md` §7). The symbol
+/// is what the program is keyed by from here on, so a dump that hid it would be
+/// hiding the thing a reader of this stage is looking for.
+pub fn mono_to_string(defs: &DefTable, meta: &Meta, linked: &super::Linked) -> String {
+    let mut p = Printer {
+        defs,
+        meta,
+        out: String::new(),
+        indent: 0,
+    };
+    for f in linked.funcs() {
+        match meta.get::<super::mono::Instance>(f.id) {
+            Some(i) => p.line(&format!("// {} = {}", i.symbol, i.name)),
+            None => p.line("// <no symbol>"),
+        }
+        p.function(f);
+    }
+    p.out
+}
+
 struct Printer<'a> {
     defs: &'a DefTable,
     meta: &'a Meta,

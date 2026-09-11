@@ -179,6 +179,18 @@ impl Linked {
         self.order.iter().copied()
     }
 
+    /// Drop a function from the whole-program view.
+    ///
+    /// What monomorphization does with a **generic declaration** once its
+    /// instantiations exist: `func <T> (x: T)` describes a family, and a family
+    /// is not something codegen can be handed. The per-file
+    /// [`Program`](super::Program) still has it, which is right — it is the
+    /// record of what lowering produced, and lowering did produce it.
+    pub fn remove(&mut self, def: DefId) {
+        self.funcs.remove(&def);
+        self.order.retain(|&d| d != def);
+    }
+
     /// Insert a function that has no per-file program behind it — what
     /// monomorphization does with each instantiation it creates.
     pub fn insert(&mut self, file: FileId, func: Function) {

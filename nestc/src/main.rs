@@ -108,6 +108,17 @@ fn main() -> ExitCode {
         );
     }
 
+    // The monomorphized whole program: every function concrete, every call with
+    // a callee, every symbol decided. It is empty when analysis reported an
+    // error, because monomorphization does not run on a program that does not
+    // type-check.
+    if !session.linked.is_empty() && !session.has_errors() {
+        print!(
+            "\n===< MONO >===\n{}",
+            ir::pretty::mono_to_string(&session.defs, &session.ir_meta, &session.linked)
+        );
+    }
+
     // Warnings are printed too, and do not fail the build: a lint is evidence
     // that the author probably meant something else, not a claim that the
     // program is wrong.

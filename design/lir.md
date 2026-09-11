@@ -431,25 +431,45 @@ _NC 4core 3Vec I i32 E 4push
 |---|---|---|
 | integer primitive | `i`/`u` + width, `is`/`us` for pointer-sized | `i32`, `u8`, `us` |
 | float primitive | `f` + width | `f64` |
-| `bool` / `char` / `void` | `b` / `c` / `v` | |
+| `bool` / `char` / `void` / `never` | `b` / `c` / `v` / `N` | |
 | `*T` / `*mut T` | `P` / `Pm` + inner | `Pi32` |
 | `[]T` / `[]mut T` | `S` / `Sm` + inner | `Si32` |
 | `[N]T` | `A` + length + inner | `A3i32` |
 | tuple | `T` + elements + `E` | `Ti32bE` |
-| nominal | length-prefixed canonical path, args in `I ... E` | `4core6OptionIi32E` |
-| `dyn Trait` | `D` + the trait's path | `D4core8ToJsonE` |
-| `const` argument | `K` + the value's type + the value | `Kus3`, `Kb1`, `Ki32n5` |
+| `func(...) -> R` | `F` + parameters + `E` + result | `Fi32Eb` |
+| nominal | `N` + length-prefixed canonical path + args in `I ... E` | `N4core6OptionIi32E` |
+| `dyn Trait` | `D` + the trait's path + `E` | `D4core8ToJsonE` |
+| `const` argument | `K` + the value's type + sign + the value | `Kusp3`, `Kb1`, `Ki32n5` |
 
-Two details earn their place:
+Four details earn their place:
 
 - **A `const` argument carries its type.** Const generic parameters are not
   `usize`-only — a parameter may be any primitive — so `K3` would be ambiguous
-  between `3usize` and `3u8`, and those are different instantiations. `n` marks
-  a negative value, because `-` is not safe in every object format.
+  between `3usize` and `3u8`, and those are different instantiations.
+- **Every encoding starts with a letter, and a numeric value carries its sign.**
+  `n` marks a negative value because `-` is not safe in every object format, and
+  `p` marks a non-negative one because *something* has to. Both exist for the
+  same reason as the `N` on a nominal: an integer is a letter followed by digits
+  and a path component *starts* with digits, so `i324core3Foo` would be either
+  `i32` then `core.Foo` or `i324` then something, and `Ku167` would be `u16` at
+  `7` or `u167` at nothing. One letter between them settles both.
+- **A nominal's arguments are written `I ... E` even when there are none.** The
+  list is what tells a reader where the length-prefixed path stops; without it
+  `N4core6OptionN4core6Option` could be one four-component path or two
+  two-component ones.
 - **A primitive mangles as a primitive, even though it is sugar.** `i32` is
   `int.<32>` in the type system, and mangling it that way would make every
   symbol in every program longer to record something no two types disagree
-  about. The sugar *is* the canonical spelling here.
+  about. The sugar *is* the canonical spelling here. `usize` / `isize` get the
+  same treatment for the same reason, even though since §3.1 they are `distinct`
+  declarations in `core` rather than primitives: `us` and `is`, keyed on the
+  `#lang` tag, not `N4core5usizeIE`.
+
+The arguments are split where the declaration's are: those belonging to the
+enclosing `impl` go on the type the impl is for, the function's own on the
+function. That is what makes `core.Vec.<i32>.push` mangle as
+`_NC4core3VecIi32E4push` rather than hanging everything off the end. A path with
+nowhere to put them — a free function — takes them all on the function.
 
 Nothing outside monomorphization may construct a symbol. A pass that needs one
 asks the instantiation it already holds.

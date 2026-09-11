@@ -208,6 +208,16 @@ pub struct Session {
     /// monomorphization, LIR lowering — read; the per-file programs above stay
     /// as the record of what lowering produced for each file on its own.
     pub linked: crate::ir::Linked,
+    /// The whole-program `impl` index, and each impl's target resolved into
+    /// types.
+    ///
+    /// Inference builds and borrows the table, then drops it; monomorphization
+    /// needs the same answers long afterwards — a `Dispatch::Generic` call is a
+    /// bound with no impl chosen, and choosing one is exactly a search over
+    /// this. The two travel together because the second is indexed by the
+    /// first: `impl_targets[i]` is the resolved target of `impls.impls[i]`.
+    pub impls: super::impls::ImplTable,
+    pub impl_targets: Vec<super::infer::ImplTarget>,
     /// Everything this build decided for the compiler — the target, and the
     /// run-time behaviours a profile chooses (§ [`Options`]).
     ///
@@ -288,6 +298,8 @@ impl Session {
             ir: HashMap::new(),
             ir_meta: crate::ir::Meta::new(),
             linked: crate::ir::Linked::default(),
+            impls: super::impls::ImplTable::default(),
+            impl_targets: Vec::new(),
             options: Options::default(),
             builtins,
             prelude_globs: vec![builtins],

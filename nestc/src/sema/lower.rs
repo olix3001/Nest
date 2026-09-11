@@ -47,8 +47,8 @@ use crate::parser::ast::{
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::OpResolution;
 use super::infer::{
-    ArgOrder, Coercion, DistinctRecv, DynCoerce, MethodDispatch, MethodRes, RangeReported,
-    RecvAdjust, SliceCoerce, Upcast,
+    ArgOrder, Coercion, DistinctRecv, DynCoerce, Generics, Instantiation, MethodDispatch,
+    MethodRes, RangeReported, RecvAdjust, SliceCoerce, Upcast,
 };
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
@@ -596,6 +596,14 @@ impl Lowerer<'_> {
         );
         self.meta
             .set_directives(id, self.defs.get(def).directives.clone());
+        // What the function is generic over, carried across from the AST so
+        // monomorphization can ask the question without the AST (see
+        // [`Generics`]). An empty list — the common case — is stamped too: "not
+        // generic" and "never asked" are different answers, and only the first
+        // one lets a later pass emit the function as it stands.
+        if let Some(g) = self.ast.meta::<Generics>(func) {
+            self.meta.set(id, g);
+        }
         Some(Function {
             id,
             def,
@@ -1169,7 +1177,7 @@ impl Lowerer<'_> {
         }
         let callee = Box::new(self.lower_expr(callee));
         let args = self.lower_args(target, slots, node);
-        self.expr(
+        let call = self.expr(
             node,
             ty,
             ExprKind::Call {
@@ -1178,7 +1186,9 @@ impl Lowerer<'_> {
                 builtin: None,
                 dispatch: Dispatch::Static,
             },
-        )
+        );
+        self.carry_instantiation(head, &call);
+        call
     }
 
     /// Build the IR node for an intrinsic call, applying the two foldings that
@@ -1542,8 +1552,9 @@ impl Lowerer<'_> {
                 self_ty: res.self_ty.clone(),
             },
         };
+        let head = callee;
         let callee = self.expr(callee, callee_ty, ExprKind::Global(res.method));
-        self.expr(
+        let call = self.expr(
             node,
             ty,
             ExprKind::Call {
@@ -1552,7 +1563,22 @@ impl Lowerer<'_> {
                 builtin: None,
                 dispatch,
             },
-        )
+        );
+        self.carry_instantiation(head, &call);
+        call
+    }
+
+    /// Carry a call site's generic arguments across from the AST node inference
+    /// stamped them on (see [`Instantiation`]).
+    ///
+    /// They land on the **call**, not on the callee expression, because that is
+    /// the node monomorphization is holding when it asks: it walks calls, and
+    /// each one it finds has to answer "which instantiation of the callee is
+    /// this?" without a second lookup.
+    fn carry_instantiation(&self, head: NodeId, call: &Expr) {
+        if let Some(inst) = self.ast.meta::<Instantiation>(head) {
+            self.meta.set(call.id, inst);
+        }
     }
 
     /// Lower an operator to a uniform call to its resolved method. The callee is

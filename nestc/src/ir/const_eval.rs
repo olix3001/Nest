@@ -608,6 +608,11 @@ impl<'a> ConstEval<'a> {
     }
 
     fn call_const_fn(&mut self, at: IrId, target: DefId, args: Vec<ConstValue>) -> EvalResult {
+        let generic_args = self
+            .meta
+            .get::<crate::sema::infer::Instantiation>(at)
+            .map(|i| i.0)
+            .unwrap_or_default();
         if self.depth >= DEPTH_BUDGET {
             return Err(ConstError::new(
                 at,
@@ -637,6 +642,28 @@ impl<'a> ConstEval<'a> {
         let mut frame = HashMap::new();
         for (param, value) in func.params.iter().zip(args) {
             frame.insert(param.def, value);
+        }
+        // A `<const N: u16>` parameter is a *value* in the body, and this call
+        // site chose it. Binding it here is what lets a generic `#const`
+        // function be evaluated at all: without it, `twice.<4>()` reaches a
+        // `return N + N` whose `N` has no value and the constant is rejected.
+        //
+        // Note this does not wait for monomorphization, and cannot: a constant's
+        // value is needed *during* inference — an array length, a `const`
+        // argument — and monomorphization runs long afterwards. What
+        // monomorphization does with the same fact is substitute it into the
+        // body for good; what this does is read it for one call.
+        let params = self
+            .meta
+            .get::<crate::sema::infer::Generics>(func.id)
+            .map(|g| g.params)
+            .unwrap_or_default();
+        for (p, a) in params.iter().zip(&generic_args) {
+            if let crate::sema::infer::GenericArg::Const(k) = a
+                && let Some(v) = const_arg_value(k)
+            {
+                frame.insert(*p, v);
+            }
         }
         self.frames.push(frame);
         self.depth += 1;
@@ -1476,5 +1503,20 @@ fn int_fits(n: &BigInt, signed: bool, bits: u32) -> bool {
         *n >= -bound.clone() && *n < bound
     } else {
         *n >= BigInt::from(0) && *n < (BigInt::from(1) << bits)
+    }
+}
+
+/// The value a `const` generic argument stands for, where it has one.
+///
+/// A [`Const::Param`] or a [`Const::Var`] does not: those are a parameter and a
+/// hole, not a number. Returning `None` for them is what keeps a nested generic
+/// — one whose argument is the *enclosing* function's parameter — reporting
+/// "not known until the function is instantiated" rather than inventing a value.
+fn const_arg_value(k: &crate::sema::ty::Const) -> Option<ConstValue> {
+    use crate::sema::ty::Const;
+    match k {
+        Const::Width(n) => Some(ConstValue::Int((*n).into())),
+        Const::Value(a) => Some(a.value.clone()),
+        _ => None,
     }
 }

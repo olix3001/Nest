@@ -2766,12 +2766,19 @@ fn linking_merges_every_file_into_one_program() {
 
     // Nothing was lost: the link holds exactly the union of the per-file
     // programs, `core`'s functions included.
+    //
+    // Linking is measured on its own output, not on `session.linked`, because
+    // monomorphization runs afterwards and rewrites that: it emits an
+    // instantiation per generic function reached and drops the generic
+    // declarations, which is the whole point of it. What this test is about is
+    // the merge.
+    let merged = crate::ir::link(&session.ir);
     let per_file: usize = session.ir.values().map(|p| p.funcs.len()).sum();
-    assert_eq!(session.linked.len(), per_file);
+    assert_eq!(merged.len(), per_file);
     assert!(
-        session.linked.len() > 2,
+        merged.len() > 2,
         "core's functions should be linked in too, got {}",
-        session.linked.len()
+        merged.len()
     );
 }
 
@@ -6283,5 +6290,506 @@ fn operators_on_a_pointer_sized_type_yield_that_type() {
     assert_eq!(
         first_error("f :: func (x: usize, y: usize) -> u64 { return x + y }\n"),
         "type mismatch: expected `u64`, found `usize`"
+    );
+}
+
+// ===< Monomorphization (phase 6) >===
+
+/// Every function in the monomorphized program, by the name its
+/// [`Instance`](crate::ir::mono::Instance) carries.
+fn instances(session: &Session) -> Vec<String> {
+    let mut out: Vec<String> = session
+        .linked
+        .funcs()
+        .filter_map(|f| session.ir_meta.get::<crate::ir::mono::Instance>(f.id))
+        .map(|i| i.name)
+        .collect();
+    out.sort();
+    out
+}
+
+/// The symbol of the one instance named `name`.
+fn symbol_of(session: &Session, name: &str) -> String {
+    session
+        .linked
+        .funcs()
+        .filter_map(|f| session.ir_meta.get::<crate::ir::mono::Instance>(f.id))
+        .find(|i| i.name == name)
+        .unwrap_or_else(|| panic!("no instance named `{name}` in {:?}", instances(session)))
+        .symbol
+        .to_string()
+}
+
+/// The monomorphized function whose instance is named `name`.
+fn instance_body<'a>(session: &'a Session, name: &str) -> &'a crate::ir::Block {
+    let def = session
+        .linked
+        .funcs()
+        .find(|f| {
+            session
+                .ir_meta
+                .get::<crate::ir::mono::Instance>(f.id)
+                .is_some_and(|i| i.name == name)
+        })
+        .unwrap_or_else(|| panic!("no instance named `{name}` in {:?}", instances(session)))
+        .def;
+    body_of(session.linked.get(def).expect("a linked function"))
+}
+
+/// Run `f` over every expression in the monomorphized program.
+fn each_mono_expr(session: &Session, mut f: impl FnMut(&crate::ir::Expr)) {
+    struct V<'a>(&'a mut dyn FnMut(&crate::ir::Expr));
+    impl crate::ir::Visitor for V<'_> {
+        fn visit_expr(&mut self, e: &crate::ir::Expr) {
+            (self.0)(e);
+            crate::ir::walk_expr(self, e);
+        }
+    }
+    let mut v = V(&mut f);
+    for func in session.linked.funcs() {
+        crate::ir::Visitor::visit_function(&mut v, func);
+    }
+}
+
+/// The whole point: one declaration, one function per argument set, and the
+/// declaration itself gone — a family is not something codegen can be handed.
+#[test]
+fn a_generic_function_becomes_one_function_per_argument_set() {
+    let session = analyze_clean(
+        "id :: func <T> (x: T) -> T { return x }\n\
+         @public main :: func () {\n\
+         \x20 const a := id.<i32>(1)\n\
+         \x20 const b := id.<bool>(true)\n\
+         \x20 const c := id.<u8>(3)\n\
+         }\n",
+    );
+    let names = instances(&session);
+    assert!(names.contains(&"id.<i32>".to_string()), "{names:?}");
+    assert!(names.contains(&"id.<bool>".to_string()), "{names:?}");
+    assert!(names.contains(&"id.<u8>".to_string()), "{names:?}");
+    // The generic declaration does not survive: it describes a family, and
+    // there is nothing to emit for a family.
+    assert!(!names.contains(&"id".to_string()), "{names:?}");
+    assert_eq!(
+        session
+            .linked
+            .funcs()
+            .filter(|f| f.name.as_str() == "id")
+            .count(),
+        3
+    );
+}
+
+/// An instantiation is keyed by its **arguments**, not by the call that asked
+/// for it: two calls at the same type are one function.
+#[test]
+fn an_instantiation_is_shared_by_every_call_site_that_asks_for_it() {
+    let session = analyze_clean(
+        "id :: func <T> (x: T) -> T { return x }\n\
+         @public main :: func () {\n\
+         \x20 const a := id.<i32>(1)\n\
+         \x20 const b := id.<i32>(2)\n\
+         \x20 const c := id.<i32>(3)\n\
+         }\n",
+    );
+    assert_eq!(
+        session
+            .linked
+            .funcs()
+            .filter(|f| f.name.as_str() == "id")
+            .count(),
+        1
+    );
+    // And every call names that one function.
+    let mut callees = Vec::new();
+    each_mono_expr(&session, |e| {
+        if let crate::ir::ExprKind::Call { callee, .. } = &e.kind {
+            if let crate::ir::ExprKind::Global(d) = callee.kind {
+                if session.defs.get(d).name.as_str() == "id" {
+                    callees.push(d);
+                }
+            }
+        }
+    });
+    assert_eq!(callees.len(), 3);
+    assert!(callees.windows(2).all(|w| w[0] == w[1]), "{callees:?}");
+}
+
+/// A call on a bound has no callee until the bound has an impl. After this pass
+/// it has one, and **no `Dispatch::Generic` survives** — that is the phase's own
+/// statement of being done.
+#[test]
+fn a_call_through_a_bound_becomes_a_direct_call() {
+    let session = analyze_clean(
+        "Summing :: trait { total :: func (self: *Self) -> i32 }\n\
+         Counter :: struct { n: i32 }\n\
+         impl Summing for Counter { total :: func (self: *Counter) -> i32 { return self.n } }\n\
+         Twice :: struct { n: i32 }\n\
+         impl Summing for Twice { total :: func (self: *Twice) -> i32 { return self.n } }\n\
+         sum :: func <S: Summing> (s: *S) -> i32 { return s.total() }\n\
+         @public main :: func () {\n\
+         \x20 const c := Counter { n: 1 }\n\
+         \x20 const t := Twice { n: 2 }\n\
+         \x20 const a := sum(&c)\n\
+         \x20 const b := sum(&t)\n\
+         }\n",
+    );
+    let mut generic = 0;
+    each_mono_expr(&session, |e| {
+        if let crate::ir::ExprKind::Call { dispatch, .. } = &e.kind {
+            if matches!(dispatch, crate::ir::Dispatch::Generic { .. }) {
+                generic += 1;
+            }
+        }
+    });
+    assert_eq!(generic, 0, "a generic dispatch survived monomorphization");
+
+    // Each instantiation calls the impl that its own self type selected.
+    for (inst, want) in [("sum.<Counter>", "Counter"), ("sum.<Twice>", "Twice")] {
+        let body = instance_body(&session, inst);
+        let tail = match &body.stmts[0].kind {
+            crate::ir::StmtKind::Return(Some(e)) => e,
+            other => panic!("expected a `return`, got {other:?}"),
+        };
+        let crate::ir::ExprKind::Call { callee, .. } = &tail.kind else {
+            panic!("expected a call");
+        };
+        let crate::ir::ExprKind::Global(d) = callee.kind else {
+            panic!("expected a global callee");
+        };
+        let owner = session.defs.get(d).parent.expect("a method has a parent");
+        assert_eq!(session.defs.get(owner).name.as_str(), want);
+    }
+}
+
+/// A method is generic over its enclosing `impl`'s parameters without declaring
+/// any of its own, and those are part of its instantiation — which is what makes
+/// `Box.<i32>.get` and `Box.<bool>.get` two functions.
+#[test]
+fn a_methods_impl_generics_are_part_of_its_instantiation() {
+    let session = analyze_clean(
+        "Box :: struct <T> { v: T }\n\
+         impl <T> Box.<T> { @public get :: func (self: *Box.<T>) -> T { return self.v } }\n\
+         @public main :: func () {\n\
+         \x20 const a := Box.<i32> { v: 1 }\n\
+         \x20 const b := Box.<bool> { v: true }\n\
+         \x20 const x := a.get()\n\
+         \x20 const y := b.get()\n\
+         }\n",
+    );
+    let names = instances(&session);
+    assert!(names.contains(&"Box.<i32>.get".to_string()), "{names:?}");
+    assert!(names.contains(&"Box.<bool>.get".to_string()), "{names:?}");
+    // The impl's arguments sit on the type the impl is for, exactly as
+    // `design/lir.md` §7 writes them.
+    assert_eq!(symbol_of(&session, "Box.<i32>.get"), "_NC3BoxIi32E3get");
+    assert_eq!(symbol_of(&session, "Box.<bool>.get"), "_NC3BoxIbE3get");
+}
+
+/// A generic impl is matched, not just looked up: `impl <T> Show for Wrap.<T>`
+/// applies to `Wrap.<i32>` with `T` bound by the match, and that binding is what
+/// the instantiation is keyed on.
+#[test]
+fn a_generic_impl_is_matched_against_the_concrete_self_type() {
+    let session = analyze_clean(
+        "Show :: trait { tag :: func (self: *Self) -> i32 }\n\
+         Wrap :: struct <T> { v: T }\n\
+         impl <T> Show for Wrap.<T> { tag :: func (self: *Wrap.<T>) -> i32 { return 1 } }\n\
+         use_it :: func <S: Show> (s: *S) -> i32 { return s.tag() }\n\
+         @public main :: func () {\n\
+         \x20 const a := Wrap.<i32> { v: 1 }\n\
+         \x20 const b := Wrap.<bool> { v: true }\n\
+         \x20 const p := use_it(&a)\n\
+         \x20 const q := use_it(&b)\n\
+         }\n",
+    );
+    let names = instances(&session);
+    assert!(names.contains(&"Wrap.<i32>.tag".to_string()), "{names:?}");
+    assert!(names.contains(&"Wrap.<bool>.tag".to_string()), "{names:?}");
+}
+
+/// A `const` generic parameter has no storage: it *is* the value the
+/// instantiation chose, and this is where it becomes one.
+#[test]
+fn a_const_generic_parameter_becomes_the_value_it_was_instantiated_with() {
+    let session = analyze_clean(
+        "repeat :: func <const N: u16> () -> u16 { return N }\n\
+         @public main :: func () {\n\
+         \x20 const a := repeat.<7>()\n\
+         \x20 const b := repeat.<9>()\n\
+         }\n",
+    );
+    assert_eq!(symbol_of(&session, "repeat.<7>"), "_NC6repeatIKu16p7E");
+    assert_eq!(symbol_of(&session, "repeat.<9>"), "_NC6repeatIKu16p9E");
+    // No `ConstParam` survives: it would name a parameter that no longer exists.
+    let mut params = 0;
+    each_mono_expr(&session, |e| {
+        if matches!(e.kind, crate::ir::ExprKind::ConstParam(_)) {
+            params += 1;
+        }
+    });
+    assert_eq!(params, 0);
+    let body = instance_body(&session, "repeat.<7>");
+    let crate::ir::StmtKind::Return(Some(e)) = &body.stmts[0].kind else {
+        panic!("expected a `return`");
+    };
+    assert!(
+        matches!(&e.kind, crate::ir::ExprKind::Lit(crate::parser::ast::Lit::Int(n)) if *n == 7.into()),
+        "{:?}",
+        e.kind
+    );
+}
+
+/// A generic function that calls itself at its own parameter must instantiate
+/// once, not forever. The instance is already queued when its body is walked,
+/// which is what stops the walk.
+#[test]
+fn a_recursive_generic_instantiates_once() {
+    let session = analyze_clean(
+        "chain :: func <T> (x: T, n: i32) -> T {\n\
+         \x20 if n <= 0 { return x }\n\
+         \x20 return chain.<T>(x, n - 1)\n\
+         }\n\
+         @public main :: func () { const r := chain.<u8>(1, 3) }\n",
+    );
+    assert_eq!(
+        session
+            .linked
+            .funcs()
+            .filter(|f| f.name.as_str() == "chain")
+            .count(),
+        1
+    );
+}
+
+/// A `*T` unsized to `*dyn Trait` is a call-graph edge with no call in it: the
+/// vtable holds that impl's methods and something will jump through one. Nothing
+/// else in the program names them.
+#[test]
+fn a_dyn_coercion_reaches_the_impls_its_vtable_will_hold() {
+    let session = analyze_clean(
+        "Describe :: trait { weight :: func (self: *Self) -> i32 }\n\
+         Rock :: struct { w: i32 }\n\
+         impl Describe for Rock { weight :: func (self: *Rock) -> i32 { return self.w } }\n\
+         @public main :: func () {\n\
+         \x20 const r := Rock { w: 1 }\n\
+         \x20 const d: *dyn Describe := &r\n\
+         }\n",
+    );
+    let names = instances(&session);
+    assert!(names.contains(&"Rock.weight".to_string()), "{names:?}");
+}
+
+/// Every function carries the name it will have in the binary — reached or not.
+/// Dropping what nothing calls is a decision about the artifact, not about
+/// types, so it is not this pass's to make.
+#[test]
+fn every_function_has_a_symbol() {
+    let session = analyze_clean(
+        "unused :: func () -> i32 { return 1 }\n\
+         @public main :: func () { const a := 1 }\n",
+    );
+    for f in session.linked.funcs() {
+        let i = session
+            .ir_meta
+            .get::<crate::ir::mono::Instance>(f.id)
+            .unwrap_or_else(|| panic!("`{}` has no symbol", f.name));
+        assert!(!i.symbol.as_str().is_empty());
+        // A concrete function is its own only instance, and says so uniformly
+        // so that a consumer can read this on every function without asking
+        // first whether there is one.
+        assert_eq!(i.origin, f.def);
+        assert!(i.args.is_empty());
+    }
+    assert!(instances(&session).contains(&"unused".to_string()));
+}
+
+/// Two instantiations a linker could confuse must encode differently. That is
+/// the *whole* requirement on a mangled name, so it gets its own test.
+#[test]
+fn a_mangled_name_is_injective() {
+    let session = analyze_clean(
+        "Wrap :: struct <T> { v: T }\n\
+         id :: func <T> (x: T) -> T { return x }\n\
+         @public main :: func () {\n\
+         \x20 const a := id.<i32>(1)\n\
+         \x20 const b := id.<u8>(1)\n\
+         \x20 const c := id.<bool>(true)\n\
+         \x20 const d := id.<Wrap.<i32>>(Wrap.<i32> { v: 1 })\n\
+         \x20 const e := id.<Wrap.<u8>>(Wrap.<u8> { v: 1 })\n\
+         \x20 const f := id.<*i32>(&a)\n\
+         }\n",
+    );
+    let mut symbols: Vec<String> = session
+        .linked
+        .funcs()
+        .filter_map(|f| session.ir_meta.get::<crate::ir::mono::Instance>(f.id))
+        .map(|i| i.symbol.to_string())
+        .collect();
+    let total = symbols.len();
+    symbols.sort();
+    symbols.dedup();
+    assert_eq!(symbols.len(), total, "two functions share a symbol");
+    // `Wrap.<i32>` and `Wrap.<u8>` differ in the argument a path alone would
+    // hide, which is the case the `N` marker and the always-present `I ... E`
+    // exist for.
+    assert!(
+        symbols.contains(&"_NC2idIN4WrapIi32EE".to_string()),
+        "{symbols:?}"
+    );
+}
+
+/// An `extern("c")` function's symbol is its bare name: that is what C expects,
+/// and a mangled version of a name chosen for a C library to find is of no use
+/// to anyone.
+#[test]
+fn an_extern_function_keeps_its_bare_name() {
+    let session = analyze_clean(
+        "puts :: extern(\"c\") func (s: *u8) -> i32\n\
+         @public main :: func () { const a := 1 }\n",
+    );
+    assert_eq!(symbol_of(&session, "puts"), "puts");
+}
+
+/// The `#const` check defers every call in a generic body — which function it
+/// reaches is a question about the instantiation, and there were none. Once
+/// there are, the calls it skipped are ordinary static ones and get judged.
+#[test]
+fn the_deferred_const_check_runs_once_the_callee_is_concrete() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "Tr :: trait { m :: func (self: *Self) -> i32 }\n\
+             Foo :: struct { n: i32 }\n\
+             impl Tr for Foo { m :: func (self: *Foo) -> i32 { return runtime() } }\n\
+             runtime :: func () -> i32 { return 1 }\n\
+             #const\n\
+             use_it :: func <T: Tr> (t: *T) -> i32 { return t.m() }\n\
+             @public main :: func () {\n\
+             \x20 const f := Foo { n: 1 }\n\
+             \x20 const a := use_it(&f)\n\
+             }\n",
+        )],
+        "main",
+    );
+    let msgs: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("is `#const`, but calls")),
+        "expected the deferred check to fire, got {msgs:?}"
+    );
+}
+
+/// A `<const N>` parameter is a *value* in the body, and the call site chose it.
+/// Binding it is what makes a generic `#const` function evaluable at all — and
+/// it happens in the evaluator rather than waiting for monomorphization, because
+/// a constant's value is needed *during* inference and monomorphization runs
+/// long afterwards.
+#[test]
+fn a_const_generic_argument_is_a_value_the_evaluator_can_read() {
+    let session = analyze_clean(
+        "#const\n\
+         twice :: func <const N: u16> () -> u16 { return N + N }\n\
+         A: u16 :: twice.<4>()\n\
+         @public main :: func () { const a := A }\n",
+    );
+    let ir = crate::ir::pretty::program_to_string(
+        &session.defs,
+        &session.ir_meta,
+        &session.ir[&entry_file(&session)],
+    );
+    assert!(ir.contains("// = 8"), "{ir}");
+}
+
+/// The same for a type argument, which already worked: the test is here so the
+/// two halves of §5's one positional list are held to the same promise.
+#[test]
+fn a_generic_const_function_evaluates_at_a_type_argument_too() {
+    let session = analyze_clean(
+        "#const\n\
+         pick :: func <T> (x: T) -> T { return x }\n\
+         B: i32 :: pick.<i32>(5)\n\
+         @public main :: func () { const b := B }\n",
+    );
+    let ir = crate::ir::pretty::program_to_string(
+        &session.defs,
+        &session.ir_meta,
+        &session.ir[&entry_file(&session)],
+    );
+    assert!(ir.contains("// = 5"), "{ir}");
+}
+
+/// An operator call carries no [`Instantiation`]: `a + b` picks its impl through
+/// trait selection rather than the generic-instantiation path, so nothing along
+/// the way had an argument list to record. The arguments are recovered from the
+/// callee's reconstructed signature instead — the narrow case where the
+/// derivation this pass otherwise avoids is sound.
+#[test]
+fn an_operator_on_a_generic_impl_instantiates_per_argument() {
+    let session = analyze_clean(
+        "{ Add } :: import <core/ops>\n\
+         Vec2 :: struct <T> { x: T, y: T }\n\
+         impl <T> Add.<Vec2.<T>> for Vec2.<T> {\n\
+         \x20 Output :: Vec2.<T>\n\
+         \x20 add :: func (self: Vec2.<T>, rhs: Vec2.<T>) -> Vec2.<T> {\n\
+         \x20   return Vec2.<T> { x: self.x, y: rhs.y }\n\
+         \x20 }\n\
+         }\n\
+         @public main :: func () {\n\
+         \x20 const a := Vec2.<i32> { x: 1, y: 2 }\n\
+         \x20 const c := a + a\n\
+         \x20 const d := Vec2.<u8> { x: 1, y: 2 }\n\
+         \x20 const e := d + d\n\
+         }\n",
+    );
+    let names = instances(&session);
+    assert!(names.contains(&"Vec2.<i32>.add".to_string()), "{names:?}");
+    assert!(names.contains(&"Vec2.<u8>.add".to_string()), "{names:?}");
+}
+
+/// The invariant that keeps not-eliminating-dead-code honest: a generic
+/// declaration does not survive this pass, so **every** function that is emitted
+/// must have been walked, or it would be left naming a callee that no longer
+/// exists. `f` below is never called by anything.
+#[test]
+fn every_call_names_a_function_the_program_still_has() {
+    let session = analyze_clean(
+        "@public\n\
+         f :: func (s: str, xs: []i32, ys: []u8) -> usize {\n\
+         \x20 return s.len() + xs.len() + ys.len()\n\
+         }\n\
+         @public main :: func () { const a := 1 }\n",
+    );
+    let mut dangling = Vec::new();
+    each_mono_expr(&session, |e| {
+        let crate::ir::ExprKind::Call {
+            callee, builtin, ..
+        } = &e.kind
+        else {
+            return;
+        };
+        if builtin.is_some() {
+            return;
+        }
+        if let crate::ir::ExprKind::Global(d) = callee.kind {
+            if !session.linked.contains(d) {
+                dangling.push(session.defs.canonical_string(d));
+            }
+        }
+    });
+    assert!(dangling.is_empty(), "calls with no callee: {dangling:?}");
+
+    // And the generic `len` really was instantiated, once per element type.
+    let names = instances(&session);
+    assert!(
+        names.contains(&"core.<impl []T>.<u8>.len".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"core.<impl []T>.<i32>.len".to_string()),
+        "{names:?}"
     );
 }

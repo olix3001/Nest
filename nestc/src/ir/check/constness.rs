@@ -52,9 +52,29 @@ use crate::ir::{Block, DefaultValue, Dispatch, Expr, ExprKind, Function, IrId, L
 
 /// Report every construct that may not run at compile time where one must.
 pub fn check(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagnostic>) {
+    let every: Vec<DefId> = linked.defs().collect();
+    check_only(defs, meta, linked, &every, out);
+}
+
+/// [`check`], restricted to the functions `only` names.
+///
+/// Monomorphization is the caller: a call in a generic `#const` body is
+/// **deferred** above rather than judged, because which function it reaches is
+/// not known until the callee is concrete, and rejecting it there would rule out
+/// every generic `#const` function while accepting it silently would be a claim.
+/// Once the instantiations exist those calls are ordinary static ones, and this
+/// is what runs over them — over *only* them, because re-checking the whole
+/// program would say everything else a second time.
+pub fn check_only(
+    defs: &DefTable,
+    meta: &Meta,
+    linked: &Linked,
+    only: &[DefId],
+    out: &mut Vec<Diagnostic>,
+) {
     let cx = Cx { defs, meta, linked };
 
-    for func in linked.funcs() {
+    for func in only.iter().filter_map(|&d| linked.get(d)) {
         let Some(body) = &func.body else { continue };
         if meta.has_directive(func.id, "const") {
             cx.check_body(func, body, out);
@@ -65,7 +85,7 @@ pub fn check(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagno
     // whether the function is called never, once or a hundred times — the
     // mistake is in the declaration, and reporting it per call site would turn
     // one wrong default into a wall of identical diagnostics.
-    for func in linked.funcs() {
+    for func in only.iter().filter_map(|&d| linked.get(d)) {
         for param in &func.params {
             if let Some(DefaultValue(e)) = meta.get::<DefaultValue>(param.id) {
                 cx.check_const_expr(&e, out);
