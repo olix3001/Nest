@@ -1208,6 +1208,35 @@ impl InferCtxt {
     }
 }
 
+/// Whether every value of one integer type is a value of another — the rule for
+/// **implicit widening** (§3.1).
+///
+/// A narrower integer may stand where a wider one is wanted, because no value is
+/// lost doing it; the reverse may not, because most values would be. That is the
+/// whole rule, and it is stated as a range containment rather than as "more
+/// bits" so that the signed/unsigned cases fall out of it instead of being
+/// special-cased:
+///
+///   - **Same signedness**, more bits: always. `u8` into `u32`, `i8` into `i64`.
+///   - **Unsigned into signed** needs one extra bit for the sign, so it must be
+///     *strictly* wider: `u8` into `i16` yes, `u8` into `i8` no — `255` has
+///     nowhere to go in an `i8`.
+///   - **Signed into unsigned**: never, at any width. A negative value has no
+///     representation at all, and widening must not be the thing that decides
+///     what `-1 as u32` means.
+///
+/// Note this is about *types*, not values: a `comptime_int` literal reaching a
+/// runtime type is a different rule (§1.5) and is checked against the literal's
+/// actual value by [`int_fits`], which is strictly more permissive.
+pub fn int_widens(from: (bool, u32), to: (bool, u32)) -> bool {
+    let ((from_signed, from_bits), (to_signed, to_bits)) = (from, to);
+    match (from_signed, to_signed) {
+        (false, false) | (true, true) => to_bits >= from_bits,
+        (false, true) => to_bits > from_bits,
+        (true, false) => false,
+    }
+}
+
 /// Whether `value` is representable in an integer type of this width and
 /// signedness — the "coerces to any integer type **it fits**" rule for a
 /// `comptime_int`.

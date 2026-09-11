@@ -3241,6 +3241,22 @@ impl Inferer<'_> {
         self.const_value_in(self.file, arg, &declared, "a `const` argument", 0)
     }
 
+    /// Whether a `const` parameter declared at `declared` may fill a slot that
+    /// wants `want` — the type-level face of implicit widening.
+    ///
+    /// A `const` parameter has no value here (that is the point of it), so this
+    /// is decided entirely on the two types, exactly as it would be for a value
+    /// of the declared type reaching the same slot.
+    fn const_ty_widens(&mut self, declared: &Ty, want: &Ty) -> bool {
+        if is_ptr_sized(declared) || is_ptr_sized(want) {
+            return false;
+        }
+        match (declared.int_parts(self.target), want.int_parts(self.target)) {
+            (Some(from), Some(to)) => super::ty::int_widens(from, to),
+            _ => false,
+        }
+    }
+
     /// The declared type of a `<const N: T>` parameter — what `N` is worth as a
     /// value in the body, and what an explicit argument must satisfy.
     /// Check one `<const N: T>` declaration.
@@ -4880,14 +4896,19 @@ impl Inferer<'_> {
             DefKind::ConstParam => {
                 // A `const` parameter stays symbolic until monomorphization, so
                 // the one thing checkable here is its *type*, and it has to be
-                // the slot's. An array length is a `usize` (§3.2), so
-                // `func <const N: u32> () -> [N]i32` is a mistake — and one
+                // one the slot accepts. An array length is a `usize` (§3.2), so
+                // `func <const N: i32> () -> [N]i32` is a mistake — and one
                 // worth catching at the declaration, because the alternative is
                 // a `[4]i32` that does not equal `[4]i32` at the call site.
+                //
+                // "Accepts" is widening, not equality: a `<const N: u16>` is a
+                // perfectly good `u32` argument for the same reason a `u16`
+                // *value* is (§3.1). The narrowing direction stays an error.
                 let declared = self.const_param_ty(def);
                 if !matches!(declared, Ty::Error)
                     && !matches!(want, Ty::Error)
                     && declared != *want
+                    && !self.const_ty_widens(&declared, want)
                 {
                     let msg = format!(
                         "`{}` is a `const {}`, but {what} must be a `{}`",
@@ -5027,7 +5048,8 @@ impl Inferer<'_> {
         let snapshot = self.cx.snapshot();
         if let Err((a, b)) = self.cx.unify(actual, expected) {
             self.cx.rollback(snapshot);
-            if self.try_array_to_slice(node, actual, expected)
+            if self.try_int_widen(node, actual, expected)
+                || self.try_array_to_slice(node, actual, expected)
                 || self.try_dyn_coerce(node, actual, expected)
                 || self.try_upcast(node, actual, expected)
             {
@@ -5044,6 +5066,44 @@ impl Inferer<'_> {
             );
             self.report(node, msg);
         }
+    }
+
+    /// Try to reach `expected` from `actual` by **widening** an integer: a
+    /// narrower type may stand where a wider one is wanted (§3.1).
+    ///
+    /// `f(x)` with `x: u16` and `f :: func (n: u32)` is the case this exists
+    /// for, and a `<const N: u16>` read in a `u32` slot is the same thing one
+    /// level up. The direction is the whole point — a `u32` reaching a `u16`
+    /// stays an error, because that one loses values and the program should say
+    /// which ones it meant to lose.
+    ///
+    /// The **pointer-sized** types take no part, in either direction. Their
+    /// width is the target's, so `u64` into `usize` would be legal on a 64-bit
+    /// machine and not on a 32-bit one — a coercion that silently appears and
+    /// disappears with the target is worse than one that never happens, and
+    /// `usize` is a distinct type precisely so that crossing into it is written
+    /// down. `cast` is still one word away.
+    ///
+    /// A widening is exact, so it lowers to the same implicit `$cast` a
+    /// `comptime_int` conversion does — [`Coercion`], not a new node kind.
+    fn try_int_widen(&mut self, node: NodeId, actual: &Ty, expected: &Ty) -> bool {
+        let got = self.cx.shallow(actual);
+        let want = self.cx.shallow(expected);
+        if is_ptr_sized(&got) || is_ptr_sized(&want) {
+            return false;
+        }
+        let (Some(from), Some(to)) = (got.int_parts(self.target), want.int_parts(self.target))
+        else {
+            return false;
+        };
+        if !super::ty::int_widens(from, to) {
+            return false;
+        }
+        if self.cx.unify(&want, expected).is_err() {
+            return false;
+        }
+        self.ast.set_meta(node, Coercion { to: want });
+        true
     }
 
     /// Try to reach `expected` from `actual` by unsizing a fixed array to a
@@ -5321,4 +5381,17 @@ fn subst_const(c: &Const, map: &Subst) -> Const {
         Const::Param(d) => map.consts.get(d).cloned().unwrap_or_else(|| c.clone()),
         other => other.clone(),
     }
+}
+
+
+/// Whether `ty` is `usize` / `isize` — an integer whose width is the target's
+/// rather than one the program wrote.
+fn is_ptr_sized(ty: &Ty) -> bool {
+    matches!(
+        ty,
+        Ty::Int {
+            width: Const::PtrBits,
+            ..
+        }
+    )
 }

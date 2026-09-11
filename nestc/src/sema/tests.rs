@@ -5645,8 +5645,12 @@ main :: func () {}
 fn a_constant_is_comptime_unless_its_type_is_written() {
     assert!(ir_text("A :: 42\nmain :: func () {}\n").contains("const A: comptime_int"));
     assert!(ir_text("A: u8 :: 42\nmain :: func () {}\n").contains("const A: u8"));
-    // Pinned means pinned: a `u8` constant is not silently an `i32`.
-    let msgs = messages("A: u8 :: 5\nmain :: func () { const x: i32 := A }\n");
+    // Pinned means pinned. `i8` rather than `i32` is the test: a `u8` *widens*
+    // into an `i32` like any other `u8` value (§3.1), so that would prove
+    // nothing — while `5` as a bare `comptime_int` would reach an `i8` happily,
+    // and this one does not, because it is a `u8` and `u8` does not widen into
+    // `i8`.
+    let msgs = messages("A: u8 :: 5\nmain :: func () { const x: i8 := A }\n");
     assert!(
         msgs.iter().any(|m| m.contains("type mismatch")),
         "{msgs:#?}"
@@ -5664,9 +5668,11 @@ fn a_constants_type_goes_before_the_binder() {
 
     // A pinned constant is range-checked with the literal's exact value in hand.
     assert!(first_error("VALUE: u8 :: 300\n").contains("does not fit in `u8`"));
-    // ...and it is pinned: a `u8` constant is not silently an `i32`.
+    // ...and it is pinned: a `u8` constant does not reach an `i8`, though the
+    // literal `5` would. (It *does* reach an `i32`, by widening — see
+    // `a_narrower_integer_widens_into_a_wider_one`.)
     assert!(
-        messages("A: u8 :: 5\nmain :: func () { const x: i32 := A }\n")
+        messages("A: u8 :: 5\nmain :: func () { const x: i8 := A }\n")
             .iter()
             .any(|m| m.contains("type mismatch"))
     );
@@ -6075,4 +6081,78 @@ fn a_family_method_does_not_mix_widths_or_signedness() {
     ] {
         assert_eq!(first_error(src), msg, "{src}");
     }
+}
+
+/// §3.1: a narrower integer may stand where a wider one is wanted, because no
+/// value is lost doing it. The other direction stays an error.
+#[test]
+fn a_narrower_integer_widens_into_a_wider_one() {
+    analyze_clean(
+        // Same signedness, more bits.
+        "a :: func (x: u16) -> u32 { return x }\n\
+         b :: func (x: i8)  -> i64 { return x }\n\
+         // Unsigned into signed, strictly wider: `255` has room in an `i16`.\n\
+         c :: func (x: u8)  -> i16 { return x }\n\
+         // Through a call, not just a return.\n\
+         take :: func (n: u32) -> u32 { return n }\n\
+         d :: func (x: u16) -> u32 { return take(x) }\n",
+    );
+    for (src, msg) in [
+        // Narrowing loses values, so it stays written down.
+        (
+            "f :: func (x: u32) -> u16 { return x }\n",
+            "type mismatch: expected `u16`, found `u32`",
+        ),
+        // Signed into unsigned is never a widening, at any width: a negative
+        // value has no representation to widen into.
+        (
+            "f :: func (x: i16) -> u32 { return x }\n",
+            "type mismatch: expected `u32`, found `i16`",
+        ),
+        // Unsigned into signed needs the extra bit, so equal widths do not do.
+        (
+            "f :: func (x: u8) -> i8 { return x }\n",
+            "type mismatch: expected `i8`, found `u8`",
+        ),
+    ] {
+        assert_eq!(first_error(src), msg, "{src}");
+    }
+
+    // A widening is exact, so it lowers to the implicit `$cast` a `comptime_int`
+    // conversion uses — not to a new node kind, and not to nothing.
+    let ir = ir_text("f :: func (x: u16) -> u32 { return x }\nmain :: func () {}\n");
+    assert!(ir.contains("$cast(x: u16): u32"), "{ir}");
+}
+
+/// The pointer-sized types take no part in widening, in either direction.
+///
+/// Their width is the target's, so `u64` into `usize` would be legal on a 64-bit
+/// machine and not on a 32-bit one. A coercion that appears and disappears with
+/// the target is worse than one that never happens.
+#[test]
+fn a_pointer_sized_integer_neither_widens_nor_is_widened_into() {
+    for src in [
+        "f :: func (x: u32) -> usize { return x }\n",
+        "f :: func (x: u8) -> usize { return x }\n",
+        "f :: func (x: usize) -> u64 { return x }\n",
+        "f :: func (x: isize) -> i64 { return x }\n",
+    ] {
+        assert!(
+            first_error(src).contains("type mismatch"),
+            "{src} -> {}",
+            first_error(src)
+        );
+    }
+}
+
+/// A `const` generic parameter fills a slot on the same rule a value does: a
+/// `<const N: u16>` is a good `u32` argument, and a `<const N: u32>` is not a
+/// good `u16` one.
+#[test]
+fn a_const_parameter_widens_into_a_wider_slot() {
+    analyze_clean("f :: func <const N: u16> () -> u32 { return N }\n");
+    assert_eq!(
+        first_error("f :: func <const N: u32> () -> u16 { return N }\n"),
+        "type mismatch: expected `u16`, found `u32`"
+    );
 }
