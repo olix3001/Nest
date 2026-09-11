@@ -28,7 +28,6 @@
 //! initialized region — without any of them re-running the interpreter.
 
 use crate::common::diagnostic::Diagnostic;
-use crate::common::options::Target;
 use crate::sema::def::DefTable;
 use crate::sema::infer::RangeReported;
 use crate::sema::ty::Ty;
@@ -42,10 +41,9 @@ pub fn check(
     defs: &DefTable,
     meta: &Meta,
     linked: &Linked,
-    target: Target,
     out: &mut Vec<Diagnostic>,
 ) {
-    let mut cx = ConstEval::new(defs, meta, linked, target);
+    let mut cx = ConstEval::new(defs, meta, linked);
     for global in linked.globals() {
         // A `#static` with no `:=` is zeroed; there is no expression to run.
         let Some(init) = &global.init else { continue };

@@ -61,7 +61,6 @@ use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::symbol::Symbol;
-use crate::common::options::Target;
 use crate::parser::ast::{BinOp, Lit, UnOp};
 use crate::sema::builtins::BuiltinOp;
 use crate::sema::def::{DefId, DefKind, DefTable};
@@ -223,9 +222,6 @@ pub struct ConstEval<'a> {
     in_progress: Vec<DefId>,
     steps: u32,
     depth: u32,
-    /// The machine being compiled for, which fixes the width of `isize` /
-    /// `usize` and so decides whether a constant of one of those types fits.
-    target: Target,
     /// A `return` / `break` / `continue` that is unwinding.
     ///
     /// `if`, `match` and a bare block are **expressions** in Nest, so control
@@ -238,7 +234,7 @@ pub struct ConstEval<'a> {
 }
 
 impl<'a> ConstEval<'a> {
-    pub fn new(defs: &'a DefTable, meta: &'a Meta, linked: &'a Linked, target: Target) -> Self {
+    pub fn new(defs: &'a DefTable, meta: &'a Meta, linked: &'a Linked) -> Self {
         ConstEval {
             defs,
             meta,
@@ -247,7 +243,6 @@ impl<'a> ConstEval<'a> {
             in_progress: Vec::new(),
             steps: 0,
             depth: 0,
-            target,
             flow: None,
         }
     }

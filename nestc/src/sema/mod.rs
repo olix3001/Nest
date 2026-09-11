@@ -304,7 +304,6 @@ pub fn analyze(session: &mut Session, entry: FileId) {
         &session.defs,
         &session.ir_meta,
         &session.linked,
-        session.options.target,
     );
     session.diagnostics.extend(diags);
 }
@@ -489,7 +488,6 @@ fn resolve_one(session: &mut Session, file: FileId) {
 fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
     let file_ns = session.files[&file].ns;
     let globs = session.prelude_globs.clone();
-    let target = session.options.target;
     let Session {
         asts,
         defs,
@@ -506,7 +504,6 @@ fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
         &globs,
         file_ns,
         file,
-        target,
     );
 }
 

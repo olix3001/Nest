@@ -36,7 +36,6 @@ use std::collections::{HashMap, HashSet};
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
-use crate::common::options::Target;
 use crate::parser::ast::{
     Ast, BinOp, Lit, NodeId, NodeKind, SliceRest, UnOp, VariantArgs, VariantPatArgs, WideFloat,
 };
@@ -265,7 +264,6 @@ pub fn infer_file(
     prelude_globs: &[DefId],
     file_ns: DefId,
     file: FileId,
-    target: Target,
 ) {
     let ast = &asts[&file];
     // The set of trait defs a use site in this file may select impls of: only
@@ -330,7 +328,6 @@ pub fn infer_file(
                 lang_traits: &lang_traits,
                 in_default: false,
                 file,
-                target,
                 cx: {
                     let mut cx = InferCtxt::new();
                     cx.set_numeric_distincts(numeric_distincts.clone());
@@ -510,7 +507,15 @@ fn family_inner(
         let NodeKind::ConstBind { rhs, .. } = &cast.node(node).kind else {
             return None;
         };
-        match &cast.node(*rhs).kind {
+        // `PTR_BITS: u16 :: 64` writes the type before the binder, so the
+        // right-hand side is an `AssocConst` wrapping the literal (§2.5).
+        let rhs = match &cast.node(*rhs).kind {
+            NodeKind::AssocConst {
+                default: Some(v), ..
+            } => *v,
+            _ => *rhs,
+        };
+        match &cast.node(rhs).kind {
             NodeKind::Lit(Lit::Int(v)) => u16::try_from(v).ok(),
             _ => None,
         }
@@ -648,9 +653,6 @@ struct Inferer<'a> {
     /// why it names the caller (§5.2).
     in_default: bool,
     file: FileId,
-    /// The machine being compiled for. Only `isize` / `usize` depend on it
-    /// today, through [`IntWidth::bits`](super::ty::IntWidth::bits).
-    target: Target,
     cx: InferCtxt,
     /// Type of each in-scope value def (params, locals) by [`DefId`].
     env: HashMap<super::def::DefId, Ty>,
@@ -1455,7 +1457,16 @@ impl Inferer<'_> {
     /// [`crate::ir::Expr::Binary`] rather than routing an `i32 < i32` through a
     /// three-way `cmp` the machine would only have to undo.
     fn check_cmp_bound(&mut self, node: NodeId, op: BinOp, lty: &Ty) {
-        if !matches!(self.cx.shallow(lty), Ty::Nominal { .. }) {
+        let shallow = self.cx.shallow(lty);
+        if !matches!(shallow, Ty::Nominal { .. }) {
+            return;
+        }
+        // `usize` / `isize` are nominal — they are `distinct` declarations in
+        // `core` (§3.1) — but they are the numeric core all the same, and
+        // comparing two of them is the machine's own instruction. Requiring an
+        // `Eq` impl for them would make `i < len` need one, which is exactly the
+        // ceremony the primitive path exists to avoid.
+        if self.is_ptr_sized(&shallow) {
             return;
         }
         let (lang, method) = match op {
@@ -2368,13 +2379,20 @@ impl Inferer<'_> {
                 // distinct type declares itself takes priority.
                 if let Some((m, repr)) = self.distinct_method_def(&recv, name.as_str()) {
                     self.ast.set_meta(base, DistinctRecv { repr: repr.clone() });
-                    return self.infer_method_call(
+                    // The receiver is the **distinct** type, not the
+                    // representation: the signature is rebound to match, so
+                    // `self` is spelled as what the caller actually holds.
+                    // `DistinctRecv` above is what tells lowering to reinterpret
+                    // it, which is all the representation is still needed for.
+                    let distinct = self.cx.shallow(&recv);
+                    return self.infer_method_call_rebound(
                         callee,
-                        &repr,
+                        &repr.clone(),
                         m,
                         MethodDispatch::Static,
                         args,
                         &targs,
+                        Some((repr, distinct)),
                     );
                 }
                 // Nothing found. A field holding a function is still a valid
@@ -3151,12 +3169,50 @@ impl Inferer<'_> {
         args: &[NodeId],
         targs: &[NodeId],
     ) -> Ty {
+        self.infer_method_call_rebound(callee, recv, method, dispatch, args, targs, None)
+    }
+
+    /// [`Inferer::infer_method_call`], with `Self` **rebound** for a method
+    /// reached through a `distinct` type's representation (§2.4).
+    ///
+    /// A `distinct D :: T` inherits `T`'s methods, and those methods are written
+    /// in terms of `T` — so a `func (self: Self) -> Self` on `T` instantiates as
+    /// `func(T) -> T`. Handing that back unchanged makes `d.dup()` a `T`, and the
+    /// distinction evaporates on the first call: exactly the failure `distinct`
+    /// exists to prevent, and the same one the builtin operator rows avoid by
+    /// computing `Output` from the self type as written.
+    ///
+    /// So every occurrence of the representation in the instantiated signature
+    /// becomes the distinct type. That is a substitution on types rather than on
+    /// a `Self` *name* because `Self` was already resolved to the representation
+    /// before this point — which also means a method that names `T` explicitly is
+    /// rebound too. That is the right reading: a `distinct` *is* its
+    /// representation reinterpreted, so a `T` in its own method's signature is
+    /// the receiver's type, not a coincidence.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_method_call_rebound(
+        &mut self,
+        callee: NodeId,
+        recv: &Ty,
+        method: super::def::DefId,
+        dispatch: MethodDispatch,
+        args: &[NodeId],
+        targs: &[NodeId],
+        rebind: Option<(Ty, Ty)>,
+    ) -> Ty {
         let sig = self.func_def_ty(method);
         let inst = self.instantiate_with(&sig, method, targs);
         // Dispatching through a trait object or a bound reaches the trait's
         // *declaration*, whose `Self` is the trait's own nominal. For this call
         // `Self` is the receiver, so say so rather than leaving the signature
         // claiming a bare `Trait`.
+        //
+        // Everything up to and including the `self` parameter below stays in the
+        // **representation's** terms when rebinding. That is not a detail: the
+        // representation may itself be generic — `str` inherits from
+        // `impl <T> []T` — and unifying the `self` parameter against the
+        // representation is what solves that `T`. Rebinding first would leave it
+        // unsolved and the call would be "type annotations needed".
         let inst = self.subst_trait_self(&inst, method, recv);
         self.types.insert(callee, inst.clone());
         let Ty::Func { params, ret } = self.cx.shallow(&inst) else {
@@ -3168,6 +3224,11 @@ impl Inferer<'_> {
             let p = self_param.clone();
             self.unify_self_param(&p, recv);
             let adjust = self.recv_adjust(&p, recv);
+            // `self_ty` is what the receiver expression must *become*, and for an
+            // inherited method that is the representation: lowering casts through
+            // `DistinctRecv` and the callee really does take a `*Base`. The
+            // rebound `*Wrapper` is the caller's view, which is already carried
+            // by the expression's own type.
             self.ast.set_meta(
                 callee,
                 MethodRes {
@@ -3178,6 +3239,21 @@ impl Inferer<'_> {
                 },
             );
         }
+        // From here the signature is the **caller's** view: `Self` is the
+        // `distinct` type, not the representation it was written over (§2.4).
+        // The impl's own generics are solved by now, so the substitution has
+        // concrete types to match against.
+        let (params, ret) = match &rebind {
+            Some((from, to)) => {
+                let params = params
+                    .iter()
+                    .map(|p| rebind_ty(&self.cx.resolve(p), from, to))
+                    .collect::<Vec<_>>();
+                let ret = Box::new(rebind_ty(&self.cx.resolve(&ret), from, to));
+                (params, ret)
+            }
+            None => (params, ret),
+        };
         // Unify the remaining parameters with the call arguments.
         let value_params = &params[params.len().min(1)..];
         let args = match self.bind_args(callee, method, args) {
@@ -3302,7 +3378,8 @@ impl Inferer<'_> {
         // `<const N: u8>` slot is a `u8`, and that is half of the argument's
         // identity (§5, [`ConstArg`]).
         let declared = self.const_param_ty(param);
-        if !matches!(declared, Ty::Error) && !declared.is_primitive() {
+        let repr = self.numeric_repr(&declared);
+        if !matches!(declared, Ty::Error) && !repr.is_primitive() {
             let msg = format!(
                 "a `const` generic parameter must have a primitive type, not `{}`",
                 declared.display(self.defs)
@@ -3352,7 +3429,12 @@ impl Inferer<'_> {
         };
         let t = self.ty_from_node(ty);
         let shallow = self.cx.shallow(&t);
-        if shallow.is_primitive() || matches!(shallow, Ty::Error) {
+        // A `distinct` over a primitive is admissible, and `usize` is one (§3.1):
+        // it is `distinct uint.<PTR_BITS>`, declared in `core` rather than built
+        // in. Refusing it here would make `<const N: usize>` — the declaration
+        // every array length is written with — illegal.
+        let repr = self.numeric_repr(&shallow);
+        if repr.is_primitive() || matches!(shallow, Ty::Error) {
             return;
         }
         let msg = format!(
@@ -3619,9 +3701,20 @@ impl Inferer<'_> {
         // means: it settled on one of the three types §1.5 lets it become, and
         // the cast is what materializes the bytes as that type — the `[]char`
         // case really is a transcoding, and the const evaluator performs it.
+        // `isize` / `usize` are `distinct` declarations (§3.1), so the test is
+        // against what the type *stands over* — otherwise the commonest
+        // conversion in the language, a bare integer literal settling on
+        // `isize`, would stop being recorded and the `$cast` would vanish from
+        // the IR.
         let converts = match comptime {
             Ty::ComptimeStr => self.cx.admits_str(&resolved),
-            _ => matches!(resolved, Ty::Int { .. } | Ty::Float(_)),
+            // `usize` / `isize` are `distinct` and so not `Ty::Int`, but they
+            // are the numeric core: a bare integer literal settling on `isize`
+            // is the commonest conversion in the language and the `$cast` has
+            // to stay in the IR. A *user* `distinct` is deliberately not
+            // included — a literal reaches one directly (§2.4), which is what
+            // the existing lowering records.
+            _ => matches!(resolved, Ty::Int { .. } | Ty::Float(_)) || self.is_ptr_sized(&resolved),
         };
         if !converts {
             return resolved;
@@ -4914,6 +5007,14 @@ impl Inferer<'_> {
         match kind {
             // `[_]T` — the length is whatever the value supplies.
             NodeKind::TypeHole => self.cx.fresh_const(),
+            // A constant whose type was written before the binder (§2.5):
+            // `SIZE: u16 :: 4` binds an `AssocConst` carrying the type and the
+            // value, where `SIZE :: 4` binds the value directly. The value is
+            // what a `const` slot wants either way — the declared type has
+            // already been checked against `want` by whoever sent us here.
+            NodeKind::AssocConst {
+                default: Some(v), ..
+            } => self.const_value_in(file, v, want, what, depth + 1),
             NodeKind::Path { .. } | NodeKind::TypePath { .. } => {
                 match self.resolved_def_in(file, node) {
                     Some(def) => self.const_of_def(file, node, def, want, what, depth),
@@ -4943,17 +5044,20 @@ impl Inferer<'_> {
         want: &Ty,
         what: &'static str,
     ) -> Const {
-        let value = match (lit, want) {
+        // The slot's type as a *primitive*: `usize` is `distinct uint.<PTR_BITS>`
+        // (§3.1) and an array length is one, so a literal filling that slot has
+        // to be read against what the `distinct` stands over. §2.4 is what makes
+        // that right rather than a shortcut — a literal reaches a `distinct`
+        // numeric with no written cast.
+        let repr = self.numeric_repr(want);
+        let value = match (lit, &repr) {
             (Lit::Int(n), Ty::Int { .. }) => {
-                // A width still symbolic — a parameter declared at `int.<N, S>`
-                // inside a generic that supplies `N` and `S` — has no range to
-                // check against yet, so the literal is taken as written and
+                // A width still symbolic — a parameter declared at `int.<N>`
+                // inside a generic that supplies `N` — has no range to check
+                // against yet, so the literal is taken as written and
                 // monomorphization is left to reject it. Range-checking against
                 // a guessed width would reject programs that are fine.
-                // `usize` is a `distinct`, and an array length is one, so the
-                // range a literal is checked against is the representation's.
-                let fits = self
-                    .numeric_repr(want)
+                let fits = repr
                     .int_parts()
                     .is_none_or(|(signed, bits)| super::ty::int_fits(n, signed, bits));
                 if !fits {
@@ -5034,9 +5138,18 @@ impl Inferer<'_> {
                 let (Some(cfile), Some(cnode)) = (d.file, d.node) else {
                     return Const::Error;
                 };
-                let NodeKind::ConstBind { rhs, .. } = self.asts[&cfile].node(cnode).kind.clone()
-                else {
-                    return Const::Error;
+                // A constant is written either way (§2.5): `SIZE :: 4` binds a
+                // value, and `SIZE: u16 :: 4` writes the type before the binder,
+                // which parses as an `AssocConst` carrying the type and the
+                // value separately. Both are a constant with a right-hand side,
+                // and a width read from one — `uint.<PTR_BITS>` in `core` — has
+                // no reason to care which spelling declared it.
+                let rhs = match self.asts[&cfile].node(cnode).kind.clone() {
+                    NodeKind::ConstBind { rhs, .. } => rhs,
+                    NodeKind::AssocConst {
+                        default: Some(rhs), ..
+                    } => rhs,
+                    _ => return Const::Error,
                 };
                 self.const_value_in(cfile, rhs, want, what, depth + 1)
             }
@@ -5504,4 +5617,43 @@ fn is_ptr_sized(lang: &LangItems, defs: &DefTable, ty: &Ty) -> bool {
         .iter()
         .filter_map(|t| lang.get(t))
         .any(|d| defs.resolve_alias(d) == def)
+}
+
+/// Replace every occurrence of `from` with `to` inside `ty`.
+///
+/// Used to rebind `Self` when a method is reached through a `distinct` type's
+/// representation — see [`Inferer::infer_method_call_rebound`].
+fn rebind_ty(ty: &Ty, from: &Ty, to: &Ty) -> Ty {
+    if ty == from {
+        return to.clone();
+    }
+    match ty {
+        Ty::Ptr { mutable, inner } => Ty::Ptr {
+            mutable: *mutable,
+            inner: Box::new(rebind_ty(inner, from, to)),
+        },
+        Ty::Slice { mutable, inner } => Ty::Slice {
+            mutable: *mutable,
+            inner: Box::new(rebind_ty(inner, from, to)),
+        },
+        Ty::Array {
+            len,
+            mutable,
+            inner,
+        } => Ty::Array {
+            len: len.clone(),
+            mutable: *mutable,
+            inner: Box::new(rebind_ty(inner, from, to)),
+        },
+        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| rebind_ty(e, from, to)).collect()),
+        Ty::Func { params, ret } => Ty::Func {
+            params: params.iter().map(|p| rebind_ty(p, from, to)).collect(),
+            ret: Box::new(rebind_ty(ret, from, to)),
+        },
+        Ty::Nominal { def, args } => Ty::Nominal {
+            def: *def,
+            args: args.iter().map(|a| rebind_ty(a, from, to)).collect(),
+        },
+        other => other.clone(),
+    }
 }

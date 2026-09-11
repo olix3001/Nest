@@ -53,8 +53,8 @@
 //
 // The compiler finds them by tag, never by name, so a `core` that spells them
 // differently still works.
-@public #lang("usize") usize :: distinct uint.<PTR_BITS>
-@public #lang("isize") isize :: distinct  int.<PTR_BITS>
+@public usize :: #lang("usize") distinct uint.<PTR_BITS>
+@public isize :: #lang("isize") distinct int.<PTR_BITS>
 
 impl <const N: u16> int.<N> {
   // Wrapping arithmetic (§6.6): the result is reduced modulo 2^N, which is what

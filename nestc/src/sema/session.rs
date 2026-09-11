@@ -395,9 +395,9 @@ impl Session {
              {{ Os, Arch, Profile }} :: import \"os.nest\"\n\
              \n\
              @public PTR_BITS: u16 :: {bits}\n\
-             @public OS: Os :: Os.{os}\n\
-             @public ARCH: Arch :: Arch.{arch}\n\
-             @public PROFILE: Profile :: Profile.{profile}\n",
+             @public OS: Os :: .{os}\n\
+             @public ARCH: Arch :: .{arch}\n\
+             @public PROFILE: Profile :: .{profile}\n",
             bits = o.target.pointer_bits,
             os = variant(o.target.os),
             arch = variant(o.target.arch),

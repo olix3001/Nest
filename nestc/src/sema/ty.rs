@@ -25,7 +25,6 @@ use num_bigint::BigInt;
 use std::collections::HashMap;
 
 use crate::common::symbol::Symbol;
-use crate::common::options::Target;
 use crate::ir::const_eval::ConstValue;
 use crate::parser::ast::NodeId;
 
@@ -375,6 +374,22 @@ impl Ty {
             Ty::Char => "char".into(),
             Ty::Void => "void".into(),
             Ty::Never => "never".into(),
+            // The pointer-sized integers print by their bare name. They are
+            // `distinct` declarations in `core` like any other nominal (§3.1),
+            // but they stand exactly where a primitive used to: every program
+            // writes `usize`, and a diagnostic that says `core.usize` names a
+            // path no source ever wrote. Keyed on the `#lang` tag, not on the
+            // name, so `core` may still spell them however it likes.
+            Ty::Nominal { def, args }
+                if args.is_empty()
+                    && defs
+                        .get(*def)
+                        .lang
+                        .as_ref()
+                        .is_some_and(|l| matches!(l.as_str(), "usize" | "isize")) =>
+            {
+                defs.get(*def).name.to_string()
+            }
             Ty::Nominal { def, args } => {
                 let name = defs.canonical_string(*def);
                 if args.is_empty() {
@@ -1250,9 +1265,9 @@ pub fn int_widens(from: (bool, u32), to: (bool, u32)) -> bool {
 /// `comptime_int`.
 ///
 /// Takes a resolved `bits` rather than an integer type, because resolving one
-/// is where the interesting decision is: a pointer-sized width needs the
-/// [`Target`], and a symbolic one has no answer at all. Callers get the pair
-/// from [`Ty::int_parts`] and say for themselves what `None` means for them.
+/// is where the interesting decision is: a symbolic width has no answer at all.
+/// Callers get the pair from [`Ty::int_parts`] and say for themselves what
+/// `None` means for them.
 pub fn int_fits(value: &BigInt, signed: bool, bits: u32) -> bool {
     if bits == 0 {
         return false;
