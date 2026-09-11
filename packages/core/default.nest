@@ -1,0 +1,23 @@
+// `Default` — a type's "empty" value.
+//
+// The language has **no struct field defaults**: a literal names every field, so
+// reading one tells you what it builds without consulting the declaration
+// (§3.3). What a type *does* get is a `Default` impl and the `..` spread, which
+// put the same convenience behind one visible token:
+//
+//     P { x: 5, ..Default.default() }
+//
+// The spread is expanded at compile time into the field reads it stands for, so
+// nothing is hidden — `..` is the mark that says "and the rest from here", and
+// removing it makes the literal incomplete again.
+//
+// `Default.default()` has no receiver: `Self` is whatever the context wants, so
+// the call above resolves it to `P` from the literal it fills. That is the same
+// static-trait-call rule `.?` uses to reach `FromResidual` (§4.6).
+
+@public Default :: #lang("default") trait {
+  // The value a type uses when none was given. It should be the *identity* of
+  // the type where there is one — zero, empty, `.none` — and cheap: this is
+  // called wherever a value is omitted, which is everywhere.
+  default :: func () -> Self
+}

@@ -480,14 +480,25 @@ impl Parser {
             self.bump();
             return (CompositeBody::Positional(Vec::new()), end);
         }
-        // Named body: `ident :` (but not `ident ::`, which would be a binding).
-        if matches!(self.peek(), Some(TokenKind::Ident(_)))
-            && matches!(self.peek_nth(1), Some(TokenKind::Colon))
+        // Named body: `ident :` (but not `ident ::`, which would be a binding),
+        // or a body that is nothing but a spread (`P { ..d }`).
+        if (matches!(self.peek(), Some(TokenKind::Ident(_)))
+            && matches!(self.peek_nth(1), Some(TokenKind::Colon)))
+            || self.at(&TokenKind::DotDot)
         {
             let mut fields = Vec::new();
+            let mut spread = None;
             loop {
                 self.skip_newlines();
                 if self.at(&TokenKind::RBrace) || self.at_eof() {
+                    break;
+                }
+                // `..expr` supplies every field not written (§3.3). It is last
+                // by construction: what follows it would have nothing to mean.
+                if self.eat(&TokenKind::DotDot) {
+                    spread = Some(self.parse_expr());
+                    self.skip_newlines();
+                    self.eat(&TokenKind::Comma);
                     break;
                 }
                 fields.push(self.parse_field_init());
@@ -499,7 +510,7 @@ impl Parser {
             self.skip_newlines();
             let end = self.cur_span();
             self.expect(&TokenKind::RBrace);
-            return (CompositeBody::Named(fields), end);
+            return (CompositeBody::Named { fields, spread }, end);
         }
         // Positional or repeat.
         let first = self.parse_expr();

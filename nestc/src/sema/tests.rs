@@ -4276,6 +4276,77 @@ fn panic_reports_the_line_that_called_it() {
 }
 
 #[test]
+fn a_spread_fills_the_fields_a_literal_did_not_write() {
+    // §3.3: the language has no struct field defaults — a literal names every
+    // field. What it gets instead is `Default` and the `..` spread, which put
+    // the same convenience behind one visible token.
+    let src = "\
+{ Default } :: import <core/default>
+P :: struct { x: i32, y: i32, z: i32 }
+impl Default for P { default :: func () -> P { return P { x: 0, y: 0, z: 0 } } }
+f :: func () -> P { return P { x: 5, ..Default.default() } }
+";
+    let s = analyze_clean(src);
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    // The spread is bound once and read once per field it fills: a
+    // `Default.default()` that ran per field would be a different program.
+    assert_eq!(ir.matches("P.default").count(), 1, "{ir}");
+    assert!(ir.contains("y: (__spread1: P.y)"), "{ir}");
+    assert!(ir.contains("z: (__spread1: P.z)"), "{ir}");
+
+    // Any value of the type works; `Default` is a convention, not a requirement.
+    analyze_clean("P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return P { x: 5, ..b } }\n");
+    analyze_clean("P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return P { ..b } }\n");
+}
+
+#[test]
+fn a_spread_is_checked_like_the_literal_it_stands_for() {
+    // The expansion is ordinary field reads, so every rule that applies to a
+    // written field applies to a filled-in one.
+    for (src, needle) in [
+        // The spread must be the type being built. Without the check, a `Q` that
+        // happens to have the remaining field names would build a `P`.
+        (
+            "P :: struct { x: i32, y: i32 }\nQ :: struct { x: i32, y: i32 }\n\
+             f :: func (q: Q) -> P { return P { x: 1, ..q } }\n",
+            "expected `P`, found `Q`",
+        ),
+        // Only a struct has fields to spread.
+        (
+            "E :: enum { a, b }\nf :: func (e: E) -> E { return E { ..e } }\n",
+            "a `..` spread needs a struct",
+        ),
+        // The type must be named: the fields the spread fills come from it, and
+        // desugaring runs before inference, so `.{ ..rest }` has nothing to
+        // enumerate.
+        (
+            "P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return .{ x: 5, ..b } }\n",
+            "a `..` spread needs the type named",
+        ),
+        // And without one, a literal still names every field.
+        (
+            "P :: struct { x: i32, y: i32 }\nf :: func () -> P { return P { x: 5 } }\n",
+            "missing field `y` in `P`",
+        ),
+    ] {
+        assert!(first_error(src).contains(needle), "{src}");
+    }
+}
+
+#[test]
+fn default_is_a_static_trait_call_that_takes_self_from_context() {
+    // `Default.default()` has no receiver, so `Self` comes from where the call
+    // sits — the literal it fills. Same rule `.?` uses to reach `FromResidual`.
+    analyze_clean(
+        "{ Default } :: import <core/default>\n\
+         W :: struct <T> { v: T, n: i32 }\n\
+         impl Default for W.<i32> { default :: func () -> W.<i32> { return W.<i32> { v: 0, n: 0 } } }\n\
+         f :: func () -> W.<i32> { return W.<i32> { v: 7, ..Default.default() } }\n",
+    );
+}
+
+#[test]
 fn a_distinct_type_does_not_convert_implicitly() {
     assert!(
         first_error("Meters :: distinct i32\nf :: func (m: Meters) -> i32 { return m }\n")

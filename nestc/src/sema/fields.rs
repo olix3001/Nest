@@ -61,7 +61,7 @@ pub fn resolve_fields(
             // so they are bound from here rather than from the `FieldInit`,
             // which has no type of its own.
             NodeKind::CompositeLit { body, .. } => {
-                if let crate::parser::ast::CompositeBody::Named(fields) = body {
+                if let crate::parser::ast::CompositeBody::Named { fields, .. } = body {
                     let target = pass.ty(id);
                     for f in fields {
                         let NodeKind::FieldInit { name, .. } = ast.node(f).kind.clone() else {

@@ -27,8 +27,10 @@ use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
+use std::collections::HashSet;
+
 use crate::parser::ast::{
-    AssignOp, Ast, BinOp, NodeId, NodeKind, TryKind, VariantArgs, VariantPatArgs,
+    AssignOp, Ast, BinOp, CompositeBody, NodeId, NodeKind, TryKind, VariantArgs, VariantPatArgs,
 };
 
 use super::def::{DefId, DefKind, DefTable, LangItems, Visibility};
@@ -88,7 +90,146 @@ impl Desugar<'_> {
             NodeKind::Assign { op, place, value } if op != AssignOp::Assign => {
                 self.lower_compound_assign(id, op, place, value)
             }
+            NodeKind::CompositeLit {
+                ty,
+                body: CompositeBody::Named { fields, spread },
+            } if spread.is_some() => {
+                self.lower_spread(id, ty, fields, spread.expect("checked"))
+            }
             _ => {}
+        }
+    }
+
+    // ===< `..` spread >===
+
+    /// `P { x: 5, ..rest }` → `{ __s :: rest  P { x: 5, y: __s.y, z: __s.z } }`.
+    ///
+    /// The spread is written once and read once *per missing field*, so it is
+    /// bound to a temporary first: `P { x: 5, ..Default.default() }` must call
+    /// `default` one time, not one time per field it fills.
+    ///
+    /// Expanding here, rather than in lowering, is what makes the rest of the
+    /// compiler unaware of the form: inference sees an ordinary literal with
+    /// every field written, so field typing, privacy and the missing-field check
+    /// all apply to the filled-in reads exactly as they would to written ones.
+    /// The cost is that the **type must be named** — the field list comes from
+    /// the resolved `P`, and desugaring runs before inference, so `.{ ..rest }`
+    /// has nothing to enumerate.
+    fn lower_spread(
+        &mut self,
+        id: NodeId,
+        ty: Option<NodeId>,
+        fields: Vec<NodeId>,
+        spread: NodeId,
+    ) {
+        let span = self.ast.node(id).span;
+        let Some(ty_node) = ty else {
+            self.report(
+                spread,
+                "a `..` spread needs the type named — write `P { ..rest }` rather than \
+                 `.{ ..rest }`, because the fields it fills come from the type",
+            );
+            return;
+        };
+        let Some(def) = self.type_head_def(ty_node) else {
+            // Resolution already reported the unknown type.
+            return;
+        };
+        let def = self.defs.resolve_alias(def);
+        if self.defs.get(def).kind != DefKind::Struct {
+            let msg = format!(
+                "a `..` spread needs a struct; `{}` is not one",
+                self.defs.canonical_string(def)
+            );
+            self.report(spread, msg);
+            return;
+        }
+        // Which fields the literal already wrote; the rest come from the spread.
+        let written: HashSet<Symbol> = fields
+            .iter()
+            .filter_map(|&f| match &self.ast.node(f).kind {
+                NodeKind::FieldInit { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut missing: Vec<Symbol> = self
+            .defs
+            .get(def)
+            .ns
+            .members
+            .iter()
+            .filter(|(n, m)| {
+                self.defs.get(**m).kind == DefKind::Field && !written.contains(*n)
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        // `ns.members` is a hash map, so fix an order: the IR is keyed by name
+        // and does not care, but a snapshot and a diagnostic both read better
+        // when two compilations agree.
+        missing.sort();
+
+        let name = self.fresh("spread");
+        let (pat, local) = self.binding_pat(span, &name, false);
+        // The temporary is **typed**, with the literal's own type node: a spread
+        // must be a value of the type being built. Without this, `P { x: 1, ..q }`
+        // where `q` is some other struct that happens to have the remaining
+        // field names type-checks, and builds a `P` out of a `Q`.
+        let bind = self.alloc(
+            span,
+            NodeKind::LocalDecl {
+                is_const: true,
+                pattern: pat,
+                ty: Some(ty_node),
+                value: spread,
+            },
+        );
+        let mut all = fields;
+        for field in missing {
+            let base = self.local_ref(span, &name, local);
+            let access = self.alloc(
+                span,
+                NodeKind::FieldAccess {
+                    base,
+                    name: field.clone(),
+                },
+            );
+            all.push(self.alloc(
+                span,
+                NodeKind::FieldInit {
+                    name: field,
+                    value: access,
+                },
+            ));
+        }
+        let lit = self.alloc(
+            span,
+            NodeKind::CompositeLit {
+                ty: Some(ty_node),
+                body: CompositeBody::Named {
+                    fields: all,
+                    spread: None,
+                },
+            },
+        );
+        self.replace(
+            id,
+            NodeKind::Block {
+                stmts: vec![bind],
+                tail: Some(lit),
+            },
+        );
+    }
+
+    /// The def a type node's head path resolved to.
+    fn type_head_def(&self, node: NodeId) -> Option<DefId> {
+        let node = match &self.ast.node(node).kind {
+            NodeKind::TypePath { .. } | NodeKind::Path { .. } => node,
+            NodeKind::GenericApply { base, .. } => *base,
+            _ => return None,
+        };
+        match self.ast.meta::<Resolution>(node)? {
+            Resolution::Def(d) => Some(d),
+            _ => None,
         }
     }
 

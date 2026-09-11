@@ -89,7 +89,7 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         },
         CompositeLit { ty, body } => {
             let shape = match body {
-                CompositeBody::Named(_) => "named",
+                CompositeBody::Named { .. } => "named",
                 CompositeBody::Positional(_) => "positional",
                 CompositeBody::Repeat { .. } => "repeat",
             };

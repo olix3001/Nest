@@ -1082,7 +1082,7 @@ impl Inferer<'_> {
     fn infer_composite_elems(&mut self, body: &crate::parser::ast::CompositeBody) {
         use crate::parser::ast::CompositeBody;
         match body {
-            CompositeBody::Named(fields) => {
+            CompositeBody::Named { fields, .. } => {
                 for &f in fields {
                     if let NodeKind::FieldInit { value, .. } = self.ast.node(f).kind.clone() {
                         self.infer_expr(value);
@@ -1620,7 +1620,7 @@ impl Inferer<'_> {
             return;
         }
         match body {
-            CompositeBody::Named(fields) => self.check_record_body(node, target, &fields),
+            CompositeBody::Named { fields, .. } => self.check_record_body(node, target, &fields),
             CompositeBody::Positional(elems) => self.check_positional_body(node, target, &elems),
             CompositeBody::Repeat { value, count } => {
                 match self.autoderef(target) {

@@ -198,8 +198,16 @@ pub enum VariantPayload {
 /// Body of a composite literal (`Type { ... }`, `.{ ... }`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CompositeBody {
-    /// `{ a: x, b: y }` — ids are [`NodeKind::FieldInit`] nodes -> record/struct.
-    Named(Vec<NodeId>),
+    /// `{ a: x, b: y [, ..rest] }` — `fields` are [`NodeKind::FieldInit`] nodes
+    /// -> record/struct.
+    ///
+    /// `spread` is a trailing `..expr`, which supplies every field the literal
+    /// did not write (§3.3). It is desugared away before inference: by the time
+    /// anything else looks at a literal, `spread` is `None`.
+    Named {
+        fields: Vec<NodeId>,
+        spread: Option<NodeId>,
+    },
     /// `{ x, y, z }` — positional entries -> array or tuple (chosen by type).
     Positional(Vec<NodeId>),
     /// `{ value; count }` — array repeat.
@@ -903,7 +911,11 @@ impl VariantPayload {
 impl CompositeBody {
     fn collect_children(&self, out: &mut Vec<NodeId>) {
         match self {
-            CompositeBody::Named(ids) | CompositeBody::Positional(ids) => {
+            CompositeBody::Named { fields, spread } => {
+                out.extend_from_slice(fields);
+                push_opt(out, spread);
+            }
+            CompositeBody::Positional(ids) => {
                 out.extend_from_slice(ids)
             }
             CompositeBody::Repeat { value, count } => out.extend_from_slice(&[*value, *count]),

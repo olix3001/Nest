@@ -243,7 +243,7 @@ composite_literal =
   | '.{' composite_body '}'                          // inferred record | array | tuple
   | '.' snake_ident [ '(' [ args ] ')' | '{' [ field_init { ',' field_init } ] '}' ]  // enum variant
 composite_body =
-    [ field_init { ',' field_init } ]                // named       -> record / struct
+    [ field_init { ',' field_init } [ ',' '..' expr ] ]  // named   -> record / struct
   | [ expr { ',' expr } ]                            // positional  -> array / tuple
   | expr ';' expr                                    // repeat: value ; count -> array
 field_init = identifier ':' expr

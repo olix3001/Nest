@@ -235,6 +235,51 @@ Type(a, b)                        // named tuple struct
 When the context type is a tuple struct, a positional inferred literal builds it:
 `const x: MyType := .{ a, b }` is identical to `const x := MyType(a, b)`.
 
+### A literal names every field, or spreads the rest
+
+A record literal must supply **every** field. There are no field defaults: a
+declaration such as `P :: struct { x: i32 := 1 }` is rejected, because a default
+there makes `P { }` build something a reader cannot see from the literal.
+
+What a type gets instead is a `Default` impl and the `..` **spread**, which put
+the same convenience behind one visible token:
+
+```nest
+{ Default } :: import <core/default>
+
+P :: struct { x: i32, y: i32, z: i32 }
+impl Default for P {
+  default :: func () -> P { return P { x: 0, y: 0, z: 0 } }
+}
+
+P { x: 5, ..Default.default() }     // y and z come from the default
+P { x: 5, ..base }                  // ...or from any other P
+```
+
+- The spread is **last**, and there is at most one: what followed it would have
+  nothing to mean.
+- It must be a value of **the type being built**. A different struct that happens
+  to have the remaining field names is a type error, not a conversion.
+- It is evaluated **once**, then read once per field it fills — so
+  `..Default.default()` calls `default` a single time.
+- The **type must be named**: `P { ..rest }`, not `.{ ..rest }`. The fields a
+  spread fills come from the type, and the expansion happens before the literal
+  is typed.
+- Every rule that applies to a written field applies to a filled-in one, privacy
+  included: a spread cannot reach a field the literal could not have written.
+
+`Default` is an ordinary trait in `core`, found by its `#lang("default")` tag:
+
+```nest
+@public Default :: #lang("default") trait {
+  default :: func () -> Self
+}
+```
+
+`Default.default()` has no receiver, so `Self` is decided by the context — the
+literal it fills (§4.6). Implementing it is a choice, not a requirement; the
+spread works with any value of the right type.
+
 **Named vs. anonymous.** A `struct { ... }` written inline in a type position —
 `x: struct { a: int, b: int }` — is an **anonymous** struct type. Anonymous
 struct types are *structural* (two with the same fields are the same type). A

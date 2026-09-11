@@ -22,6 +22,7 @@ prelude :: import "prelude.nest"
 
 @public ops     :: import "ops.nest"
 @public cmp     :: import "cmp.nest"
+@public default :: import "default.nest"
 @public control :: import "control.nest"
 @public option  :: import "option.nest"
 @public result  :: import "result.nest"

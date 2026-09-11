@@ -1706,7 +1706,7 @@ impl Lowerer<'_> {
     /// the type is the authority here.
     fn lower_composite(&mut self, node: NodeId, body: &CompositeBody, ty: Ty) -> Expr {
         match body {
-            CompositeBody::Named(fields) => {
+            CompositeBody::Named { fields, .. } => {
                 let fields = fields
                     .iter()
                     .filter_map(|&f| match self.ast.node(f).kind.clone() {
