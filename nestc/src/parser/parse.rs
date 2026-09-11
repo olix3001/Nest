@@ -169,6 +169,31 @@ impl Parser {
             )
     }
 
+    /// The parser's current position, for a caller that needs to prove it moved.
+    ///
+    /// A body loop that parses members until `}` spins forever if an iteration
+    /// consumes nothing, and `expect_*` deliberately reports without consuming so
+    /// that a missing token is recovered at the *next* item rather than by
+    /// eating the one that follows. The two together are a hang, so every such
+    /// loop checks this and bumps when it has not moved. `P :: struct { x: i32
+    /// := 1 }` hung the compiler until it did.
+    pub(crate) fn position(&self) -> usize {
+        self.pos
+    }
+
+    /// Guarantee progress in a body loop: bump if `before` is still the cursor.
+    /// Returns whether the loop should stop (end of input).
+    pub(crate) fn ensure_progress(&mut self, before: usize) -> bool {
+        if self.pos != before {
+            return false;
+        }
+        if self.at_eof() {
+            return true;
+        }
+        self.bump();
+        false
+    }
+
     pub(crate) fn peek_nth(&self, n: usize) -> Option<&TokenKind> {
         self.tokens.get(self.pos + n).map(|t| &t.kind)
     }

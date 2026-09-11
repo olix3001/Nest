@@ -388,6 +388,7 @@ impl Parser {
             if self.at(&TokenKind::RBrace) || self.at_eof() {
                 break;
             }
+            let before = self.position();
             // A comptime item — `assert(...)` — may sit among the fields (§6.10).
             if self.at_comptime_item() {
                 members.push(self.parse_expr());
@@ -396,6 +397,9 @@ impl Parser {
             }
             self.skip_newlines();
             self.eat(&TokenKind::Comma);
+            if self.ensure_progress(before) {
+                break;
+            }
         }
         let end = self.cur_span();
         self.expect(&TokenKind::RBrace);
@@ -431,6 +435,22 @@ impl Parser {
         let name = self.expect_ident();
         self.expect(&TokenKind::Colon);
         let ty = self.parse_type();
+        // `x: i32 := 1` — a field with a default. The language has none (§13.3:
+        // `field = { attribute } identifier ':' type`), and a struct literal
+        // never silently omits a field; a type that wants filled-in values
+        // implements `Default` and a literal spreads it. Consuming the
+        // expression is what keeps this a diagnostic instead of a parser that
+        // makes no progress and spins.
+        if self.at(&TokenKind::ColonEq) {
+            let at = self.cur_span();
+            self.bump();
+            let value = self.parse_expr();
+            self.error(
+                at.to(self.node_span(value)),
+                "a struct field has no default value; implement `Default` for the type \
+                 and write `P { x: 5, ..Default.default() }`",
+            );
+        }
         let span = start.to(self.node_span(ty));
         self.alloc(
             span,
@@ -457,9 +477,13 @@ impl Parser {
             if self.at(&TokenKind::RBrace) || self.at_eof() {
                 break;
             }
+            let before = self.position();
             variants.push(self.parse_variant());
             self.skip_newlines();
             self.eat(&TokenKind::Comma);
+            if self.ensure_progress(before) {
+                break;
+            }
         }
         let end = self.cur_span();
         self.expect(&TokenKind::RBrace);
@@ -535,9 +559,13 @@ impl Parser {
             if self.at(&TokenKind::RBrace) || self.at_eof() {
                 break;
             }
+            let before = self.position();
             members.push(self.parse_trait_member());
             self.skip_newlines();
             self.eat(&TokenKind::Comma);
+            if self.ensure_progress(before) {
+                break;
+            }
         }
         let end = self.cur_span();
         self.expect(&TokenKind::RBrace);

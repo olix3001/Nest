@@ -83,7 +83,7 @@ struct_type   = { directive } 'struct' [ struct_body ]
 struct_body   = '{' { field | comptime_item } '}'      // record
               | '(' type { ',' type } ')'              // tuple struct
                                                        // (absent) => unit struct
-field         = { attribute } identifier ':' type ','
+field         = { attribute } identifier ':' type ','    // no default; see 3.4
 enum_type     = { directive } 'enum' [ generics ] '{' { variant } '}'
 variant       = { attribute } snake_ident [ variant_payload ] ','
 variant_payload = '(' type { ',' type } ')' | '{' { field } '}'

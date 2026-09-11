@@ -30,6 +30,43 @@ fn tree_with_errors(src: &str) -> String {
 }
 
 #[test]
+fn a_member_body_always_makes_progress() {
+    // Every `{ member* }` loop used to spin forever on input it could not
+    // consume: `expect_*` reports *without* consuming, so that a missing token is
+    // recovered at the next item rather than by eating the one after it, and a
+    // loop whose iteration consumed nothing never reaches `}`.
+    //
+    // `P :: struct { x: i32 := 1 }` hung the compiler — a struct field has no
+    // default (§13.3), so `parse_field` stopped at the type and left `:=` where
+    // it was. These parse to *something* with diagnostics, and the test is that
+    // they return at all.
+    for src in [
+        "P :: struct { x: i32 := 1 }\n",
+        "P :: struct { x: i32 := 1, y: i32 := 2 }\n",
+        "E :: enum { a, := , b }\n",
+        "T :: trait { := }\n",
+        "P :: struct { := }\n",
+    ] {
+        let (_, errors) = Parser::parse_file(src, FileId(0));
+        assert!(!errors.is_empty(), "expected a diagnostic for {src:?}");
+    }
+}
+
+#[test]
+fn a_struct_field_default_is_refused_by_name() {
+    // The language has no field defaults: a struct literal never silently omits
+    // a field. A type that wants filled-in values implements `Default` and a
+    // literal spreads it, so the diagnostic says that rather than "unexpected".
+    let (_, errors) = Parser::parse_file("P :: struct { x: i32 := 1 }\n", FileId(0));
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("a struct field has no default value")),
+        "{errors:#?}"
+    );
+}
+
+#[test]
 fn constants_and_binding_forms() {
     assert_snapshot!(tree(
         "\
