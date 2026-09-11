@@ -57,7 +57,7 @@ use crate::common::symbol::Symbol;
 use crate::common::options::Target;
 use crate::parser::ast::Lit;
 use crate::sema::def::DefTable;
-use crate::sema::ty::{IntWidth, Ty};
+use crate::sema::ty::Ty;
 
 use crate::ir::{
     Arm, Block, Expr, ExprKind, Linked, Member, Meta, Pattern, PatternKind, Stmt, StmtKind,
@@ -981,7 +981,13 @@ impl Cx<'_> {
         match self.resolve(ty) {
             Ty::Bool => (BigInt::from(0), BigInt::from(1)),
             Ty::Char => (BigInt::from(0), BigInt::from(0x10_FFFF_u32)),
-            Ty::Int { signed, width } => int_bounds(signed, width, self.target),
+            // A symbolic `int.<N, S>` has no finite range, so it falls to the
+            // same answer a `comptime_int` gets: nothing but a wildcard covers
+            // it, which is the only honest reading of a width not yet chosen.
+            ty @ Ty::Int { .. } => match ty.int_parts(self.target) {
+                Some((signed, bits)) => int_bounds(signed, bits),
+                None => (BigInt::from(i128::MIN), BigInt::from(i128::MAX)),
+            },
             // A `comptime_int` is arbitrary precision, so nothing finite covers
             // it. Give it a range no finite set of patterns can fill.
             _ => (BigInt::from(i128::MIN), BigInt::from(i128::MAX)),
@@ -1044,8 +1050,7 @@ fn as_range(c: &Ctor) -> Option<(BigInt, BigInt)> {
     }
 }
 
-fn int_bounds(signed: bool, width: IntWidth, target: Target) -> (BigInt, BigInt) {
-    let bits = width.bits(target);
+fn int_bounds(signed: bool, bits: u32) -> (BigInt, BigInt) {
     if signed {
         let limit = BigInt::from(1) << (bits - 1);
         (-limit.clone(), limit - 1)

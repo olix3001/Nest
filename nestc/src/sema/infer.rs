@@ -3541,11 +3541,15 @@ impl Inferer<'_> {
         // A `distinct` numeric is checked against what it stands over: §2.4
         // lets a literal reach one with no written cast, so this is the only
         // place `70000` meeting a `distinct u16` is caught.
+        // A symbolic `int.<N, S>` has no range to check the literal against
+        // until monomorphization picks its width, so there is nothing to say
+        // here — and nothing to reach it today, since a literal can only settle
+        // on a width the call site already fixed.
         let settled = self.numeric_repr(resolved);
-        let Ty::Int { signed, width } = &settled else {
+        let Some((signed, bits)) = settled.int_parts(self.target) else {
             return;
         };
-        if super::ty::int_fits(&value, *signed, *width, self.target) {
+        if super::ty::int_fits(&value, signed, bits) {
             return;
         }
         let msg = format!(
@@ -4744,8 +4748,16 @@ impl Inferer<'_> {
         what: &'static str,
     ) -> Const {
         let value = match (lit, want) {
-            (Lit::Int(n), Ty::Int { signed, width }) => {
-                if !super::ty::int_fits(n, *signed, *width, self.target) {
+            (Lit::Int(n), Ty::Int { .. }) => {
+                // A width still symbolic — a parameter declared at `int.<N, S>`
+                // inside a generic that supplies `N` and `S` — has no range to
+                // check against yet, so the literal is taken as written and
+                // monomorphization is left to reject it. Range-checking against
+                // a guessed width would reject programs that are fine.
+                let fits = want
+                    .int_parts(self.target)
+                    .is_none_or(|(signed, bits)| super::ty::int_fits(n, signed, bits));
+                if !fits {
                     let msg = format!("`{n}` does not fit in `{}`", want.display(self.defs));
                     self.report_in(file, node, msg);
                     return Const::Error;
@@ -4881,10 +4893,7 @@ impl Inferer<'_> {
             // so it is *not* a `str`, and no variable is needed.
             Lit::Bytes(_) => Ty::Slice {
                 mutable: false,
-                inner: Box::new(Ty::Int {
-                    signed: false,
-                    width: crate::sema::ty::IntWidth::Fixed(8),
-                }),
+                inner: Box::new(Ty::u8()),
             },
             Lit::Char(_) => Ty::Char,
             Lit::Bool(_) => Ty::Bool,

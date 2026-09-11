@@ -65,7 +65,7 @@ use crate::common::options::Target;
 use crate::parser::ast::{BinOp, Lit, UnOp};
 use crate::sema::builtins::BuiltinOp;
 use crate::sema::def::{DefId, DefKind, DefTable};
-use crate::sema::ty::{FloatWidth, IntWidth, Ty, float_fits, int_truncate};
+use crate::sema::ty::{FloatWidth, Ty, float_fits, int_truncate};
 
 use super::{
     Arm, Block, Dispatch, Expr, ExprKind, ImplicitCast, IrId, Linked, Meta, Pattern, PatternKind,
@@ -1187,6 +1187,27 @@ impl<'a> ConstEval<'a> {
         }
     }
 
+    /// The signedness and width of the integer type a cast targets.
+    ///
+    /// A member of the family whose arguments are still symbolic — `int.<N, S>`
+    /// inside the impl in `core` — has no width until monomorphization chooses
+    /// one, and no constant can be narrowed to it here. Nothing reaches this
+    /// today, because a generic `#const` function's body is not evaluated until
+    /// it is instantiated (phase 6); reporting rather than passing the value
+    /// through is what keeps it from silently producing an unchecked constant
+    /// if that ever changes.
+    fn int_parts_at(&self, at: IrId, to: &Ty) -> Result<(bool, u32), ConstError> {
+        to.int_parts(self.target).ok_or_else(|| {
+            ConstError::new(
+                at,
+                format!(
+                    "`{}` has no width until it is instantiated",
+                    to.display(self.defs)
+                ),
+            )
+        })
+    }
+
     /// Convert a value to the type a `$cast` names.
     ///
     /// What "convert" means depends on **who wrote the cast** (see
@@ -1206,16 +1227,14 @@ impl<'a> ConstEval<'a> {
         let exact = mode == CastMode::Implicit;
         match (&value, to) {
             (_, Ty::Error) => Ok(value),
-            (ConstValue::Int(n), Ty::Int { signed, width }) => {
+            // Every integer arm below wants a concrete width, and gets it from
+            // `int_parts_at`.
+            (ConstValue::Int(n), Ty::Int { .. }) => {
+                let (signed, bits) = self.int_parts_at(at, to)?;
                 if !exact {
-                    return Ok(ConstValue::Int(int_truncate(
-                        n,
-                        *signed,
-                        *width,
-                        self.target,
-                    )));
+                    return Ok(ConstValue::Int(int_truncate(n, signed, bits)));
                 }
-                if !int_fits(n, *signed, *width, self.target) {
+                if !int_fits(n, signed, bits) {
                     return Err(ConstError::new(
                         at,
                         format!("`{n}` does not fit in `{}`", to.display(self.defs)),
@@ -1235,7 +1254,8 @@ impl<'a> ConstEval<'a> {
             // Only a written `$cast` reaches this: the language has no implicit
             // float-to-integer conversion, so there is no exact form of it to
             // define. It truncates toward zero, as the machine does.
-            (ConstValue::Float(f), Ty::Int { signed, width }) => {
+            (ConstValue::Float(f), Ty::Int { .. }) => {
+                let (signed, bits) = self.int_parts_at(at, to)?;
                 if !f.is_finite() {
                     return Err(ConstError::new(
                         at,
@@ -1248,7 +1268,7 @@ impl<'a> ConstEval<'a> {
                 // Out of range is undefined at run time and unknowable here, so
                 // it is reported rather than guessed at — unlike an integer
                 // narrowing, which has one answer the machine agrees with.
-                if !int_fits(&truncated, *signed, *width, self.target) {
+                if !int_fits(&truncated, signed, bits) {
                     return Err(ConstError::new(
                         at,
                         format!("`{truncated}` does not fit in `{}`", to.display(self.defs)),
@@ -1256,17 +1276,13 @@ impl<'a> ConstEval<'a> {
                 }
                 Ok(ConstValue::Int(truncated))
             }
-            (ConstValue::Char(c), Ty::Int { signed, width }) => {
+            (ConstValue::Char(c), Ty::Int { .. }) => {
+                let (signed, bits) = self.int_parts_at(at, to)?;
                 let n = BigInt::from(*c as u32);
                 if !exact {
-                    return Ok(ConstValue::Int(int_truncate(
-                        &n,
-                        *signed,
-                        *width,
-                        self.target,
-                    )));
+                    return Ok(ConstValue::Int(int_truncate(&n, signed, bits)));
                 }
-                if !int_fits(&n, *signed, *width, self.target) {
+                if !int_fits(&n, signed, bits) {
                     return Err(ConstError::new(at, "this `char` does not fit"));
                 }
                 Ok(ConstValue::Int(n))
@@ -1365,10 +1381,12 @@ impl<'a> ConstEval<'a> {
             return Ok(value);
         };
         let declared = self.meta.ty_or_error(at);
-        let Ty::Int { signed, width } = self.repr_of(&declared) else {
+        // A symbolic `int.<N, S>` has no range to check against, so there is
+        // nothing to say until monomorphization picks the width.
+        let Some((signed, bits)) = self.repr_of(&declared).int_parts(self.target) else {
             return Ok(value);
         };
-        if int_fits(n, signed, width, self.target) {
+        if int_fits(n, signed, bits) {
             return Ok(value);
         }
         Err(ConstError::new(
@@ -1446,14 +1464,13 @@ impl<'a> ConstEval<'a> {
     }
 }
 
-/// Whether `n` is representable in the given integer type.
+/// Whether `n` is representable in an integer type of this width and signedness.
 ///
-/// `IntWidth::Ptr` is the pointer-sized case, and its width comes from the
-/// [`Target`] rather than from an assumption made here — the bootstrap targets
-/// 64-bit machines, but the question "does this constant fit a `usize`" has no
-/// answer that is independent of the machine, so the answer is a parameter.
-fn int_fits(n: &BigInt, signed: bool, width: IntWidth, target: Target) -> bool {
-    let bits = width.bits(target);
+/// `bits` is already resolved, which is where the pointer-sized case is dealt
+/// with: the question "does this constant fit a `usize`" has no answer that is
+/// independent of the machine, so the [`Target`] is consulted by the caller —
+/// through [`Ty::int_parts`] — rather than assumed here.
+fn int_fits(n: &BigInt, signed: bool, bits: u32) -> bool {
     if bits == 0 {
         return n.is_zero();
     }

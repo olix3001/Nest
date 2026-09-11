@@ -1313,10 +1313,7 @@ impl Lowerer<'_> {
             },
             None => Ty::Error,
         };
-        let u32_ty = Ty::Int {
-            signed: false,
-            width: crate::sema::ty::IntWidth::Fixed(32),
-        };
+        let u32_ty = Ty::int(32, false);
         let fields = vec![
             (
                 Symbol::new("file"),

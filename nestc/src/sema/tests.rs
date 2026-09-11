@@ -409,7 +409,7 @@ main :: func () -> isize {
 
 // ===< type inference >===
 
-use super::ty::{FloatWidth, IntWidth, Ty};
+use super::ty::{FloatWidth, Ty};
 
 /// The finalized [`Ty`] attached to the first node matching `pred`.
 fn node_ty(
@@ -456,10 +456,7 @@ fn literal_takes_annotated_type() {
     );
     assert_eq!(
         ty,
-        Ty::Int {
-            signed: true,
-            width: IntWidth::Fixed(32)
-        }
+        Ty::int(32, true)
     );
 }
 
@@ -534,10 +531,7 @@ f :: func () { const y := g(3) }
     );
     assert_eq!(
         ty,
-        Ty::Int {
-            signed: true,
-            width: IntWidth::Fixed(16)
-        }
+        Ty::int(16, true)
     );
 }
 
@@ -858,11 +852,8 @@ fn a_functions_type_is_its_whole_signature() {
     // A function's `Ty` metadata is its `Ty::Func`, not just its return type —
     // otherwise `meta.ty` would mean something different for a function than for
     // every other node, which is the duplication moving types here removed.
-    use crate::sema::ty::{IntWidth, Ty};
-    let i32_ty = Ty::Int {
-        signed: true,
-        width: IntWidth::Fixed(32),
-    };
+    use crate::sema::ty::Ty;
+    let i32_ty = Ty::int(32, true);
     let session = analyze_mem(
         &[("main", "f :: func (a: i32, b: bool) -> i32 { return a }")],
         "main",
@@ -3541,10 +3532,7 @@ fn is_nominal_named(session: &Session, ty: &Ty, name: &str) -> bool {
 }
 
 fn i32_ty() -> Ty {
-    Ty::Int {
-        signed: true,
-        width: IntWidth::Fixed(32),
-    }
+    Ty::int(32, true)
 }
 
 fn diag_contains(session: &Session, needle: &str) -> bool {
@@ -3628,10 +3616,7 @@ fn operator_mixed_widths() {
     );
     assert_eq!(
         ty,
-        Ty::Int {
-            signed: true,
-            width: IntWidth::Fixed(64)
-        }
+        Ty::int(64, true)
     );
 }
 
@@ -3644,10 +3629,7 @@ fn operator_result_pinned_late_by_return() {
     let file = entry_file(&s);
     assert_eq!(
         binop_ty(&s, file, BinOp::Add),
-        Ty::Int {
-            signed: true,
-            width: IntWidth::Fixed(16)
-        }
+        Ty::int(16, true)
     );
 }
 
