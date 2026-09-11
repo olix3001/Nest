@@ -1,0 +1,30 @@
+// Source locations.
+//
+// `Location` is what `#caller_location` evaluates to (§5.2). It is an ordinary
+// struct — the compiler finds it by its `#lang` tag, never by name or path, so a
+// `core` that spells it differently still works.
+//
+// The only way to get one is as a **default argument**:
+//
+//     report :: func (msg: str, loc: Location := #caller_location) { ... }
+//
+// which is the whole point. A default is filled in at the call site, so each
+// call supplies *its own* position — that is what makes `panic` name the line
+// that called it rather than the line inside `core` that raised it. Written
+// anywhere else, `#caller_location` would have to mean "the location of this
+// expression", which is a different and much less useful thing, so it is
+// refused.
+//
+// The fields are `@public(all)`: a location that cannot be read is not a
+// location.
+
+@public(all)
+Location :: #lang("location") struct {
+  // The source file, as the compiler was given it.
+  file: str,
+  // 1-based, counted the way an editor counts.
+  line:   u32,
+  // 1-based, counted in `char`s from the start of the line — not in bytes, so a
+  // line with text outside ASCII still points where a reader would look.
+  column: u32,
+}

@@ -128,6 +128,7 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         }
         TypePath { .. } => "TypePath".into(),
         TypeHole => "TypeHole _".into(),
+        CallerLocation => "CallerLocation #caller_location".into(),
         AssocBinding { name, .. } => format!("AssocBinding {name} ="),
         PtrType { mutable, .. } => format!("PtrType *{}", mut_tag(*mutable)),
         SliceType { mutable, .. } => format!("SliceType []{}", mut_tag(*mutable)),

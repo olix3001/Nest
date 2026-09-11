@@ -251,6 +251,15 @@ but its effect is described where operators are (§6.13).
   writes `#lang`: the set is the compiler's, and a program that could declare its
   own would be asking for a body no compiler knows how to fill.
 
+### Source positions (`#caller_location`)
+
+- **`#caller_location`** — an **expression**, not a decoration: it evaluates to a
+  `Location` describing the **call site**, and it is legal only as a default
+  argument. See §5.2, which covers the rule and the reason for it. It is spelled
+  with a `#` rather than as a name so that it cannot be shadowed, re-exported or
+  passed around; the only place it means anything is the one position that gives
+  it a meaning.
+
 ### Implementations (not a directive)
 
 Implementations were once the `#impl(...)` directive; they are now the **`impl`

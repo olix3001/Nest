@@ -64,11 +64,13 @@ pub fn lower_file(
     lang: &LangItems,
     asts: &HashMap<FileId, Ast>,
     meta: &Meta,
+    sources: &crate::common::source::SourceMap,
     file: FileId,
 ) -> Program {
     let ast = &asts[&file];
     let mut lo = Lowerer {
         defs,
+        sources,
         lang,
         ast,
         asts,
@@ -114,6 +116,9 @@ pub fn lower_file(
 
 struct Lowerer<'a> {
     defs: &'a DefTable,
+    /// The program's source text, for the one construct that needs a line and a
+    /// column rather than a byte span: `#caller_location`.
+    sources: &'a crate::common::source::SourceMap,
     /// The `#lang` registry, consulted for the types an operator's desugaring
     /// mentions but the surface syntax never wrote — `Ordering`, for the `cmp`
     /// a user-type comparison lowers to.
@@ -1145,7 +1150,7 @@ impl Lowerer<'_> {
             // A tuple struct's fields are positions, not parameters: they take no
             // defaults and reject named arguments, so every slot is written.
             let fields = self
-                .lower_args(None, slots)
+                .lower_args(None, slots, node)
                 .into_iter()
                 .enumerate()
                 .map(|(i, e)| (Symbol::new(&i.to_string()), e))
@@ -1159,11 +1164,11 @@ impl Lowerer<'_> {
         // why the tag, and not the function's name or path, is what a later
         // stage keys on.
         if let Some(tag) = target.and_then(|d| self.defs.get(d).intrinsic_tag()) {
-            let args = self.lower_args(target, slots);
+            let args = self.lower_args(target, slots, node);
             return self.lower_intrinsic(node, tag, args, ty);
         }
         let callee = Box::new(self.lower_expr(callee));
-        let args = self.lower_args(target, slots);
+        let args = self.lower_args(target, slots, node);
         self.expr(
             node,
             ty,
@@ -1207,12 +1212,20 @@ impl Lowerer<'_> {
     /// declaration owns. Here there is no such conflict — the default is lowered
     /// once against its declaration and the result is *cloned* into each site,
     /// so a default like `.{}` still builds a fresh value per call.
-    fn lower_args(&mut self, callee: Option<DefId>, slots: &[Option<NodeId>]) -> Vec<Expr> {
+    fn lower_args(&mut self, callee: Option<DefId>, slots: &[Option<NodeId>], at: NodeId) -> Vec<Expr> {
         let mut out = Vec::with_capacity(slots.len());
         for (i, slot) in slots.iter().enumerate() {
             match slot {
                 Some(a) => out.push(self.lower_expr(*a)),
                 None => {
+                    // `#caller_location` is the one default that cannot be
+                    // lowered once and cloned: its whole value is *which call
+                    // site asked*. The cache below would hand every caller the
+                    // declaration's position, so it is built here, from `at`.
+                    if self.default_is_caller_location(callee, i) {
+                        out.push(self.caller_location(at));
+                        continue;
+                    }
                     let d = callee.and_then(|c| self.param_default(c, i));
                     // A hole with no default behind it means inference and
                     // lowering disagree about the signature; a typed `Error`
@@ -1231,6 +1244,94 @@ impl Lowerer<'_> {
             }
         }
         out
+    }
+
+    /// Whether `def`'s `i`-th value parameter defaults to `#caller_location`.
+    fn default_is_caller_location(&self, def: Option<DefId>, i: usize) -> bool {
+        let Some(def) = def else { return false };
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return false;
+        };
+        let Some(ast) = self.asts.get(&file) else {
+            return false;
+        };
+        let rhs = match &ast.node(node).kind {
+            NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let NodeKind::FuncExpr { params, .. } = &ast.node(rhs).kind else {
+            return false;
+        };
+        params
+            .iter()
+            .filter_map(|&p| match &ast.node(p).kind {
+                NodeKind::Param { name, default, .. } if name.as_str() != "self" => Some(*default),
+                _ => None,
+            })
+            .nth(i)
+            .flatten()
+            .is_some_and(|d| matches!(ast.node(d).kind, NodeKind::CallerLocation))
+    }
+
+    /// Build the `Location` value for the call site `at` (§5.2).
+    ///
+    /// This is an ordinary struct construction with three constant fields, not a
+    /// new IR node: every stage after this one — the `#const` check, the const
+    /// evaluator, codegen — already knows what a `Construct` of literals is, and
+    /// a location is exactly that once the position is resolved.
+    fn caller_location(&mut self, at: NodeId) -> Expr {
+        let node = self.ast.node(at);
+        let (file, span) = (node.file, node.span);
+        let ty = match self.lang.get("location") {
+            Some(def) => Ty::Nominal {
+                def: self.defs.resolve_alias(def),
+                args: Vec::new(),
+            },
+            // Inference already reported the missing lang item.
+            None => return self.expr(at, Ty::Error, ExprKind::Error),
+        };
+        let Ty::Nominal { def, .. } = &ty else {
+            unreachable!()
+        };
+        let def = *def;
+        let (name, line, column) = match self.sources.file(file) {
+            Some(src) => {
+                let lc = src.line_col(span.start);
+                (src.name.clone(), lc.line, lc.column)
+            }
+            // A file with no recorded text (an in-memory test fixture that was
+            // never added to the map) still gets a well-formed value.
+            None => (String::new(), 0, 0),
+        };
+        // The literal's type is `str`, the `#lang("str")` item — found by tag,
+        // like the location type itself.
+        let str_ty = match self.lang.get("str") {
+            Some(d) => Ty::Nominal {
+                def: self.defs.resolve_alias(d),
+                args: Vec::new(),
+            },
+            None => Ty::Error,
+        };
+        let u32_ty = Ty::Int {
+            signed: false,
+            width: crate::sema::ty::IntWidth::Fixed(32),
+        };
+        let fields = vec![
+            (
+                Symbol::new("file"),
+                self.expr(at, str_ty, ExprKind::Lit(Lit::Str(name))),
+            ),
+            (
+                Symbol::new("line"),
+                self.expr(at, u32_ty.clone(), ExprKind::Lit(Lit::Int(line.into()))),
+            ),
+            (
+                Symbol::new("column"),
+                self.expr(at, u32_ty, ExprKind::Lit(Lit::Int(column.into()))),
+            ),
+        ];
+        self.expr(at, ty, ExprKind::Construct { def, fields })
     }
 
     /// The lowered default of `def`'s `i`-th **value** parameter, if it has one.
@@ -1341,7 +1442,7 @@ impl Lowerer<'_> {
             }
         };
         let mut call_args = vec![self.adjust_recv(recv, res.adjust, &res.self_ty)];
-        let lowered = self.lower_args(Some(res.method), slots);
+        let lowered = self.lower_args(Some(res.method), slots, node);
         call_args.extend(lowered);
         // A method may be `#intrinsic` too — `x.wrapping_add(y)` is one (§3.1) —
         // and it lowers the same way a free intrinsic call does, with the

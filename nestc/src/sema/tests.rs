@@ -4212,6 +4212,70 @@ fn a_comptime_item_no_longer_needs_a_sigil() {
 }
 
 #[test]
+fn caller_location_is_filled_in_at_each_call_site() {
+    // §5.2: `#caller_location` is a **default argument**, and a default is
+    // filled in at the call site — which is the whole of why it names the
+    // caller. Two calls in one function get two different positions, and the
+    // cache that lowers every other default once and clones it must not apply.
+    let src = "\
+{ Location } :: import <core/loc>
+report :: func (msg: str, loc: Location := #caller_location) -> u32 { return loc.line }
+main :: func () {
+  const a := report(\"x\")
+  const b := report(\"y\")
+}
+";
+    let s = analyze_clean(src);
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    assert!(ir.contains("line: 4: u32"), "{ir}");
+    assert!(ir.contains("line: 5: u32"), "{ir}");
+
+    // It is an ordinary default, so writing the argument still wins.
+    analyze_clean(
+        "{ Location } :: import <core/loc>\n\
+         r :: func (loc: Location := #caller_location) -> u32 { return loc.line }\n\
+         f :: func () -> u32 { return r(Location { file: \"f\", line: 9, column: 1 }) }\n",
+    );
+    // And a method's default works the same way.
+    analyze_clean(
+        "{ Location } :: import <core/loc>\n\
+         P :: struct { n: i32 }\n\
+         impl P { m :: func (self: P, loc: Location := #caller_location) -> u32 { return loc.line } }\n\
+         f :: func (p: P) -> u32 { return p.m() }\n",
+    );
+}
+
+#[test]
+fn caller_location_is_only_a_default_argument() {
+    // Anywhere else it could only mean "the position of this expression", which
+    // is a different thing and one nothing asked for. Refusing it keeps the one
+    // meaning it has.
+    for src in [
+        "{ Location } :: import <core/loc>\nf :: func () -> Location { return #caller_location }\n",
+        "f :: func () { const x := #caller_location }\n",
+    ] {
+        assert!(
+            first_error(src).contains("`#caller_location` is only a default argument"),
+            "{src}"
+        );
+    }
+    // No other directive is an expression.
+    assert!(first_error("f :: func () { const x := #inline }\n").contains("`#inline` is not an expression"));
+}
+
+#[test]
+fn panic_reports_the_line_that_called_it() {
+    // The reason the feature exists. `panic` is declared in `core` with a
+    // `#caller_location` default, so the location it carries is the program's
+    // line, not the declaration's in `core/fail.nest`.
+    let s = analyze_clean("main :: func () {\n  panic(\"boom\")\n}\n");
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    assert!(ir.contains("line: 2: u32"), "{ir}");
+}
+
+#[test]
 fn a_distinct_type_does_not_convert_implicitly() {
     assert!(
         first_error("Meters :: distinct i32\nf :: func (m: Meters) -> i32 { return m }\n")

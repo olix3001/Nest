@@ -523,6 +523,7 @@ fn lower_one(session: &mut Session, file: FileId) {
         &session.lang_items,
         &session.asts,
         &session.ir_meta,
+        &session.sources,
         file,
     );
     session.ir.insert(file, program);

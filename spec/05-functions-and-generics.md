@@ -93,10 +93,46 @@ Rules:
   written — not at each call site.
 - A default must be **compile-time known at the call site** (§5.1): a literal, a
   path to a `const` item or `const` generic parameter, a composite literal whose
-  elements are all constant, a `cast` of a constant, a location directive
-  (`#caller_location`), or a call to a `#const` function. Note that this is not the same as
-  "a single fixed value" — `#caller_location` differs at every call site and is
-  still admissible, because each site knows its own.
+  elements are all constant, a `cast` of a constant, `#caller_location`, or a
+  call to a `#const` function. Note that this is not the same as "a single fixed
+  value" — `#caller_location` differs at every call site and is still
+  admissible, because each site knows its own.
+
+### `#caller_location`
+
+`#caller_location` is the position of the **call site**, as a `Location`. It is
+an expression, and the only place it is legal is a default argument:
+
+```nest
+{ Location } :: import <core/loc>
+
+report :: func (msg: str, loc: Location := #caller_location) {
+  // `loc.file`, `loc.line`, `loc.column` name the line that called `report`
+}
+```
+
+That restriction is the feature, not a limitation of it. A default is filled in
+at the call site, so each call supplies its own position — which is exactly what
+makes `panic` name the line that raised it rather than the line inside `core`
+that declares it. Written anywhere else it could only mean "the position of this
+expression", which is a different thing, so it is refused.
+
+`Location` is an ordinary struct in `core`, found by its `#lang("location")` tag
+like everything else the compiler wires syntax to:
+
+```nest
+// core/loc.nest
+@public(all)
+Location :: #lang("location") struct { file: str, line: u32, column: u32 }
+```
+
+It is **not** in the prelude: a function only needs to name the type in order to
+*declare* such a parameter, which is a deliberate act that can afford a line of
+import (§4.6). Line and column are 1-based, and the column counts `char`s rather
+than bytes.
+
+It is an ordinary default in every other respect — writing the argument at a call
+site overrides it, and a method may declare one.
 - An omitted argument is filled in during lowering, so the compiled call is
   ordinary and positional; nothing after that stage knows a default was involved.
 

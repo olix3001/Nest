@@ -370,6 +370,10 @@ pub enum NodeKind {
     },
     /// `[name:] value` — one call argument.
     Arg { name: Option<Symbol>, value: NodeId },
+    /// `#caller_location` — the position of the call site, as a `Location`
+    /// (§5.2). Legal only as a **default argument**: a default is filled in at
+    /// the call site, which is exactly what makes it name the caller.
+    CallerLocation,
     /// `[Type] { body }` / `.{ body }` — record, array, or repeat literal.
     ///
     /// The typed tuple-struct form `Type(args...)` is syntactically identical to a
@@ -628,6 +632,7 @@ impl NodeKind {
         match self {
             Continue
             | Lit(_)
+            | CallerLocation
             | Path { .. }
             | TypeHole
             | Import { .. }

@@ -349,6 +349,11 @@ impl Parser {
                 self.bump();
                 self.alloc(span, NodeKind::Lit(Lit::Bool(false)))
             }
+            // `#caller_location` in expression position. It is a directive
+            // spelling rather than a name so that it cannot be shadowed,
+            // re-exported, or passed around: the only place it means anything is
+            // a default argument, and inference enforces that.
+            Some(TokenKind::Hash) => self.parse_location_directive(),
             Some(TokenKind::Ident(_)) => {
                 let name = self.expect_ident();
                 self.alloc(
@@ -390,6 +395,20 @@ impl Parser {
                 self.error_node(span, msg)
             }
         }
+    }
+
+    /// `#caller_location` — the one directive that is an *expression* (§5.2).
+    fn parse_location_directive(&mut self) -> NodeId {
+        let start = self.cur_span();
+        self.bump(); // '#'
+        let name = self.expect_ident();
+        let span = start.to(self.cur_span());
+        if name.as_str() != "caller_location" {
+            let msg = format!("`#{name}` is not an expression");
+            self.error(span, msg);
+            return self.error_node(span, "expected an expression");
+        }
+        self.alloc(span, NodeKind::CallerLocation)
     }
 
     /// `( )` unit, `( expr )` grouping, or `( expr { ',' expr } )` tuple.

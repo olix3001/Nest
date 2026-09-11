@@ -6,14 +6,17 @@
 // sitting beside the prelude's `panic` *function* would be one name meaning two
 // things. `str.nest` is left unexported for the same reason.
 
-// Abort the program with a message (§8). `#caller_location` is what makes the
-// report name the line that called `panic`, rather than this declaration —
-// without it every panic in the program would point here.
+{ Location } :: import "loc.nest"
+
+// Abort the program with a message (§8). The `loc` default is what makes the
+// report name the line that called `panic`, rather than this declaration: a
+// default argument is filled in **at the call site**, so each call supplies its
+// own position (§5.2). Without it every panic in the program would point here.
 //
 // The return type is `never`, which is the whole of why a `panic` may sit in any
 // expression position: the signature *promises* divergence, so the type checker
 // needs no special case for it (§3.1).
-@public panic :: #caller_location #intrinsic("panic") func (msg: str) -> never
+@public panic :: #intrinsic("panic") func (msg: str, loc: Location := #caller_location) -> never
 
 // A compile-time assertion (§6.10). Checked during compilation, producing no
 // run-time code; the run-time `assert` is an ordinary `std` function, not this.

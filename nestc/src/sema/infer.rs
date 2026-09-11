@@ -326,6 +326,7 @@ pub fn infer_file(
                 impls,
                 in_scope_traits: &in_scope_traits,
                 lang_traits: &lang_traits,
+                in_default: false,
                 file,
                 target,
                 cx: {
@@ -419,6 +420,19 @@ fn binds_a_value(defs: &DefTable, asts: &HashMap<FileId, Ast>, ast: &Ast, node: 
 /// like every other language item.
 fn str_lang_ty(defs: &DefTable, lang: &LangItems) -> Option<Ty> {
     lang.get("str").map(|def| Ty::Nominal {
+        def: defs.resolve_alias(def),
+        args: Vec::new(),
+    })
+}
+
+/// The `#lang("location")` type, or `None` when the program declares no such
+/// item.
+///
+/// `Location` is not a compiler primitive — it is an ordinary struct in core
+/// (§5.2), found by tag like everything else the compiler wires syntax to, so a
+/// `core` that names it differently still works.
+fn location_lang_ty(defs: &DefTable, lang: &LangItems) -> Option<Ty> {
+    lang.get("location").map(|def| Ty::Nominal {
         def: defs.resolve_alias(def),
         args: Vec::new(),
     })
@@ -545,6 +559,11 @@ struct Inferer<'a> {
     /// Traits carrying a `#lang` tag. Selectable everywhere, because the
     /// compiler — not the program — is what named them.
     lang_traits: &'a HashSet<DefId>,
+    /// Whether the expression being inferred is a **default argument**. The one
+    /// thing that cares is `#caller_location`, which is meaningless anywhere
+    /// else: a default is filled in at the call site, and that is the whole of
+    /// why it names the caller (§5.2).
+    in_default: bool,
     file: FileId,
     /// The machine being compiled for. Only `isize` / `usize` depend on it
     /// today, through [`IntWidth::bits`](super::ty::IntWidth::bits).
@@ -612,7 +631,9 @@ impl Inferer<'_> {
                 // `i32` exactly as a written argument would.
                 if let Some(d) = default {
                     self.reject_param_refs_in_default(d, &param_defs);
+                    let outer = std::mem::replace(&mut self.in_default, true);
                     let dty = self.infer_expr(d);
+                    self.in_default = outer;
                     self.expect(d, &dty, &pty);
                 }
                 if let Some(def) = self.def_of(*p) {
@@ -743,6 +764,7 @@ impl Inferer<'_> {
                     None => Ty::Void,
                 }
             }
+            NodeKind::CallerLocation => self.infer_caller_location(node),
             NodeKind::Lit(lit) => {
                 // Keep the literal's exact value so `finish` can check it fits
                 // whatever runtime integer type it settles on.
@@ -3776,6 +3798,34 @@ impl Inferer<'_> {
     }
 
     // ===< field access >===
+
+    /// Type `#caller_location` (§5.2).
+    ///
+    /// It is only ever a **default argument**. A default is filled in at the
+    /// call site, which is exactly what makes this name the caller rather than
+    /// the declaration; written anywhere else it could only mean "the position
+    /// of this expression", which is a different thing and one nothing asked
+    /// for. Refusing it there keeps the one meaning it has.
+    fn infer_caller_location(&mut self, node: NodeId) -> Ty {
+        if !self.in_default {
+            self.report(
+                node,
+                "`#caller_location` is only a default argument — write it as \
+                 `loc: Location := #caller_location` on the parameter that receives it",
+            );
+            return Ty::Error;
+        }
+        match location_lang_ty(self.defs, self.lang) {
+            Some(t) => t,
+            None => {
+                self.report(
+                    node,
+                    "`#caller_location` requires the `#lang(\"location\")` item",
+                );
+                Ty::Error
+            }
+        }
+    }
 
     /// Apply the one rule an intrinsic needs beyond its declared signature
     /// (§6.4), if `def` is one and it has such a rule.
