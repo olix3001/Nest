@@ -1136,7 +1136,22 @@ impl Inferer<'_> {
             // synthetic `__it` / `__try` the desugarer introduced): type its RHS
             // and bind the pattern, exactly like an un-annotated `let`.
             NodeKind::ConstBind { pattern, rhs } => {
-                let vty = self.infer_expr(rhs);
+                // A block-local binding may be **typed** — `#static n: u8 :: 0`
+                // is the function-local form of §2.6, and a local `A: u8 :: 5`
+                // pins a constant the same way a namespace one does. The type is
+                // what the binding *is*, so it is read here rather than inferred
+                // from the initializer.
+                let vty = match self.ast.node(rhs).kind.clone() {
+                    NodeKind::AssocConst { ty, default } => {
+                        let want = self.ty_from_node(ty);
+                        if let Some(d) = default {
+                            let got = self.infer_expr(d);
+                            self.expect(d, &got, &want);
+                        }
+                        want
+                    }
+                    _ => self.infer_expr(rhs),
+                };
                 self.bind_pattern(pattern, &vty);
             }
             NodeKind::Assign { place, value, .. } => {

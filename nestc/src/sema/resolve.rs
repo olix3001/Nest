@@ -261,7 +261,17 @@ impl Resolver<'_> {
                 // (§2.6): a program-lifetime region that outlives the call. The
                 // directive sits on the enclosing `Decl`, which is why the walk
                 // records it on the way down.
-                self.bind_pattern(pattern, self.decl_static);
+                //
+                // A function-local one is a **global** that happens to be named
+                // inside a block — C's `static` local. So it is introduced as a
+                // `DefKind::Const` region rather than a `Local`, which is what
+                // puts it in front of `lower_globals`; only its *visibility* is
+                // the block's, and that comes from the scope frame either way.
+                if self.decl_static {
+                    self.introduce_static(pattern, id);
+                    return;
+                }
+                self.bind_pattern(pattern, false);
             }
             // A decorated item. The directives are carried by collection, but
             // `#static` changes what the binding underneath *is*, so it has to
@@ -727,6 +737,24 @@ impl Resolver<'_> {
     }
 
     /// [`Resolver::introduce`], recording whether the binding may be assigned to.
+    /// Introduce a function-local `#static` as a program-lifetime region.
+    ///
+    /// The def points at the **binding**, not the pattern, because that is where
+    /// its type and initializer are and what every consumer of a global reads.
+    fn introduce_static(&mut self, pattern: NodeId, bind: NodeId) {
+        let NodeKind::BindingPat { name, .. } = self.ast.node(pattern).kind.clone() else {
+            // A destructuring `#static` names no single region; the binding form
+            // is reported elsewhere, and treating it as ordinary locals here
+            // keeps the rest of the body resolvable.
+            self.bind_pattern(pattern, true);
+            return;
+        };
+        self.introduce_binding(name, DefKind::Const, pattern, true);
+        if let Some(def) = self.def_of(pattern) {
+            self.defs.get_mut(def).node = Some(bind);
+        }
+    }
+
     fn introduce_binding(&mut self, name: Symbol, kind: DefKind, node: NodeId, mutable: bool) {
         let scope = self.current_ns();
         let span = self.ast.node(node).span;

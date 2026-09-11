@@ -5692,8 +5692,23 @@ fn a_static_names_a_region_and_must_say_how_wide() {
     analyze_clean("#static COUNT: usize :: 0\nf :: func () { COUNT = COUNT + 1 }\n");
     analyze_clean("#static SCRATCH: [8]u8\nf :: func () {}\n");
     // Inside a function, this is the only way to name a region: `let` and
-    // `const` are run-time bindings and cannot outlive the call.
-    analyze_clean("f :: func () {\n  #static CALLS: usize :: 0\n  CALLS = CALLS + 1\n}\n");
+    // `const` are run-time bindings and cannot outlive the call. It is a
+    // **global** that happens to be named inside a block — C's `static` local —
+    // so it is emitted as one, and only its visibility is the block's.
+    let s = analyze_clean(
+        "f :: func () -> usize {\n  #static CALLS: usize :: 0\n  CALLS = CALLS + 1\n  return CALLS\n}\n",
+    );
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    assert!(ir.contains("static CALLS: usize"), "{ir}");
+    // The declared type is what the region *is*, so the reads are `usize` and
+    // not the `isize` an un-annotated integer literal would default to.
+    assert!(!ir.contains("isize"), "{ir}");
+    // An ordinary local binding is still a local.
+    let s = analyze_clean("f :: func () -> i32 {\n  const A: i32 := 5\n  return A\n}\n");
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    assert!(!ir.contains("static A"), "{ir}");
 
     assert!(
         first_error("#static COUNT :: 0\n").contains("a `#static` needs an explicit type")
