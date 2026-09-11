@@ -5037,7 +5037,7 @@ fn a_const_argument_must_match_the_type_of_its_slot() {
         first_error(
             "f :: func <const N: usize> () -> usize { return N }\ng :: func () -> usize { return f.<true>() }\n"
         )
-        .contains("a `const` argument of type `usize` cannot be written this way")
+        .contains("a `const` argument is a `usize`, and this is not one")
     );
     // An array length is the one slot whose type is fixed: `[N]T` is a `usize`
     // count (§3.2). A parameter of another type standing in one is caught at the
@@ -5045,6 +5045,108 @@ fn a_const_argument_must_match_the_type_of_its_slot() {
     assert!(
         first_error("zeros :: func <const N: u32> () -> [N]i32 { return .{ 0; 4 } }\n")
             .contains("`N` is a `const u32`, but an array length must be a `usize`")
+    );
+}
+
+#[test]
+fn a_const_parameter_in_a_type_is_checked_as_a_type() {
+    // A `const` generic is not just a value the body reads: it appears *in
+    // types*, so it has to take part in type checking everywhere a type does.
+    // These are the places it shows up, and what each has to say.
+
+    // Solved from the argument, and carried into the return type — so a `[3]u32`
+    // in and a `[4]u32` annotation out is a mismatch stated in the lengths, not
+    // in `N`.
+    analyze_clean(
+        "f :: func <const N: usize> (a: [N]u32) -> usize { return N }\n\
+         g :: func () -> usize { const a := [_]u32 { 1, 2, 3 }\n  return f(a) }\n",
+    );
+    assert!(
+        first_error(
+            "f :: func <const N: usize> (a: [N]u32) -> [N]u32 { return a }\n\
+             g :: func () { const b: [4]u32 := f([_]u32 { 1, 2, 3 }) }\n"
+        )
+        .contains("expected `[4]u32`, found `[3]u32`")
+    );
+
+    // An explicit argument that contradicts the call's own argument is the same
+    // mismatch: `N` is pinned to 4 first, then the `[3]u32` fails to fit.
+    assert!(
+        first_error(
+            "f :: func <const N: usize> (a: [N]u32) -> usize { return N }\n\
+             g :: func () -> usize { return f.<4>([_]u32 { 1, 2, 3 }) }\n"
+        )
+        .contains("expected `[4]u32`, found `[3]u32`")
+    );
+
+    // Inside a generic body `N` stays symbolic, so a repeat literal counted by
+    // `N` builds a `[N]u32` and a literal of a *fixed* count does not.
+    analyze_clean(
+        "f :: func <const N: usize> () -> [N]u32 { const a: [N]u32 := .{ 0; N }\n  return a }\n",
+    );
+    assert!(
+        first_error(
+            "f :: func <const N: usize> () -> [N]u32 { const a: [N]u32 := [_]u32 { 1, 2 }\n  return a }\n"
+        )
+        .contains("expected `[N]u32`, found `[2]u32`")
+    );
+    assert!(
+        first_error("f :: func <const N: usize> () { const x: [4]u32 := [N]u32 { 1, 2, 3, 4 } }\n")
+            .contains("this literal has 4 element(s) but the array is `[N]`")
+    );
+
+    // Two distinct parameters are two distinct lengths. Nothing says they agree,
+    // so nothing may assume it.
+    assert!(
+        first_error(
+            "g :: func <const M: usize, const K: usize> (a: [M]u32) -> [K]u32 { return a }\n"
+        )
+        .contains("expected `[K]u32`, found `[M]u32`")
+    );
+
+    // Nesting works, and one generic serves two different lengths at once.
+    analyze_clean(
+        "f :: func <const N: usize, const M: usize> (a: [N][M]u32) -> [M]u32 { return a[0] }\n\
+         g :: func () -> [2]u32 { const a := [_][2]u32 { [_]u32{1,2}, [_]u32{3,4} }\n  return f(a) }\n",
+    );
+    analyze_clean(
+        "f :: func <const N: usize> (a: [N]u32) -> usize { return N }\n\
+         g :: func () -> usize { return f([_]u32{1,2}) + f([_]u32{1,2,3}) }\n",
+    );
+}
+
+#[test]
+fn a_const_parameter_is_a_value_of_its_declared_type() {
+    // `N` names a value in the body (§5), and that value has the parameter's
+    // type — not "some integer". A `bool` parameter is a `bool` everywhere.
+    analyze_clean("f :: func <const N: usize> () -> usize { return N + 1 }\n");
+    analyze_clean("f :: func <const B: bool> () -> bool { return B }\n");
+    for (src, needle) in [
+        (
+            "f :: func <const B: bool> () -> usize { return B }\n",
+            "expected `usize`, found `bool`",
+        ),
+        (
+            "f :: func <const C: char> () -> usize { return C }\n",
+            "expected `usize`, found `char`",
+        ),
+        (
+            "f :: func <const X: f32> () -> usize { return X }\n",
+            "expected `usize`, found `f32`",
+        ),
+        (
+            "f :: func <const N: i8> () -> usize { return N }\n",
+            "expected `usize`, found `i8`",
+        ),
+    ] {
+        assert!(first_error(src).contains(needle), "{src}");
+    }
+
+    // A named constant of the wrong type is refused in a length slot too, and
+    // the message names the slot rather than "a `const` argument".
+    assert!(
+        first_error("FLAG :: true\nf :: func () { const a: [FLAG]u32 := .{ 0; 1 } }\n")
+            .contains("an array length is a `usize`, and this is not one")
     );
 }
 

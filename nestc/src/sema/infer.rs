@@ -4433,7 +4433,7 @@ impl Inferer<'_> {
             _ => None,
         };
         if let Some(lit) = lit {
-            return self.const_from_lit(file, node, &lit, want);
+            return self.const_from_lit(file, node, &lit, want, what);
         }
         match kind {
             // `[_]T` — the length is whatever the value supplies.
@@ -4459,7 +4459,14 @@ impl Inferer<'_> {
     /// one. Range is checked here for the same reason it is checked for a typed
     /// constant (§2.5): this is where the arbitrary-precision number is still in
     /// hand.
-    fn const_from_lit(&mut self, file: FileId, node: NodeId, lit: &Lit, want: &Ty) -> Const {
+    fn const_from_lit(
+        &mut self,
+        file: FileId,
+        node: NodeId,
+        lit: &Lit,
+        want: &Ty,
+        what: &'static str,
+    ) -> Const {
         let value = match (lit, want) {
             (Lit::Int(n), Ty::Int { signed, width }) => {
                 if !super::ty::int_fits(n, *signed, *width, self.target) {
@@ -4485,7 +4492,7 @@ impl Inferer<'_> {
             (_, Ty::Error) => return Const::Error,
             _ => {
                 let msg = format!(
-                    "a `const` argument of type `{}` cannot be written this way",
+                    "{what} is a `{}`, and this is not one",
                     want.display(self.defs)
                 );
                 self.report_in(file, node, msg);
