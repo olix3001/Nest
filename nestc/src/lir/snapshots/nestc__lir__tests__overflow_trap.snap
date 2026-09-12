@@ -25,7 +25,7 @@ func add(a_0: i32, b_1: i32) -> i32  // _NC3add
   let _3: core.Location
 bb0:                    // entry
   _2 := checked_add(a_0, b_1)
-  switch _2.overflowed { 1 => bb1, _ => bb2 }
+  switch _2.1 { 1 => bb1, _ => bb2 }
 bb1:                    // overflow
   _3 := Location("mem:main", 1, 46)
   call core.panic("integer overflow", _3)

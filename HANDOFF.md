@@ -301,8 +301,13 @@ is a thing a backend has to learn that it already knows how to do.
 
 What follows is that change and the others of its kind, each with the shape to
 move to, the obstacle in the way, and what it costs to leave alone. **A is the
-one that was asked for.** B–D are the same mistake in other places. E–G are
-cheaper and independent. H is the big one and goes last.
+one that was asked for.** B–D are the same mistake in other places. G and I–N
+came out of a second pass over `lir/mod.rs` looking for anything a backend
+would have to *learn* rather than read. H is the big one and goes last.
+
+**E and F are already done** — they were small enough to do rather than
+describe, and they are kept here with their reasoning so the list reads as one
+audit rather than two.
 
 ### A. A vtable is a global, not a table beside the program
 
@@ -407,32 +412,39 @@ them to one case carrying the type. Keep **`Array`**, because an array does not
 flatten (§7b), and keep **`Variant`**, because it is the one aggregate whose
 construction needs a value the fields do not carry — the tag.
 
-### E. `Offset` carries a `Ty` where everything else carries a number
+### E. `Offset` carries a stride — **done**
 
-Every size in LIR is a number: `TypeDef::layout`, every `TypeMember::offset`.
-`Rvalue::Offset { ptr, index, elem: Ty }` is the exception, and it sends the
-backend back through the layout engine for a stride the compiler has already
-computed. Make it `stride: u64`. This is the pointer-size caveat the
-requirement allows, and it is already how the rest of the type table works.
+`Rvalue::Offset { ptr, index, stride: u64 }`. It used to carry the element
+`Ty`, which sent a backend back through the layout engine for a number this
+compiler had already computed, while every other size in LIR — a `TypeDef`'s
+layout, every member offset — was a number. `Cx::stride` is the element
+layout's size, tail padding included, which is what an array stride is. The
+dump reads `_6 := _3.*.ptr + k_2 * 4`.
 
-### F. A field's name and its type's member names should agree
+### F. A projection's name agrees with its type — **done**
 
-`checked_add` yields a `(i32, bool)` whose `TypeDef` members are named `0` and
-`1`, and the projections that read it are `.0` and **`.overflowed`** — a name
-the type does not have. The index is authoritative so nothing miscompiles, but
-a dump that names a member which is not in the type is a trap for the next
-reader. Either name the tuple's members `0`/`1` at the projection, or give the
-checked result a real `TypeDef` with `{ value, overflowed }`. The second is
-better and costs one type per width.
+The checked-arithmetic result is a `(T, bool)` whose `TypeDef` members are `0`
+and `1`, and the overflow test read `.overflowed` — a member the type does not
+have. Nothing miscompiled, since the index is authoritative, but a dump that
+names a member which is not in the type is a trap for the next reader. It is
+`.1` now. (The alternative — a real `{ value, overflowed }` type per width —
+buys a nicer dump for a type per integer width, which is not worth it.)
 
 ### G. `StmtKind::Intrinsic` is keyed by a `Symbol`
 
-The set that survives to LIR is closed — `new`, `make`, `transmute`, `trap`,
-`assert`, `wrapping_add`, `wrapping_sub`, `gc_collect`, `gc_keep_alive`,
-`gc_pin`, and `embed_file` if it reaches here at all (check). A `Symbol` makes
-a backend's match non-exhaustive, so a name added upstream is a silent
-fall-through instead of a compile error. Make it an enum. Confirm the list by
-walking `sema::intrinsics` against what `lir::lower` handles before this pass.
+A `Symbol` makes a backend's match non-exhaustive: a name added upstream is a
+silent fall-through instead of a compile error. Make it an enum.
+
+The set is closed, and here is the walk. `sema::intrinsics` declares `cast`,
+`transmute`, `size_of`, `align_of`, `new`, `drop`, `index`, `embed_file`,
+`trap`, `assert`, `wrapping_add`, `wrapping_sub`, `gc_collect`,
+`gc_keep_alive`, `gc_pin`. `sema::lower` synthesizes more as it desugars —
+`slice`, `format`, `array`, `repeat`, `len`, and `cast` again — and `make` and
+`index_mut` arrive through `core`'s `#intrinsic` members. Of those,
+`lir::lower` **handles and removes** `size_of`, `align_of`, `cast`, `drop`,
+`index`, `index_mut`, `len` and `array`; everything else falls through to
+`emit_intrinsic` and reaches a backend by name. Confirm the residue by running
+the walk again before writing the enum — the two lists drift.
 
 ### H. `Program` is not standalone: `Ty::Nominal` needs the `DefTable`
 
@@ -446,6 +458,91 @@ consumer.
 It is last because it touches every file in `lir/` and every test that spells a
 type. Doing A–G first means doing it once, over the simpler shape.
 
+### I. One call statement, not two
+
+`StmtKind::Call { dest, callee, args }` and `StmtKind::Intrinsic { dest, name,
+args }` have the same shape and the same meaning — *run this thing, put the
+answer here*. Once G has made the intrinsic set an enum, the two collapse:
+
+```rust
+pub enum Callee {
+    Static { … },
+    Indirect(Operand),
+    Intrinsic(Intrinsic),   // the enum from G
+}
+```
+
+Three statement kinds left — `Assign`, `Call`, `Drop` — which is the smallest
+the instruction set can honestly be. Do it in the same pass as G; separately it
+is two migrations of the same call sites.
+
+### J. Mutability is carried at LIR and means nothing there
+
+`Rvalue::Ref { mutable }`, `Ty::Ptr { mutable }`, `Ty::Slice { mutable }` and
+`Ty::Array { mutable }` all survive into LIR, and **no** target distinguishes
+them: LLVM, C and wasm each have one address. The mutability check ran in
+sema; by here it is a field a backend reads and does not use, and worse, `*T`
+and `*mut T` are two entries in the type table for one machine type.
+
+Strip it the way `distinct` is stripped (`Cx::strip`, one more clause) so
+pointer types unify, and drop `mutable` from `Rvalue::Ref`. Two cautions:
+`mono::type_key` mangles mutability, so the *symbol* must keep using the
+unstripped type — the same rule that already stops `strip` from descending into
+a nominal's generic arguments — and the `#mutating` directive on functions is
+separate and stays.
+
+### K. `Constant` and `ConstValue` overlap
+
+`Constant::Value(ConstValue)` embeds a sema enum that has its own `Void`, while
+`Constant::Undef` means the same nothing. `ConstValue::Str` and
+`ConstValue::Aggregate` are the blobs B is about. After A and B, `Constant`
+should be the whole of what an operand can be — scalar, address of a function,
+address of a global, aggregate of those, undef — and `ConstValue` should appear
+in LIR only as the scalar case, if at all. This is a cleanup that only makes
+sense *after* B, or it will be done twice.
+
+### L. `Callee::Static` and `Constant::Func` carry three names for one thing
+
+`{ def: DefId, name: String, symbol: Symbol }`. The linker needs `symbol`;
+`name` is the dump's; `def` is what makes `Program` need the `DefTable`. Once H
+lands, check whether anything reads `def` and delete it if not. Keep `name` —
+a dump that prints mangled symbols is a dump nobody reads.
+
+### M. `Function::directives` is a sema type in a backend's face
+
+`Vec<Directive>` comes straight from the front end, with `DirectiveArg` values
+shaped by the AST. A backend wants a handful of decided facts — the section
+name, whether to inline, the ABI — not a directive list to re-interpret. Decide
+them at lowering into a small `FunctionAttrs` struct and keep the raw list only
+if debug info turns out to need it.
+
+### N. An enum payload is `[N]u8`, so every read of one is a reinterpretation
+
+§7b flattens an enum to `{ tag, payload: [N]u8 }`, and `Projection::Variant`
+reads that byte array *as* the variant's fields. Every backend has to
+bitcast — legal everywhere, but it is the one place where a place's type does
+not describe the bytes under it.
+
+The alternative is a `TypeDef` per variant (`Tag::two = struct { 0: u32, 1: u8
+}`) with `Projection::Variant` becoming a pointer cast to it, which makes the
+member offsets come from the type table like every other. Weigh it against the
+cost: it is one more type per variant in a table a debugger reads. Either way,
+say which one it is in §7b — today the doc says the payload is a union and the
+code says it is bytes.
+
+### What was found and deliberately left alone
+
+- **`StmtKind::Drop`** stays an instruction rather than becoming a call to a
+  runtime symbol. It was asked for as an instruction, a backend maps it to one
+  call, and the escape analysis and the written `drop(p)` share it.
+- **`Origin`** on a `TypeDef` (`Struct`/`Enum`/`Tuple`/`Slice`/`Dyn`) is debug
+  metadata, not shape — a debugger printing `.green` instead of `2` needs it.
+  It costs a backend nothing because a backend never matches on it.
+- **`Block::label` and `Local::name`** are the dump's and the debugger's. Same
+  reasoning.
+- **`Switch` covering every branch**, including a two-way `bool`. One form is
+  simpler than two even where the second would be smaller.
+
 ### Ordering, and what each one costs to skip
 
 | | Change | Depends on | Cost of leaving it |
@@ -454,8 +551,14 @@ type. Doing A–G first means doing it once, over the simpler shape.
 | B | Blob constants become globals | A's `Constant::Address` | Every backend re-implements read-only data emission |
 | C | One arithmetic rvalue | — | Three shapes for one idea |
 | D | `AggregateKind` collapses | — | Four names for one operation |
-| E | `Offset` carries a stride | — | The backend re-runs layout |
-| F | Member names agree with the type | — | A dump that lies quietly |
+| E | `Offset` carries a stride | — | **done** |
+| F | Member names agree with the type | — | **done** |
+| I | One call statement | G | Two statement kinds for one operation |
+| J | `Ref`/`Ty` mutability at LIR | — | A field every backend reads and none uses |
+| K | `Constant` and `ConstValue` overlap | A | Two spellings of "nothing" |
+| L | `Callee::Static` carries three names | H | Two of them are for the dump |
+| M | `Function::directives` is a sema type | — | A backend parses AST-shaped args |
+| N | An enum payload is `[N]u8` | — | Every read of one is a reinterpretation |
 | G | Intrinsics are an enum | — | A non-exhaustive match in every backend |
 | H | `TypeId` instead of `Ty::Nominal` | A–G, ideally | `Program` cannot leave the process |
 

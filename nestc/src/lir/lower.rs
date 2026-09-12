@@ -273,6 +273,15 @@ impl Cx<'_> {
     }
 
     /// `usize`, as wide as this target's pointer.
+    /// The bytes between one `ty` and the next in an array of them — its
+    /// layout's size, which already includes tail padding.
+    ///
+    /// `0` where the layout is in error, which is a program that has already
+    /// been reported and will not be emitted.
+    fn stride(&self, ty: &Ty) -> u64 {
+        self.layouts.of(ty).map(|l| l.size).unwrap_or(0)
+    }
+
     fn usize_ty(&self) -> Ty {
         Ty::int((self.layouts.pointer_size() * 8) as u16, false)
     }
@@ -1846,9 +1855,13 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             },
             span,
         );
+        // Member `1` of a tuple is named `1`. It would read better as
+        // `overflowed`, and it used to — but the type table says a `(i32,
+        // bool)` has members `0` and `1`, and a projection naming a member the
+        // type does not have is a dump that lies to the next reader.
         let flag = Place::local(pair).then(Projection::Field {
             index: 1,
-            name: Symbol::new("overflowed"),
+            name: Symbol::new("1"),
         });
         let trap = self.new_block(Some("overflow".to_string()));
         let ok = self.new_block(None);
@@ -1974,7 +1987,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                         Some(Rvalue::Offset {
                             ptr: Operand::Copy(ptr),
                             index: i,
-                            elem: *inner,
+                            stride: self.cx.stride(&inner),
                         })
                     }
                     _ => Some(Rvalue::Ref {
@@ -2686,7 +2699,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             Rvalue::Offset {
                 ptr: Operand::Copy(ptr),
                 index,
-                elem: (**inner).clone(),
+                stride: self.cx.stride(inner),
             },
             span,
         );

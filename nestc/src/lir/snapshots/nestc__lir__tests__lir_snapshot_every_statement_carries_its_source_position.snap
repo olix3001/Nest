@@ -47,9 +47,9 @@ bb1:                    // out of bounds
     }
   unreachable   // mem:main:3:19
 bb2:
-  _7 := _4.*.ptr + k_1 * stride(i32)   // mem:main:3:19
+  _7 := _4.*.ptr + k_1 * 4   // mem:main:3:19
   _8 := checked_add(total_3, _7.*)   // mem:main:3:11
-  switch _8.overflowed { 1 => bb3, _ => bb4 }   // mem:main:3:11
+  switch _8.1 { 1 => bb3, _ => bb4 }   // mem:main:3:11
 bb3:                    // overflow
   _9 := Location("mem:main", 3, 11)   // mem:main:3:11
   call core.panic("integer overflow", _9)   // mem:main:3:11

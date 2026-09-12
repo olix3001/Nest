@@ -31,9 +31,9 @@ func raw(s_0: []i32, k_1: u64, d_2: i32) -> i32 #unsafe  // _NC3raw
   let _6: core.Location
 bb0:                    // entry
   _3 := &s_0
-  _4 := _3.*.ptr + k_1 * stride(i32)
+  _4 := _3.*.ptr + k_1 * 4
   _5 := checked_div(_4.*, d_2)
-  switch _5.overflowed { 1 => bb1, _ => bb2 }
+  switch _5.1 { 1 => bb1, _ => bb2 }
 bb1:                    // overflow
   _6 := Location("mem:main", 1, 66)
   call core.panic("integer overflow", _6)

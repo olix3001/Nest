@@ -35,7 +35,7 @@ func V.<as core.Add>.add(self_0: V, rhs_1: V) -> V  // _NC1VXN4core3AddIE3add
   let _4: V
 bb0:                    // entry
   _2 := checked_add(self_0.x, rhs_1.x)
-  switch _2.overflowed { 1 => bb1, _ => bb2 }
+  switch _2.1 { 1 => bb1, _ => bb2 }
 bb1:                    // overflow
   _3 := Location("mem:main", 5, 54)
   call core.panic("integer overflow", _3)

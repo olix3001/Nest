@@ -44,6 +44,6 @@ bb1:                    // out of bounds
     }
   unreachable
 bb2:
-  _6 := _3.*.ptr + k_2 * stride(i32)
+  _6 := _3.*.ptr + k_2 * 4
   _6.* = o_0.*.i.v
   return

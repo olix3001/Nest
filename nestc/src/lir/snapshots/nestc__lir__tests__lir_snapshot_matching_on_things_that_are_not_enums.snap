@@ -150,7 +150,7 @@ bb3:                    // arm pattern
   goto bb1
 bb4:                    // arm pattern
   _12 := checked_add(first_8, last_11)
-  switch _12.overflowed { 1 => bb11, _ => bb12 }
+  switch _12.1 { 1 => bb11, _ => bb12 }
 bb5:                    // unreachable
   unreachable
 bb6:
@@ -162,14 +162,14 @@ bb8:
   _6 := xs_0.len >= 2
   switch _6 { 1 => bb10, _ => bb5 }
 bb9:
-  _4 := xs_0.ptr + 0 * stride(i32)
+  _4 := xs_0.ptr + 0 * 4
   only_5 := _4.*
   goto bb3
 bb10:
-  _7 := xs_0.ptr + 0 * stride(i32)
+  _7 := xs_0.ptr + 0 * 4
   first_8 := _7.*
   _9 := sub(xs_0.len, 1)
-  _10 := xs_0.ptr + _9 * stride(i32)
+  _10 := xs_0.ptr + _9 * 4
   last_11 := _10.*
   goto bb4
 bb11:                    // overflow

@@ -331,11 +331,10 @@ impl Printer<'_> {
                 };
                 format!("{head}({})", fields.join(", "))
             }
-            Rvalue::Offset { ptr, index, elem } => format!(
-                "{} + {} * stride({})",
+            Rvalue::Offset { ptr, index, stride } => format!(
+                "{} + {} * {stride}",
                 self.operand(f, ptr),
-                self.operand(f, index),
-                elem.display(self.defs)
+                self.operand(f, index)
             ),
         }
     }

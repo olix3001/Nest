@@ -495,7 +495,13 @@ pub enum Rvalue {
     Offset {
         ptr: Operand,
         index: Operand,
-        elem: Ty,
+        /// **Bytes** between one element and the next, tail padding included.
+        ///
+        /// A number rather than the element type, because every other size in
+        /// LIR is one — a `TypeDef`'s layout, a member's offset — and a type
+        /// here would send a backend back through the layout engine for an
+        /// answer this compiler has already computed.
+        stride: u64,
     },
 }
 

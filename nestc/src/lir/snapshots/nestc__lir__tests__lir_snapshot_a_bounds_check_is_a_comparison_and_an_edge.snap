@@ -37,5 +37,5 @@ bb1:                    // out of bounds
     }
   unreachable
 bb2:
-  _5 := _2.*.ptr + k_1 * stride(i32)
+  _5 := _2.*.ptr + k_1 * 4
   return _5.*

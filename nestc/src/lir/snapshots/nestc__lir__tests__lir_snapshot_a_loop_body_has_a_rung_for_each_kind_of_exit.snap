@@ -51,7 +51,7 @@ bb4:                    // else
   goto bb5
 bb5:                    // join
   _5 := checked_add(i_2, 1)
-  switch _5.overflowed { 1 => bb7, _ => bb8 }
+  switch _5.1 { 1 => bb7, _ => bb8 }
 bb6:                    // cleanup 1 (break)
   call cleanup()
     @safepoint { live: [] }

@@ -106,7 +106,7 @@ bb0:                    // entry
       _17 := reloc _17
     }
   _19 := checked_add(_16, _18)
-  switch _19.overflowed { 1 => bb1, _ => bb2 }
+  switch _19.1 { 1 => bb1, _ => bb2 }
 bb1:                    // overflow
   _20 := Location("mem:main", 30, 10)
   call core.panic("integer overflow", _20)
@@ -123,7 +123,7 @@ bb2:
       _21 := reloc _21
     }
   _23 := checked_add(_19.0, _22)
-  switch _23.overflowed { 1 => bb3, _ => bb4 }
+  switch _23.1 { 1 => bb3, _ => bb4 }
 bb3:                    // overflow
   _24 := Location("mem:main", 30, 10)
   call core.panic("integer overflow", _24)
@@ -139,7 +139,7 @@ bb4:
       _25 := reloc _25
     }
   _27 := checked_add(_23.0, _26)
-  switch _27.overflowed { 1 => bb5, _ => bb6 }
+  switch _27.1 { 1 => bb5, _ => bb6 }
 bb5:                    // overflow
   _28 := Location("mem:main", 30, 10)
   call core.panic("integer overflow", _28)
@@ -155,7 +155,7 @@ func Square.<as Draw>.area(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE4area
   let _2: core.Location
 bb0:                    // entry
   _1 := checked_mul(self_0.*.s, self_0.*.s)
-  switch _1.overflowed { 1 => bb1, _ => bb2 }
+  switch _1.1 { 1 => bb1, _ => bb2 }
 bb1:                    // overflow
   _2 := Location("mem:main", 10, 46)
   call core.panic("integer overflow", _2)
@@ -171,7 +171,7 @@ func Square.<as Draw>.perimeter(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE9
   let _2: core.Location
 bb0:                    // entry
   _1 := checked_mul(self_0.*.s, 4)
-  switch _1.overflowed { 1 => bb1, _ => bb2 }
+  switch _1.1 { 1 => bb1, _ => bb2 }
 bb1:                    // overflow
   _2 := Location("mem:main", 11, 51)
   call core.panic("integer overflow", _2)
@@ -193,7 +193,7 @@ func Circle.<as Draw>.area(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE4area
   let _4: core.Location
 bb0:                    // entry
   _1 := checked_mul(self_0.*.r, self_0.*.r)
-  switch _1.overflowed { 1 => bb1, _ => bb2 }
+  switch _1.1 { 1 => bb1, _ => bb2 }
 bb1:                    // overflow
   _2 := Location("mem:main", 15, 46)
   call core.panic("integer overflow", _2)
@@ -203,7 +203,7 @@ bb1:                    // overflow
   unreachable
 bb2:
   _3 := checked_mul(_1.0, 3)
-  switch _3.overflowed { 1 => bb3, _ => bb4 }
+  switch _3.1 { 1 => bb3, _ => bb4 }
 bb3:                    // overflow
   _4 := Location("mem:main", 15, 46)
   call core.panic("integer overflow", _4)
@@ -219,7 +219,7 @@ func Circle.<as Draw>.perimeter(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE9
   let _2: core.Location
 bb0:                    // entry
   _1 := checked_mul(self_0.*.r, 6)
-  switch _1.overflowed { 1 => bb1, _ => bb2 }
+  switch _1.1 { 1 => bb1, _ => bb2 }
 bb1:                    // overflow
   _2 := Location("mem:main", 16, 51)
   call core.panic("integer overflow", _2)

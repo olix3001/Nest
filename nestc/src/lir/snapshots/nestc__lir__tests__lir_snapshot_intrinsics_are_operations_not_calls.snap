@@ -21,7 +21,7 @@ func sizes() -> u64  // _NC5sizes
   let _1: core.Location
 bb0:                    // entry
   _0 := checked_add(5, 1)
-  switch _0.overflowed { 1 => bb1, _ => bb2 }
+  switch _0.1 { 1 => bb1, _ => bb2 }
 bb1:                    // overflow
   _1 := Location("mem:main", 3, 36)
   call core.panic("integer overflow", _1)

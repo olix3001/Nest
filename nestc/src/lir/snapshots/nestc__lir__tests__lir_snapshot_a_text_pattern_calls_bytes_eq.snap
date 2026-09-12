@@ -42,7 +42,7 @@ bb3:                    // arm "no"
   goto bb1
 bb4:                    // arm _
   _4 := checked_neg(1)
-  switch _4.overflowed { 1 => bb10, _ => bb11 }
+  switch _4.1 { 1 => bb10, _ => bb11 }
 bb5:                    // unreachable
   unreachable
 bb6:

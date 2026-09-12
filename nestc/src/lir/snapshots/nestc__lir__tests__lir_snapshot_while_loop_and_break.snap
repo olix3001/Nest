@@ -57,7 +57,7 @@ bb7:                    // else
   goto bb8
 bb8:                    // join
   _8 := checked_add(acc_2, i_4)
-  switch _8.overflowed { 1 => bb9, _ => bb10 }
+  switch _8.1 { 1 => bb9, _ => bb10 }
 bb9:                    // overflow
   _9 := Location("mem:main", 6, 11)
   call core.panic("integer overflow", _9)
@@ -68,7 +68,7 @@ bb9:                    // overflow
 bb10:
   acc_2 := _8.0
   _10 := checked_add(i_4, 1)
-  switch _10.overflowed { 1 => bb11, _ => bb12 }
+  switch _10.1 { 1 => bb11, _ => bb12 }
 bb11:                    // overflow
   _11 := Location("mem:main", 7, 9)
   call core.panic("integer overflow", _11)

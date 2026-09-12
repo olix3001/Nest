@@ -61,7 +61,7 @@ bb5:                    // join
       p_3 := reloc p_3
     }
   _8 := checked_add(i_5, 1)
-  switch _8.overflowed { 1 => bb6, _ => bb7 }
+  switch _8.1 { 1 => bb6, _ => bb7 }
 bb6:                    // overflow
   _9 := Location("mem:main", 9, 9)
   call core.panic("integer overflow", _9)
