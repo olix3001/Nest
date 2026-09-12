@@ -2,6 +2,11 @@
 source: src/sema/tests.rs
 expression: lir_text(src)
 ---
+type core.Location = struct {           // was a struct; size 24, align 8
+  file: core.str                    // +0
+  line: u32                    // +16
+  column: u32                    // +20
+}
 type core.str = struct {           // was a distinct; size 16, align 8
   0: []u8                    // +0
 }
@@ -9,26 +14,19 @@ type []u8 = struct {           // was a slice; size 16, align 8
   ptr: *u8                    // +0
   len: u64                    // +8
 }
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: core.str                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
 
 func checked(n_0: i32) -> i32  // _NC7checked
-  let _1: i32
-  let _2: bool
-  let _3: core.str
-  let _4: core.Location
-  let _5: never
+  let _1: bool
+  let _2: core.Location
 bb0:                    // entry
-  _1 := cast 0 : comptime_int -> i32
-  _2 := n_0 < _1
-  switch _2 { 1 => bb1, _ => bb2 }
+  _1 := n_0 < 0
+  switch _1 { 1 => bb1, _ => bb2 }
 bb1:                    // then
-  _3 := cast "negative" : comptime_str -> core.str
-  _4 := Location("mem:main", 2, 14)
-  _5 := $panic(_3, _4)
+  _2 := Location("mem:main", 2, 14)
+  call core.panic("negative", _2)
+    @safepoint { live: [_2]
+      _2 := reloc _2
+    }
   unreachable
 bb2:                    // else
   goto bb3

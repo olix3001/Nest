@@ -31,6 +31,7 @@ pub fn collect_file(
     ast: &Ast,
     file: FileId,
     file_ns: DefId,
+    in_core: bool,
 ) -> Vec<RawImport> {
     let mut cx = Collector {
         defs,
@@ -38,6 +39,7 @@ pub fn collect_file(
         diags,
         ast,
         file,
+        in_core,
         imports: Vec::new(),
         in_impl: false,
         pending: Vec::new(),
@@ -58,6 +60,9 @@ struct Collector<'a> {
     diags: &'a mut Vec<Diagnostic>,
     ast: &'a Ast,
     file: FileId,
+    /// Whether this file belongs to the `core` package. A `#lang` claim from
+    /// `core` is a **default** the program may answer over (see [`LangItems`]).
+    in_core: bool,
     imports: Vec<RawImport>,
     /// Whether collection is inside an `impl` body, where a name may repeat
     /// across impls that share a host namespace.
@@ -548,7 +553,7 @@ impl Collector<'_> {
         self.defs.get_mut(scope).ns.members.insert(name, id);
         if let Some(tag) = lang {
             self.defs.get_mut(id).lang = Some(tag.clone());
-            if let Some(prev) = self.lang.set(tag.clone(), id) {
+            if let Some(prev) = self.lang.set(tag.clone(), id, self.in_core) {
                 let _ = prev;
                 self.report(node, format!("duplicate `#lang(\"{tag}\")` item"));
             }

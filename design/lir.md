@@ -31,14 +31,23 @@ func f(a: i32, b: i32) -> bool {          // examples/f.nest:3:1
 bb0:
   t0 := a + b                             // 5:11
   p.x = t0                                // 6:3
-  t1 := call g(&p) @safepoint(live: [p])  // 7:14
-  switch t1 { true => bb1, false => bb2 }
+  t1 := call g(&p)                        // 7:14
+    @safepoint { live: [p]
+      p := reloc p
+    }
+  switch t1 { 1 => bb1, _ => bb2 }
 bb1:
   return t1
 bb2:
   return false
 }
 ```
+
+There are **three** instructions — an assignment, a call, and a `drop` (§5) —
+and four terminators. That is the whole set, and keeping it that small is the
+point: a backend for C, for LLVM, or for wasm has to answer for each of them, so
+every operation this level invents is a question asked of every backend that will
+ever exist.
 
 `:=` **introduces** a value into a local; `=` **stores** into a place. That is
 the same distinction the source language draws, so it costs a reader nothing to
@@ -114,6 +123,32 @@ expression position without special-casing it in the type checker.
 A function declared `-> never` is checked to genuinely never return: see the
 divergence check in the IR-pass plan. In LIR, a call to one is followed by
 `unreachable`, and the block ends there.
+
+### A panic is a call, and it is the program's panic
+
+There is no `$panic` operation. `panic` is an ordinary function in `core` (spec
+§8.6) found by its `#lang("panic")` tag, and the failures the **compiler** raises
+— a trapped overflow (§7d), an index past the end of a sequence (§3.2) — lower to
+a call to it:
+
+```
+bb6:                    // overflow
+  _5 := Location("m.nest", 22, 9)
+  call core.panic("integer overflow", _5)
+  unreachable
+```
+
+Two things follow, and both are the reason. A backend has nothing new to
+implement: it already emits calls, and the last instruction of a panic is
+`core`'s `trap` intrinsic, one instruction on every target. And a program that
+replaces `#lang("panic_handler")` replaces what an overflow does too — a
+compiler-private abort beside a library panic would be two ways for a program to
+die, reported differently.
+
+The `Location` is built at the lowering, because the source did not write this
+call site. It is the same three numbers `#caller_location` fills in for a call
+the program *did* write, taken from the span the failing operation already
+carries (§7c).
 
 ## 3. `defer`, placed once per exit path
 
@@ -250,25 +285,51 @@ frees memory that is still referenced. The pass is therefore useful for
 short-lived local temporaries and honest about being useful for nothing else.
 
 ```
-let p := alloc Node        // never passed anywhere
-p.x = 1
-t := p.x
+let p := new.<Node>()      // never passed anywhere
+p.*.x = 1
+t := p.*.x
 ```
 
 ```
 bb0:
-  p := alloc Node
-  p.x = 1
-  t := p.x
-  drop p                   // provably dead at scope exit
-  ...
+  _1 := $new()
+  p_3 := _1
+  p_3.*.x = 1
+  _4 := p_3.*.x
+  goto bb5
+bb5:                       // cleanup 0 (return)
+  drop p_3                 // provably dead at scope exit
+  goto bb4
 ```
 
 A `drop` sits on the same cleanup ladder as `defer`, for the same reason: an
 allocation in a scope with three exits is freed once, in a block all three reach.
+It goes on the rung **after** the `defer` bodies, because a `defer` may still
+read the object and the memory has to survive until it has.
 
 Extending this to per-function escape summaries later is a change of *precision*,
 not of shape — the drop insertion machinery does not move.
+
+### Where the analysis runs
+
+A scope is **lexical**, and once control flow is a graph there are no scopes left
+to speak of — the ladder is what remains of them. So the question is asked of the
+IR tree, in `lir::escape`, and the answer is handed to the lowering, which
+registers a drop the way it registers a `defer` and lets the machinery it already
+has place it. Asking it on the CFG instead would mean rediscovering the scopes
+the ladder was built from.
+
+The test is written as a **whitelist**, which is the blunt rule above read from
+the other side: a candidate survives only if every mention of it is the base of a
+place being read or written — `p.*.x`, `p.*`, `p.*.x = 1`. Anything else
+disqualifies it, including forms that would be provably fine, because a whitelist
+that is wrong leaks and a blacklist that is wrong corrupts memory.
+
+One ordering rule falls out of the ladder being shared. A rung is built at the
+first exit that needs it (§3), so a `let` that comes *after* an exit has no slot
+yet when that rung is built, and putting a drop there would free a slot the path
+never wrote. Such an allocation is not a candidate; it is collected like anything
+else.
 
 ## 6. GC safepoints, and why pointers get redefined
 
@@ -279,16 +340,47 @@ A **safepoint** is a point where collection may happen — a call, an allocation
 loop back-edge. LIR annotates each with the set of live pointer-typed locals.
 
 ```
-t7: i32 := call g(p) @safepoint {
-  live: [p, q]
-  p := reloc p
-  q := reloc q
-}
+_7 := call g(p)
+    @safepoint { live: [p_1, q_2]
+      p_1 := reloc p_1
+      q_2 := reloc q_2
+    }
 ```
+
+It sits **on** the statement rather than becoming a block, because the
+association between "this call" and "the collection that may happen inside it" is
+what an LLVM statepoint needs and a separate block loses. A back edge is the same
+annotation on the terminator.
 
 Whether that becomes a shadow stack, an LLVM statepoint, or something else is a
 **codegen** decision — different collectors want different mechanisms, and the
 expensive part (computing precise liveness) is the same for all of them.
+
+`live` is one list, not two. It is the root set the collector traces *and* the
+list of relocations, because with a moving collector every one of those locals
+holds a different address afterwards — `live: [p]` beside `p := reloc p` would be
+the same fact written twice, and two copies of a fact are two things that can
+disagree. A dump prints the `reloc` lines because a redefinition is what the list
+*means*.
+
+The set is the one live **before** the statement, not after it. Collection
+happens while the statement is running — inside the callee, inside the allocator
+— and at that moment the destination has not been written, so relocating it would
+relocate whatever the slot happened to hold.
+
+### What counts as a root
+
+A local whose type can contain a reference: a pointer, a slice, a `dyn`, and any
+aggregate holding one — a `str` is a root because it is a `distinct []u8` (§7b),
+and an enum is one when a *variant* holds a pointer, since its flattened payload
+member is `[N]u8` and says nothing.
+
+One over-approximation is left, and it is named rather than hidden: a `*T` is a
+root whatever `T` is, so a vtable pointer — a `*void` by this level — is counted
+with the rest. Narrowing it wants a distinction between a managed reference and a
+machine address that the type system does not draw today. Counting a code pointer
+is safe and costs a word in a stack map, so it waits for the language to have the
+distinction rather than for the pass to guess at it.
 
 ### Why `reloc` exists
 
@@ -783,7 +875,7 @@ emits a comparison against the length — the constant in a `[N]T`'s type, the
 t0 := k < s.len
 switch t0 { 1 => bb2, _ => bb1 }
 bb1:                    // out of bounds
-  panic("index out of bounds")
+  call core.panic("index out of bounds", Location(...))
   unreachable
 bb2:
   t1 := s.ptr + k * stride(i32)
@@ -830,6 +922,20 @@ has no body to lower; where the IR has a call to one, LIR has the operation it
 denotes — an instruction, a constant, or nothing at all. `size_of.<T>()` is the
 number layout computed; `wrapping_add(a, b)` is one instruction. What reaches
 codegen is never "a call to a function that does not exist".
+
+**The comptime types are gone**, and so is the `$cast` out of them. A literal
+written where an `i32` is wanted reaches the IR as `$cast(10: comptime_int)`,
+which is bookkeeping about where the literal's type came from and was only ever
+read by inference. LIR folds it into the definition — `_4 := 10` — because
+`comptime_int` is a type no backend has a register for, and a cast whose source
+cannot exist at run time is not a conversion.
+
+**Reading a discriminant is a member read.** An enum is `{ tag, payload }` by
+§7b, so `s.tag` is an ordinary projection and there is no `discriminant`
+operation beside it. What §4 requires is that it be read *once*, which is a
+property of the decision tree rather than of the instruction set.
+
+**And there is no `$panic`** — see §2.
 
 `distinct` types are also gone. A `distinct T` has exactly `T`'s representation,
 so the `$cast` the IR emits when a distinct type reaches an inherited method is a

@@ -16,6 +16,11 @@ type []u8 = struct {           // was a slice; size 16, align 8
   ptr: *u8                    // +0
   len: u64                    // +8
 }
+type core.Location = struct {           // was a struct; size 24, align 8
+  file: core.str                    // +0
+  line: u32                    // +16
+  column: u32                    // +20
+}
 vtable _NVN5SpeakIEN3DogIE for Dog as Speak {
   [0] say = _NC3DogXN5SpeakIE3say
 }
@@ -32,6 +37,10 @@ bb0:                    // entry
   s_3 := _2
   _4 := s_3.vtable.*.say
   _5 := call (_4)(s_3)
+    @safepoint { live: [s_3, _4]
+      s_3 := reloc s_3
+      _4 := reloc _4
+    }
   return _5
 
 func Dog.<as Speak>.say(self_0: *Dog) -> i32  // _NC3DogXN5SpeakIE3say

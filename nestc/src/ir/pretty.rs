@@ -618,7 +618,9 @@ pub fn directive_str(d: &Directive) -> String {
         .iter()
         .map(|a| match a {
             DirectiveArg::Int(n) => n.to_string(),
-            DirectiveArg::Str(s) => format!("{s:?}"),
+            // `as_str` first: a `Symbol`'s own `Debug` prints the wrapper, so
+            // `#lang("panic")` came out as `#lang(Symbol("panic"))`.
+            DirectiveArg::Str(s) => format!("{:?}", s.as_str()),
             DirectiveArg::Name(n) => n.to_string(),
             DirectiveArg::Other => "?".to_string(),
         })

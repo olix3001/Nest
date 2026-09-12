@@ -16,7 +16,37 @@
 // The return type is `never`, which is the whole of why a `panic` may sit in any
 // expression position: the signature *promises* divergence, so the type checker
 // needs no special case for it (§3.1).
-@public panic :: #intrinsic("panic") func (msg: str, loc: Location := #caller_location) -> never
+//
+// This is an **ordinary function**, not an intrinsic. The compiler's own
+// failures — an integer that overflowed under `overflow=trap`, an index past the
+// end of a sequence — are lowered to a call to *this* function, found by its
+// `#lang("panic")` tag, so a panic the compiler raises and a panic the program
+// writes are the same code path and print the same way.
+@public panic :: #lang("panic") func (msg: str, loc: Location := #caller_location) -> never {
+  panic_handler(msg, loc)
+}
+
+// What a panic actually *does*, and the one piece of it a program may replace.
+//
+// `core` has no I/O — it does not know whether this target has a console, a
+// serial port or nothing at all — so the default is the only thing that is
+// correct everywhere: stop. A program that wants a message printed, a backtrace
+// walked, or a reset vector jumped to declares its own:
+//
+//     #lang("panic_handler")
+//     my_handler :: func (msg: str, loc: Location) -> never { ... }
+//
+// A `#lang` tag claimed outside `core` wins over `core`'s claim of the same tag
+// (§9), which is what makes this a **default** rather than a fixed answer; two
+// claims in the same package are still the duplicate error they always were.
+@public panic_handler :: #lang("panic_handler") func (msg: str, loc: Location) -> never {
+  trap()
+}
+
+// Stop the process, immediately and without unwinding — the one part of failing
+// that no library can write, because it is a machine instruction (§6.4). Every
+// target has one: `ud2`, `brk`, `unreachable`.
+@public trap :: #intrinsic("trap") func () -> never
 
 // A compile-time assertion (§6.10). Checked during compilation, producing no
 // run-time code; the run-time `assert` is an ordinary `std` function, not this.

@@ -137,6 +137,8 @@ fn main() -> ExitCode {
             &session.linked,
             &layouts,
             &session.options,
+            &session.lang_items,
+            &session.sources,
         );
         print!(
             "\n===< LIR >===\n{}",

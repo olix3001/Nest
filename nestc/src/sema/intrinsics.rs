@@ -100,9 +100,14 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     plain("index"),
     // Compile-time data.
     plain("embed_file"),
-    // Failing, at run time and at compile time (§6.10, §8). `panic` returns
-    // `never`, so divergence is in the signature rather than in a table here.
-    plain("panic"),
+    // Failing, at run time and at compile time (§6.10, §8).
+    //
+    // `panic` is **not** here: it is an ordinary function in `core` that calls
+    // the `#lang("panic_handler")` item, and the compiler's own failures (a
+    // trapped overflow, an index out of bounds) lower to a call to it like any
+    // other. What no library can write is the last instruction, so that — and
+    // only that — is the intrinsic.
+    plain("trap"),
     plain("assert"),
     // Integer arithmetic with a stated overflow behaviour (§6.6). These are the
     // inherent methods on the two integer families in `core/num.nest`, and they

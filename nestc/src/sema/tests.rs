@@ -7582,6 +7582,8 @@ fn lir_program(src: &str, options: crate::common::options::Options) -> String {
         &session.linked,
         &layouts,
         &session.options,
+        &session.lang_items,
+        &session.sources,
     );
     // Only the entry file's functions: `core` is linked into every program and
     // its lowering is not what any of these tests is about.
@@ -7813,6 +7815,8 @@ main :: func () { let x := area(.circle(3)) }
         &session.linked,
         &layouts,
         &session.options,
+        &session.lang_items,
+        &session.sources,
     );
     for f in &program.funcs {
         for b in &f.blocks {
@@ -7983,7 +7987,10 @@ fn a_constant_index_in_range_is_neither_reported_nor_checked() {
 fn a_slice_index_is_checked_against_its_length_at_run_time() {
     let lir = lir_text("f :: func (s: []i32, k: usize) -> i32 { return s[k] }\n");
     assert!(lir.contains("k_1 < "), "{lir}");
-    assert!(lir.contains("$panic(\"index out of bounds\")"), "{lir}");
+    assert!(
+        lir.contains("call core.panic(\"index out of bounds\""),
+        "{lir}"
+    );
 }
 
 /// An array with a run-time index is checked too — against the constant its
@@ -8009,6 +8016,222 @@ fn unsafe_turns_the_bounds_check_off() {
 fn lir_snapshot_a_bounds_check_is_a_comparison_and_an_edge() {
     let src = "\
 get :: func (s: []i32, k: usize) -> i32 { return s[k] }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+// ===< Phase 9: drops and safepoints (`design/lir.md` §5, §6) >===
+
+/// A `comptime_int` is not a machine type, and the `$cast` the IR carries out of
+/// a literal is bookkeeping about where its type came from (§6.5). LIR folds it
+/// into the definition: `10` written where an `i32` is wanted **is** an `i32`.
+#[test]
+fn a_comptime_literal_reaches_lir_as_a_literal() {
+    let lir = lir_text("f :: func () -> i32 { return 10 }\n");
+    assert!(!lir.contains("comptime_int"), "{lir}");
+    assert!(!lir.contains("cast"), "{lir}");
+    assert!(lir.contains("return 10"), "{lir}");
+}
+
+/// An enum is `{ tag, payload }` by §7b, so reading the discriminant is a member
+/// read and needs no operation of its own.
+#[test]
+fn the_discriminant_is_a_member_read() {
+    let lir = lir_text(
+        "\
+Shape :: enum { dot, circle(i32) }
+f :: func (s: Shape) -> i32 { return s.match { .dot => 0, .circle(r) => r } }
+",
+    );
+    assert!(lir.contains(":= s_0.tag"), "{lir}");
+    assert!(!lir.contains("discriminant"), "{lir}");
+}
+
+/// The compiler's own failures go through `core`'s `panic`, found by its
+/// `#lang("panic")` tag — the same function a written `panic("...")` calls, so
+/// there is no `$panic` operation for a backend to invent a meaning for.
+#[test]
+fn a_trapped_overflow_calls_cores_panic() {
+    let lir = lir_text_with(
+        "f :: func (a: i32, b: i32) -> i32 { return a + b }\n",
+        crate::common::options::Options {
+            overflow: crate::common::options::OverflowMode::Trap,
+            ..Default::default()
+        },
+    );
+    assert!(lir.contains("call core.panic(\"integer overflow\""), "{lir}");
+    assert!(!lir.contains("$panic"), "{lir}");
+}
+
+/// A program may answer a `#lang` tag `core` already answered: `core`'s claim is
+/// a **default**, which is what makes the panic handler replaceable (§9).
+#[test]
+fn a_program_may_replace_cores_panic_handler() {
+    let src = "\
+{ Location } :: import <core/loc>
+{ trap } :: import <core/fail>
+my_handler :: #lang(\"panic_handler\") func (msg: str, loc: Location) -> never { trap() }
+@public main :: func () {}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let def = session
+        .lang_items
+        .get("panic_handler")
+        .expect("the tag is claimed");
+    assert_eq!(session.defs.get(def).name.as_str(), "my_handler");
+}
+
+/// Two claims from the same side are still the duplicate they always were: the
+/// rule above is about `core` being the fallback, not about the tag being a
+/// free-for-all.
+#[test]
+fn two_claims_on_one_lang_tag_in_one_program_are_an_error() {
+    let src = "\
+{ Location } :: import <core/loc>
+{ trap } :: import <core/fail>
+a :: #lang(\"panic_handler\") func (msg: str, loc: Location) -> never { trap() }
+b :: #lang(\"panic_handler\") func (msg: str, loc: Location) -> never { trap() }
+";
+    assert!(
+        messages(src)
+            .iter()
+            .any(|m| m.contains("duplicate `#lang(\"panic_handler\")`")),
+        "{:#?}",
+        messages(src)
+    );
+}
+
+/// §5: an allocation nothing outside the scope can reach is freed explicitly,
+/// on the cleanup ladder every exit goes through.
+#[test]
+fn an_allocation_that_does_not_escape_is_dropped() {
+    let lir = lir_text(
+        "\
+{ new } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func () -> i32 {
+  let p := new.<Node>()
+  p.*.x = 5
+  return p.*.x
+}
+",
+    );
+    assert!(lir.contains("drop p_"), "{lir}");
+}
+
+/// "Passed to any call" escapes, and deliberately so (§5): without per-function
+/// summaries there is no way to know whether a callee retains what it is given,
+/// and guessing wrong frees memory something still references.
+#[test]
+fn an_allocation_passed_to_a_call_is_not_dropped() {
+    let lir = lir_text(
+        "\
+{ new } :: import <core/mem>
+Node :: struct { x: i32 }
+sink :: func (p: *mut Node) {}
+f :: func () -> i32 {
+  let p := new.<Node>()
+  sink(p)
+  return p.*.x
+}
+",
+    );
+    assert!(!lir.contains("drop "), "{lir}");
+}
+
+/// A returned allocation outlives its scope, which is the first rule §5 lists.
+#[test]
+fn a_returned_allocation_is_not_dropped() {
+    let lir = lir_text(
+        "\
+{ new } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func () -> *mut Node {
+  let p := new.<Node>()
+  return p
+}
+",
+    );
+    assert!(!lir.contains("drop "), "{lir}");
+}
+
+/// A call is a safepoint, and it carries the pointer-holding locals something
+/// after it still reads (§6).
+#[test]
+fn a_call_carries_the_live_pointers() {
+    let lir = lir_text(
+        "\
+{ new } :: import <core/mem>
+Node :: struct { x: i32 }
+sink :: func (p: *mut Node) {}
+f :: func () -> i32 {
+  let p := new.<Node>()
+  sink(p)
+  return p.*.x
+}
+",
+    );
+    assert!(lir.contains("@safepoint { live: [p_"), "{lir}");
+    assert!(lir.contains("reloc p_"), "{lir}");
+}
+
+/// A loop that calls nothing and allocates nothing would otherwise be a region
+/// the collector can never interrupt, so its **back edge** is a safepoint (§6).
+#[test]
+fn a_loop_back_edge_is_a_safepoint() {
+    let lir = lir_text(
+        "\
+f :: func (n: i32) -> i32 {
+  let i := 0
+  while i < n { i = i + 1 }
+  return i
+}
+",
+    );
+    let lines: Vec<&str> = lir.lines().collect();
+    assert!(
+        lines.windows(2).any(|w| {
+            w[0].trim_start().starts_with("goto") && w[1].trim_start().starts_with("@safepoint")
+        }),
+        "{lir}"
+    );
+}
+
+/// A non-pointer local is never a root (§6), and precision is not only a
+/// performance question: with a moving collector an over-approximate live set
+/// means relocating objects nothing will ever read again.
+#[test]
+fn an_integer_local_is_never_a_root() {
+    let lir = lir_text(
+        "\
+g :: func (n: i32) -> i32 { return n }
+f :: func () -> i32 {
+  let a := 1
+  let b := g(a)
+  return a + b
+}
+",
+    );
+    assert!(lir.contains("@safepoint { live: [] }"), "{lir}");
+    assert!(!lir.contains("reloc a_"), "{lir}");
+}
+
+/// The whole of §5 and §6 in one function: an allocation dropped on the ladder,
+/// a call that is a safepoint, and the relocations that make it a definition.
+#[test]
+fn lir_snapshot_drops_ride_the_ladder_and_calls_are_safepoints() {
+    let src = "\
+{ new } :: import <core/mem>
+Node :: struct { x: i32 }
+report :: func (n: i32) {}
+f :: func (c: bool) -> i32 {
+  let p := new.<Node>()
+  defer report(0)
+  if c { return p.*.x }
+  report(p.*.x)
+  return 0
+}
 ";
     insta::assert_snapshot!(lir_text(src));
 }

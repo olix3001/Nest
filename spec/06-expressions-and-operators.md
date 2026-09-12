@@ -162,7 +162,7 @@ The intrinsics (extensible; not a closed list):
 | `size_of.<T>()` / `align_of.<T>()` | layout queries (`usize`), `#const` |
 | `len(x)` | element count of an array or slice (`usize`); the core library's `.len()` method is written in terms of it |
 | `assert(cond[, msg])` | compile-time assertion (§6.10) |
-| `panic(msg)` | abort the program with a message; `#caller_location` (§5) |
+| `trap()` | stop the process immediately, without unwinding — the last instruction of a panic |
 | `embed_file("path")` | splice a file's bytes as a compile-time `[]u8` |
 | `gc_collect()` | request a collection now (§6.4.1) |
 | `gc_keep_alive(x)` | keep `x` reachable up to this point (§6.4.1) |
@@ -180,6 +180,12 @@ The ones that are **operations on a value** are inherent methods rather than fre
 functions, so they read like the rest of the language: `x.wrapping_add(y)`, not
 `wrapping_add(x, y)`. The ones that are questions about a *type* stay free
 functions, because there is no value to hang them off.
+
+`panic(msg)` is **not** in this table, and that is the point: it is an ordinary
+function in `core` (§8) that calls the replaceable panic handler, and `trap` is
+the one part of it no library can write. Nothing about `panic` needs the compiler
+except its `#lang("panic")` tag, which is how a trapped overflow or an index past
+the end of a sequence reaches the same function a written `panic(...)` does.
 
 Which of these names are in scope unqualified is the prelude's business (§4.6):
 `cast`, `panic` and `size_of` are, the rest are reached through an import.

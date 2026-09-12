@@ -199,3 +199,41 @@ Use `Result` for anything a caller could respond to. Reserve aborts for bugs. A
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.10); a
 **run-time** assertion is the std function `assert(cond, msg)`, which aborts on
 failure and may be compiled out in release builds.
+
+## 8.6 The panic handler
+
+`panic` is an ordinary function in `core`, not a compiler intrinsic:
+
+```nest
+@public panic :: #lang("panic") func (msg: str, loc: Location := #caller_location) -> never {
+  panic_handler(msg, loc)
+}
+
+@public panic_handler :: #lang("panic_handler") func (msg: str, loc: Location) -> never {
+  trap()
+}
+```
+
+Every abort in the table above goes through it, including the ones the *compiler*
+raises — a trapped integer overflow, an index past the end of a sequence. Those
+are the program failing, not a compiler-private stop, so they are lowered to a
+call to whatever carries `#lang("panic")`, with the `Location` filled in from the
+failing operation's own position. There is no separate mechanism for them to
+disagree with.
+
+**The handler is replaceable.** `core` has no I/O — it does not know whether the
+target has a console, a serial port or nothing at all — so its default does the
+only thing that is correct everywhere: stops. A program declares its own by
+claiming the tag, which wins over `core`'s (see
+[09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3):
+
+```nest
+#lang("panic_handler")
+my_handler :: func (msg: str, loc: Location) -> never {
+  write_line(msg)
+  os.abort()
+}
+```
+
+`trap` is the one piece that stays an intrinsic: stopping the processor is a
+machine instruction (`ud2`, `brk`, `unreachable`) and no library can write it.

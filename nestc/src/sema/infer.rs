@@ -475,7 +475,7 @@ pub fn infer_file(
     // `x.add(y)` by name — neither goes through impl selection by tag.
     let lang_traits: HashSet<DefId> = lang
         .iter()
-        .map(|(_, &d)| defs.resolve_alias(d))
+        .map(|(_, d)| defs.resolve_alias(d))
         .filter(|&d| defs.get(d).kind == DefKind::Trait)
         .collect();
     // Every `func` with a body is its own inference problem. A bodyless

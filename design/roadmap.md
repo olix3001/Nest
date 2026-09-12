@@ -5,14 +5,11 @@ broke, what to run); this file is the *plan* (what is next, and what each step
 involves). When they disagree, the handoff is right about the past and this file
 is right about the future.
 
-Phases 0 through 4 are **complete**: the front end parses, resolves, infers,
-lowers to IR, validates the IR, evaluates constants, splits the prelude, declares
-every intrinsic in `core`, and takes a `const` generic of any primitive type. A
-round of language decisions on top of that — `#caller_location`, `Default`, the
-binding syntax, trait conformance — is recorded below. **Phase 5 is done**: the
-integer families, implicit widening, `usize` as a `core` declaration, and the
-`Self` rebinding that `distinct` had always been missing. **376 tests pass.**
-Phase 6 and everything after it is unbuilt.
+Phases 0 through 9 are **complete**: the front end parses, resolves, infers,
+lowers to IR, validates the IR and evaluates constants; monomorphization,
+layout, and the LIR lowering turn that into a concrete control-flow graph with
+its drops and safepoints placed. **461 tests pass.** Phase 10 — codegen and the
+real driver — is what is left.
 
 ## The order, at a glance
 
@@ -25,7 +22,7 @@ Phase 6 and everything after it is unbuilt.
 | 6 | Monomorphization ✅ | 5 | large | Was the old "Phase 2"; 5 changes what it must substitute |
 | 7 | Layout ✅ | 6 | medium | A generic type has no layout until its arguments are known |
 | 8 | LIR: shape and control flow ✅ | 7 | large | `design/lir.md` §1–4 |
-| 9 | LIR: defer, drops, safepoints | 8 | large | `design/lir.md` §3, 5, 6 |
+| 9 | LIR: defer, drops, safepoints ✅ | 8 | large | `design/lir.md` §3, 5, 6 |
 | 10 | Codegen and the real driver | 9 | large | The first executable |
 
 Phases 2, 3 and 4 are independent of each other in principle. The order above is
@@ -625,10 +622,59 @@ blocks, one terminator each.
   composite intrinsic: where its elements live is an allocation question, not a
   shape one.
 
-## Phase 9 — LIR: defer, drops, safepoints
+## Phase 9 — LIR: defer, drops, safepoints ✅ **done**
 
-`design/lir.md` §3, 5, 6: `defer` bodies placed once per exit path, explicit
-drops, GC safepoints with their live-pointer sets, and the `reloc` discipline.
+`design/lir.md` §3, 5, 6: `defer` bodies placed once per exit path (which came
+with phase 8, because a lowering that dropped them was a wrong program that
+looked right), explicit drops, GC safepoints with their live-pointer sets, and
+the `reloc` discipline.
+
+### What is built
+
+- **Escape analysis** (`nestc/src/lir/escape.rs`), intra-procedural and
+  deliberately blunt: an allocation escapes if it is returned, stored anywhere
+  reachable from outside, or **passed to any call**. It runs on the IR **tree**,
+  because a scope is lexical and once control flow is a graph there are no scopes
+  left to ask about — the ladder is what remains of them. The answer is handed to
+  the lowering, which registers a `drop` the way it registers a `defer`.
+- **`drop` on the ladder** (§5), after the `defer` bodies on the same rung: a
+  `defer` may still read the object, and the memory has to survive until it has.
+- **Safepoints** (`nestc/src/lir/safepoint.rs`), at the three places §6 names — a
+  call, an allocation, a loop's back edge — each carrying the set of roots live
+  **before** the statement, because collection happens while it is running and
+  the destination has not been written yet.
+- **`live` is one list, not two.** It is the root set and the `reloc`
+  redefinitions at once, since with a moving collector every root holds a
+  different address afterwards; two copies of that fact are two things that can
+  disagree.
+- **Real liveness**, a backward dataflow to a fixed point, rather than "every
+  pointer in the frame". §6 is explicit that precision is not only a performance
+  question: an over-approximate live set relocates objects nothing will read.
+- **Back edges without dominators**: a DFS with the path marked, which is the
+  same answer dominators give on the graphs this lowering produces.
+
+### What it does not do
+
+- **Per-function escape summaries.** A change of *precision*; the drop machinery
+  does not move.
+- **`Drop` (the trait).** The per-type form of cleanup is still unbuilt; §5's
+  drops are the compiler's own, for memory it proved local.
+- **The object-start table** interior pointers need (§6). That is the collector's
+  to build, and there is no collector yet.
+
+### Fixed alongside it
+
+- **No `$panic` in LIR.** `panic` is an ordinary function in `core` found by
+  `#lang("panic")`, and the compiler's own failures call it; the only intrinsic
+  left is `trap`, one machine instruction. The handler behind it is
+  `#lang("panic_handler")`, and a program may **replace** it — a `#lang` tag
+  claimed outside `core` now wins over `core`'s claim of the same tag, which is
+  what makes `core`'s answers defaults rather than fixed points.
+- **No `comptime_int` in LIR.** The `$cast` out of a literal folds into the
+  literal's definition; `comptime_int` is a type no backend has a register for.
+- **No `discriminant` operation.** An enum is `{ tag, payload }`, so reading the
+  tag is an ordinary member read. §4's "read once" is a property of the decision
+  tree, not of the instruction set.
 
 ## Phase 10 — Codegen and the real driver
 

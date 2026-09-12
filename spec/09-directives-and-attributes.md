@@ -206,15 +206,32 @@ call to whatever trait carries `#lang("add")`, `.?` uses `#lang("try")`, and
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.13; the
 operator/method mapping lives there so it sits beside the operators it drives.
 
-Ordinary user code never writes `#lang` — the tags belong to the core library the
-compiler is built against. It is listed here because it is a compiler directive,
-but its effect is described where operators are (§6.13).
+Ordinary user code rarely writes `#lang` — the tags belong to the core library
+the compiler is built against. It is listed here because it is a compiler
+directive, but its effect is described where operators are (§6.13).
+
+**A tag `core` claims is a default the program may answer over.** The same tag
+may be claimed once inside `core` and once outside it; the outside claim wins,
+and no diagnostic is raised. Two claims from the *same* side — both in `core`, or
+both in the program — remain the duplicate-`#lang` error they have always been.
+
+The rule exists because "the compiler finds what it needs by tag, never by name"
+only holds up if a tag can be re-answered, and `core` is by definition the
+fallback library. What it is actually for is `#lang("panic_handler")` (§8): `core`
+has no I/O and cannot know whether a target has a console, so its handler stops
+the process and a program that wants a message printed or a reset vector jumped
+to declares its own.
+
+```nest
+#lang("panic_handler")
+my_handler :: func (msg: str, loc: Location) -> never { ... }
+```
 
 ### Compiler-supplied bodies (`#intrinsic`)
 
 - **`#intrinsic`** — mark a **bodyless** function whose body the compiler
   supplies: an instruction, a constant, or nothing at all. It is how `core`
-  declares `cast`, `size_of`, `panic`, `wrapping_add` and the rest (§6.4).
+  declares `cast`, `size_of`, `trap`, `wrapping_add` and the rest (§6.4).
 
   ```nest
   @public size_of :: #intrinsic func <T> () -> usize

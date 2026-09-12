@@ -106,7 +106,8 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
         // alias: whoever looks the tag up wants the members, and an alias that
         // mirrors them is one hop of indirection with nothing on the other side.
         if let (Some(tag), Some(base)) = (imp.lang.clone(), base) {
-            match session.lang_items.set(tag.clone(), base) {
+            let in_core = session.pkg_of.get(&file).map(String::as_str) == Some("core");
+            match session.lang_items.set(tag.clone(), base, in_core) {
                 Some(prev) if prev != base => {
                     session.error(file, imp.span, format!("duplicate `#lang(\"{tag}\")` item"));
                 }

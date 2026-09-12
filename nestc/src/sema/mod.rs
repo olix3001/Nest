@@ -418,6 +418,7 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
         );
 
         // Collect definitions (disjoint field borrows while reading the ast).
+        let in_core = session.pkg_of.get(&file).map(String::as_str) == Some("core");
         let raw_imports = {
             let Session {
                 asts,
@@ -427,7 +428,7 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
                 ..
             } = &mut *session;
             let ast = &asts[&file];
-            collect::collect_file(defs, lang_items, diagnostics, ast, file, ns)
+            collect::collect_file(defs, lang_items, diagnostics, ast, file, ns, in_core)
         };
 
         // Load each import target and enqueue it for collection.

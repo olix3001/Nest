@@ -16,6 +16,11 @@ type []u8 = struct {           // was a slice; size 16, align 8
   ptr: *u8                    // +0
   len: u64                    // +8
 }
+type core.Location = struct {           // was a struct; size 24, align 8
+  file: core.str                    // +0
+  line: u32                    // +16
+  column: u32                    // +20
+}
 
 func area(s_0: Shape) -> i32  // _NC4area
   let _1: i32
@@ -23,15 +28,13 @@ func area(s_0: Shape) -> i32  // _NC4area
   let r_3: i32
   let w_4: i32
   let h_5: i32
-  let _6: i32
 bb0:                    // entry
-  _2 := discriminant(s_0)
+  _2 := s_0.tag
   switch _2 { 0 => bb7, 1 => bb8, 2 => bb9, _ => bb5 }
 bb1:                    // join
   return _1
 bb2:                    // arm .dot
-  _6 := cast 0 : comptime_int -> i32
-  _1 := _6
+  _1 := 0
   goto bb1
 bb3:                    // arm .circle
   _1 := r_3

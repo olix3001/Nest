@@ -72,8 +72,10 @@ use crate::sema::builtins::BuiltinOp;
 use crate::sema::def::{DefId, Directive};
 use crate::sema::ty::Ty;
 
+pub mod escape;
 pub mod lower;
 pub mod pretty;
+pub mod safepoint;
 
 pub use lower::lower;
 
@@ -220,11 +222,47 @@ pub struct Stmt {
     /// line table is address → source position and a span reconstructed at the
     /// end is a span that is wrong (§7c).
     pub span: Option<FileSpan>,
+    /// Set when collection may happen here (§6): a call, an allocation.
+    pub safepoint: Option<Safepoint>,
+}
+
+impl Stmt {
+    pub fn new(kind: StmtKind, span: Option<FileSpan>) -> Stmt {
+        Stmt {
+            kind,
+            span,
+            safepoint: None,
+        }
+    }
+}
+
+/// A point where the collector may run, and what it must be told (§6).
+///
+/// `live` is both halves of the answer at once. It is the **root set** — the
+/// locals holding references the collector has to trace — and it is the list of
+/// `reloc` definitions, because with a moving collector every one of those
+/// locals holds a different address afterwards. They are one list rather than
+/// two for the reason the rest of LIR keeps one of everything: `p := reloc p`
+/// beside `live: [p]` is the same fact written twice, and two copies of a fact
+/// are two things that can disagree.
+///
+/// What makes this a *definition* site rather than an annotation is the whole
+/// argument of §6: a pass that does not know what a safepoint is still must not
+/// move a load of `p` across one, and it will not, because `p` is redefined
+/// here and every pass respects a definition.
+///
+/// Turning this into a shadow stack, an LLVM statepoint, or nothing at all (a
+/// non-moving collector drops the relocs as identity) is **codegen's** choice.
+/// The expensive part — knowing precisely which locals are live — is the same
+/// for all of them, so it is computed once, here.
+#[derive(Debug, Clone)]
+pub struct Safepoint {
+    pub live: Vec<LocalId>,
 }
 
 /// What a [`Stmt`] does.
 ///
-/// There are two, and the second is a call. A call is an *instruction* rather
+/// Three, and the interesting one is the call. A call is an *instruction* rather
 /// than a terminator, which is the single largest simplification in LIR and is
 /// bought by the panic model (§2): a panic does not unwind, so a call has one
 /// successor and the CFG stays roughly the size of the source.
@@ -242,6 +280,14 @@ pub enum StmtKind {
         callee: Callee,
         args: Vec<Operand>,
     },
+    /// Free the allocation this local points at, without involving the
+    /// collector (§5).
+    ///
+    /// It is emitted only where escape analysis proved the object does not
+    /// outlive the scope, and it rides the same cleanup ladder `defer` does, one
+    /// rung per kind of exit — an allocation in a scope with three exits is
+    /// freed once, in a block all three reach.
+    Drop(LocalId),
 }
 
 /// How a call reaches its code.
@@ -420,11 +466,6 @@ pub enum Rvalue {
         index: Operand,
         elem: Ty,
     },
-    /// Read an enum's tag. The one operation that is not a projection even
-    /// though the tag *is* a member: what a decision tree switches on is a
-    /// number, and asking for it by name would tie every consumer to the tag's
-    /// width.
-    Discriminant(Place),
     /// A compiler intrinsic that survives as an operation rather than folding to
     /// a constant — the GC ones, the wrapping arithmetic. Nothing here is ever
     /// "a call to a function that does not exist" (§9).
@@ -457,6 +498,20 @@ pub enum AggregateKind {
 pub struct Terminator {
     pub kind: TermKind,
     pub span: Option<FileSpan>,
+    /// Set on a loop's **back edge**, the third kind of safepoint (§6). A loop
+    /// that calls nothing and allocates nothing would otherwise be a region the
+    /// collector can never interrupt.
+    pub safepoint: Option<Safepoint>,
+}
+
+impl Terminator {
+    pub fn new(kind: TermKind, span: Option<FileSpan>) -> Terminator {
+        Terminator {
+            kind,
+            span,
+            safepoint: None,
+        }
+    }
 }
 
 /// What a [`Terminator`] does.

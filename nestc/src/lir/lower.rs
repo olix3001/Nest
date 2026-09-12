@@ -52,7 +52,7 @@
 use std::collections::HashMap;
 
 use crate::common::options::{Options, OverflowMode};
-use crate::common::source::FileSpan;
+use crate::common::source::{FileSpan, SourceMap};
 use crate::common::symbol::Symbol;
 use crate::ir::layout::Layouts;
 use crate::ir::{
@@ -61,7 +61,7 @@ use crate::ir::{
 };
 use crate::parser::ast::{BinOp, Lit};
 use crate::sema::builtins::BuiltinOp;
-use crate::sema::def::{DefId, DefTable};
+use crate::sema::def::{DefId, DefTable, LangItems};
 use crate::sema::ty::Ty;
 
 use super::{
@@ -71,12 +71,15 @@ use super::{
 };
 
 /// Lower the whole monomorphized program.
+#[allow(clippy::too_many_arguments)]
 pub fn lower(
     defs: &DefTable,
     meta: &Meta,
     linked: &Linked,
     layouts: &Layouts,
     options: &Options,
+    lang: &LangItems,
+    sources: &SourceMap,
 ) -> Program {
     let mut cx = Cx {
         defs,
@@ -84,6 +87,9 @@ pub fn lower(
         linked,
         layouts,
         options,
+        lang,
+        sources,
+        drops: super::escape::analyze(linked.funcs()),
         program: Program::default(),
         type_index: HashMap::new(),
         vtable_index: HashMap::new(),
@@ -115,7 +121,13 @@ pub fn lower(
     // turned out to mention. "Every type" is not a set anyone can enumerate —
     // the same reason layout is a query — so what LIR carries is what LIR uses.
     cx.collect_types();
-    cx.program
+
+    // Safepoints after everything, and they have to be: what is live at a call
+    // is a property of the finished graph, and which types hold references is a
+    // question for the table that was only just built (§6).
+    let mut program = cx.program;
+    super::safepoint::annotate(defs, &mut program);
+    program
 }
 
 /// State shared by every function's lowering: the tables that answer questions
@@ -126,6 +138,19 @@ struct Cx<'a> {
     linked: &'a Linked,
     layouts: &'a Layouts<'a>,
     options: &'a Options,
+    /// The `#lang` registry. LIR reaches into it for exactly one thing: the
+    /// `panic` a trapped overflow or an out-of-bounds index calls (§2). Finding
+    /// it by tag is what keeps the compiler's own failures and the program's on
+    /// the same code path — and what lets a program replace the handler.
+    lang: &'a LangItems,
+    /// The source text, for turning a span into the `file`/`line`/`column` a
+    /// compiler-raised panic reports. A source-written `panic(...)` gets the
+    /// same three numbers from `#caller_location` (§5.2); this is that, for a
+    /// call site the source did not write.
+    sources: &'a SourceMap,
+    /// Which allocations each IR block may free on the way out (§5), from
+    /// [`super::escape`].
+    drops: super::escape::Drops,
     program: Program,
     /// Flattened type definitions, by [`crate::ir::mono::type_key`].
     type_index: HashMap<String, usize>,
@@ -164,13 +189,21 @@ impl Cx<'_> {
     /// loop counter has no compile-time value, which is exactly when a run-time
     /// check is what the language promised (§3.2).
     fn const_index(&self, e: &Expr) -> Option<u64> {
+        self.const_value(e)?.as_u64()
+    }
+
+    /// The value of `e`, when the const evaluator can produce one.
+    ///
+    /// A fresh evaluator per question, for the reason [`Self::const_index`]
+    /// gives: the answer is a property of the expression, not of the walk.
+    fn const_value(&self, e: &Expr) -> Option<ConstValue> {
         let mut cx = crate::ir::const_eval::ConstEval::new(
             self.defs,
             self.meta,
             self.linked,
             self.layouts,
         );
-        cx.eval(e).ok()?.as_u64()
+        cx.eval(e).ok()
     }
 
     /// `usize`, as wide as this target's pointer.
@@ -508,6 +541,10 @@ enum Exit {
 struct Scope {
     id: u32,
     defers: Vec<Expr>,
+    /// The allocations escape analysis proved do not outlive this scope (§5).
+    /// They are freed on every exit, after the `defer` bodies — a `defer` may
+    /// still read the object, and the memory has to survive until it has.
+    drops: Vec<DefId>,
 }
 
 /// Where `break` and `continue` go, and where `break value` writes.
@@ -641,10 +678,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 }
                 self.goto(b, span);
             }
-            None => self.terminate(Terminator {
-                kind: TermKind::Return(value),
-                span,
-            }),
+            None => self.terminate(Terminator::new(TermKind::Return(value), span)),
         }
     }
 
@@ -685,7 +719,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         if self.blocks[at].term.is_some() {
             return;
         }
-        self.blocks[at].stmts.push(Stmt { kind, span });
+        self.blocks[at].stmts.push(Stmt::new(kind, span));
     }
 
     fn terminate(&mut self, term: Terminator) {
@@ -696,10 +730,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     }
 
     fn goto(&mut self, target: BlockId, span: Option<FileSpan>) {
-        self.terminate(Terminator {
-            kind: TermKind::Goto(target),
-            span,
-        });
+        self.terminate(Terminator::new(TermKind::Goto(target), span));
     }
 
     /// Whether the current block has already ended — how the walk knows a
@@ -717,10 +748,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             .map(|(i, b)| Block {
                 id: BlockId(i as u32),
                 stmts: b.stmts,
-                term: b.term.unwrap_or(Terminator {
-                    kind: TermKind::Unreachable,
-                    span: None,
-                }),
+                term: b.term.unwrap_or(Terminator::new(TermKind::Unreachable, None)),
                 label: b.label,
             })
             .collect()
@@ -743,23 +771,21 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// Branch on `cond`, continuing in a fresh block when it is true.
     fn branch_if(&mut self, cond: Operand, on_false: BlockId, span: Option<FileSpan>) {
         let next = self.new_block(None);
-        self.terminate(Terminator {
-            kind: TermKind::Switch {
+        self.terminate(Terminator::new(TermKind::Switch {
                 value: cond,
                 arms: vec![(1, next)],
                 otherwise: on_false,
-            },
-            span,
-        });
+            }, span));
         self.at = next;
     }
 
     // ===< Scopes and the cleanup ladder (§3) >===
 
-    fn push_scope(&mut self, defers: Vec<Expr>) {
+    fn push_scope(&mut self, block: IrId, defers: Vec<Expr>) {
         let id = self.next_scope;
         self.next_scope += 1;
-        self.scopes.push(Scope { id, defers });
+        let drops = self.cx.drops.get(&block).cloned().unwrap_or_default();
+        self.scopes.push(Scope { id, defers, drops });
     }
 
     /// Leave the innermost scope by falling off its end: its bodies run here,
@@ -774,6 +800,22 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         }
         for d in scope.defers.iter().rev() {
             self.eval(d);
+        }
+        self.emit_drops(&scope.drops);
+    }
+
+    /// Free this scope's non-escaping allocations (§5).
+    ///
+    /// A candidate whose local does not exist yet is skipped rather than
+    /// invented: that is the ordering rule `lir::escape` states, and the skip is
+    /// what makes a mistake there a leak instead of a free of a slot nothing
+    /// wrote.
+    fn emit_drops(&mut self, drops: &[DefId]) {
+        for def in drops.iter().rev() {
+            if let Some(&l) = self.local_of.get(def) {
+                let span = self.locals[l.0 as usize].span;
+                self.push(LirStmtKind::Drop(l), span);
+            }
         }
     }
 
@@ -793,24 +835,25 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             return self.landing(exit, span);
         }
         let scope = &self.scopes[depth - 1];
-        let (id, defers) = (scope.id, scope.defers.clone());
-        // A scope with nothing deferred is not a rung: it would be a block whose
-        // only statement is a jump, which is a block a reader has to follow to
-        // learn nothing.
-        if defers.is_empty() {
+        let (id, defers, drops) = (scope.id, scope.defers.clone(), scope.drops.clone());
+        // A scope with nothing to run on the way out is not a rung: it would be
+        // a block whose only statement is a jump, which is a block a reader has
+        // to follow to learn nothing.
+        if defers.is_empty() && drops.is_empty() {
             return self.rung(exit, depth - 1, floor, span);
         }
         if let Some(b) = self.rungs.get(&(id, exit)) {
             return *b;
         }
         let next = self.rung(exit, depth - 1, floor, span);
-        let block = self.new_block(Some(format!("defer {} ({})", id, exit_label(exit))));
+        let block = self.new_block(Some(format!("cleanup {} ({})", id, exit_label(exit))));
         self.rungs.insert((id, exit), block);
         let resume = self.at;
         self.at = block;
         for d in defers.iter().rev() {
             self.eval(d);
         }
+        self.emit_drops(&drops);
         self.goto(next, span);
         self.at = resume;
         block
@@ -843,20 +886,19 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         let b = self.new_block(Some("return".to_string()));
         let resume = self.at;
         self.at = b;
-        self.terminate(Terminator {
-            kind: TermKind::Return(slot.map(Operand::local)),
-            span,
-        });
+        self.terminate(Terminator::new(TermKind::Return(slot.map(Operand::local)), span));
         self.at = resume;
         self.ret_slot = slot;
         self.ret_block = Some(b);
         b
     }
 
-    /// Whether any scope currently open has something deferred — which is what
-    /// decides whether an exit needs a ladder at all.
+    /// Whether any scope currently open has something to run on the way out —
+    /// which is what decides whether an exit needs a ladder at all.
     fn any_defers(&self, floor: usize) -> bool {
-        self.scopes[floor..].iter().any(|s| !s.defers.is_empty())
+        self.scopes[floor..]
+            .iter()
+            .any(|s| !s.defers.is_empty() || !s.drops.is_empty())
     }
 
     // ===< Blocks and statements >===
@@ -867,7 +909,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         // out — and it only ever turns checks *off*, never back on.
         let outer = self.unguarded;
         self.unguarded |= self.cx.meta.has_directive(b.id, "unsafe");
-        self.push_scope(b.defers.clone());
+        self.push_scope(b.id, b.defers.clone());
         for s in &b.stmts {
             self.stmt(s);
         }
@@ -914,10 +956,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     }
                     self.goto(target, span);
                 } else {
-                    self.terminate(Terminator {
-                        kind: TermKind::Return(value),
-                        span,
-                    });
+                    self.terminate(Terminator::new(TermKind::Return(value), span));
                 }
             }
             StmtKind::Break(e) => {
@@ -1186,14 +1225,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             } else {
                 (join, other)
             };
-            self.terminate(Terminator {
-                kind: TermKind::Switch {
+            self.terminate(Terminator::new(TermKind::Switch {
                     value: a,
                     arms: vec![(1, t)],
                     otherwise: f,
-                },
-                span,
-            });
+                }, span));
             self.at = other;
             let b = self.eval(rhs);
             self.assign(place.clone(), Rvalue::Use(b), span);
@@ -1253,6 +1289,92 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         };
         let id = self.cx.vtable(&slots);
         Operand::Const(Constant::Vtable(id))
+    }
+
+    // ===< Panicking (§2) >===
+
+    /// Emit the panic a compiler-raised failure makes: a call to `core`'s
+    /// `panic`, then `unreachable`.
+    ///
+    /// A trapped overflow and an index past the end are **the program failing**,
+    /// not a compiler-private abort, so they go through the same function a
+    /// written `panic("...")` does — found by its `#lang("panic")` tag, like
+    /// every other item the compiler reaches into `core` for. Two things follow
+    /// from that and both are the point: a program that replaces
+    /// `#lang("panic_handler")` replaces what these do too, and there is no
+    /// `$panic` operation for a backend to implement, only a call it already
+    /// knows how to emit.
+    ///
+    /// The `Location` is built here because the source did not write this call
+    /// site: `#caller_location` fills the argument in for a call the *program*
+    /// wrote (§5.2), and this is the same three numbers taken from the span the
+    /// failing operation already carries.
+    fn panic_at(&mut self, msg: &str, span: Option<FileSpan>) {
+        let message = Operand::Const(Constant::Value(ConstValue::Str(msg.to_string())));
+        let Some(def) = self.cx.lang.get("panic") else {
+            // A `core` with no `#lang("panic")` item: inference has said so
+            // already. Stop the block rather than lose the edge.
+            self.terminate(Terminator::new(TermKind::Unreachable, span));
+            return;
+        };
+        let callee = self.static_callee(def);
+        let mut args = vec![message];
+        if let Some(loc) = self.location(span) {
+            args.push(loc);
+        }
+        self.emit_call(callee, args, Ty::Never, span);
+    }
+
+    /// The `Location` value for `span`, as an operand.
+    fn location(&mut self, span: Option<FileSpan>) -> Option<Operand> {
+        let def = self.cx.defs.resolve_alias(self.cx.lang.get("location")?);
+        let (file, line, column) = match span.and_then(|s| {
+            self.cx
+                .sources
+                .file(s.file)
+                .map(|f| (f.name.clone(), f.line_col(s.span.start)))
+        }) {
+            Some((name, lc)) => (name, lc.line, lc.column),
+            None => (String::new(), 0, 0),
+        };
+        let ty = Ty::Nominal {
+            def,
+            args: Vec::new(),
+        };
+        Some(self.into_temp(
+            Rvalue::Aggregate {
+                kind: AggregateKind::Struct(def),
+                fields: vec![
+                    Operand::Const(Constant::Value(ConstValue::Str(file))),
+                    Operand::Const(Constant::Value(ConstValue::Int(line.into()))),
+                    Operand::Const(Constant::Value(ConstValue::Int(column.into()))),
+                ],
+            },
+            ty,
+            span,
+        ))
+    }
+
+    /// Read an enum's tag.
+    ///
+    /// It is an ordinary member read: an enum is `{ tag, payload }` by §7b, so
+    /// the discriminant is a field like any other and needs no operation of its
+    /// own. What a decision tree switches on is the value in that field, read
+    /// **once** (§4) into a slot the groups share.
+    fn tag_of(&mut self, place: &Place, ty: &Ty, span: Option<FileSpan>) -> Operand {
+        let width = match self.cx.layouts.enum_layout(ty) {
+            Some(Ok(e)) => (e.tag.size * 8) as u16,
+            _ => 8,
+        };
+        let tag = place.clone().then(Projection::Field {
+            index: 0,
+            name: Symbol::new("tag"),
+        });
+        self.into_temp(
+            Rvalue::Use(Operand::Copy(tag)),
+            Ty::int(width, false),
+            span,
+        )
     }
 
     // ===< Calls >===
@@ -1389,10 +1511,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 },
                 span,
             );
-            self.terminate(Terminator {
-                kind: TermKind::Unreachable,
-                span,
-            });
+            self.terminate(Terminator::new(TermKind::Unreachable, span));
             return None;
         }
         if matches!(ty, Ty::Void) {
@@ -1485,30 +1604,13 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         );
         let trap = self.new_block(Some("out of bounds".to_string()));
         let go_on = self.new_block(None);
-        self.terminate(Terminator {
-            kind: TermKind::Switch {
+        self.terminate(Terminator::new(TermKind::Switch {
                 value: ok,
                 arms: vec![(1, go_on)],
                 otherwise: trap,
-            },
-            span,
-        });
+            }, span));
         self.at = trap;
-        let sink = self.temp(Ty::Never, span);
-        self.assign(
-            Place::local(sink),
-            Rvalue::Intrinsic {
-                name: Symbol::new("panic"),
-                args: vec![Operand::Const(Constant::Value(ConstValue::Str(
-                    "index out of bounds".to_string(),
-                )))],
-            },
-            span,
-        );
-        self.terminate(Terminator {
-            kind: TermKind::Unreachable,
-            span,
-        });
+        self.panic_at("index out of bounds", span);
         self.at = go_on;
     }
 
@@ -1602,31 +1704,14 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         });
         let trap = self.new_block(Some("overflow".to_string()));
         let ok = self.new_block(None);
-        self.terminate(Terminator {
-            kind: TermKind::Switch {
+        self.terminate(Terminator::new(TermKind::Switch {
                 value: Operand::Copy(flag),
                 arms: vec![(1, trap)],
                 otherwise: ok,
-            },
-            span,
-        });
+            }, span));
 
         self.at = trap;
-        let sink = self.temp(Ty::Never, span);
-        self.assign(
-            Place::local(sink),
-            Rvalue::Intrinsic {
-                name: Symbol::new("panic"),
-                args: vec![Operand::Const(Constant::Value(ConstValue::Str(
-                    "integer overflow".to_string(),
-                )))],
-            },
-            span,
-        );
-        self.terminate(Terminator {
-            kind: TermKind::Unreachable,
-            span,
-        });
+        self.panic_at("integer overflow", span);
 
         self.at = ok;
         Rvalue::Use(Operand::Copy(Place::local(pair).then(Projection::Field {
@@ -1661,8 +1746,23 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // because what the conversion *is* — a truncation, a sign extension,
             // a rounding — depends on both, and recovering it from the operand
             // would be codegen re-deriving a type this stage already had.
+            //
+            // **A comptime literal is not a conversion.** `10` written where an
+            // `i32` is wanted is an `i32` whose value is ten — the `$cast` the
+            // IR carries is bookkeeping about where the literal's type came
+            // from (§6.5), and the only stage that needed it was inference.
+            // Emitting it here would leave `comptime_int` in the type of a
+            // machine operand, which is a type no backend has a register for, so
+            // the literal is folded into its definition and the cast disappears.
             "cast" if args.len() == 1 => {
                 let from = self.cx.ty_of(args[0].id);
+                let comptime = matches!(
+                    from,
+                    Ty::ComptimeInt | Ty::ComptimeFloat | Ty::ComptimeStr
+                );
+                if let Some(v) = comptime.then(|| self.cx.const_value(e)).flatten() {
+                    return Some(Rvalue::Use(Operand::Const(Constant::Value(v))));
+                }
                 let v = self.eval(&args[0]);
                 Some(Rvalue::Cast {
                     value: v,
@@ -1751,10 +1851,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 if matches!(ty, Ty::Never) {
                     let sink = self.temp(Ty::Never, span);
                     self.assign(Place::local(sink), value, span);
-                    self.terminate(Terminator {
-                        kind: TermKind::Unreachable,
-                        span,
-                    });
+                    self.terminate(Terminator::new(TermKind::Unreachable, span));
                     return None;
                 }
                 Some(value)
@@ -1879,14 +1976,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         let then_b = self.new_block(Some("then".to_string()));
         let else_b = self.new_block(Some("else".to_string()));
         let join = self.new_block(Some("join".to_string()));
-        self.terminate(Terminator {
-            kind: TermKind::Switch {
+        self.terminate(Terminator::new(TermKind::Switch {
                 value: c,
                 arms: vec![(1, then_b)],
                 otherwise: else_b,
-            },
-            span,
-        });
+            }, span));
 
         self.at = then_b;
         let v = self.block_value(then);
@@ -2024,7 +2118,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
 
         // Read once. This is the invariant §4 names, and it is why the groups
         // are built around a single switch rather than around per-arm tests.
-        let disc = self.into_temp(Rvalue::Discriminant(place.clone()), Ty::int(8, false), span);
+        let disc = self.tag_of(place, sty, span);
         let switch_at = self.at;
         let default = self.new_block(Some("no variant matched".to_string()));
         // One block for "nothing matched", shared by every group. Exhaustiveness
@@ -2049,14 +2143,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             self.chain(place, sty, arms, &candidates, &bodies, Some(i as u32), dead, span);
         }
         self.at = switch_at;
-        self.terminate(Terminator {
-            kind: TermKind::Switch {
+        self.terminate(Terminator::new(TermKind::Switch {
                 value: disc,
                 arms: targets,
                 otherwise: default,
-            },
-            span,
-        });
+            }, span));
 
         // A discriminant no variant claims cannot happen, but a catch-all arm
         // still has to be somewhere the graph can point at.
@@ -2228,17 +2319,13 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 let Some((_, index)) = self.variant_index(ty, name) else {
                     return;
                 };
-                let disc =
-                    self.into_temp(Rvalue::Discriminant(place.clone()), Ty::int(8, false), span);
+                let disc = self.tag_of(place, ty, span);
                 let ok = self.new_block(None);
-                self.terminate(Terminator {
-                    kind: TermKind::Switch {
+                self.terminate(Terminator::new(TermKind::Switch {
                         value: disc,
                         arms: vec![(index as i128, ok)],
                         otherwise: fail,
-                    },
-                    span,
-                });
+                    }, span));
                 self.at = ok;
                 let payload = place.clone().then(Projection::Variant {
                     index,

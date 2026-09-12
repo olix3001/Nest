@@ -205,6 +205,7 @@ impl Printer<'_> {
         for s in &b.stmts {
             let text = self.stmt(f, s);
             self.line(&format!("  {text}{}", self.at(s.span)));
+            self.safepoint(f, s.safepoint.as_ref());
         }
         let term = match &b.term.kind {
             TermKind::Goto(t) => format!("goto bb{}", t.0),
@@ -229,6 +230,26 @@ impl Printer<'_> {
             TermKind::Unreachable => "unreachable".to_string(),
         };
         self.line(&format!("  {term}{}", self.at(b.term.span)));
+        self.safepoint(f, b.term.safepoint.as_ref());
+    }
+
+    /// A safepoint, written the way §6 writes it: the live set, then one
+    /// `reloc` line per root, because a redefinition is what the list *means*.
+    fn safepoint(&mut self, f: &Function, sp: Option<&super::Safepoint>) {
+        let Some(sp) = sp else { return };
+        let live: Vec<String> = sp.live.iter().map(|l| self.local_name(f, *l)).collect();
+        // Nothing to trace is still a point the collector may run at, and saying
+        // so on one line keeps a dump readable when most of them are empty.
+        if live.is_empty() {
+            self.line("    @safepoint { live: [] }");
+            return;
+        }
+        self.line(&format!("    @safepoint {{ live: [{}]", live.join(", ")));
+        for l in &sp.live {
+            let n = self.local_name(f, *l);
+            self.line(&format!("      {n} := reloc {n}"));
+        }
+        self.line("    }");
     }
 
     fn stmt(&self, f: &Function, s: &Stmt) -> String {
@@ -243,6 +264,7 @@ impl Printer<'_> {
                     self.rvalue(f, value)
                 )
             }
+            StmtKind::Drop(l) => format!("drop {}", self.local_name(f, *l)),
             StmtKind::Call { dest, callee, args } => {
                 let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();
                 let call = match callee {
@@ -307,7 +329,6 @@ impl Printer<'_> {
                 self.operand(f, index),
                 elem.display(self.defs)
             ),
-            Rvalue::Discriminant(p) => format!("discriminant({})", self.place(f, p)),
             Rvalue::Intrinsic { name, args } => {
                 let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();
                 format!("${name}({})", args.join(", "))

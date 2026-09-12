@@ -365,11 +365,25 @@ impl DefTable {
     }
 }
 
-/// The registry mapping each `#lang("tag")` to the single def that carries it
-/// (§9.3). Populated during collection; consumed by desugaring.
+/// The registry mapping each `#lang("tag")` to the def that carries it (§9.3).
+/// Populated during collection; consumed by desugaring.
+///
+/// A tag may be claimed twice, once by `core` and once by the program: the
+/// program's claim wins and `core`'s is the **default**. That rule is what makes
+/// `#lang("panic_handler")` replaceable without any of the machinery being
+/// special to panicking — `core` is by definition the fallback library, so
+/// "found by tag, never by name" only holds up if a tag can be re-answered. Two
+/// claims from the same side stay the duplicate error they were.
 #[derive(Debug, Default)]
 pub struct LangItems {
-    map: HashMap<Symbol, DefId>,
+    map: HashMap<Symbol, Claim>,
+}
+
+/// One `#lang` claim: which def, and whether it came from `core`.
+#[derive(Debug, Clone, Copy)]
+struct Claim {
+    def: DefId,
+    from_core: bool,
 }
 
 impl LangItems {
@@ -377,17 +391,37 @@ impl LangItems {
         Self::default()
     }
 
-    /// Register `tag → def`. Returns the previous def if the tag was already
-    /// claimed (a duplicate-`#lang` error the caller reports).
-    pub fn set(&mut self, tag: Symbol, def: DefId) -> Option<DefId> {
-        self.map.insert(tag, def)
+    /// Register `tag → def`. `from_core` says whether the declaration lives in
+    /// the `core` package. Returns the previous def only when the two claims
+    /// genuinely collide — a duplicate-`#lang` error the caller reports; a
+    /// program overriding one of `core`'s defaults returns `None`.
+    pub fn set(&mut self, tag: Symbol, def: DefId, from_core: bool) -> Option<DefId> {
+        let claim = Claim { def, from_core };
+        match self.map.get(&tag).copied() {
+            // `core` supplies a default for a tag the program already answered:
+            // keep the program's.
+            Some(prev) if from_core && !prev.from_core => None,
+            // The program answers a tag `core` had a default for: take over.
+            Some(prev) if !from_core && prev.from_core => {
+                self.map.insert(tag, claim);
+                None
+            }
+            Some(prev) => {
+                self.map.insert(tag, claim);
+                Some(prev.def)
+            }
+            None => {
+                self.map.insert(tag, claim);
+                None
+            }
+        }
     }
 
     pub fn get(&self, tag: &str) -> Option<DefId> {
-        self.map.get(&Symbol::new(tag)).copied()
+        self.map.get(&Symbol::new(tag)).map(|c| c.def)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Symbol, &DefId)> {
-        self.map.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&Symbol, DefId)> {
+        self.map.iter().map(|(t, c)| (t, c.def))
     }
 }

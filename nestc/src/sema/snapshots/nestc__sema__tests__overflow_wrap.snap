@@ -9,6 +9,11 @@ type []u8 = struct {           // was a slice; size 16, align 8
   ptr: *u8                    // +0
   len: u64                    // +8
 }
+type core.Location = struct {           // was a struct; size 24, align 8
+  file: core.str                    // +0
+  line: u32                    // +16
+  column: u32                    // +20
+}
 
 func add(a_0: i32, b_1: i32) -> i32  // _NC3add
   let _2: i32
