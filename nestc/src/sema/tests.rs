@@ -7942,3 +7942,73 @@ read :: func (s: []i32, a: [3]i32, k: usize) -> i32 { return s[k] + a[k] }
 ";
     insta::assert_snapshot!(lir_text(src));
 }
+
+// ===< Bounds >===
+
+/// A `[N]T` carries its length in its type (§3.2), so when the index is also a
+/// compile-time value the comparison has two known numbers in it and an answer
+/// that cannot change. There is no input and no build setting under which `a[7]`
+/// on a `[3]i32` is anything but a trap, so it is refused where it is written.
+#[test]
+fn a_constant_index_past_a_fixed_arrays_end_is_a_compile_error() {
+    for src in [
+        "f :: func () -> i32 {\n  const a := [_]i32 { 1, 2, 3 }\n  return a[7]\n}\n",
+        // Through a named constant, and through arithmetic: the same evaluator
+        // answers both, so neither is a different case.
+        "K: usize :: 5\nf :: func (a: [3]i32) -> i32 { return a[K] }\n",
+        "f :: func (a: [3]i32) -> i32 { return a[1 + 2] }\n",
+        // The last index is `N - 1`; `N` itself is one past the end.
+        "f :: func (a: [3]i32) -> i32 { return a[3] }\n",
+    ] {
+        let msgs = messages(src);
+        assert_eq!(msgs.len(), 1, "{src}\n{msgs:#?}");
+        assert!(msgs[0].contains("out of bounds"), "{msgs:#?}");
+    }
+}
+
+/// And an index that is known to be *in* range is not a diagnostic and not a
+/// branch either — the comparison has a known answer, so there is nothing to
+/// emit.
+#[test]
+fn a_constant_index_in_range_is_neither_reported_nor_checked() {
+    let src = "f :: func (a: [3]i32) -> i32 { return a[2] }\n";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    let lir = lir_text(src);
+    assert!(!lir.contains("out of bounds"), "{lir}");
+}
+
+/// A slice's length is a run-time value, so there is nothing to compare against
+/// until the program runs — which is exactly what §3.2 promises: a trap.
+#[test]
+fn a_slice_index_is_checked_against_its_length_at_run_time() {
+    let lir = lir_text("f :: func (s: []i32, k: usize) -> i32 { return s[k] }\n");
+    assert!(lir.contains("k_1 < "), "{lir}");
+    assert!(lir.contains("$panic(\"index out of bounds\")"), "{lir}");
+}
+
+/// An array with a run-time index is checked too — against the constant its
+/// type carries.
+#[test]
+fn a_fixed_array_with_a_runtime_index_is_checked_against_its_length() {
+    let lir = lir_text("f :: func (a: [3]i32, k: usize) -> i32 { return a[k] }\n");
+    assert!(lir.contains("k_1 < 3"), "{lir}");
+}
+
+/// `#unsafe` disables the run-time safety checks in its scope (§9). The whole
+/// meaning of the directive is that they are off, so a check emitted anyway
+/// would make it a comment.
+#[test]
+fn unsafe_turns_the_bounds_check_off() {
+    let lir = lir_text("f :: #unsafe func (s: []i32, k: usize) -> i32 { return s[k] }\n");
+    assert!(!lir.contains("out of bounds"), "{lir}");
+}
+
+/// The shape §3.2's trap takes: a comparison, an edge, and a block that does not
+/// come back — the same one `overflow=trap` takes, for the same reason.
+#[test]
+fn lir_snapshot_a_bounds_check_is_a_comparison_and_an_edge() {
+    let src = "\
+get :: func (s: []i32, k: usize) -> i32 { return s[k] }
+";
+    insta::assert_snapshot!(lir_text(src));
+}

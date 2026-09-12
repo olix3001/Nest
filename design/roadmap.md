@@ -602,6 +602,11 @@ blocks, one terminator each.
 - **`overflow=trap` is an edge** (§7d): a checked operation, a switch on the
   flag, and a block that panics and does not come back. Integers reached through
   a `distinct` count — `usize` is one (§3.1).
+- **Bounds checks are the same shape** (§3.2): a comparison against the length,
+  an edge, a block that panics. `#unsafe` turns them off (§9), and an index the
+  evaluator proved in range needs none. The other half is `check::bounds`, which
+  refuses `a[7]` on a `[3]i32` where it is written — a fixed array's length is in
+  its type, so when the index is known too the answer cannot change.
 - **Intrinsics are gone as calls** (§9): `size_of` / `align_of` are the numbers
   layout computed, `cast` is a cast carrying both types, `len` is a constant or a
   member, `index` is a projection or pointer arithmetic, an array literal is an

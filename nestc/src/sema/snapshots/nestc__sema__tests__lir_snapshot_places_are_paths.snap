@@ -26,11 +26,19 @@ type []u8 = struct {           // was a slice; size 16, align 8
 func reach(o_0: *mut Outer, xs_1: []mut i32, k_2: usize) -> void  // _NC5reach
   let _3: i32
   let _4: *[]mut i32
-  let _5: *mut i32
+  let _5: bool
+  let _6: never
+  let _7: *mut i32
 bb0:                    // entry
   _3 := cast 1 : comptime_int -> i32
   o_0.*.i.v = _3
   _4 := &xs_1
-  _5 := _4.*.ptr + k_2 * stride(i32)
-  _5.* = o_0.*.i.v
+  _5 := k_2 < _4.*.len
+  switch _5 { 1 => bb2, _ => bb1 }
+bb1:                    // out of bounds
+  _6 := $panic("index out of bounds")
+  unreachable
+bb2:
+  _7 := _4.*.ptr + k_2 * stride(i32)
+  _7.* = o_0.*.i.v
   return

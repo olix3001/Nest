@@ -387,7 +387,14 @@ because only the defining package may write an inherent impl (§4.9). `len` may
 also be called directly, and on a `[N]T` whose `N` is known it folds to a
 compile-time constant.
 Out-of-bounds indexing traps at run time (unless in an `#unsafe`
-scope, §9). A slice-of-structs may be laid out struct-of-arrays with the `#soa`
+scope, §9) — and is a **compile error** when both numbers are known. A `[N]T`
+carries its length in its type, so if the index is also a compile-time value the
+comparison has an answer that no input and no build setting can change; `a[7]`
+on a `[3]i32` is refused where it is written rather than compiled into a trap.
+The rule is narrow on purpose: both numbers, or nothing. A slice has no length
+until it runs, and an index the compiler cannot work out is not evidence of
+anything — guessing at those is how a bounds checker starts rejecting correct
+programs. A slice-of-structs may be laid out struct-of-arrays with the `#soa`
 directive (§9). Growable sequences are the std `Vector` (§3.9).
 
 Array **values** are written with composite literals — `.{ 1, 2, 3 }` (inferred),

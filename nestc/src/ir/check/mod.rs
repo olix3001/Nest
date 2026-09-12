@@ -23,6 +23,7 @@ use crate::sema::def::DefTable;
 
 use super::{Arm, Block, Expr, ExprKind, Linked, Meta, Stmt, StmtKind};
 
+pub mod bounds;
 pub mod constants;
 pub mod constness;
 pub mod declarations;
@@ -47,6 +48,7 @@ pub fn run(
     exhaustive::check(defs, meta, linked, &mut out);
     constness::check(defs, meta, linked, &mut out);
     constants::check(defs, meta, linked, layouts, &mut out);
+    bounds::check(defs, meta, linked, layouts, &mut out);
     object_safety::check(defs, meta, linked, &mut out);
     reachability::check(defs, meta, linked, &mut out);
     declarations::check(defs, meta, linked, &mut out);

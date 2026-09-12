@@ -2,7 +2,7 @@
 
 **Generated**: 2026-09-12
 **Branch**: `main`
-**Status**: **443 tests pass**, `cargo clippy` reports 85 warnings (the 73
+**Status**: **449 tests pass**, `cargo clippy` reports 85 warnings (the 73
 baseline plus dead-code entries in the new `lir` module — fields codegen will
 read and nothing does yet). Every file in `examples/*.nest` compiles.
 
@@ -133,6 +133,8 @@ Everything in the previous handoffs' lists still stands. New this session:
 | A vtable's slots are monomorphization's answer | The instantiated method does not exist until that pass makes it |
 | The sequences implement `Index` and not `IndexMut` | A sequence's write permission is in its type, not in its receiver (§2.3, §3.2) |
 | Pointer arithmetic exists in LIR and nowhere above | A flattened slice has no element to project; the source has bounds in the type and needs none |
+| A constant index past a fixed array's end is a compile error | Both numbers are in the type and the literal; no run can change the answer |
+| An index the evaluator cannot fold is never reported | The evaluator failing is not evidence; that is how a bounds checker starts refusing correct programs |
 | A call is an instruction, not a terminator | A panic does not unwind (§2) — the whole reason the CFG stays the size of the source |
 | Pattern types are threaded down | A pattern is matched *against* a type; its node carries none |
 | `overflow=trap` is an edge in the graph | Every later pass has to see it to be correct (§7d) |
@@ -148,6 +150,40 @@ clippy` → 90 warnings. Every file in `examples/*.nest` compiles clean.
 **Broken**: nothing.
 
 **Uncommitted changes**: none.
+
+## Indexing is bounds-checked
+
+§3.2 always said out-of-bounds indexing traps at run time; nothing emitted the
+trap. Now two things do, and they divide the question by what is knowable:
+
+- **`ir/check/bounds.rs`** refuses `a[7]` on a `[3]i32` **where it is written**.
+  A fixed array carries its length in its type, so when the index is also a
+  compile-time value the comparison has an answer no input and no build setting
+  can change. The index is worked out by the ordinary const evaluator, so a named
+  constant and `a[1 + 2]` are the same case as a literal.
+- **The LIR lowering** emits the trap for everything else: a comparison against
+  the length — the constant in a `[N]T`, the `len` member of a `[]T` — an edge,
+  and a block that panics. The same shape `overflow=trap` takes, for the same
+  reason (§7d).
+
+The rule is **narrow on purpose**: both numbers known, or nothing. A slice has no
+length until it runs, and an index the evaluator gives up on is not evidence of
+anything — guessing at those is how a bounds checker starts rejecting correct
+programs. Proving a run-time index in range is an optimization and belongs where
+the CFG is.
+
+Two things elide the run-time check, and neither is an optimization: **`#unsafe`**
+(§9), whose whole meaning is that the checks in that scope are off — honoured on
+a function and on a block, since it is a *scope* — and an index the evaluator
+already proved in range, whose branch would be a block nothing can reach. Both
+halves ask the **same** evaluator, which is what keeps them from disagreeing
+about whether an index is known.
+
+One gap worth knowing: `check::bounds` runs **before** monomorphization, like
+every other check, so `func <const N: usize> (a: [N]T) { a[7] }` has no length to
+compare against yet and is caught by the run-time trap rather than at the
+declaration. Instantiating it first would make one mistake one diagnostic per
+call site, which is why none of the checks run after mono.
 
 ## Indexing goes through `Index` now, like every other operator
 
@@ -322,7 +358,7 @@ reach the table.
 
 ## Resume instructions
 
-1. `cd nestc && cargo test` — expect **443 passed**.
+1. `cd nestc && cargo test` — expect **449 passed**.
 2. See the phase working:
    ```
    cargo build
@@ -347,7 +383,7 @@ reach the table.
 4. The natural follow-up, if you want a small one first: close the `a[i]`
    special case the same way `.len()` was closed — see **Deliberately not done**.
 5. Whatever you touch, verify with all three:
-   - `cargo test` (443 and rising)
+   - `cargo test` (449 and rising)
    - `for f in ../examples/*.nest; do ./target/debug/nestc "$f" >/dev/null || echo "FAIL $f"; done`
    - `cargo clippy` — compare the warning **set**, not the count.
 

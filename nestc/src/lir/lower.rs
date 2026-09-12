@@ -154,6 +154,25 @@ impl Cx<'_> {
         }
     }
 
+    /// The value of an index expression, when there is one.
+    ///
+    /// The same evaluator `check::bounds` asked, so the two cannot disagree
+    /// about whether an index is known — and a fresh one per question, because
+    /// the answer is a property of the expression rather than of the walk.
+    ///
+    /// `None` is the overwhelmingly common answer and means nothing is wrong: a
+    /// loop counter has no compile-time value, which is exactly when a run-time
+    /// check is what the language promised (§3.2).
+    fn const_index(&self, e: &Expr) -> Option<u64> {
+        let mut cx = crate::ir::const_eval::ConstEval::new(
+            self.defs,
+            self.meta,
+            self.linked,
+            self.layouts,
+        );
+        cx.eval(e).ok()?.as_u64()
+    }
+
     /// `usize`, as wide as this target's pointer.
     fn usize_ty(&self) -> Ty {
         Ty::int((self.layouts.pointer_size() * 8) as u16, false)
@@ -532,6 +551,12 @@ struct Lowerer<'a, 'c> {
     ret_block: Option<BlockId>,
     /// The declared result type.
     ret: Ty,
+    /// Whether the run-time safety checks are off here — `#unsafe` (§9).
+    ///
+    /// A function-level one covers the whole body. A block-level one is a
+    /// *scope*, so it is saved and restored around the block rather than set
+    /// once.
+    unguarded: bool,
 }
 
 impl<'a, 'c> Lowerer<'a, 'c> {
@@ -540,6 +565,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             Some(Ty::Func { ret, .. }) => *ret,
             _ => Ty::Void,
         };
+        let unguarded = cx.meta.has_directive(f.id, "unsafe");
         Lowerer {
             cx,
             f,
@@ -554,6 +580,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             ret_slot: None,
             ret_block: None,
             ret,
+            unguarded,
         }
     }
 
@@ -836,6 +863,10 @@ impl<'a, 'c> Lowerer<'a, 'c> {
 
     /// Lower a block and hand back its value, if it has one.
     fn block_value(&mut self, b: &ir::Block) -> Option<Operand> {
+        // `#unsafe` on a block is a scope (§9), so it is restored on the way
+        // out — and it only ever turns checks *off*, never back on.
+        let outer = self.unguarded;
+        self.unguarded |= self.cx.meta.has_directive(b.id, "unsafe");
         self.push_scope(b.defers.clone());
         for s in &b.stmts {
             self.stmt(s);
@@ -845,6 +876,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             _ => None,
         };
         self.pop_scope();
+        self.unguarded = outer;
         value
     }
 
@@ -1386,6 +1418,100 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         Some(Rvalue::Use(Operand::local(dest)))
     }
 
+    /// Guard an index against the sequence's length.
+    ///
+    /// The length comes from wherever the sequence keeps it: a `[N]T` has it in
+    /// its type and a `[]T` in its second member (§7b). Either way the emitted
+    /// shape is the same one a checked add has — a comparison, a branch, and a
+    /// block that panics — because "this program has gone wrong" has one
+    /// answer in this language and it does not return.
+    ///
+    /// Two cases emit nothing:
+    ///
+    /// - **`#unsafe`** (§9). The directive's whole meaning is that the run-time
+    ///   safety checks in that scope are off, and a check emitted anyway would
+    ///   make it a comment.
+    /// - **Both numbers already known.** `a[1]` on a `[3]i32` has a comparison
+    ///   whose answer cannot change, and `check::bounds` has already reported
+    ///   the case where that answer is "no". Emitting the branch would be
+    ///   emitting a block nothing can reach.
+    fn bounds_check(
+        &mut self,
+        base: &Place,
+        seq: &Ty,
+        index_expr: &Expr,
+        index: &Operand,
+        span: Option<FileSpan>,
+    ) {
+        if self.unguarded {
+            return;
+        }
+        let n = match seq {
+            Ty::Array { len, .. } => match len.value() {
+                Some(n) => Some(n),
+                // A length monomorphization did not substitute: there is no
+                // number to compare against and no program to run either.
+                None => return,
+            },
+            Ty::Slice { .. } => None,
+            // Not a sequence — already a type error.
+            _ => return,
+        };
+        // An array whose index the evaluator can work out needs no branch: the
+        // comparison has two known numbers in it. The *answer* is not asked
+        // here — `check::bounds` owns the diagnostic and asked the same
+        // evaluator, so one that came out "no" has already been reported and
+        // one that came out "yes" is what this skips.
+        if let (Some(n), Some(i)) = (n, self.cx.const_index(index_expr))
+            && i < n
+        {
+            return;
+        }
+        let len = match n {
+            Some(n) => Operand::Const(Constant::Value(ConstValue::Int(n.into()))),
+            None => Operand::Copy(base.clone().then(Projection::Field {
+                index: 1,
+                name: Symbol::new("len"),
+            })),
+        };
+        let ok = self.into_temp(
+            Rvalue::Binary {
+                op: BinOp::Lt,
+                lhs: index.clone(),
+                rhs: len,
+            },
+            Ty::Bool,
+            span,
+        );
+        let trap = self.new_block(Some("out of bounds".to_string()));
+        let go_on = self.new_block(None);
+        self.terminate(Terminator {
+            kind: TermKind::Switch {
+                value: ok,
+                arms: vec![(1, go_on)],
+                otherwise: trap,
+            },
+            span,
+        });
+        self.at = trap;
+        let sink = self.temp(Ty::Never, span);
+        self.assign(
+            Place::local(sink),
+            Rvalue::Intrinsic {
+                name: Symbol::new("panic"),
+                args: vec![Operand::Const(Constant::Value(ConstValue::Str(
+                    "index out of bounds".to_string(),
+                )))],
+            },
+            span,
+        );
+        self.terminate(Terminator {
+            kind: TermKind::Unreachable,
+            span,
+        });
+        self.at = go_on;
+    }
+
     // ===< The overflow setting, made real (§7d) >===
 
     /// Whether this operation traps on overflow in this build.
@@ -1563,6 +1689,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 };
                 let base = self.place_of(&args[0])?.then(Projection::Deref);
                 let i = self.eval(&args[1]);
+                // Out of bounds **traps** (§3.2). The check is here for the same
+                // reason `overflow=trap` is (§7d): it is not a flag on an
+                // instruction, it is a comparison, an edge, and a block that
+                // does not come back, and every pass after this one has to see
+                // that edge to be correct.
+                self.bounds_check(&base, &seq, &args[1], &i, span);
                 match seq {
                     Ty::Slice { inner, .. } => {
                         let ptr = base.then(Projection::Field {

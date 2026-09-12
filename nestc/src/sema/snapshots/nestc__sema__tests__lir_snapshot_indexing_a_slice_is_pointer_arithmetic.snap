@@ -23,20 +23,36 @@ type []u8 = struct {           // was a slice; size 16, align 8
 
 func read(s_0: []i32, a_1: [3]i32, k_2: usize) -> i32  // _NC4read
   let _3: *[]i32
-  let _4: *i32
-  let _5: *[3]i32
+  let _4: bool
+  let _5: never
   let _6: *i32
-  let _7: (i32, bool)
-  let _8: never
+  let _7: *[3]i32
+  let _8: bool
+  let _9: never
+  let _10: *i32
+  let _11: (i32, bool)
+  let _12: never
 bb0:                    // entry
   _3 := &s_0
-  _4 := _3.*.ptr + k_2 * stride(i32)
-  _5 := &a_1
-  _6 := &_5.*[k_2]
-  _7 := checked_add(_4.*, _6.*)
-  switch _7.overflowed { 1 => bb1, _ => bb2 }
-bb1:                    // overflow
-  _8 := $panic("integer overflow")
+  _4 := k_2 < _3.*.len
+  switch _4 { 1 => bb2, _ => bb1 }
+bb1:                    // out of bounds
+  _5 := $panic("index out of bounds")
   unreachable
 bb2:
-  return _7.0
+  _6 := _3.*.ptr + k_2 * stride(i32)
+  _7 := &a_1
+  _8 := k_2 < 3
+  switch _8 { 1 => bb4, _ => bb3 }
+bb3:                    // out of bounds
+  _9 := $panic("index out of bounds")
+  unreachable
+bb4:
+  _10 := &_7.*[k_2]
+  _11 := checked_add(_6.*, _10.*)
+  switch _11.overflowed { 1 => bb5, _ => bb6 }
+bb5:                    // overflow
+  _12 := $panic("integer overflow")
+  unreachable
+bb6:
+  return _11.0

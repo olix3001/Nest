@@ -775,6 +775,26 @@ and a call that diverges. Every pass after lowering (drops, safepoints, liveness
 has to see that edge to be correct, so it must exist in the graph rather than
 appear underneath it.
 
+The **bounds check** is the same shape and is here for the same reason. `a[i]`
+emits a comparison against the length — the constant in a `[N]T`'s type, the
+`len` member of a `[]T` (§7b) — and a block that panics:
+
+```
+t0 := k < s.len
+switch t0 { 1 => bb2, _ => bb1 }
+bb1:                    // out of bounds
+  panic("index out of bounds")
+  unreachable
+bb2:
+  t1 := s.ptr + k * stride(i32)
+```
+
+Two things elide it, and neither is an optimization: **`#unsafe`** (§9), whose
+whole meaning is that the run-time checks in that scope are off, and an index the
+evaluator already worked out to be in range, whose comparison has a known answer
+— the out-of-range case having been reported by `check::bounds` rather than
+compiled.
+
 Two things this setting does **not** change:
 
 - **Constants.** A `::` binding *is* its value (§2.5), and one that overflows is
