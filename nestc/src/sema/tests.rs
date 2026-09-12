@@ -7795,6 +7795,262 @@ sizes :: func () -> usize { return size_of.<Header>() + align_of.<Header>() }
     insta::assert_snapshot!(lir_text(src));
 }
 
+/// One generic function is **several** functions here (§7): monomorphization
+/// runs before this pass, so a backend never sees a type parameter and never
+/// has to instantiate anything itself.
+#[test]
+fn lir_snapshot_a_generic_function_is_one_function_per_instantiation() {
+    let src = "\
+id :: func <T> (x: T) -> T { return x }
+both :: func (n: i32, c: bool) -> i32 {
+  let a := id.<i32>(n)
+  let b := id.<bool>(c)
+  if b { return a }
+  return 0
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// A bound that a *generic* satisfies is resolved at the call, not at run time:
+/// the instantiation names the impl's member directly and there is no vtable in
+/// the program at all. The contrast with
+/// [`lir_snapshot_dynamic_dispatch_goes_through_a_vtable_slot`] is the whole
+/// point — the same source method, two different instructions.
+#[test]
+fn lir_snapshot_a_bound_on_a_generic_needs_no_vtable() {
+    let src = "\
+Speak :: trait { say :: func (self: *Self) -> i32 }
+Dog :: struct { n: i32 }
+impl Speak for Dog { say :: func (self: *Self) -> i32 { return self.n } }
+heard :: func <T: Speak> (t: *T) -> i32 { return t.say() }
+call :: func (d: *Dog) -> i32 { return heard.<Dog>(d) }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// A `#static` is a **global** with an initializer, and a read of one is a
+/// place with a global base rather than a slot. A plain `::` constant is not a
+/// global at all by this point: it was folded into every use.
+#[test]
+fn lir_snapshot_a_static_is_a_place_and_a_constant_is_a_value() {
+    let src = "\
+LIMIT :: 10
+#static counter: u32 :: 0
+bump :: func () -> u32 {
+  counter = counter + 1
+  return counter
+}
+at_limit :: func (n: i32) -> bool { return n == LIMIT }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// A `str` pattern is **text** equality, and text equality is `core`'s
+/// `bytes_eq` (`#lang("bytes_eq")`) — the same function `impl Eq for str`
+/// calls, so a pattern and an `==` cannot disagree. Comparing the two `{ ptr,
+/// len }` headers with one machine `Eq` would be comparing addresses.
+#[test]
+fn lir_snapshot_a_text_pattern_calls_bytes_eq() {
+    let src = "\
+kind :: func (s: str) -> i32 {
+  return s.match {
+    \"yes\" => 1,
+    \"no\" => 0,
+    _ => -1,
+  }
+}
+same :: func (a: str, b: str) -> bool { return a == b }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// Dividing by zero is not overflow — `overflow=wrap` says what `MAX + 1`
+/// means and has nothing to say about `x / 0` — so the check is unconditional
+/// (§7d). A divisor the evaluator knows is not zero needs no branch, which is
+/// why the second function here is three instructions.
+#[test]
+fn lir_snapshot_dividing_by_zero_is_a_check_of_its_own() {
+    let src = "\
+by_value :: func (a: i32, b: i32) -> i32 { return a / b }
+by_constant :: func (a: i32) -> i32 { return a % 2 }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// `#unsafe` (§9) removes the checks the *program* is responsible for — the
+/// bounds comparison and the zero comparison are both gone here.
+///
+/// The overflow trap stays, and that is not an oversight: `overflow=` is a
+/// build-wide decision about what `MAX + 1` **means** (§7d), not a check on a
+/// program that might be wrong, so a directive about safety checks has nothing
+/// to say to it. Compiling this with `overflow=wrap` is what removes it.
+#[test]
+fn lir_snapshot_unsafe_removes_the_checks_the_program_owns() {
+    let src = "\
+raw :: #unsafe func (s: []i32, k: usize, d: i32) -> i32 { return s[k] / d }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// Casts (§6.11). A conversion between two run-time types is a `Cast` rvalue a
+/// backend maps onto one instruction; a `transmute` is a reinterpretation of
+/// the same bits; and a cast whose **source is a literal** is neither — it is
+/// folded, because `cast.<u16>(7)` names a constant and a comptime type is not
+/// something a machine holds.
+#[test]
+fn lir_snapshot_a_cast_of_a_literal_is_the_literal() {
+    let src = "\
+{ transmute } :: import <core/mem>
+conv :: func (n: i32, f: f64) -> u8 {
+  let wide := cast.<i64>(n)
+  let narrow := cast.<u8>(wide)
+  let single := cast.<f32>(f)
+  let bits := transmute.<u32>(n)
+  let folded := cast.<u16>(7)
+  return narrow
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// The cleanup ladder has one rung per **kind** of exit (§3), and a loop is
+/// where all four kinds appear at once: falling out of the body, `continue`,
+/// `break`, and `return` each run the `defer` and then go somewhere different.
+#[test]
+fn lir_snapshot_a_loop_body_has_a_rung_for_each_kind_of_exit() {
+    let src = "\
+cleanup :: func () {}
+scan :: func (n: i32) -> i32 {
+  let mut i := 0
+  while i < n {
+    defer cleanup()
+    i = i + 1
+    if i == 2 { continue }
+    if i == 3 { break }
+    if i == 4 { return 4 }
+  }
+  return i
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// An operator on a user type is a **call** to the impl's member (§6.13), with
+/// nothing left of the `+` — while the same `+` on the `i32` inside it is the
+/// machine operation, because that impl's member is `#intrinsic`.
+#[test]
+fn lir_snapshot_an_operator_on_a_user_type_is_a_call() {
+    let src = "\
+{ Add } :: import <core/ops>
+V :: struct { x: i32 }
+impl Add for V {
+  Output :: V
+  add :: func (self: V, rhs: V) -> V { return V { x: self.x + rhs.x } }
+}
+total :: func (a: V, b: V) -> V { return a + b }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// A function with no body is a **declaration**: no blocks, no locals, and a
+/// call to it is an ordinary direct call. A backend emits the reference and
+/// lets the linker find it.
+#[test]
+fn lir_snapshot_an_extern_function_has_no_blocks() {
+    let src = "\
+puts :: extern(\"c\") func (s: *u8) -> i32
+shout :: func (s: *u8) -> i32 { return puts(s) }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// An array of constants is **one constant** — `{ 1, 2, 3 }` in the dump, not
+/// three stores — and an array is the one aggregate §7b does not flatten, so
+/// the type stays `[3]i32`.
+///
+/// Indexing one needs a **place**, because `xs[i]` goes through `core`'s
+/// `Index` impl and that takes `&xs`. A `::` constant has no address, so the
+/// value is written into a slot first and the slot is what is pointed at. This
+/// is the shape rather than a fold: the element is not read out at compile
+/// time, which it could be and is worth doing later.
+#[test]
+fn lir_snapshot_an_array_constant_is_a_value_and_indexing_one_needs_a_place() {
+    let src = "\
+TABLE: [3]i32 :: .{ 1, 2, 3 }
+from_constant :: func () -> i32 { return TABLE[1] }
+from_local :: func () -> i32 {
+  const t: [3]i32 := .{ 1, 2, 3 }
+  return t[1]
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// Safepoints (§6) are on the calls, the allocation, and the loop's **back
+/// edge** — the three places a collector can run — and each carries the roots
+/// live *before* the instruction, which is the set a stack map has to describe.
+#[test]
+fn lir_snapshot_a_back_edge_carries_the_live_roots() {
+    let src = "\
+{ new } :: import <core/mem>
+Node :: struct { v: i32 }
+work :: func (n: *mut Node) {}
+walk :: func (n: i32) -> i32 {
+  let p := new.<Node>()
+  let mut i := 0
+  while i < n {
+    work(p)
+    i = i + 1
+  }
+  return p.*.v
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// An allocation that is **returned** escapes (§5), so there is no drop on any
+/// exit and the collector owns it. The ladder is empty, which is the point: the
+/// pass says nothing rather than guessing.
+#[test]
+fn lir_snapshot_an_allocation_that_escapes_gets_no_drop() {
+    let src = "\
+{ new } :: import <core/mem>
+Node :: struct { v: i32 }
+build :: func () -> *mut Node {
+  let p := new.<Node>()
+  p.*.v = 1
+  return p
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// One decision tree over several kinds of test (§4): a tuple's members, a
+/// literal, an or-pattern, a range, and a guard all become comparisons on the
+/// same chain of candidates, and a `_` arm is the edge that is left.
+#[test]
+fn lir_snapshot_a_decision_tree_mixes_tuples_ranges_and_guards() {
+    let src = "\
+pair :: func (t: (i32, bool)) -> i32 {
+  return t.match {
+    (0, true) => 1,
+    (n, _) if n > 10 => 2,
+    _ => 0,
+  }
+}
+grade :: func (n: u8) -> i32 {
+  return n.match {
+    0..<10 => 1,
+    10..=200 => 2,
+    201 | 202 => 3,
+    _ => 0,
+  }
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
 // ===< LIR well-formedness >===
 
 /// Every block ends in exactly one terminator and every edge points at a block
@@ -9153,3 +9409,5 @@ f :: func () -> i32 {
 ";
     insta::assert_snapshot!(lir_text(src));
 }
+
+

@@ -1874,11 +1874,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // the literal is folded into its definition and the cast disappears.
             "cast" if args.len() == 1 => {
                 let from = self.cx.ty_of(args[0].id);
-                let comptime = matches!(
-                    from,
-                    Ty::ComptimeInt | Ty::ComptimeFloat | Ty::ComptimeStr
-                );
-                if let Some(v) = comptime.then(|| self.cx.const_value(e)).flatten() {
+                // A cast the evaluator can perform is a **value**, whatever the
+                // source type was. `cast.<u16>(7)` is `7`, and a `comptime_int`
+                // that reached here at all has no other form: there is no
+                // machine type to cast *from*, so the fold is not an
+                // optimization but the only lowering there is.
+                if let Some(v) = self.cx.const_value(e) {
                     return Some(Rvalue::Use(Operand::Const(Constant::Value(v))));
                 }
                 let v = self.eval(&args[0]);
@@ -1997,13 +1998,19 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     fn place_of(&mut self, e: &Expr) -> Option<Place> {
         match &e.kind {
             ExprKind::Local(def) => self.local_of.get(def).copied().map(Place::local),
-            ExprKind::Global(def) => {
-                let g = self.cx.linked.global(*def)?;
-                g.mutable.then(|| Place {
+            // A `#static` is the one global with a region of its own. A `::`
+            // constant *is* its value (§2.5) and has no address, so a place is
+            // made for it the way one is made for any other value that needs
+            // one: a slot, written once. `TABLE[1]` on a constant array is what
+            // asks for this — indexing goes through `&TABLE`, and a constant
+            // with nowhere to point at would be a pointer to nothing.
+            ExprKind::Global(def) => match self.cx.linked.global(*def) {
+                Some(g) if g.mutable => Some(Place {
                     base: Base::Global(*def),
                     projection: Vec::new(),
-                })
-            }
+                }),
+                _ => self.materialize(e),
+            },
             ExprKind::Deref { base } => Some(self.place_of(base)?.then(Projection::Deref)),
             ExprKind::Field { base, name, .. } => {
                 let bty = self.cx.ty_of(base.id);
@@ -2019,18 +2026,24 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     name: Symbol::new(&index.to_string()),
                 }))
             }
-            _ => {
-                let ty = self.cx.ty_of(e.id);
-                let span = self.cx.meta.span(e.id);
-                let v = self.eval(e);
-                match v {
-                    Operand::Copy(p) => Some(p),
-                    other => {
-                        let slot = self.temp(ty, span);
-                        self.assign(Place::local(slot), Rvalue::Use(other), span);
-                        Some(Place::local(slot))
-                    }
-                }
+            _ => self.materialize(e),
+        }
+    }
+
+    /// Give `e` a place by evaluating it into one.
+    ///
+    /// A value that is already read out of a place keeps that place; anything
+    /// else gets a slot of its own, which is what makes `(a + b).x` and
+    /// `TABLE[1]` need no special case downstream.
+    fn materialize(&mut self, e: &Expr) -> Option<Place> {
+        let ty = self.cx.ty_of(e.id);
+        let span = self.cx.meta.span(e.id);
+        match self.eval(e) {
+            Operand::Copy(p) => Some(p),
+            other => {
+                let slot = self.temp(ty, span);
+                self.assign(Place::local(slot), Rvalue::Use(other), span);
+                Some(Place::local(slot))
             }
         }
     }

@@ -2,7 +2,7 @@
 
 **Generated**: 2026-09-12
 **Branch**: `main`
-**Status**: **499 tests pass**, `cargo clippy` reports 83 warnings (the same
+**Status**: **513 tests pass**, `cargo clippy` reports 83 warnings (the same
 dead-code-shaped set as before — fields codegen will read and nothing does yet).
 Every file in `examples/*.nest` compiles.
 
@@ -217,12 +217,32 @@ Everything in the previous handoffs' lists still stands. New this session:
 
 ## Current state
 
-**Working**: everything. `cd nestc && cargo test` → **499 passed**. `cargo
+**Working**: everything. `cd nestc && cargo test` → **513 passed**. `cargo
 clippy` → 83 warnings. Every file in `examples/*.nest` compiles clean.
 
 **Broken**: nothing.
 
 **Uncommitted changes**: none.
+
+### The LIR snapshot suite (this session)
+
+Fourteen more `insta` snapshots, in the same shape as the IR and parser ones:
+source in, the whole lowered program out. They cover what the earlier fifteen
+did not — monomorphization, a bound resolved at the call rather than through a
+vtable, `#static` versus `::`, a text pattern reaching `core.bytes_eq`, the
+division-by-zero check, `#unsafe`, casts, the four rungs a loop's ladder needs,
+an operator that is a call, an `extern` declaration, array constants,
+safepoints on a back edge, an allocation that escapes, and a decision tree over
+tuples, ranges, an or-pattern and a guard. `design/lir.md` §10 ends with what
+the two kinds of test (snapshots, invariants) each guard.
+
+Writing them found three defects, all fixed:
+
+| Defect | Fix |
+|---|---|
+| `TABLE[1]` on a `::` array constant lowered to `undef` — indexing takes `&TABLE` and a constant has no address, so `place_of` returned `None` and the caller made it undefined | `place_of` materializes a constant into a slot, the same path `(a + b).x` takes |
+| `cast.<u16>(7)` stayed a run-time cast between two constants, because the fold was gated on the *source* still being `comptime_int` | Any cast the evaluator can perform is folded |
+| `#unsafe` was documented as removing "bounds, init, null" checks but also removes the division-by-zero one | `spec/09` says so, and says the overflow trap is `overflow=`'s decision and stays |
 
 ## Deliberately not done
 
@@ -314,7 +334,7 @@ not have to be written at seventy literal sites.
 
 ## Resume instructions
 
-1. `cd nestc && cargo test` — expect **499 passed**.
+1. `cd nestc && cargo test` — expect **513 passed**.
 2. See the phase working:
    ```
    cargo build

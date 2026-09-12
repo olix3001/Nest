@@ -295,8 +295,10 @@ directives trade safety for speed:
   zeroed) by `new` / `make`, and reads are not init-checked. For FFI structs and
   performance-critical buffers.
 - **`#unsafe`** — on a **func or block**, disables run-time safety checks in that
-  scope: bounds checks, the read-before-write (uninitialized) trap, and null
-  checks at C boundaries. Nothing else changes.
+  scope: bounds checks, the division-by-zero check, the read-before-write
+  (uninitialized) trap, and null checks at C boundaries. Nothing else changes —
+  in particular the overflow behaviour is `overflow=`'s to decide (§6.13), not
+  this directive's, so a checked add stays checked inside an `#unsafe` body.
 
 ```
 Scratch :: #raw struct { buf: [4096]uint8 }     // not zeroed on allocation

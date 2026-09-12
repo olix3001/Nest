@@ -71,6 +71,13 @@ p.*.next.x      chained
 A place is never a value. `t0 := p.x` *loads* from a place; `p.x = t0` *stores*
 into one. Only the store form appears on the left of `=`.
 
+A **base** is a local or a `#static`, and nothing else. A `::` constant is not
+one: §2.5 says such a constant *is* its value, so it has no region and nothing
+can point at it. Where one is used as a place — `TABLE[1]`, since indexing goes
+through `core`'s `Index` impl and that takes `&TABLE` — the value is written
+into a slot first and the slot is the place. That is the same materialization
+`(a + b).x` gets, and it is why a backend never meets a base it cannot address.
+
 Field projections print **by name**, not by index. The index is what codegen
 wants, but a reader debugging a mis-lowered access needs to know which field it
 was — and after `#packed` / `#align` / `#soa` have had their say, the index alone
@@ -959,6 +966,13 @@ read by inference. LIR folds it into the definition — `_4 := 10` — because
 `comptime_int` is a type no backend has a register for, and a cast whose source
 cannot exist at run time is not a conversion.
 
+The fold is not conditional on the source being a comptime type: **any cast the
+evaluator can perform is a value**. `cast.<u16>(7)` is `7` even though the `7`
+had already settled on `isize`, because the alternative is asking a backend to
+emit a conversion between two constants it will fold anyway — and a rule that
+holds only for the types inference happened to leave behind is a rule nobody can
+state.
+
 **Reading a discriminant is a member read.** An enum is `{ tag, payload }` by
 §7b, so `s.tag` is an ordinary projection and there is no `discriminant`
 operation beside it. What §4 requires is that it be read *once*, which is a
@@ -992,8 +1006,10 @@ complete list of what is still left to do when a backend receives one, so that
 **Four terminators**: `goto`, `switch`, `return`, `unreachable`. `switch` covers
 every branch there is, so there is no `br`/`switch` pair to keep in step.
 
-**Nine rvalues**: `Use`, `Ref`, `Binary`, `Unary`, `Cast`, `Aggregate`, `Offset`,
-and that is the set. `Binary` and `Unary` are machine operations on **scalars** —
+**Eight rvalues**: `Use`, `Ref`, `Builtin`, `Binary`, `Unary`, `Cast`,
+`Aggregate`, `Offset`, and that is the set. `Builtin` is the checked arithmetic
+`overflow=trap` needs — `checked_add(a, b)` yielding `{ value, overflowed }`
+(§7d) — which is one LLVM overflow intrinsic, one C helper, or one wasm sequence. `Binary` and `Unary` are machine operations on **scalars** —
 nothing structural ever reaches one, which is why text equality is a call to
 `core` (§6.13) rather than an `==` on a `{ ptr, len }`.
 
@@ -1060,3 +1076,26 @@ consumer to justify it and not before.
 - **Division.** `x / 0` traps before the divide (§7d), so the instruction a
   backend emits has no undefined case left except `INT_MIN / -1`, which the
   checked form catches under `overflow=trap`.
+
+### How the shape above is held in place
+
+Two kinds of test, guarding two different things.
+
+**Snapshots, from source to LIR.** Each one compiles a whole program — the entry
+file plus `core` — and records the dump of every function the entry file
+defined. A graph is the one representation where a reader cannot reconstruct
+intent from the shape, since every construct becomes the same jumps, so "did
+this `while` become the right three blocks" is a question only the whole
+lowering can answer. There is one per construct: the loops, the ladder's four
+rungs, the decision tree over enums and tuples and ranges and text, the checks
+(§7d), monomorphization, statics, casts, safepoints on the back edge, dynamic
+dispatch against a bound resolved at the call, and a declaration with no blocks.
+
+**Invariants, over any lowering.** A snapshot catches a change; it cannot say
+what *any* program may produce. The invariant tests say that: every place and
+every live local names a slot that exists, block ids are dense and 0 is the
+entry, every direct call names a function the program defines, no `Binary` has
+an aggregate operand, no local has a type a machine cannot hold, and every
+nominal type a local mentions is in the type table. They run over `core` too —
+it is code a backend has to emit, and a shape it alone produces is exactly the
+one nothing else would catch.

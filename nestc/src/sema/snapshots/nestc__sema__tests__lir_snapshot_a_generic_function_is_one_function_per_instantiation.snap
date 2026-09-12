@@ -1,0 +1,53 @@
+---
+source: src/sema/tests.rs
+expression: lir_text(src)
+---
+type []u8 = struct {           // was a slice; size 16, align 8
+  ptr: *u8                    // +0
+  len: u64                    // +8
+}
+type usize = struct {           // was a distinct; size 8, align 8
+  0: u64                    // +0
+}
+type core.Location = struct {           // was a struct; size 24, align 8
+  file: core.str                    // +0
+  line: u32                    // +16
+  column: u32                    // +20
+}
+type core.str = struct {           // was a distinct; size 16, align 8
+  0: []u8                    // +0
+}
+type (usize, bool) = struct {           // was a tuple; size 16, align 8
+  0: usize                    // +0
+  1: bool                    // +8
+}
+
+func both(n_0: i32, c_1: bool) -> i32  // _NC4both
+  let _2: i32
+  let _3: i32
+  let a_4: i32
+  let _5: bool
+  let _6: bool
+  let b_7: bool
+bb0:                    // entry
+  _2 := call id.<i32>(n_0)
+  _3 := _2
+  a_4 := _3
+  _5 := call id.<bool>(c_1)
+  _6 := _5
+  b_7 := _6
+  switch b_7 { 1 => bb1, _ => bb2 }
+bb1:                    // then
+  return a_4
+bb2:                    // else
+  goto bb3
+bb3:                    // join
+  return 0
+
+func id.<i32>(x_0: i32) -> i32  // _NC2idIi32E
+bb0:                    // entry
+  return x_0
+
+func id.<bool>(x_0: bool) -> bool  // _NC2idIbE
+bb0:                    // entry
+  return x_0
