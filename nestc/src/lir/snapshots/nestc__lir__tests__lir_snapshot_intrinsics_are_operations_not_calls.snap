@@ -1,29 +1,23 @@
 ---
-source: src/sema/tests.rs
+source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type (usize, bool) = struct {           // was a tuple; size 16, align 8
-  0: usize                    // +0
+type (u64, bool) = struct {           // was a tuple; size 16, align 8
+  0: u64                    // +0
   1: bool                    // +8
 }
-type usize = struct {           // was a distinct; size 8, align 8
-  0: u64                    // +0
-}
 type core.Location = struct {           // was a struct; size 24, align 8
-  file: core.str                    // +0
+  file: []u8                    // +0
   line: u32                    // +16
   column: u32                    // +20
-}
-type core.str = struct {           // was a distinct; size 16, align 8
-  0: []u8                    // +0
 }
 type []u8 = struct {           // was a slice; size 16, align 8
   ptr: *u8                    // +0
   len: u64                    // +8
 }
 
-func sizes() -> usize  // _NC5sizes
-  let _0: (usize, bool)
+func sizes() -> u64  // _NC5sizes
+  let _0: (u64, bool)
   let _1: core.Location
 bb0:                    // entry
   _0 := checked_add(5, 1)

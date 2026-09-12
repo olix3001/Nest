@@ -56,7 +56,7 @@ pub mod session;
 pub mod ty;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;

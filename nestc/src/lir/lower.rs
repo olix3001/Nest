@@ -105,7 +105,7 @@ pub fn lower(
         cx.program.globals.push(Global {
             def: g.def,
             name: g.name.clone(),
-            ty: meta.ty_or_error(g.id),
+            ty: cx.strip(&meta.ty_or_error(g.id)),
             init: meta.get::<ConstValue>(g.id),
             span: meta.span(g.id),
         });
@@ -160,7 +160,73 @@ struct Cx<'a> {
 
 impl Cx<'_> {
     fn ty_of(&self, id: IrId) -> Ty {
-        self.meta.ty_or_error(id)
+        self.strip(&self.meta.ty_or_error(id))
+    }
+
+    /// `ty` with every `distinct` replaced by what it is distinct *from*.
+    ///
+    /// A `distinct T` has exactly `T`'s representation (§2.4) — the difference
+    /// between the two is a rule about which values may be assigned to which
+    /// names, and that rule was enforced before this pass ran. Keeping it here
+    /// would mean emitting `usize` as a one-member struct wrapping a `u64`,
+    /// which is not what it is: a struct of one scalar is passed differently
+    /// from the scalar under every C ABI there is, so a backend would have to
+    /// know to unwrap it and LIR would have made a distinction that costs
+    /// something and means nothing.
+    ///
+    /// The peeling goes through pointers, slices, arrays and tuples, because
+    /// `*usize` is `*u64` for the same reason. It does **not** go into a
+    /// nominal type's generic arguments: `Vec.<usize>` is the instantiation
+    /// monomorphization made and named, and renaming it here would name a
+    /// function that does not exist.
+    fn strip(&self, ty: &Ty) -> Ty {
+        self.strip_at(ty, 0)
+    }
+
+    fn strip_at(&self, ty: &Ty, depth: u32) -> Ty {
+        // A `distinct` over a `distinct` is legal; a cycle among them is not,
+        // and `check::declarations` has already said so.
+        if depth > 64 {
+            return ty.clone();
+        }
+        match ty {
+            Ty::Nominal { def, .. } => {
+                let Some(t) = self.linked.ty(*def) else {
+                    return ty.clone();
+                };
+                if !matches!(t.kind, TypeDefKind::Distinct { .. }) {
+                    return ty.clone();
+                }
+                match self.layouts.member_types(ty).as_deref() {
+                    Some([(_, repr)]) => self.strip_at(repr, depth + 1),
+                    _ => ty.clone(),
+                }
+            }
+            Ty::Ptr { mutable, inner } => Ty::Ptr {
+                mutable: *mutable,
+                inner: Box::new(self.strip_at(inner, depth + 1)),
+            },
+            Ty::Slice { mutable, inner } => Ty::Slice {
+                mutable: *mutable,
+                inner: Box::new(self.strip_at(inner, depth + 1)),
+            },
+            Ty::Array {
+                len,
+                inner,
+                mutable,
+            } => Ty::Array {
+                len: len.clone(),
+                mutable: *mutable,
+                inner: Box::new(self.strip_at(inner, depth + 1)),
+            },
+            Ty::Tuple(elems) => Ty::Tuple(
+                elems
+                    .iter()
+                    .map(|t| self.strip_at(t, depth + 1))
+                    .collect(),
+            ),
+            _ => ty.clone(),
+        }
     }
 
     fn key(&self, ty: &Ty) -> String {
@@ -385,7 +451,7 @@ impl Cx<'_> {
                     .enumerate()
                     .map(|(i, t)| TypeMember {
                         name: Symbol::new(&i.to_string()),
-                        ty: t.clone(),
+                        ty: self.strip(t),
                         offset: f.offsets[i],
                     })
                     .collect();
@@ -410,7 +476,7 @@ impl Cx<'_> {
                             name: Symbol::new("ptr"),
                             ty: Ty::Ptr {
                                 mutable: *mutable,
-                                inner: inner.clone(),
+                                inner: Box::new(self.strip(inner)),
                             },
                             offset: 0,
                         },
@@ -427,7 +493,7 @@ impl Cx<'_> {
             Ty::Nominal { def, .. } => {
                 let t = self.linked.ty(*def)?;
                 match &t.kind {
-                    TypeDefKind::Struct { .. } | TypeDefKind::Distinct { .. } => {
+                    TypeDefKind::Struct { .. } => {
                         let f = self.layouts.fields(ty)?.ok()?;
                         let members = self
                             .layouts
@@ -436,20 +502,16 @@ impl Cx<'_> {
                             .enumerate()
                             .map(|(i, (n, t))| TypeMember {
                                 name: n,
-                                ty: t,
+                                ty: self.strip(&t),
                                 offset: f.offsets.get(i).copied().unwrap_or(0),
                             })
                             .collect();
-                        let origin = match &t.kind {
-                            TypeDefKind::Distinct { .. } => Origin::Distinct(*def),
-                            _ => Origin::Struct(*def),
-                        };
                         Some(TypeDef {
                             key,
                             name,
                             members,
                             layout,
-                            origin,
+                            origin: Origin::Struct(*def),
                         })
                     }
                     // An enum becomes `{ tag, payload }`. The variants do not go
@@ -484,7 +546,7 @@ impl Cx<'_> {
                                     .enumerate()
                                     .map(|(j, (n, t))| TypeMember {
                                         name: n,
-                                        ty: t,
+                                        ty: self.strip(&t),
                                         offset: e.variants[i].offsets.get(j).copied().unwrap_or(0),
                                     })
                                     .collect(),
@@ -502,7 +564,10 @@ impl Cx<'_> {
                             },
                         })
                     }
-                    TypeDefKind::Trait { .. } => None,
+                    // A `distinct` never reaches here: `Cx::strip` replaced it
+                    // with what it is distinct from before any type was
+                    // recorded (§9). A trait is not a type with a shape.
+                    TypeDefKind::Distinct { .. } | TypeDefKind::Trait { .. } => None,
                 }
             }
             _ => None,
@@ -599,7 +664,7 @@ struct Lowerer<'a, 'c> {
 impl<'a, 'c> Lowerer<'a, 'c> {
     fn new(cx: &'a mut Cx<'c>, f: &'c ir::Function) -> Self {
         let ret = match cx.meta.ty(f.id) {
-            Some(Ty::Func { ret, .. }) => *ret,
+            Some(Ty::Func { ret, .. }) => cx.strip(&ret),
             _ => Ty::Void,
         };
         let unguarded = cx.meta.has_directive(f.id, "unsafe");
@@ -1699,7 +1764,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         if self.unguarded || !matches!(op, BuiltinOp::Div | BuiltinOp::Rem) {
             return;
         }
-        if !self.is_integer(ty) {
+        if !ty.is_int() {
             // A float divided by zero is an infinity, which is a value and not a
             // fault (§3.1).
             return;
@@ -1741,7 +1806,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// and a bitwise operation cannot leave its width at all.
     fn traps(&self, op: BuiltinOp, ty: &Ty) -> bool {
         self.cx.options.overflow == OverflowMode::Trap
-            && self.is_integer(ty)
+            && ty.is_int()
             && matches!(
                 op,
                 BuiltinOp::Add
@@ -1752,41 +1817,6 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     | BuiltinOp::Neg
                     | BuiltinOp::Shl
             )
-    }
-
-    /// Whether `ty` is an integer, **through any `distinct`s over one**.
-    ///
-    /// `usize` is the case that makes this necessary: since §3.1 it is
-    /// `distinct uint.<PTR_BITS>` declared in `core` rather than a primitive, so
-    /// a plain `Ty::is_int` says no about the commonest integer type a program
-    /// writes. A `distinct T` has exactly `T`'s representation (§2.4), and
-    /// overflow is a property of the representation.
-    fn is_integer(&self, ty: &Ty) -> bool {
-        self.is_integer_at(ty, 0)
-    }
-
-    fn is_integer_at(&self, ty: &Ty, depth: u32) -> bool {
-        if ty.is_int() {
-            return true;
-        }
-        // A `distinct` over a `distinct` is legal, and a cycle among them is
-        // not — but it is `check::declarations` that says so, not this.
-        if depth > 16 {
-            return false;
-        }
-        let Ty::Nominal { def, .. } = ty else {
-            return false;
-        };
-        if !matches!(
-            self.cx.linked.ty(*def).map(|t| &t.kind),
-            Some(TypeDefKind::Distinct { .. })
-        ) {
-            return false;
-        }
-        match self.cx.layouts.member_types(ty).as_deref() {
-            Some([(_, repr)]) => self.is_integer_at(repr, depth + 1),
-            _ => false,
-        }
     }
 
     /// A checked operation: the value, a flag, and an edge to a block that does
@@ -2068,7 +2098,6 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 Some(TypeDefKind::Struct { members }) => {
                     members.iter().map(|m| m.name.clone()).collect()
                 }
-                Some(TypeDefKind::Distinct { repr }) => vec![repr.name.clone()],
                 Some(TypeDefKind::Enum { .. }) => {
                     vec![Symbol::new("tag"), Symbol::new("payload")]
                 }
@@ -2606,25 +2635,10 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// else.
     fn byte_slice(&mut self, place: &Place, ty: &Ty) -> Option<Place> {
         match ty {
+            // `str` is a `distinct []u8`, and a `distinct` is its
+            // representation by this level (§9) — so there is no wrapper to
+            // read through and this is the only shape text arrives in.
             Ty::Slice { .. } => Some(place.clone()),
-            // One `distinct` hop, which is what `str` is. The recursion is for a
-            // `distinct` over a `distinct`, which the language allows.
-            Ty::Nominal { def, .. }
-                if matches!(
-                    self.cx.linked.ty(*def).map(|t| &t.kind),
-                    Some(TypeDefKind::Distinct { .. })
-                ) =>
-            {
-                let repr = match self.cx.layouts.member_types(ty).as_deref() {
-                    Some([(_, repr)]) => repr.clone(),
-                    _ => return None,
-                };
-                let inner = place.clone().then(Projection::Field {
-                    index: 0,
-                    name: Symbol::new("0"),
-                });
-                self.byte_slice(&inner, &repr)
-            }
             _ => None,
         }
     }

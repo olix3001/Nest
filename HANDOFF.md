@@ -224,6 +224,23 @@ clippy` → 83 warnings. Every file in `examples/*.nest` compiles clean.
 
 **Uncommitted changes**: none.
 
+### The LIR tests moved, and `distinct` stopped being a struct
+
+`nestc/src/lir/tests.rs` + `nestc/src/lir/snapshots/` — the IR → LIR tests used
+to sit in `sema::tests`, which tests AST → IR. They test a different pass and
+now live with it. `sema::tests` is `pub(crate)` so the few helpers they share
+(`analyze_mem`, `ir_text`, `messages`) still resolve.
+
+**A `distinct T` is now `T` at LIR**, not a one-member struct wrapping it. The
+old shape put `type usize = struct { 0: u64 }` in the type table and typed
+every `usize` local as that struct — and a struct of one scalar is not passed
+like the scalar under any C ABI, so it was a distinction that cost something at
+the FFI boundary and meant nothing anywhere. `Cx::strip` peels the chain (and
+goes through pointers, slices, arrays and tuples, but not into a nominal's
+generic arguments), applied where a type is read from the IR and where the type
+table's members are built. Three now-dead distinct paths went with it —
+`byte_slice`'s hop, `is_integer`'s recursion, and `Origin::Distinct`.
+
 ### The LIR snapshot suite (this session)
 
 Fourteen more `insta` snapshots, in the same shape as the IR and parser ones:

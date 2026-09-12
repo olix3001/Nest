@@ -400,7 +400,8 @@ relocate whatever the slot happened to hold.
 ### What counts as a root
 
 A local whose type can contain a reference: a pointer, a slice, a `dyn`, and any
-aggregate holding one — a `str` is a root because it is a `distinct []u8` (§7b),
+aggregate holding one — a `str` is a root because it *is* a `[]u8` by this
+level (§9),
 and an enum is one when a *variant* holds a pointer, since its flattened payload
 member is `[N]u8` and says nothing.
 
@@ -657,7 +658,7 @@ codegen all need the contents. What LIR adds is the flattening:
 |---|---|
 | `struct { a: T, b: U }` | itself |
 | tuple struct, `(A, B)` | a struct with positional members `0`, `1` |
-| `distinct T` | a struct with one member — already its IR shape |
+| `distinct T` | **`T` itself** — the name is gone, see below |
 | `[]T` / `[]mut T` | `struct { ptr: *T, len: usize }` |
 | `enum { a, b(T) }` | `struct { tag: uN, payload: <union of the variants> }` |
 | `dyn Trait` | `struct { data: *void, vtable: *void }` |
@@ -707,7 +708,8 @@ match":
   element.
 
 So LIR's aggregates are: **struct, and array**. Everything else — tuple, enum,
-slice, `distinct`, trait object, vtable — is a struct by the time LIR sees it. A
+slice, trait object, vtable — is a struct by the time LIR sees it, and a
+`distinct` is not an aggregate at all: it is whatever it is distinct from. A
 slice is the interesting near-miss: `[]T` *does* flatten, because a slice is a
 pointer and a length, and neither of those is indexed by a run-time value. The
 indexing happens through the pointer it holds.
@@ -980,11 +982,27 @@ property of the decision tree rather than of the instruction set.
 
 **And there is no `$panic`** — see §2.
 
-`distinct` types are also gone. A `distinct T` has exactly `T`'s representation,
-so the `$cast` the IR emits when a distinct type reaches an inherited method is a
-no-op here: by this point the check that the method is *available* has already
-happened, and LIR sees two names for one layout. It does not need to know which
-was written.
+**`distinct` types are gone, and not by being wrapped.** A `distinct T` *is* a
+`T` in memory (§2.4) — the difference between them is a rule about which values
+may be given which names, and every pass that enforces it has already run. So
+LIR replaces the name with what it names: a `usize` local is a `u64` local, a
+`str` parameter is a `[]u8` parameter, and `Meters` is `f64`. Nothing carries
+the source name into a backend.
+
+Wrapping it in a one-member struct instead — which is its IR shape, and was its
+LIR shape until this was fixed — would be worse than redundant. **A struct of
+one scalar is not passed like the scalar** under any C ABI: it can go in memory
+where the scalar goes in a register, and the two disagree at exactly the
+boundary FFI cares about. The wrapper would also have to be unwrapped by every
+backend, at every use, to get back the type it should have had. The peeling goes
+through pointers, slices, arrays and tuples for the same reason — `*usize` is
+`*u64` — but stops at a nominal type's generic arguments, since `Vec.<usize>` is
+the instantiation monomorphization named and renaming it here would name a
+function that does not exist.
+
+One consequence worth stating: the `$cast` the IR emits when a distinct type
+reaches an inherited method has nothing left to do here, because both sides of
+it are the same type.
 
 ## 10. What a backend has to supply
 
@@ -1079,6 +1097,9 @@ consumer to justify it and not before.
 
 ### How the shape above is held in place
 
+`nestc/src/lir/tests.rs`, with the snapshots in `nestc/src/lir/snapshots/`.
+They live with the pass rather than with `sema` because what they test is this
+pass: source goes in, and the LIR that came out the far end is what is checked.
 Two kinds of test, guarding two different things.
 
 **Snapshots, from source to LIR.** Each one compiles a whole program — the entry

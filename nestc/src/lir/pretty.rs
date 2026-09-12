@@ -72,7 +72,6 @@ impl Printer<'_> {
     fn type_def(&mut self, t: &TypeDef) {
         let shape = match &t.origin {
             Origin::Struct(_) => "struct",
-            Origin::Distinct(_) => "distinct",
             Origin::Enum { .. } => "enum",
             Origin::Tuple => "tuple",
             Origin::Slice => "slice",

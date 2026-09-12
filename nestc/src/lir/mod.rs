@@ -599,8 +599,6 @@ pub struct TypeMember {
 pub enum Origin {
     /// It always was one.
     Struct(DefId),
-    /// `distinct T` — already a one-member struct in the IR.
-    Distinct(DefId),
     /// An enum: a `tag` member and a `payload` member, plus the variants the
     /// payload stands for.
     Enum {
@@ -626,3 +624,6 @@ pub struct VariantDef {
     /// dump needs in order to print the variant the way it was written.
     pub tuple: bool,
 }
+
+#[cfg(test)]
+mod tests;
