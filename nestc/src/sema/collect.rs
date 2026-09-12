@@ -410,6 +410,17 @@ impl Collector<'_> {
             .type_head_name(self_ty)
             .and_then(|name| self.defs.get(scope).ns.members.get(&name).copied())
             .filter(|&d| self.defs.get(d).kind.is_namespace_like());
+        // A target that carries **generic arguments** — `impl Draw for
+        // Box.<i32>` — names a type, so its members belong to that type's
+        // namespace, but `Self` must not: the head def is `Box`, and `Self`
+        // meaning `Box.<?>` leaves the arguments to inference, which then has
+        // nothing to solve them from in a member that never mentions `self`.
+        // So such an impl gets a namespace of its own for the `Self` binding
+        // alone, exactly as a structural target does.
+        let parameterized = matches!(
+            &self.ast.node(self_ty).kind,
+            NodeKind::TypePath { generic_args, .. } if !generic_args.is_empty()
+        );
         let host = match target {
             Some(t) => t,
             // The target names no type collected here — a structural `impl <T>
@@ -442,22 +453,47 @@ impl Collector<'_> {
         // named type for `Self` to point at. Bind `Self` in the impl's own
         // namespace as an alias for the target's type expression, so `self: *Self`
         // means `*[]T` there exactly as it means `*Vec3` in `impl Vec3`.
-        if target.is_none() {
+        if target.is_none() || parameterized {
+            // Where the members went and where `Self` goes are two questions:
+            // for a parameterized target the members are the type's and the
+            // binding is the block's own.
+            let owner = match target {
+                Some(_) if parameterized => {
+                    self.anon_impls += 1;
+                    let name = Symbol::new(&format!("<impl {}>", self.target_label(self_ty)));
+                    let mut canonical = self.defs.get(scope).canonical.clone();
+                    canonical.push(name.clone());
+                    let span = self.ast.node(node).span;
+                    let id = self.defs.alloc(
+                        name,
+                        DefKind::Namespace,
+                        Visibility::Private,
+                        Some(scope),
+                        Some(self.file),
+                        Some(span),
+                        Some(node),
+                        canonical,
+                    );
+                    self.ast.set_meta(node, DefMeta(id));
+                    id
+                }
+                _ => host,
+            };
             let span = self.ast.node(self_ty).span;
-            let mut canonical = self.defs.get(host).canonical.clone();
+            let mut canonical = self.defs.get(owner).canonical.clone();
             canonical.push(Symbol::new("Self"));
             let id = self.defs.alloc(
                 Symbol::new("Self"),
                 DefKind::TypeAlias,
                 Visibility::Private,
-                Some(host),
+                Some(owner),
                 Some(self.file),
                 Some(span),
                 Some(self_ty),
                 canonical,
             );
             self.defs
-                .get_mut(host)
+                .get_mut(owner)
                 .ns
                 .members
                 .insert(Symbol::new("Self"), id);

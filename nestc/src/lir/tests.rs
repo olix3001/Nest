@@ -238,6 +238,56 @@ heard :: func (d: *Dog) -> i32 {
     insta::assert_snapshot!(lir_text(src));
 }
 
+/// **Vtables are data** (§7b): one constant per `(trait, concrete type)` pair,
+/// its slots in the trait's declaration order, each holding the symbol
+/// monomorphization decided fills it. Nothing is selected at run time — a
+/// dispatch is two projections and an indirect call.
+///
+/// What this covers that
+/// [`lir_snapshot_dynamic_dispatch_goes_through_a_vtable_slot`] does not: a
+/// trait with **several** methods, so the slot *order* is visible; two impls,
+/// so there are two vtables and each names its own functions; a generic type
+/// coerced at an instantiation, so the vtable is for `Box.<i32>` and not for
+/// `Box`; and one impl coerced twice, which shares the single constant rather
+/// than emitting it again.
+#[test]
+fn lir_snapshot_a_vtable_is_a_constant_per_trait_and_type() {
+    let src = "\
+Draw :: trait {
+  area :: func (self: *Self) -> i32
+  perimeter :: func (self: *Self) -> i32
+  sides :: func (self: *Self) -> i32
+}
+Square :: struct { s: i32 }
+Circle :: struct { r: i32 }
+Box :: struct <T> { v: T }
+impl Draw for Square {
+  area :: func (self: *Self) -> i32 { return self.s * self.s }
+  perimeter :: func (self: *Self) -> i32 { return self.s * 4 }
+  sides :: func (self: *Self) -> i32 { return 4 }
+}
+impl Draw for Circle {
+  area :: func (self: *Self) -> i32 { return self.r * self.r * 3 }
+  perimeter :: func (self: *Self) -> i32 { return self.r * 6 }
+  sides :: func (self: *Self) -> i32 { return 0 }
+}
+impl Draw for Box.<i32> {
+  area :: func (self: *Self) -> i32 { return self.v }
+  perimeter :: func (self: *Self) -> i32 { return self.v }
+  sides :: func (self: *Self) -> i32 { return 1 }
+}
+total :: func (sq: *Square, ci: *Circle, bx: *Box.<i32>) -> i32 {
+  let a: *dyn Draw := sq
+  let b: *dyn Draw := ci
+  let c: *dyn Draw := bx
+  // The same impl again: one vtable, not two.
+  let d: *dyn Draw := sq
+  return a.area() + b.perimeter() + c.sides() + d.sides()
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
 /// Places are paths (§1): a field by name, a deref, an index by a run-time
 /// value. Nothing else is a place, and everything else gets a slot.
 #[test]
@@ -2122,3 +2172,4 @@ fn a_distinct_scalar_is_the_scalar_and_not_a_wrapper() {
     assert!(!lir.contains("type usize"), "{lir}");
     assert!(!lir.contains("type core.str"), "{lir}");
 }
+

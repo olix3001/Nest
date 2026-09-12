@@ -4011,6 +4011,30 @@ fn ir_snap_comptime_casts_are_explicit() {
     ));
 }
 
+/// `Self` in `impl Trait for Box.<i32>` is `Box.<i32>`, arguments and all.
+///
+/// It used to be the **head** — `Box.<?T>`, with the argument left to
+/// inference — which happened to work in any member whose body mentioned
+/// `self`, since the use solved it. A member that does not, `sides :: func
+/// (self: *Self) -> i32 { return 1 }`, had nothing to solve it from and was
+/// refused with "type annotations needed" on its own parameter. Collection
+/// binds `Self` to the whole target expression now, the way it always did for
+/// a structural target.
+#[test]
+fn self_in_an_impl_for_an_instantiation_carries_the_arguments() {
+    analyze_clean(
+        "Draw :: trait { sides :: func (self: *Self) -> i32 }\n\
+         Box :: struct <T> { v: T }\n\
+         impl Draw for Box.<i32> { sides :: func (self: *Self) -> i32 { return 1 } }\n",
+    );
+    // And the argument is not free: a member may rely on it.
+    analyze_clean(
+        "Draw :: trait { first :: func (self: *Self) -> i32 }\n\
+         Box :: struct <T> { v: T }\n\
+         impl Draw for Box.<i32> { first :: func (self: *Self) -> i32 { return self.v } }\n",
+    );
+}
+
 // ===< regressions: bugs found by the language-wide audit >===
 
 /// Assert `src` analyzes with no diagnostics, returning the session.

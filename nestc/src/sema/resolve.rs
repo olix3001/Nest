@@ -177,7 +177,19 @@ impl Resolver<'_> {
                 // collection bound `Self` in that anonymous namespace as an alias
                 // for the target's type expression; prefer it over the enclosing
                 // namespace, which `Self` has no business meaning.
-                let self_binding = self_def.or_else(|| {
+                // The block's own namespace first: collection puts a `Self`
+                // alias there for a target that is structural *or* carries
+                // generic arguments, and that alias is the only form that
+                // holds the arguments. The head def is the fallback, and it
+                // is enough exactly when there are none.
+                let own = self.def_of(id).and_then(|d| {
+                    self.defs
+                        .get(d)
+                        .ns
+                        .get_direct(&Symbol::new("Self"))
+                        .map(|s| self.defs.resolve_alias(s))
+                });
+                let self_binding = own.or(self_def).or_else(|| {
                     self.defs
                         .get(host)
                         .ns

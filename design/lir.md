@@ -1135,6 +1135,12 @@ under it is the renderer filtering rather than the program being split. A test
 says so, and the invariant below — every direct call names a function the
 program defines — is checked over the whole thing, `core` included.
 
+**Vtables.** One snapshot is about the dispatch — two projections and an
+indirect call — and one about the **data**: a trait with three methods so the
+slot order is visible, two impls so there are two constants, an impl for
+`Box.<i32>` so the vtable is for the instantiation rather than the generic, and
+one type coerced twice, which shares its constant instead of emitting a second.
+
 **Invariants, over any lowering.** A snapshot catches a change; it cannot say
 what *any* program may produce. The invariant tests say that: every place and
 every live local names a slot that exists, block ids are dense and 0 is the
