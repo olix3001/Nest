@@ -1,12 +1,15 @@
-# Handoff: LIR is ordinary now, and it comes out in codegen units
+# Handoff: LIR is ordinary, it comes out in codegen units, and `defer` obeys §8.4
 
-**Generated**: 2026-09-12
+**Generated**: 2026-09-13
 **Branch**: `main`
-**Status**: **532 tests pass**, `cargo clippy` reports 78 warnings (the same
+**Status**: **534 tests pass**, `cargo clippy` reports 77 warnings (the same
 dead-code-shaped set as before — fields codegen will read and nothing does yet).
-Every file in `examples/*.nest` compiles.
+Every file in `examples/*.nest` compiles. **Both pieces of work are committed**
+(`9c8a2a0` the LIR/codegen-unit work, `ba130ab` the `defer` fix); the tree is
+clean.
 
-**Read `design/lir.md` §10 and §11 first.** §10 is the whole instruction set a
+**Read `design/lir.md` §3, §10 and §11 first.** §3 gained the registration-count
+rule described below. §10 is the whole instruction set a
 backend answers for, and it is now a short list with nothing reserved. §11 is
 new: the codegen-unit split. This document is the *state*. **Phase 10 (codegen
 and the real driver) is next and is unblocked.**
@@ -92,6 +95,33 @@ split is built on top of it.
       each unit gets a private copy), `Imported` (another unit defines it).
 - [x] **Dumps are per unit**, headed `unit <name> { … }`.
 
+### A `defer` control never reached does not run (spec §8.4) — `ba130ab`
+
+Found by reading the ladder, not by a failing test. `sema::lower` hoisted every
+`defer` body out of the statement list into `ir::Block::defers`, which **lost the
+position**, and the lowering ran the whole list on every exit from the block. So:
+
+```
+if c { return }      // this return climbed the rung...
+defer side(1)        // ...that runs this, which control never registered
+```
+
+- [x] **The body is a statement**, `ir::StmtKind::Defer(Expr)`, at the point that
+      registers it. `ir::Block::defers` is gone. Everything about a `defer` is
+      about *when*, and a representation that cannot say when is the bug.
+- [x] **A scope's list grows as the walk passes each one.** `Scope::defers`
+      starts empty; `Lowerer::stmt` pushes on `StmtKind::Defer`.
+- [x] **A rung is keyed by `(scope, kind of exit, how many are registered)`.**
+      Two `return`s below the same `defer` still share one; one above it gets its
+      own, or none at all — it returns directly.
+- [x] **Nine walkers stopped special-casing the hoisted list.** The ones that
+      only care *that* a body is in the program call `ir::defer_bodies(block)`,
+      which yields them in written order at the point in the walk where they run;
+      the rest match the statement. `ir::const_eval` still refuses a block
+      holding one.
+- [x] Two new tests, and the loop snapshot changed: the `while` guard's `break`
+      is above the body's `defer`, so it now leaves without running it.
+
 ### The dump says everything in full
 
 `add_checked.i32 _16, _18`, `switch.bool _19.1`, `call core.panic(_20, _22)`,
@@ -103,10 +133,22 @@ dump contains `<unknown …>`.
 
 ## Not Yet Done
 
+- [ ] **A `defer` captures at registration, and this one does not.** Spec §8.4:
+      *a `defer` registers its action when control reaches it, **capturing the
+      current values it references***. The lowering evaluates the body at the
+      exit instead, so `let mut i := 1; defer side(i); i = 2` calls `side(2)`.
+      Fixing it means evaluating the body's free variables into temporaries at
+      the registration point and running the body against those — a change to
+      what a rung reads, not to the ladder. The position half of §8.4 is fixed;
+      this half is not.
+- [ ] **The `Drop` trait** (`#lang("drop")`), which spec §8.4 promises and
+      nothing implements. **Deliberately not started**: the user is still
+      deciding what it means for a collected language with no moves — when a
+      value that was returned, stored, or passed to a call should still be
+      dropped. The mechanism is understood (see *Key Decisions*); the rule is
+      not.
 - [ ] **Phase 10: codegen and the real driver.** `design/lir.md` §10 is the
       brief and there is nothing left in it marked "the backend re-derives this".
-- [ ] **The `Drop` trait** (`#lang("drop")`), which spec §8.4 promises and
-      nothing implements. It attaches to the same ladder §5's drops ride.
 - [ ] **Optimization across units** — the cost of the split, and the reason the
       default is 1.
 - [ ] The three §5/§6 items still open: per-function escape summaries, the
@@ -115,6 +157,15 @@ dump contains `<unknown …>`.
 ## Failed Approaches (Don't Repeat These)
 
 Everything in the previous handoffs' lists still stands. New this session:
+
+- **Hoisting `defer` bodies to the block.** `ir::Block::defers` held them in
+  written order and the position was gone, so every exit ran every body — one
+  control had never reached included. The bodies live in the statement stream
+  now. The same trap is waiting for anything else whose meaning is *where it is*:
+  a list beside the statements cannot answer it.
+- **Keying a cleanup rung by `(scope, exit)` alone.** Two `return`s in one scope
+  share a rung only when the same defers are registered at both. Adding the count
+  to the key is what makes an exit above a `defer` not climb it.
 
 - **Keying the type table by the front end's `mono::type_key` and leaving
   mutability in it.** `[]i32` and `[]mut i32` then sat in the table as two
@@ -174,19 +225,23 @@ Everything in the previous handoffs' lists still stands. New this session:
 | Private linkage for data nothing can name | A unit should not depend on a neighbour's anonymous bytes |
 | `-C codegen-units` defaults to 1 | There is no backend yet, and one unit is the dump a person reads |
 | A unit refers to everything by index into itself | Makes the split a filter, and makes every dangling reference a test failure |
+| A `defer` body is a **statement**, not a list on the block | Its meaning is *where it is* — which exits run it — and a list beside the statements cannot say where |
+| A cleanup rung is keyed by the registration count too | Two exits with different defers registered are leaving different scopes, whatever they have in common |
+| The `Drop` trait is **not** started | Without moves, "this value was returned / stored / passed to a call, so do not drop it" has no settled answer, and a wrong one either double-frees a resource or silently never releases it |
 
 ## Current State
 
-**Working**: everything. `cd nestc && cargo test` → **532 passed**. `cargo
-clippy` → 78 warnings, all dead-code-shaped. Every file in `examples/*.nest`
+**Working**: everything. `cd nestc && cargo test` → **534 passed**. `cargo
+clippy` → 77 warnings, all dead-code-shaped. Every file in `examples/*.nest`
 compiles clean, at four settings of `-C codegen-units`.
 
-**Broken**: nothing.
+**Broken**: nothing. Two spec §8.4 divergences are *known and open*, both about a
+`defer`'s values rather than its position: the body captures nothing at
+registration (see *Not Yet Done*), and `Drop` does not exist.
 
-**Uncommitted changes**: this work, unstaged. 45 files: `nestc/src/lir/*` (the
-representation, the lowering, the split, the dump, the tests), 34 snapshots,
-`nestc/src/ir/mono.rs` (a new `global_symbol`), `nestc/src/common/options.rs`
-(the new setting), `nestc/src/main.rs`, `design/lir.md`, `design/roadmap.md`.
+**Uncommitted changes**: none. `9c8a2a0` is the LIR/codegen-unit work (47 files),
+`ba130ab` the `defer` fix (19 files: `ir::StmtKind::Defer` and the walkers,
+`lir::lower`'s ladder, three snapshots, `design/lir.md` §3, `design/roadmap.md`).
 
 ## Files to Know
 
@@ -199,6 +254,8 @@ representation, the lowering, the split, the dump, the tests), 34 snapshots,
 | `nestc/src/lir/unit.rs` | The split: `partition` (per file, merged), `build` (collect, then renumber), `home_unit` (which unit defines a global). |
 | `nestc/src/lir/safepoint.rs` | Liveness, back edges, and what counts as a root — now able to say a vtable pointer and a function pointer are *code*. |
 | `nestc/src/lir/tests.rs` | The invariants are under `// ===< LIR well-formedness >===` and `// ===< The codegen-unit split (§11) >===`. |
+| `nestc/src/ir/mod.rs` | `StmtKind::Defer` and `ir::defer_bodies` — the walkers that only care *that* a body exists use the latter. |
+| `nestc/src/sema/lower.rs` | `lower_stmt`'s `NodeKind::Defer` arm: the body stays where it was written. |
 | `nestc/src/common/options.rs` | `codegen_units`, and the `-C` parsing. |
 
 ## Code Context
@@ -273,7 +330,7 @@ unreachable, and the test is what says so.
 
 ## Resume Instructions
 
-1. `cd nestc && cargo test` — expect **532 passed**.
+1. `cd nestc && cargo test` — expect **534 passed**.
 2. See the split working:
    ```
    cargo build
@@ -289,11 +346,26 @@ unreachable, and the test is what says so.
    ```
    Expect: a `unit e` holding `main` and a `declare func scale(…)`, a
    `unit shapes` holding `scale`, and `Point` defined in both.
-3. **Phase 10 (codegen and the real driver) is next.** `design/lir.md` §10 is the
+3. See the `defer` rule, which is what changed most recently:
+   ```
+   cat > /tmp/d.nest <<'EOF'
+   first :: func () {}
+   run :: func (n: i32) -> i32 {
+     if n > 10 { return 1 }
+     defer first()
+     return 2
+   }
+   EOF
+   ./target/debug/nestc /tmp/d.nest | sed -n '/===< LIR/,$p'
+   ```
+   Expect `return 1` in its own block with no `call first()` before it, and one
+   `cleanup 0 (return)` rung that the second `return` climbs.
+4. **Phase 10 (codegen and the real driver) is next.** `design/lir.md` §10 is the
    brief: three statements, three callees, four terminators, six rvalues,
    twenty-four opcodes, thirteen intrinsics, and four things a backend does
    itself. `-C` stays the interface for build settings.
-4. A small one first, if you want it: the `Drop` trait (`#lang("drop")`).
+5. A smaller one first, if you want it: the capture half of §8.4 (see *Not Yet
+   Done*). **The `Drop` trait is waiting on the user's decision, not on work.**
 
 ## Edge Cases & Error Handling
 
@@ -306,6 +378,15 @@ unreachable, and the test is what says so.
   nothing for it as long as the address is valid.
 - **A `char`** is `u32` by this level, so `c == 'a'` prints as `eq.u32 c_0, 97`.
   The block label still says `arm 'a'`, which is where the spelling survives.
+- **A `defer` inside a loop body** belongs to the body's scope, so it is
+  registered again on each iteration and run on each way out. The `while` guard's
+  `break` is desugared to the body's *first* statement, above any `defer` a
+  person writes there, so leaving the loop normally runs nothing — which is what
+  `lir_snapshot_a_loop_body_has_a_rung_for_each_kind_of_exit` shows.
+- **A `defer` in an `if` block** belongs to that block's scope and runs when the
+  block ends, not when the function returns. That is the existing reading of
+  "scope" here, and spec §8.4 says "the current function scope"; nothing tests
+  the difference yet.
 - **`Intrinsic::Unknown`** exists so that adding a row to `sema::intrinsics` with
   no case here cannot silently reach a backend as a name.
   `every_declared_intrinsic_has_a_lir_case` fails the build instead, and

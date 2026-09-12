@@ -754,6 +754,8 @@ split — checked over every file in `examples/` at four settings of
 | A call or `size_of` inside a *type* (`[double(4)]T`, `[size_of.<H>()]u8`) | design | nothing today; wants dependency-ordered analysis, which is a phase of its own |
 | The `str` → `String` / `[]T` → `Vec.<T>` conversion: a `From`-style trait or a `#lang` coercion | the user | `std`, which does not exist yet; This decision is left for after the codegen works. |
 | `#when` (conditional compilation) | the user | nothing yet; not in the parser, spec, or grammar |
+| What `Drop` (`#lang("drop")`) means with no moves — when a value that was returned, stored, or passed to a call should still be dropped | the user | the `Drop` trait itself, which spec §8.4 promises and nothing implements. The mechanism is understood; the rule is not, and a wrong one either double-releases a resource or never releases it |
+| Whether a `defer` body **captures** the values it reads at registration (spec §8.4) or reads them at the exit, which is what the lowering does today | design | nothing; it is a change to what a rung reads, not to the ladder |
 
 **On `[SIZE * 2]T`.** The note here asked for a `Const::Unevaluated(DefId)`
 resolved post-link, and said *do not bolt a second evaluator onto the AST*. What
