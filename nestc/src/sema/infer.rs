@@ -166,6 +166,21 @@ pub enum RecvAdjust {
 #[derive(Debug, Clone, Copy)]
 pub struct RangeReported;
 
+/// A **compile-time value slot** this pass has already complained about: the
+/// length in `[SIZE * 2]T`, or an explicit `const` generic argument.
+///
+/// It exists because a type node is resolved **once per use**, not once. An
+/// alias `T :: [A - 10]i32` is expanded wherever `T` is written, so a length
+/// that does not fit a `usize` would be reported once per mention of `T` — one
+/// mistake, as many diagnostics as the program has uses. The value is read
+/// every time (callers need the answer); only the sentence is said once.
+///
+/// Set on the node in the *type*, which is what makes it the right key: two
+/// separate `[A - 10]i32`s written out are two nodes and two mistakes, and one
+/// alias used twice is one node and one.
+#[derive(Debug, Clone, Copy)]
+pub struct ConstSlotReported;
+
 #[derive(Debug, Clone)]
 pub struct Coercion {
     /// The type the value is converted to.
@@ -557,6 +572,20 @@ pub fn infer_file(
         let mut cx = fresh!();
         cx.stamp_member_types();
     }
+    // Declaration-level, and the last of them: expand every type alias the file
+    // declares.
+    //
+    // An alias is expanded **on use** — that is what an alias is — so one that
+    // nothing mentions is a right-hand side nothing ever looks at, and
+    // `T :: [A - 10]i32` passes a build in silence. A declaration is a claim
+    // about a type whether or not anything takes it up, so it is checked where
+    // it is written. Uses stay quiet about what this already said, by the same
+    // per-node rule everything in the `const_*` family follows (see
+    // [`ConstSlotReported`]).
+    {
+        let mut cx = fresh!();
+        cx.check_type_aliases();
+    }
     for func in fns {
         let mut cx = fresh!();
         cx.infer_func(func);
@@ -935,7 +964,7 @@ impl Inferer<'_> {
             .filter_map(|&g| self.def_of(g))
             .collect();
         let own = order.len();
-        let sig = self.func_sig_ty(func);
+        let sig = self.inferred_sig_ty(func);
         let (mut tys, mut consts) = (Vec::new(), Vec::new());
         self.collect_generic_params(&sig, &mut tys, &mut consts);
         for d in tys.into_iter().chain(consts) {
@@ -4261,6 +4290,39 @@ impl Inferer<'_> {
         self.func_sig_ty_in(self.file, func)
     }
 
+    /// The signature of a function **this pass has just inferred**, read back
+    /// from what it recorded rather than resolved a second time.
+    ///
+    /// [`Inferer::func_sig_ty`] exists for a signature nothing has looked at
+    /// yet — a callee in another file — and resolving one is not a free
+    /// operation: `ty_from_node` *reports*, so an array length that does not fit
+    /// a `usize` produces a diagnostic every time its type node is walked. For
+    /// the function being inferred, the answer is already in hand — each
+    /// parameter's type was recorded on its own node and the return type on the
+    /// `FuncExpr`'s — so asking again is both slower and, for exactly the two
+    /// positions a signature has, a duplicate diagnostic.
+    fn inferred_sig_ty(&mut self, func: NodeId) -> Ty {
+        let NodeKind::FuncExpr { params, .. } = self.ast.node(func).kind.clone() else {
+            return self.cx.fresh();
+        };
+        let params = params
+            .iter()
+            .map(|p| match self.types.get(p) {
+                Some(t) => t.clone(),
+                // A parameter whose node carries no type is one `infer_func`
+                // never reached, which today means the tree was already in
+                // error. A variable stands in; it mentions no generic, which is
+                // the only question being asked here.
+                None => self.cx.fresh(),
+            })
+            .collect();
+        let ret = self.types.get(&func).cloned().unwrap_or(Ty::Void);
+        Ty::Func {
+            params,
+            ret: Box::new(ret),
+        }
+    }
+
     /// The signature type of a `FuncExpr` living in `file`.
     fn func_sig_ty_in(&mut self, file: FileId, func: NodeId) -> Ty {
         let ast = &self.asts[&file];
@@ -5202,6 +5264,24 @@ impl Inferer<'_> {
         }
     }
 
+    /// Resolve the right-hand side of every type alias this file declares, for
+    /// the side effect of checking it.
+    ///
+    /// The type itself is thrown away: an alias has no node of its own to stamp
+    /// it on — every *use* of it carries the expansion — and computing it twice
+    /// costs nothing, because the second time is what a use does anyway.
+    fn check_type_aliases(&mut self) {
+        let aliases: Vec<DefId> = self
+            .defs
+            .iter()
+            .filter(|d| d.file == Some(self.file) && d.kind == DefKind::TypeAlias)
+            .map(|d| d.id)
+            .collect();
+        for def in aliases {
+            self.expand_alias(def);
+        }
+    }
+
     /// Expand a type-alias / associated-type binding to the type it names.
     ///
     /// For an impl's `Output :: Vec3` this is `Vec3`; for a plain alias it is the
@@ -5288,7 +5368,7 @@ impl Inferer<'_> {
         // A constant that names itself would otherwise loop forever.
         if depth > 8 {
             let msg = format!("{what} may not refer to itself");
-            self.report_in(file, node, msg);
+            self.report_const_in(file, node, msg);
             return Const::Error;
         }
         let kind = self.asts[&file].node(node).kind.clone();
@@ -5354,7 +5434,7 @@ impl Inferer<'_> {
         depth: u32,
     ) -> Option<ConstValue> {
         if depth > 32 {
-            self.report_in(file, node, format!("{what} may not refer to itself"));
+            self.report_const_in(file, node, format!("{what} may not refer to itself"));
             return None;
         }
         let ast_kind = self.asts[&file].node(node).kind.clone();
@@ -5373,7 +5453,7 @@ impl Inferer<'_> {
                 match crate::ir::const_eval::unary_op(op, &v) {
                     Ok(v) => Some(v),
                     Err(msg) => {
-                        self.report_in(file, node, msg);
+                        self.report_const_in(file, node, msg);
                         None
                     }
                 }
@@ -5396,7 +5476,7 @@ impl Inferer<'_> {
                 match crate::ir::const_eval::binary_values(op, &a, &b) {
                     Ok(v) => Some(v),
                     Err(msg) => {
-                        self.report_in(file, node, msg);
+                        self.report_const_in(file, node, msg);
                         None
                     }
                 }
@@ -5430,7 +5510,7 @@ impl Inferer<'_> {
                              instantiated",
                             d.name
                         );
-                        self.report_in(file, node, msg);
+                        self.report_const_in(file, node, msg);
                         None
                     }
                     _ => {
@@ -5439,7 +5519,7 @@ impl Inferer<'_> {
                             self.defs.canonical_string(def),
                             d.kind.label()
                         );
-                        self.report_in(file, node, msg);
+                        self.report_const_in(file, node, msg);
                         None
                     }
                 }
@@ -5455,7 +5535,7 @@ impl Inferer<'_> {
                     "a call cannot be evaluated inside {what}: a function's body is not compiled \
                      until after the types are known, and this is one of them"
                 );
-                self.report_in(file, node, msg);
+                self.report_const_in(file, node, msg);
                 None
             }
             _ => {
@@ -5463,7 +5543,7 @@ impl Inferer<'_> {
                     "{what} must be a literal, a constant, a `const` generic parameter, or an \
                      expression built from those"
                 );
-                self.report_in(file, node, msg);
+                self.report_const_in(file, node, msg);
                 None
             }
         }
@@ -5481,7 +5561,7 @@ impl Inferer<'_> {
             ConstValue::Bool(b) => Some(b),
             other => {
                 let msg = format!("`{}` is not a `bool`", other.display());
-                self.report_in(file, node, msg);
+                self.report_const_in(file, node, msg);
                 None
             }
         }
@@ -5543,7 +5623,7 @@ impl Inferer<'_> {
                     .is_none_or(|(signed, bits)| super::ty::int_fits(n, signed, bits));
                 if !fits {
                     let msg = format!("`{n}` does not fit in `{}`", want.display(self.defs));
-                    self.report_in(file, node, msg);
+                    self.report_const_in(file, node, msg);
                     return Const::Error;
                 }
                 value
@@ -5552,7 +5632,7 @@ impl Inferer<'_> {
             (ConstValue::Int(n), Ty::Float(_)) => match n.to_f64() {
                 Some(f) => ConstValue::Float(f),
                 None => {
-                    self.report_in(file, node, "this integer is not representable as a float");
+                    self.report_const_in(file, node, "this integer is not representable as a float");
                     return Const::Error;
                 }
             },
@@ -5566,7 +5646,7 @@ impl Inferer<'_> {
                     "{what} is a `{}`, and this is not one",
                     want.display(self.defs)
                 );
-                self.report_in(file, node, msg);
+                self.report_const_in(file, node, msg);
                 return Const::Error;
             }
         };
@@ -5609,7 +5689,7 @@ impl Inferer<'_> {
                         declared.display(self.defs),
                         want.display(self.defs)
                     );
-                    self.report_in(file, node, msg);
+                    self.report_const_in(file, node, msg);
                     return Const::Error;
                 }
                 Const::Param(def)
@@ -5639,7 +5719,7 @@ impl Inferer<'_> {
                     self.defs.canonical_string(def),
                     d.kind.label()
                 );
-                self.report_in(file, node, msg);
+                self.report_const_in(file, node, msg);
                 Const::Error
             }
         }
@@ -5975,6 +6055,20 @@ impl Inferer<'_> {
         let span = self.asts[&file].node(node).span;
         self.diags
             .push(Diagnostic::error(message).with_primary(FileSpan::new(file, span), ""));
+    }
+
+    /// Report about a compile-time value slot, **at most once per slot**.
+    ///
+    /// Every diagnostic in the `const_*` family below goes through this rather
+    /// than through [`Inferer::report_in`]; see [`ConstSlotReported`] for why a
+    /// type node can be visited many times and a mistake in it is still one
+    /// mistake.
+    fn report_const_in(&mut self, file: FileId, node: NodeId, message: impl Into<String>) {
+        if self.asts[&file].meta::<ConstSlotReported>(node).is_some() {
+            return;
+        }
+        self.asts[&file].set_meta(node, ConstSlotReported);
+        self.report_in(file, node, message);
     }
 }
 

@@ -69,6 +69,12 @@ pub fn check(
                 if meta.get::<RangeReported>(err.at).is_some() {
                     continue;
                 }
+                // The same rule, said by the evaluator rather than found here:
+                // the constant genuinely has no value, and the reason it has
+                // none is already on the screen (see [`ConstError::reported`]).
+                if err.reported {
+                    continue;
+                }
                 let what = if global.mutable {
                     format!("the initializer of `#static {}`", global.name)
                 } else {

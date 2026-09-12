@@ -7383,3 +7383,140 @@ fn a_field_directive_that_cannot_mean_anything_is_rejected() {
         messages("S :: struct { #align(3) a: u8 }\n")
     );
 }
+
+// ===< Layout arithmetic, and one diagnostic per mistake >===
+//
+// Four defects found by an audit of phase 7, each of which the compiler used to
+// answer with a crash, a silence, or a second sentence about one mistake.
+
+/// A length is whatever the program wrote, so `elem.size * n` is the one product
+/// in the compiler that a legal source type can push past a `u64`. It used to
+/// panic in a debug build — and, worse, would have wrapped in a release one,
+/// producing a size nothing downstream could tell was wrong.
+#[test]
+fn an_array_too_big_for_the_target_is_reported_rather_than_overflowing() {
+    let src = "\
+{ size_of } :: import <core/mem>
+A: usize :: size_of.<[18446744073709551615]u64>()
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("larger than this target")),
+        "{msgs:#?}"
+    );
+}
+
+/// The same arithmetic reached through a struct's fields rather than through one
+/// array: two members that each fit and together do not.
+#[test]
+fn a_struct_too_big_for_the_target_is_reported_at_its_declaration() {
+    let src = "\
+Big :: struct { a: [1152921504606846975]u64, b: [1152921504606846975]u64 }
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(msgs[0].contains("larger than this target"), "{msgs:#?}");
+}
+
+/// `#align(N)` rounds the total up, and rounding up is where a size that is
+/// merely huge becomes one that has wrapped — `div_ceil` cannot overflow, but
+/// multiplying the result back by the alignment can, and the product is then
+/// *smaller* than the input.
+#[test]
+fn rounding_a_size_up_to_an_alignment_cannot_wrap() {
+    let src = "\
+Wide :: #align(16) struct { a: [2305843009213693951]u64 }
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("larger than this target")),
+        "{msgs:#?}"
+    );
+}
+
+/// The ceiling is the **target's**, not this compiler's: a type that a 64-bit
+/// build accepts is refused for a 16-bit one, because addressing it is what a
+/// size has to be able to do.
+#[test]
+fn the_size_ceiling_follows_the_targets_pointer_width() {
+    let src = "\
+Buf :: struct { bytes: [40000]u8 }
+main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    let narrow = Target {
+        pointer_bits: 16,
+        ..Target::HOST_64
+    };
+    let msgs = messages_for(src, narrow);
+    assert!(
+        msgs.iter().any(|m| m.contains("larger than this target")),
+        "{msgs:#?}"
+    );
+}
+
+/// `stamp_generics` used to re-resolve the signature purely to collect the
+/// generic parameters it mentions, and resolving a type *reports* — so a bad
+/// array length in a parameter or a return type was reported twice, while the
+/// same length in a field or a local was reported once.
+#[test]
+fn a_bad_array_length_in_a_signature_is_reported_once() {
+    for src in [
+        "f :: func (x: [1 - 2]i32) -> i32 { return 0 }\nmain :: func () {}\n",
+        "f :: func () -> [1 - 2]i32 { return [_]i32 {} }\nmain :: func () {}\n",
+        "S :: struct { a: [1 - 2]i32 }\nmain :: func () {}\n",
+    ] {
+        let msgs = messages(src);
+        assert_eq!(msgs.len(), 1, "{src}\n{msgs:#?}");
+        assert!(msgs[0].contains("does not fit in `usize`"), "{msgs:#?}");
+    }
+}
+
+/// A type node is resolved once per **use**, not once, so an alias's length used
+/// to be reported once per mention of the alias. One mistake, one diagnostic.
+#[test]
+fn an_aliass_bad_length_is_reported_once_however_often_it_is_used() {
+    let src = "\
+A: usize :: 4
+T :: [A - 10]i32
+f :: func (x: T) -> i32 { return 0 }
+g :: func (y: T) -> i32 { return 0 }
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(msgs[0].contains("does not fit in `usize`"), "{msgs:#?}");
+}
+
+/// ...and it is reported even when nothing uses the alias at all. An alias is
+/// expanded on use, which is what an alias *is*, so a right-hand side nothing
+/// mentions used to pass a build in complete silence.
+#[test]
+fn an_unused_type_aliass_length_is_still_checked() {
+    let src = "\
+A: usize :: 4
+T :: [A - 10]i32
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(msgs[0].contains("does not fit in `usize`"), "{msgs:#?}");
+}
+
+/// A type argument that is already in error has no layout, and saying so is the
+/// second sentence about one mistake — the evaluator fails, and stays quiet
+/// about why.
+#[test]
+fn size_of_an_unresolved_type_does_not_add_a_second_diagnostic() {
+    let src = "\
+{ size_of } :: import <core/mem>
+B: usize :: size_of.<u65536>()
+main :: func () {}
+";
+    let msgs = messages(src);
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(msgs[0].contains("cannot resolve name"), "{msgs:#?}");
+}

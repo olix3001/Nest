@@ -32,12 +32,20 @@
 //! A type that fails to lay out *and* has no diagnostic would be a defect in
 //! this compiler rather than in the program; the place to catch that is a test,
 //! and there is one.
+//!
+//! **One failure is not like the others**, and it is the one this pass does
+//! report: a type the target cannot address
+//! ([`LayoutError::TooLarge`](crate::ir::layout::LayoutError::TooLarge)).
+//! `struct { a: [1 << 62]u64, b: [1 << 62]u64 }` is well-typed, its members are
+//! well-typed, it contains itself nowhere, and nothing above this point has any
+//! reason to look at it — being too big is a fact about the *size*, and the size
+//! is computed here. No other check owns the question, so this one does.
 
 use crate::common::diagnostic::Diagnostic;
 use crate::sema::def::{DefKind, DefTable};
 use crate::sema::ty::Ty;
 
-use crate::ir::layout::Layouts;
+use crate::ir::layout::{LayoutError, Layouts};
 use crate::ir::{Linked, Meta, TypeDef, TypeDefKind};
 
 /// Lay out every concrete type, stamping what worked.
@@ -66,8 +74,24 @@ pub fn check(
         if is_generic(defs, &ty) {
             continue;
         }
-        if let Ok(layout) = layouts.of(&ty) {
-            meta.set(t.id, layout);
+        match layouts.of(&ty) {
+            Ok(layout) => {
+                meta.set(t.id, layout);
+            }
+            // Every other error is already somebody's diagnostic; this one is
+            // nobody's until it is this one's (see the module docs).
+            Err(err @ LayoutError::TooLarge(_)) => {
+                let mut d = Diagnostic::error(format!("`{}`: {}", t.name, err.message()));
+                if let Some(span) = meta.span(t.id) {
+                    d = d.with_primary(span, "does not fit in the target's address space");
+                }
+                out.push(d.with_note(format!(
+                    "the largest object this target can hold is {} bytes; a size is a `usize` \
+                     and the distance between two addresses inside one object is an `isize`",
+                    layouts.max_size()
+                )));
+            }
+            Err(_) => {}
         }
     }
 }

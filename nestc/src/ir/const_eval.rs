@@ -169,6 +169,15 @@ impl ConstValue {
 pub struct ConstError {
     pub at: IrId,
     pub message: String,
+    /// Whether the mistake behind this failure has **already been reported**,
+    /// so that the caller stops rather than says a second thing about it.
+    ///
+    /// The evaluator still fails — there is no value, and pretending otherwise
+    /// would put a wrong number into the program — but the failure is a
+    /// consequence rather than a discovery. `size_of.<u65536>()` is the worked
+    /// example: `u65536` does not resolve, inference said so, and "`<error>` has
+    /// no known layout" adds nothing except a second place for a reader to look.
+    pub reported: bool,
 }
 
 impl ConstError {
@@ -176,6 +185,15 @@ impl ConstError {
         ConstError {
             at,
             message: message.into(),
+            reported: false,
+        }
+    }
+
+    /// A failure whose cause is already somebody else's diagnostic.
+    fn already_reported(at: IrId, message: impl Into<String>) -> Self {
+        ConstError {
+            reported: true,
+            ..ConstError::new(at, message)
         }
     }
 
@@ -1155,6 +1173,15 @@ impl<'a> ConstEval<'a> {
                 let ty = self.type_argument(e.id).ok_or_else(|| {
                     ConstError::new(e.id, format!("`${name}` needs a type argument"))
                 })?;
+                // A type argument that is already in error has no layout, and
+                // saying so would be the second sentence about one mistake —
+                // see [`ConstError::reported`].
+                if ty.mentions_error() {
+                    return Err(ConstError::already_reported(
+                        e.id,
+                        format!("`${name}` was given a type that is already in error"),
+                    ));
+                }
                 let layout = self
                     .layouts
                     .of(&ty)

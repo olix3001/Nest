@@ -686,6 +686,29 @@ an alignment, and that is the point of it. `#align(N)` raises an alignment, on a
 type or on a single field, and the size follows: a stride has to be a multiple of
 the alignment or the second element of an array would be misaligned.
 
+### A type has a size only if the target can address it
+
+The ceiling is **`isize::MAX` on the target**, and a type that exceeds it has no
+layout — `LayoutError::TooLarge`, reported at the declaration by the stamping
+pass (`ir/check/layouts.rs`), which is the one layout failure that pass reports
+because it is the one no earlier check owns.
+
+Two things make it a rule rather than an implementation limit:
+
+- **`isize`, not `usize`.** The *difference* of two addresses inside one object
+  is an `isize`, so an object larger than that has interior addresses whose
+  distance apart cannot be expressed — and `&a[n] - &a[0]` is what indexing
+  computes.
+- **Without a ceiling the arithmetic is unanswerable, not merely unchecked.**
+  `[18446744073709551615]u64` is a type a program may write, and `N × stride(T)`
+  for it leaves a `u64`. The only two answers available without a rule are a
+  panic in a debug compiler and a *silently wrapped* size in a release one, and
+  the second is the dangerous one: every later check passes on a number that is
+  smaller than the truth.
+
+So every product and every sum in the layout arithmetic is checked as it is
+computed, rather than at the end where it would already have wrapped.
+
 ### Where the target comes back
 
 Phase 5 took the target out of the type layer on purpose: `usize` is `distinct

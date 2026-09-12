@@ -128,6 +128,10 @@ pub enum LayoutError {
     Unknown(String),
     /// The recursion guard fired — see [`DEPTH`].
     TooDeep(String),
+    /// The type is bigger than the target can address (see
+    /// [`Layouts::max_size`]). Unlike every other variant this one is *not*
+    /// already reported by some other check, so the stamping pass reports it.
+    TooLarge(String),
 }
 
 impl LayoutError {
@@ -144,6 +148,9 @@ impl LayoutError {
             }
             LayoutError::Unknown(t) => format!("`{t}` has no known layout"),
             LayoutError::TooDeep(t) => format!("`{t}` nests too deeply to lay out"),
+            LayoutError::TooLarge(t) => {
+                format!("`{t}` is larger than this target can address")
+            }
         }
     }
 }
@@ -182,6 +189,32 @@ impl<'a> Layouts<'a> {
         (self.target.pointer_bits as u64).div_ceil(8)
     }
 
+    /// The largest object this target can hold — the rule §7cc states as "a
+    /// type has a size only if the target can address it".
+    ///
+    /// The ceiling is `isize::MAX`, not `usize::MAX`, and the extra bit is not
+    /// caution: the **difference** of two addresses inside one object is an
+    /// `isize`, so an object bigger than that has interior addresses whose
+    /// distance apart cannot be expressed. `&a[n] - &a[0]` is the everyday form
+    /// of that, and an array indexing operation computes it.
+    ///
+    /// Having a ceiling at all is what makes the arithmetic below *checkable*
+    /// rather than merely unchecked: `[18446744073709551615]u64` is a type a
+    /// program may write, and without a rule the only answers available are a
+    /// panic in a debug compiler and a silently wrapped size in a release one.
+    pub fn max_size(&self) -> u64 {
+        let bits = self.target.pointer_bits.clamp(2, 64);
+        (1u64 << (bits - 1)) - 1
+    }
+
+    /// `n` if the target can address an object that big, an error otherwise.
+    fn within_target(&self, n: u64, ty: &Ty) -> Result<u64> {
+        if n > self.max_size() {
+            return Err(LayoutError::TooLarge(self.show(ty)));
+        }
+        Ok(n)
+    }
+
     /// The layout of `ty`.
     pub fn of(&self, ty: &Ty) -> Result<Layout> {
         let key = super::mono::type_key(self.defs, ty);
@@ -200,7 +233,7 @@ impl<'a> Layouts<'a> {
     /// different question and is answered by its element's [`Layout`].
     pub fn fields(&self, ty: &Ty) -> Option<Result<Fields>> {
         match ty {
-            Ty::Tuple(elems) => Some(self.aggregate(&elems.iter().collect::<Vec<_>>(), None, 0)),
+            Ty::Tuple(elems) => Some(self.aggregate(ty, &elems.iter().collect::<Vec<_>>(), None, 0)),
             Ty::Nominal { def, .. } => {
                 let t = self.linked.ty(*def)?;
                 match &t.kind {
@@ -292,13 +325,23 @@ impl<'a> Layouts<'a> {
                 // The stride is the element's size, tail padding included, which
                 // is why [`Layout::size`] is the stride and not a data size: an
                 // array is exactly `n` of them end to end.
+                //
+                // `n` is whatever the program wrote, so this product is the one
+                // place in the compiler where a legal source type can exceed a
+                // `u64`. It is checked rather than wrapped for the reason
+                // [`Layouts::max_size`] gives: a wrapped size is a wrong answer
+                // that nothing downstream can detect.
+                let size = elem
+                    .size
+                    .checked_mul(n)
+                    .ok_or_else(|| LayoutError::TooLarge(self.show(ty)))?;
                 Ok(Layout {
-                    size: elem.size * n,
+                    size: self.within_target(size, ty)?,
                     align: elem.align,
                 })
             }
             Ty::Tuple(elems) => Ok(self
-                .aggregate(&elems.iter().collect::<Vec<_>>(), None, depth)?
+                .aggregate(ty, &elems.iter().collect::<Vec<_>>(), None, depth)?
                 .layout),
             Ty::Nominal { def, .. } => self.nominal(ty, *def, depth),
             Ty::Dyn(_) => Err(LayoutError::Unsized(self.show(ty))),
@@ -359,27 +402,32 @@ impl<'a> Layouts<'a> {
             })
             .collect();
         let refs: Vec<&Ty> = tys.iter().collect();
-        let mut fields = self.aggregate(&refs, Some(def), depth)?;
+        let mut fields = self.aggregate(ty, &refs, Some(def), depth)?;
         // A member may over-align itself (§9). It cannot *under*-align: an
         // `#align(1)` on a field of a non-`#packed` struct would be a request to
         // put a `u64` at an odd address, which is a different thing from asking
         // for no padding and is what `#packed` is for.
         let per_field: Vec<Option<u64>> = members.iter().map(|m| self.align_of(m.id)).collect();
         if per_field.iter().any(Option::is_some) {
-            fields = self.aggregate_with(&refs, Some(def), &per_field, depth)?;
+            fields = self.aggregate_with(ty, &refs, Some(def), &per_field, depth)?;
         }
         Ok(fields)
     }
 
     /// Lay out a run of types back to back, honouring the aggregate's own
     /// `#packed` / `#align`.
-    fn aggregate(&self, tys: &[&Ty], owner: Option<DefId>, depth: u32) -> Result<Fields> {
+    fn aggregate(&self, at: &Ty, tys: &[&Ty], owner: Option<DefId>, depth: u32) -> Result<Fields> {
         let none = vec![None; tys.len()];
-        self.aggregate_with(tys, owner, &none, depth)
+        self.aggregate_with(at, tys, owner, &none, depth)
     }
 
+    /// `at` is the type being laid out, and is carried only so that a size that
+    /// runs past [`Layouts::max_size`] can name it. A run of fields is not a
+    /// type on its own — an enum variant's payload is one — so it is a separate
+    /// argument rather than something recovered from `owner`.
     fn aggregate_with(
         &self,
+        at: &Ty,
         tys: &[&Ty],
         owner: Option<DefId>,
         per_field: &[Option<u64>],
@@ -399,9 +447,17 @@ impl<'a> Layouts<'a> {
                 (false, Some(n)) => l.align.max(n),
                 (false, None) => l.align,
             };
-            offset = round_up(offset, want);
+            // Both of these can leave a `u64` — a struct of two
+            // `[1 << 62]u64`s is a type a program may write — so both are
+            // checked against the target's ceiling as they go rather than once
+            // at the end, where the sum would already have wrapped.
+            offset = round_up_checked(offset, want)
+                .ok_or_else(|| LayoutError::TooLarge(self.show(at)))?;
             offsets.push(offset);
-            offset += l.size;
+            offset = offset
+                .checked_add(l.size)
+                .ok_or_else(|| LayoutError::TooLarge(self.show(at)))?;
+            self.within_target(offset, at)?;
             align = align.max(want);
         }
         // Fields are laid out in **declaration order**, and nothing is
@@ -412,9 +468,11 @@ impl<'a> Layouts<'a> {
         if let Some(n) = owner.and_then(|d| self.align_of_def(d)) {
             align = align.max(n);
         }
+        let size = round_up_checked(offset, align)
+            .ok_or_else(|| LayoutError::TooLarge(self.show(at)))?;
         Ok(Fields {
             layout: Layout {
-                size: round_up(offset, align),
+                size: self.within_target(size, at)?,
                 align,
             },
             offsets,
@@ -444,7 +502,7 @@ impl<'a> Layouts<'a> {
                 .map(|m| subst_ty(&subst, &self.meta.ty_or_error(m.id)))
                 .collect();
             let refs: Vec<&Ty> = tys.iter().collect();
-            let f = self.aggregate(&refs, None, depth)?;
+            let f = self.aggregate(ty, &refs, None, depth)?;
             payload.size = payload.size.max(f.layout.size);
             payload.align = payload.align.max(f.layout.align);
             payloads.push(f);
@@ -460,9 +518,13 @@ impl<'a> Layouts<'a> {
         if let Some(n) = self.align_of_def(def) {
             align = align.max(n);
         }
+        let size = payload_at
+            .checked_add(payload.size)
+            .and_then(|n| round_up_checked(n, align))
+            .ok_or_else(|| LayoutError::TooLarge(self.show(ty)))?;
         Ok(EnumLayout {
             layout: Layout {
-                size: round_up(payload_at + payload.size, align),
+                size: self.within_target(size, ty)?,
                 align,
             },
             tag,
@@ -548,11 +610,28 @@ pub struct EnumLayout {
 }
 
 /// Round `n` up to the next multiple of `align` (a power of two).
+///
+/// Used only where both arguments are already bounded — a scalar's own size, an
+/// enum tag. Anywhere a program's numbers reach, [`round_up_checked`] is the one
+/// to call.
 fn round_up(n: u64, align: u64) -> u64 {
     if align <= 1 {
         return n;
     }
     n.div_ceil(align) * align
+}
+
+/// [`round_up`], and `None` when the rounded value would not fit in a `u64`.
+///
+/// Rounding up is where a size that is merely huge becomes one that has wrapped:
+/// `div_ceil` cannot overflow, but multiplying the result back by the alignment
+/// can, and the product is then a *smaller* number than the input — which is the
+/// worst possible failure, since every later check would pass.
+fn round_up_checked(n: u64, align: u64) -> Option<u64> {
+    if align <= 1 {
+        return Some(n);
+    }
+    n.div_ceil(align).checked_mul(align)
 }
 
 /// Replace every generic parameter in `ty` by what `map` binds it to.

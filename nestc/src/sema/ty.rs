@@ -308,6 +308,29 @@ impl Ty {
         matches!(self, Ty::Int { .. })
     }
 
+    /// Whether [`Ty::Error`] appears anywhere inside this type.
+    ///
+    /// What it is for is **diagnostic suppression**, and only that. A `Ty::Error`
+    /// is the placeholder inference leaves where it already reported something,
+    /// so a later pass that finds one is looking at the consequence of a mistake
+    /// rather than at a mistake: `size_of.<u65536>()` is "cannot resolve name
+    /// `u65536`" once, not that plus "`<error>` has no known layout". A pass
+    /// asks this before speaking, never before working.
+    pub fn mentions_error(&self) -> bool {
+        match self {
+            Ty::Error => true,
+            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Array { inner, .. } => {
+                inner.mentions_error()
+            }
+            Ty::Tuple(elems) => elems.iter().any(Ty::mentions_error),
+            Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_error),
+            Ty::Func { params, ret } => {
+                params.iter().any(Ty::mentions_error) || ret.mentions_error()
+            }
+            _ => false,
+        }
+    }
+
     /// The signedness and width in bits of a **concrete** integer type — the
     /// pair every site that has to compute with an integer's range needs.
     ///
