@@ -2,48 +2,37 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
 
-func conv(n_0: i32, f_1: f64) -> u8  // _NC4conv
-  let _2: i64
-  let _3: i64
-  let wide_4: i64
-  let _5: u8
-  let _6: u8
-  let narrow_7: u8
-  let _8: f32
-  let _9: f32
-  let single_10: f32
-  let _11: u32
-  let _12: u32
-  let bits_13: u32
-  let _14: u16
-  let folded_15: u16
-bb0:                    // entry
-  _2 := cast n_0 : i32 -> i64
-  _3 := _2
-  wide_4 := _3
-  _5 := cast wide_4 : i64 -> u8
-  _6 := _5
-  narrow_7 := _6
-  _8 := cast f_1 : f64 -> f32
-  _9 := _8
-  single_10 := _9
-  _11 := $transmute(n_0)
-  _12 := _11
-  bits_13 := _12
-  _14 := 7
-  folded_15 := _14
-  return narrow_7
+  func conv(n_0: i32, f_1: f64) -> u8  // _NC4conv
+    let _2: i64
+    let _3: i64
+    let wide_4: i64
+    let _5: u8
+    let _6: u8
+    let narrow_7: u8
+    let _8: f32
+    let _9: f32
+    let single_10: f32
+    let _11: u32
+    let _12: u32
+    let bits_13: u32
+    let _14: u16
+    let folded_15: u16
+  bb0:                    // entry
+    _2 := cast n_0 : i32 -> i64
+    _3 := _2
+    wide_4 := _3
+    _5 := cast wide_4 : i64 -> u8
+    _6 := _5
+    narrow_7 := _6
+    _8 := cast f_1 : f64 -> f32
+    _9 := _8
+    single_10 := _9
+    _11 := $transmute(n_0)
+    _12 := _11
+    bits_13 := _12
+    _14 := 7
+    folded_15 := _14
+    return narrow_7
+}

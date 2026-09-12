@@ -2,31 +2,20 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type Node = struct {           // was a struct; size 4, align 4
-  v: i32                    // +0
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  type Node = struct {           // was a struct; size 4, align 4
+    v: i32                    // +0
+  }
 
-func build() -> *mut Node  // _NC5build
-  let _0: *mut Node
-  let _1: *mut Node
-  let p_2: *mut Node
-bb0:                    // entry
-  _0 := $new()
-    @safepoint { live: [] }
-  _1 := _0
-  p_2 := _1
-  p_2.*.v = 1
-  return p_2
+  func build() -> *Node  // _NC5build
+    let _0: *Node
+    let _1: *Node
+    let p_2: *Node
+  bb0:                    // entry
+    _0 := $new()
+      @safepoint { live: [] }
+    _1 := _0
+    p_2 := _1
+    p_2.*.v = 1
+    return p_2
+}

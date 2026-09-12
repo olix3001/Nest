@@ -2,41 +2,30 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type Dog = struct {           // was a struct; size 4, align 4
-  n: i32                    // +0
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  type Dog = struct {           // was a struct; size 4, align 4
+    n: i32                    // +0
+  }
 
-func call(d_0: *Dog) -> i32  // _NC4call
-  let _1: i32
-bb0:                    // entry
-  _1 := call heard.<Dog>(d_0)
-    @safepoint { live: [d_0]
-      d_0 := reloc d_0
-    }
-  return _1
+  func call(d_0: *Dog) -> i32  // _NC4call
+    let _1: i32
+  bb0:                    // entry
+    _1 := call heard.<Dog>(d_0)
+      @safepoint { live: [d_0]
+        d_0 := reloc d_0
+      }
+    return _1
 
-func Dog.<as Speak>.say(self_0: *Dog) -> i32  // _NC3DogXN5SpeakIE3say
-bb0:                    // entry
-  return self_0.*.n
+  func Dog.<as Speak>.say(self_0: *Dog) -> i32  // _NC3DogXN5SpeakIE3say
+  bb0:                    // entry
+    return self_0.*.n
 
-func heard.<Dog>(t_0: *Dog) -> i32  // _NC5heardIN3DogIEE
-  let _1: i32
-bb0:                    // entry
-  _1 := call Dog.<as Speak>.say(t_0)
-    @safepoint { live: [t_0]
-      t_0 := reloc t_0
-    }
-  return _1
+  func heard.<Dog>(t_0: *Dog) -> i32  // _NC5heardIN3DogIEE
+    let _1: i32
+  bb0:                    // entry
+    _1 := call Dog.<as Speak>.say(t_0)
+      @safepoint { live: [t_0]
+        t_0 := reloc t_0
+      }
+    return _1
+}

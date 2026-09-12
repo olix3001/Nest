@@ -2,48 +2,37 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type Dog = struct {           // was a struct; size 4, align 4
-  n: i32                    // +0
-}
-type *dyn Speak = struct {           // was a dyn; size 16, align 8
-  data: *void                    // +0
-  vtable: *void                    // +8
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
-vtable _NVN5SpeakIEN3DogIE for Dog as Speak {
-  [0] say = _NC3DogXN5SpeakIE3say
-}
+unit mem:main {
+  type Dog = struct {           // was a struct; size 4, align 4
+    n: i32                    // +0
+  }
+  type vtable.Speak = struct {           // was a vtable for Speak; size 8, align 8
+    say: func(*void) -> i32                    // +0
+  }
+  type *dyn Speak = struct {           // was a dyn Speak; size 16, align 8
+    data: *void                    // +0
+    vtable: *vtable.Speak                    // +8
+  }
+  private const vtable.Speak.for.Dog: vtable.Speak = { &Dog.<as Speak>.say }  // _NVN5SpeakIEN3DogIE
 
-func heard(d_0: *Dog) -> i32  // _NC5heard
-  let _1: *dyn Speak
-  let _2: *dyn Speak
-  let s_3: *dyn Speak
-  let _4: *void
-  let _5: i32
-bb0:                    // entry
-  _1 := dyn(d_0, &vtable#0)
-  _2 := _1
-  s_3 := _2
-  _4 := s_3.vtable.*.say
-  _5 := call (_4)(s_3)
-    @safepoint { live: [s_3, _4]
-      s_3 := reloc s_3
-      _4 := reloc _4
-    }
-  return _5
+  func heard(d_0: *Dog) -> i32  // _NC5heard
+    let _1: *dyn Speak
+    let _2: *dyn Speak
+    let s_3: *dyn Speak
+    let _4: func(*void) -> i32
+    let _5: i32
+  bb0:                    // entry
+    _1 := *dyn Speak(d_0, &vtable.Speak.for.Dog)
+    _2 := _1
+    s_3 := _2
+    _4 := s_3.vtable.*.say
+    _5 := call (_4)(s_3)
+      @safepoint { live: [s_3]
+        s_3 := reloc s_3
+      }
+    return _5
 
-func Dog.<as Speak>.say(self_0: *Dog) -> i32  // _NC3DogXN5SpeakIE3say
-bb0:                    // entry
-  return self_0.*.n
+  func Dog.<as Speak>.say(self_0: *Dog) -> i32  // _NC3DogXN5SpeakIE3say
+  bb0:                    // entry
+    return self_0.*.n
+}

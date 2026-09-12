@@ -2,56 +2,45 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type Node = struct {           // was a struct; size 4, align 4
-  x: i32                    // +0
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  type Node = struct {           // was a struct; size 4, align 4
+    x: i32                    // +0
+  }
 
-func report(n_0: i32) -> void  // _NC6report
-bb0:                    // entry
-  return
+  func report(n_0: i32) -> void  // _NC6report
+  bb0:                    // entry
+    return
 
-func f(c_0: bool) -> i32  // _NC1f
-  let _1: *mut Node
-  let _2: *mut Node
-  let p_3: *mut Node
-  let _4: i32
-bb0:                    // entry
-  _1 := $new()
-    @safepoint { live: [] }
-  _2 := _1
-  p_3 := _2
-  switch c_0 { 1 => bb1, _ => bb2 }
-bb1:                    // then
-  _4 := p_3.*.x
-  goto bb5
-bb2:                    // else
-  goto bb3
-bb3:                    // join
-  call report(p_3.*.x)
-    @safepoint { live: [p_3]
-      p_3 := reloc p_3
-    }
-  _4 := 0
-  goto bb5
-bb4:                    // return
-  return _4
-bb5:                    // cleanup 0 (return)
-  call report(0)
-    @safepoint { live: [p_3]
-      p_3 := reloc p_3
-    }
-  drop p_3
-  goto bb4
+  func f(c_0: bool) -> i32  // _NC1f
+    let _1: *Node
+    let _2: *Node
+    let p_3: *Node
+    let _4: i32
+  bb0:                    // entry
+    _1 := $new()
+      @safepoint { live: [] }
+    _2 := _1
+    p_3 := _2
+    switch.bool c_0 { 1 => bb1, _ => bb2 }
+  bb1:                    // then
+    _4 := p_3.*.x
+    goto bb5
+  bb2:                    // else
+    goto bb3
+  bb3:                    // join
+    call report(p_3.*.x)
+      @safepoint { live: [p_3]
+        p_3 := reloc p_3
+      }
+    _4 := 0
+    goto bb5
+  bb4:                    // return
+    return _4
+  bb5:                    // cleanup 0 (return)
+    call report(0)
+      @safepoint { live: [p_3]
+        p_3 := reloc p_3
+      }
+    drop p_3
+    goto bb4
+}

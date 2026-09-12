@@ -45,40 +45,25 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::sema::def::DefTable;
-use crate::sema::ty::Ty;
-
 use super::{
-    Base, BlockId, Function, LocalId, Operand, Place, Program, Rvalue, Safepoint, StmtKind,
-    TermKind,
+    Base, BlockId, Function, Intrinsic, LocalId, Operand, Origin, Place, Rvalue, Safepoint,
+    StmtKind, TermKind, Ty, TypeDef, Unit,
 };
 
 /// Annotate every safepoint in the program with its live set.
-pub fn annotate(defs: &DefTable, program: &mut Program) {
-    // The flattened type table is what says whether a named type holds a
-    // reference, so it is indexed once and asked per local (§7b).
-    let types: HashMap<String, usize> = program
-        .types
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (t.key.clone(), i))
-        .collect();
-    let cx = Roots {
-        defs,
-        types: &types,
-        defined: &program.types,
-    };
-    for f in &mut program.funcs {
+pub fn annotate(unit: &mut Unit) {
+    let types = std::mem::take(&mut unit.types);
+    let cx = Roots { defined: &types };
+    for f in &mut unit.funcs {
         annotate_function(&cx, f);
     }
+    unit.types = types;
 }
 
-/// What the root question needs: the def table for a type's key, and the
-/// flattened definitions for its members.
+/// What the root question needs: the flattened definitions, which is where a
+/// named type's members are (§7b).
 struct Roots<'a> {
-    defs: &'a DefTable,
-    types: &'a HashMap<String, usize>,
-    defined: &'a [super::TypeDef],
+    defined: &'a [TypeDef],
 }
 
 fn annotate_function(cx: &Roots, f: &mut Function) {
@@ -106,10 +91,17 @@ fn annotate_function(cx: &Roots, f: &mut Function) {
         term_reads(&b.term.kind, &mut live, &roots);
         for s in b.stmts.iter_mut().rev() {
             let is_point = match &s.kind {
+                // An allocation and a collection are the two intrinsics that
+                // can start one; the rest are instructions, and an instruction
+                // does not call the collector.
+                StmtKind::Call {
+                    callee: super::Callee::Intrinsic(i),
+                    ..
+                } => matches!(
+                    i,
+                    Intrinsic::New | Intrinsic::Make | Intrinsic::GcCollect
+                ),
                 StmtKind::Call { .. } => true,
-                StmtKind::Intrinsic { name, .. } => {
-                    matches!(name.as_str(), "new" | "make" | "gc_collect")
-                }
                 StmtKind::Assign { .. } | StmtKind::Drop(_) => false,
             };
             // The set is the one live **before** the statement, not after it.
@@ -193,14 +185,6 @@ fn stmt_effect(k: &StmtKind, live: &mut HashSet<LocalId>, roots: &HashSet<LocalI
         }
         // A `drop` **reads** the pointer it frees, which is what keeps the
         // allocation traceable right up to the point it stops existing.
-        StmtKind::Intrinsic { dest, args, .. } => {
-            if let Some(d) = dest {
-                write(d, live, roots);
-            }
-            for a in args {
-                operand_reads(a, live, roots);
-            }
-        }
         StmtKind::Drop(o) => operand_reads(o, live, roots),
     }
 }
@@ -228,12 +212,12 @@ fn term_reads(t: &TermKind, live: &mut HashSet<LocalId>, roots: &HashSet<LocalId
 fn rvalue_reads(v: &Rvalue, live: &mut HashSet<LocalId>, roots: &HashSet<LocalId>) {
     match v {
         Rvalue::Use(o) => operand_reads(o, live, roots),
-        Rvalue::Ref { place, .. } => place_reads(place, live, roots),
-        Rvalue::Binary { lhs, rhs, .. } => {
-            operand_reads(lhs, live, roots);
-            operand_reads(rhs, live, roots);
+        Rvalue::Ref(place) => place_reads(place, live, roots),
+        Rvalue::Op { args, .. } => {
+            for o in args {
+                operand_reads(o, live, roots);
+            }
         }
-        Rvalue::Unary { operand, .. } => operand_reads(operand, live, roots),
         Rvalue::Cast { value, .. } => operand_reads(value, live, roots),
         Rvalue::Aggregate { fields, .. } => {
             for o in fields {
@@ -243,11 +227,6 @@ fn rvalue_reads(v: &Rvalue, live: &mut HashSet<LocalId>, roots: &HashSet<LocalId
         Rvalue::Offset { ptr, index, .. } => {
             operand_reads(ptr, live, roots);
             operand_reads(index, live, roots);
-        }
-        Rvalue::Builtin { args, .. } => {
-            for o in args {
-                operand_reads(o, live, roots);
-            }
         }
     }
 }
@@ -324,10 +303,10 @@ impl Roots<'_> {
     /// about.
     ///
     /// It is asked of the *type* rather than of the value, and it looks
-    /// **through** aggregates: a struct with a pointer field is as much a root
+    /// **through** aggregates: a struct with a pointer member is as much a root
     /// as the pointer is, because the frame slot holding it is where that
-    /// pointer lives. A `str` is one for the same reason — a `distinct []u8` is
-    /// a slice underneath (§2.4), and the flattened table is what says so.
+    /// pointer lives. A slice is one for the same reason — it is `{ ptr, len }`
+    /// by now (§7b), and the table is what says so.
     fn is_root(&self, ty: &Ty, depth: usize) -> bool {
         // A type that reaches this deep has a pointer somewhere above it or is
         // recursive, and a recursive type is recursive *through* a pointer.
@@ -335,34 +314,44 @@ impl Roots<'_> {
             return true;
         }
         match ty {
-            Ty::Ptr { .. } | Ty::Slice { .. } | Ty::Dyn(_) => true,
-            Ty::Array { inner, .. } => self.is_root(inner, depth + 1),
-            Ty::Tuple(elems) => elems.iter().any(|t| self.is_root(t, depth + 1)),
-            Ty::Nominal { .. } => self.nominal_is_root(ty, depth),
+            // A pointer to a vtable is a pointer to **code**, and code is not
+            // in the heap. It is the one address LIR can tell apart from a
+            // managed reference, because the vtable is an ordinary global with
+            // a type of its own (§7b).
+            Ty::Ptr(inner) => !self.is_vtable(inner),
+            // A function pointer is code as well.
+            Ty::Func { .. } => false,
+            Ty::Array { elem, .. } => self.is_root(elem, depth + 1),
+            Ty::Named(id) => self.named_is_root(*id, depth),
             _ => false,
         }
+    }
+
+    fn is_vtable(&self, ty: &Ty) -> bool {
+        let Ty::Named(id) = ty else { return false };
+        matches!(
+            self.defined.get(id.0 as usize).map(|t| &t.origin),
+            Some(Origin::Vtable { .. })
+        )
     }
 
     /// A named type is a root when one of its members is.
     ///
     /// An **enum** is the case worth naming: its flattened members are a tag and
     /// `[N]u8` of shared payload, which holds no pointer as far as a type can
-    /// tell, so the variants' own member types are what the question has to be
-    /// asked of.
-    fn nominal_is_root(&self, ty: &Ty, depth: usize) -> bool {
-        let key = crate::ir::mono::type_key(self.defs, ty);
-        let Some(&i) = self.types.get(&key) else {
-            // A named type the program never used as a value has no flattened
-            // definition here. Answering yes is the safe direction: a root
-            // missed is a use after free, and a root invented is a word in a
-            // stack map.
+    /// tell, so the variants' own types are what the question has to be asked
+    /// of.
+    fn named_is_root(&self, id: super::TypeId, depth: usize) -> bool {
+        let Some(t) = self.defined.get(id.0 as usize) else {
+            // A type with no definition here would be a defect in the lowering.
+            // Answering yes is the safe direction: a root missed is a use after
+            // free, and a root invented is a word in a stack map.
             return true;
         };
-        let t = &self.defined[i];
-        if let super::Origin::Enum { variants, .. } = &t.origin {
+        if let Origin::Enum { variants } = &t.origin {
             return variants
                 .iter()
-                .any(|v| v.members.iter().any(|m| self.is_root(&m.ty, depth + 1)));
+                .any(|v| self.named_is_root(v.ty, depth + 1));
         }
         t.members.iter().any(|m| self.is_root(&m.ty, depth + 1))
     }

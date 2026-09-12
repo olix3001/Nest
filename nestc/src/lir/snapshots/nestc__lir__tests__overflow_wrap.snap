@@ -2,18 +2,11 @@
 source: src/lir/tests.rs
 expression: "lir_text_with(src, wrap)"
 ---
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
+unit mem:main {
 
-func add(a_0: i32, b_1: i32) -> i32  // _NC3add
-  let _2: i32
-bb0:                    // entry
-  _2 := add(a_0, b_1)
-  return _2
+  func add(a_0: i32, b_1: i32) -> i32  // _NC3add
+    let _2: i32
+  bb0:                    // entry
+    _2 := add.i32 a_0, b_1
+    return _2
+}

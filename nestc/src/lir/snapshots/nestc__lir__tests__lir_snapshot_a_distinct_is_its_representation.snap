@@ -2,69 +2,65 @@
 source: src/lir/tests.rs
 expression: lir
 ---
-type Point = struct {           // was a struct; size 8, align 4
-  x: i32                    // +0
-  y: i32                    // +4
-}
-type Color = struct {           // was a enum; size 8, align 4
-  tag: u8                    // +0
-  payload: [4]u8                    // +4
-}
-  // tag 0 => .red
-  // tag 1 => .green
-  // tag 2 => .blue(0: i32 +0)
-type []Point = struct {           // was a slice; size 16, align 8
-  ptr: *Point                    // +0
-  len: u64                    // +8
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  type Point = struct {           // was a struct; size 8, align 4
+    x: i32                    // +0
+    y: i32                    // +4
+  }
+  type Color = struct {           // was a enum; size 8, align 4
+    tag: u8                    // +0
+    payload: [4]u8                    // +4
+  }
+    // tag 0 => .red as Color.red
+    // tag 1 => .green as Color.green
+    // tag 2 => .blue as Color.blue(0: i32 +0)
+  type Color.red = struct {           // was a variant of Color; size 0, align 1
+  }
+  type Color.green = struct {           // was a variant of Color; size 0, align 1
+  }
+  type Color.blue = struct {           // was a variant of Color; size 4, align 4
+    0: i32                    // +0
+  }
+  type []Point = struct {           // was a slice; size 16, align 8
+    ptr: *Point                    // +0
+    len: u64                    // +8
+  }
 
-func take(h_0: Point, s_1: Color, d_2: Point, p_3: *Point, xs_4: []Point) -> i32  // _NC4take
-bb0:                    // entry
-  return h_0.x
+  func take(h_0: Point, s_1: Color, d_2: Point, p_3: *Point, xs_4: []Point) -> i32  // _NC4take
+  bb0:                    // entry
+    return h_0.x
 
-func mk(p_0: Point) -> Point  // _NC2mk
-bb0:                    // entry
-  return p_0
+  func mk(p_0: Point) -> Point  // _NC2mk
+  bb0:                    // entry
+    return p_0
 
-func hue(s_0: Color) -> i32  // _NC3hue
-  let _1: i32
-  let _2: u8
-  let n_3: i32
-bb0:                    // entry
-  _2 := s_0.tag
-  switch _2 { 0 => bb7, 1 => bb8, 2 => bb9, _ => bb5 }
-bb1:                    // join
-  return _1
-bb2:                    // arm .red
-  _1 := 1
-  goto bb1
-bb3:                    // arm .green
-  _1 := 2
-  goto bb1
-bb4:                    // arm .blue
-  _1 := n_3
-  goto bb1
-bb5:                    // no variant matched
-  unreachable
-bb6:                    // unreachable
-  unreachable
-bb7:                    // .red
-  goto bb2
-bb8:                    // .green
-  goto bb3
-bb9:                    // .blue
-  n_3 := (s_0 as blue).0
-  goto bb4
+  func hue(s_0: Color) -> i32  // _NC3hue
+    let _1: i32
+    let _2: u8
+    let n_3: i32
+  bb0:                    // entry
+    _2 := s_0.tag
+    switch.u8 _2 { 0 => bb7, 1 => bb8, 2 => bb9, _ => bb5 }
+  bb1:                    // join
+    return _1
+  bb2:                    // arm .red
+    _1 := 1
+    goto bb1
+  bb3:                    // arm .green
+    _1 := 2
+    goto bb1
+  bb4:                    // arm .blue
+    _1 := n_3
+    goto bb1
+  bb5:                    // no variant matched
+    unreachable
+  bb6:                    // unreachable
+    unreachable
+  bb7:                    // .red
+    goto bb2
+  bb8:                    // .green
+    goto bb3
+  bb9:                    // .blue
+    n_3 := (s_0.payload as Color.blue).0
+    goto bb4
+}

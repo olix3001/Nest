@@ -7,6 +7,13 @@
 //! name**. Together they are what turns a list of blocks back into a program
 //! somebody wrote.
 //!
+//! **Everything is written out in full.** A type is named the way the source
+//! names it (`core.Vec.<i32>`, `Shape.circle`), a function by its whole path
+//! with its symbol beside it, a global by its name and never by its index, an
+//! operation by a word (`add_checked.i32`) and never by a sigil that a reader
+//! has to look up. The indices the structures use are how a *backend* resolves a
+//! reference; a person reading a dump should never have to.
+//!
 //! The one convention worth stating: `:=` **introduces** a value into a local
 //! and `=` **stores** into a place. That is the same distinction the source
 //! language draws, so it costs a reader nothing to carry across.
@@ -14,52 +21,54 @@
 use std::fmt::Write;
 
 use crate::common::source::SourceMap;
-use crate::sema::def::DefTable;
 
 use super::{
-    AggregateKind, Base, Block, Callee, Constant, Function, Operand, Origin, Place, Program,
-    Projection, Rvalue, Stmt, StmtKind, TermKind, TypeDef, Vtable,
+    Aggregate, Base, Block, Callee, Constant, Function, Global, Operand, Origin, Place, Program,
+    Projection, Rvalue, Stmt, StmtKind, TermKind, Ty, TypeDef, Unit,
 };
 
-/// Render a whole [`Program`].
+/// Render a whole [`Program`] — every codegen unit in it.
 ///
 /// `sources` is optional: with it, every instruction carries `file:line:col` the
 /// way §1's example does; without it the spans are left off, which is what a
 /// test comparing structure wants.
-pub fn program_to_string(defs: &DefTable, sources: Option<&SourceMap>, p: &Program) -> String {
+pub fn program_to_string(sources: Option<&SourceMap>, p: &Program) -> String {
+    let mut out = String::new();
+    for (i, u) in p.units.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&unit_to_string(sources, u));
+    }
+    out
+}
+
+/// Render one codegen unit.
+pub fn unit_to_string(sources: Option<&SourceMap>, u: &Unit) -> String {
     let mut pr = Printer {
-        defs,
         sources,
+        unit: u,
         out: String::new(),
     };
+    pr.line(&format!("unit {} {{", u.name));
     // Types first, then the data, then the code: a function's locals read better
     // once a reader has seen what their types are made of.
-    for t in &p.types {
+    for t in &u.types {
         pr.type_def(t);
     }
-    for g in &p.globals {
-        let init = match &g.init {
-            Some(v) => v.display(),
-            None => "zeroed".to_string(),
-        };
-        pr.line(&format!(
-            "global {}: {} = {init}",
-            g.name,
-            g.ty.display(defs)
-        ));
+    for g in &u.globals {
+        pr.global(g);
     }
-    for v in &p.vtables {
-        pr.vtable(v);
-    }
-    for f in &p.funcs {
+    for f in &u.funcs {
         pr.function(f);
     }
+    pr.line("}");
     pr.out
 }
 
 struct Printer<'a> {
-    defs: &'a DefTable,
     sources: Option<&'a SourceMap>,
+    unit: &'a Unit,
     out: String,
 }
 
@@ -69,52 +78,49 @@ impl Printer<'_> {
         self.out.push('\n');
     }
 
+    // ===< Types >===
+
     fn type_def(&mut self, t: &TypeDef) {
         let shape = match &t.origin {
-            Origin::Struct(_) => "struct",
+            Origin::Struct => "struct",
             Origin::Enum { .. } => "enum",
             Origin::Tuple => "tuple",
             Origin::Slice => "slice",
-            Origin::Dyn(_) => "dyn",
+            Origin::Dyn { trait_name } => &format!("dyn {trait_name}"),
+            Origin::Variant { parent } => &format!("variant of {parent}"),
+            Origin::Vtable { trait_name } => &format!("vtable for {trait_name}"),
         };
         self.line(&format!(
-            "type {} = struct {{           // was a {shape}; size {}, align {}",
+            "  type {} = struct {{           // was a {shape}; size {}, align {}",
             t.name, t.layout.size, t.layout.align
         ));
         for m in &t.members {
+            let ty = self.ty(&m.ty);
             self.line(&format!(
-                "  {}: {}                    // +{}",
-                m.name,
-                m.ty.display(self.defs),
-                m.offset
+                "    {}: {ty}                    // +{}",
+                m.name, m.offset
             ));
         }
-        self.line("}");
+        self.line("  }");
         // The variants survive the tag they became: a debugger showing `2`
-        // instead of `.green` is a worse debugger (§7c).
-        if let Origin::Enum { variants, .. } = &t.origin {
+        // instead of `.green` is a worse debugger (§7c). Each one names the type
+        // its payload is read as, which is where its members' offsets are.
+        if let Origin::Enum { variants } = &t.origin {
             for v in variants {
-                let members: Vec<String> = v
+                let name = self.unit.ty(v.ty).name.clone();
+                let (open, close) = if v.tuple { ("(", ")") } else { (" { ", " }") };
+                let members: Vec<String> = self
+                    .unit
+                    .ty(v.ty)
                     .members
                     .iter()
-                    .map(|m| {
-                        format!(
-                            "{}: {} +{}",
-                            m.name,
-                            m.ty.display(self.defs),
-                            m.offset
-                        )
-                    })
+                    .map(|m| format!("{}: {} +{}", m.name, self.ty(&m.ty), m.offset))
                     .collect();
-                // A payload written positionally prints in brackets and a
-                // record one in braces, which is how it was written — the tag
-                // it became does not remember, and the definition does.
-                let (open, close) = if v.tuple { ("(", ")") } else { (" { ", " }") };
                 if members.is_empty() {
-                    self.line(&format!("  // tag {} => .{}", v.tag, v.name));
+                    self.line(&format!("    // tag {} => .{} as {name}", v.tag, v.name));
                 } else {
                     self.line(&format!(
-                        "  // tag {} => .{}{open}{}{close}",
+                        "    // tag {} => .{} as {name}{open}{}{close}",
                         v.tag,
                         v.name,
                         members.join(", ")
@@ -124,58 +130,146 @@ impl Printer<'_> {
         }
     }
 
-    fn vtable(&mut self, v: &Vtable) {
-        self.line(&format!(
-            "vtable {} for {} as {} {{",
-            v.symbol,
-            v.concrete.display(self.defs),
-            self.defs.canonical_string(v.trait_def)
-        ));
-        for (i, slot) in v.slots.iter().enumerate() {
-            match slot {
-                Some(s) => self.line(&format!("  [{i}] {} = {}", s.method, s.symbol)),
-                // Object safety should have made this unreachable; a hole is
-                // how a defect shows up as a defect rather than as a call to
-                // the wrong function.
-                None => self.line(&format!("  [{i}] <unfilled>")),
+    /// A type, written the way the source writes it.
+    fn ty(&self, ty: &Ty) -> String {
+        match ty {
+            Ty::Int { bits, signed } => {
+                format!("{}{bits}", if *signed { "i" } else { "u" })
             }
+            Ty::Float { bits } => format!("f{bits}"),
+            Ty::Bool => "bool".to_string(),
+            Ty::Ptr(inner) => format!("*{}", self.ty(inner)),
+            Ty::Array { len, elem } => format!("[{len}]{}", self.ty(elem)),
+            Ty::Func { params, ret } => {
+                let ps: Vec<String> = params.iter().map(|p| self.ty(p)).collect();
+                format!("func({}) -> {}", ps.join(", "), self.ty(ret))
+            }
+            Ty::Named(id) => self
+                .unit
+                .types
+                .get(id.0 as usize)
+                .map(|t| t.name.clone())
+                // A type id with nothing behind it is a defect in the split, and
+                // saying so is better than printing a number.
+                .unwrap_or_else(|| format!("<unknown type #{}>", id.0)),
+            Ty::Void => "void".to_string(),
+            Ty::Never => "never".to_string(),
         }
-        self.line("}");
     }
 
+    // ===< Data >===
+
+    fn global(&mut self, g: &Global) {
+        let ty = self.ty(&g.ty);
+        let kind = if g.mutable { "global" } else { "const" };
+        if g.linkage == super::Linkage::Imported {
+            // Another unit defines it; this one only needs the linker to know
+            // the name and the shape (§11).
+            self.line(&format!("  extern {kind} {}: {ty}  // {}", g.name, g.symbol));
+            return;
+        }
+        let init = match &g.init {
+            Some(c) => self.constant(c),
+            None => "zeroed".to_string(),
+        };
+        // `private` is the linkage, printed because it is the difference between
+        // a name the linker resolves and one it never sees (§11).
+        let vis = if g.linkage == super::Linkage::Internal {
+            "private "
+        } else {
+            ""
+        };
+        self.line(&format!(
+            "  {vis}{kind} {}: {ty} = {init}  // {}{}",
+            g.name,
+            g.symbol,
+            self.at(g.span)
+        ));
+    }
+
+    fn constant(&self, c: &Constant) -> String {
+        match c {
+            Constant::Int(n) => n.to_string(),
+            // `.0` on a whole number, so a dump never reads a float as an
+            // integer: `x == 0` and `x == 0.0` are different instructions, and
+            // the point of the dump is to say which one this is.
+            Constant::Float(f) if f.fract() == 0.0 && f.is_finite() => format!("{f:.1}"),
+            Constant::Float(f) => f.to_string(),
+            Constant::Bool(b) => b.to_string(),
+            Constant::Func(id) => match self.unit.funcs.get(id.0 as usize) {
+                Some(f) => format!("&{}", f.name),
+                None => format!("&<unknown function #{}>", id.0),
+            },
+            Constant::Global(id) => match self.unit.globals.get(id.0 as usize) {
+                Some(g) => format!("&{}", g.name),
+                None => format!("&<unknown global #{}>", id.0),
+            },
+            Constant::Aggregate(items) => {
+                let parts: Vec<String> = items.iter().map(|i| self.constant(i)).collect();
+                format!("{{ {} }}", parts.join(", "))
+            }
+            Constant::Bytes(b) => crate::parser::ast::bytes_repr(b),
+            Constant::Variant { name, payload, tag } if payload.is_empty() => {
+                format!(".{name}#{tag}")
+            }
+            Constant::Variant { name, payload, tag } => {
+                let parts: Vec<String> = payload.iter().map(|i| self.constant(i)).collect();
+                format!(".{name}#{tag}({})", parts.join(", "))
+            }
+            Constant::Undef => "undef".to_string(),
+        }
+    }
+
+    // ===< Code >===
+
     fn function(&mut self, f: &Function) {
-        let params: Vec<String> = f.locals[..f.params]
+        let params: Vec<String> = f.locals[..f.params.min(f.locals.len())]
             .iter()
-            .map(|l| format!("{}: {}", self.local_name(f, l.id), l.ty.display(self.defs)))
+            .map(|l| format!("{}: {}", self.local_name(f, l.id), self.ty(&l.ty)))
             .collect();
         let abi = match &f.extern_abi {
             Some(a) => format!("extern(\"{a}\") "),
             None => String::new(),
         };
         let mut tags = String::new();
-        for d in &f.directives {
-            let _ = write!(tags, " {}", crate::ir::pretty::directive_str(d));
+        if let Some(s) = &f.attrs.section {
+            let _ = write!(tags, " #section(\"{s}\")");
         }
+        match f.attrs.inline {
+            super::Inline::Always => tags.push_str(" #inline"),
+            super::Inline::Never => tags.push_str(" #inline(never)"),
+            super::Inline::Default => {}
+        }
+        if let Some(n) = f.attrs.offset {
+            let _ = write!(tags, " #offset({n})");
+        }
+        if f.attrs.public {
+            tags.push_str(" @public");
+        }
+        if f.attrs.unchecked {
+            tags.push_str(" #unsafe");
+        }
+        let ret = self.ty(&f.ret);
+        let decl = if f.blocks.is_empty() { "declare " } else { "" };
         self.line(&format!(
-            "\n{abi}func {}({}) -> {}{tags}  // {}{}",
+            "\n  {decl}{abi}func {}({}) -> {ret}{tags}  // {}{}",
             f.name,
             params.join(", "),
-            f.ret.display(self.defs),
             f.symbol,
             self.at(f.span)
         ));
         if f.blocks.is_empty() {
-            // A declaration: a signature and a symbol, and no code of its own.
-            self.line("  // declaration only");
+            // A declaration: a signature and a symbol, and no code of its own —
+            // an `extern` function, or one another unit defines (§11).
             return;
         }
         // Locals are declared up front (§1), parameters excluded: those are in
         // the signature above.
-        for l in &f.locals[f.params..] {
+        for l in &f.locals[f.params.min(f.locals.len())..] {
+            let ty = self.ty(&l.ty);
             self.line(&format!(
-                "  let {}: {}{}",
+                "    let {}: {ty}{}",
                 self.local_name(f, l.id),
-                l.ty.display(self.defs),
                 self.at(l.span)
             ));
         }
@@ -189,7 +283,7 @@ impl Printer<'_> {
     /// A temporary no source name produced simply has none, and showing it as a
     /// slot is honest — better than inventing a name (§7c).
     fn local_name(&self, f: &Function, id: super::LocalId) -> String {
-        match &f.locals[id.0 as usize].name {
+        match f.locals.get(id.0 as usize).and_then(|l| l.name.as_ref()) {
             Some(n) => format!("{n}_{}", id.0),
             None => format!("_{}", id.0),
         }
@@ -200,16 +294,17 @@ impl Printer<'_> {
             Some(l) => format!("                    // {l}"),
             None => String::new(),
         };
-        self.line(&format!("bb{}:{label}", b.id.0));
+        self.line(&format!("  bb{}:{label}", b.id.0));
         for s in &b.stmts {
             let text = self.stmt(f, s);
-            self.line(&format!("  {text}{}", self.at(s.span)));
+            self.line(&format!("    {text}{}", self.at(s.span)));
             self.safepoint(f, s.safepoint.as_ref());
         }
         let term = match &b.term.kind {
             TermKind::Goto(t) => format!("goto bb{}", t.0),
             TermKind::Switch {
                 value,
+                ty,
                 arms,
                 otherwise,
             } => {
@@ -218,7 +313,8 @@ impl Printer<'_> {
                     .map(|(v, t)| format!("{v} => bb{}", t.0))
                     .collect();
                 format!(
-                    "switch {} {{ {}, _ => bb{} }}",
+                    "switch.{} {} {{ {}, _ => bb{} }}",
+                    self.ty(ty),
                     self.operand(f, value),
                     arms.join(", "),
                     otherwise.0
@@ -228,7 +324,7 @@ impl Printer<'_> {
             TermKind::Return(None) => "return".to_string(),
             TermKind::Unreachable => "unreachable".to_string(),
         };
-        self.line(&format!("  {term}{}", self.at(b.term.span)));
+        self.line(&format!("    {term}{}", self.at(b.term.span)));
         self.safepoint(f, b.term.safepoint.as_ref());
     }
 
@@ -240,15 +336,15 @@ impl Printer<'_> {
         // Nothing to trace is still a point the collector may run at, and saying
         // so on one line keeps a dump readable when most of them are empty.
         if live.is_empty() {
-            self.line("    @safepoint { live: [] }");
+            self.line("      @safepoint { live: [] }");
             return;
         }
-        self.line(&format!("    @safepoint {{ live: [{}]", live.join(", ")));
+        self.line(&format!("      @safepoint {{ live: [{}]", live.join(", ")));
         for l in &sp.live {
             let n = self.local_name(f, *l);
-            self.line(&format!("      {n} := reloc {n}"));
+            self.line(&format!("        {n} := reloc {n}"));
         }
-        self.line("    }");
+        self.line("      }");
     }
 
     fn stmt(&self, f: &Function, s: &Stmt) -> String {
@@ -257,29 +353,23 @@ impl Printer<'_> {
                 // `:=` introduces into a local; `=` stores into a place. The
                 // same distinction the source draws.
                 let op = if place.is_whole_local() { ":=" } else { "=" };
-                format!(
-                    "{} {op} {}",
-                    self.place(f, place),
-                    self.rvalue(f, value)
-                )
-            }
-            StmtKind::Intrinsic { dest, name, args } => {
-                let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();
-                let call = format!("${name}({})", args.join(", "));
-                match dest {
-                    Some(d) if d.is_whole_local() => format!("{} := {call}", self.place(f, d)),
-                    Some(d) => format!("{} = {call}", self.place(f, d)),
-                    None => call,
-                }
+                format!("{} {op} {}", self.place(f, place), self.rvalue(f, value))
             }
             StmtKind::Drop(o) => format!("drop {}", self.operand(f, o)),
             StmtKind::Call { dest, callee, args } => {
                 let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();
                 let call = match callee {
-                    Callee::Static { name, .. } => format!("call {name}({})", args.join(", ")),
+                    Callee::Static(id) => {
+                        let name = match self.unit.funcs.get(id.0 as usize) {
+                            Some(g) => g.name.clone(),
+                            None => format!("<unknown function #{}>", id.0),
+                        };
+                        format!("call {name}({})", args.join(", "))
+                    }
                     Callee::Indirect(o) => {
                         format!("call ({})({})", self.operand(f, o), args.join(", "))
                     }
+                    Callee::Intrinsic(i) => format!("${}({})", i.name(), args.join(", ")),
                 };
                 match dest {
                     Some(d) if d.is_whole_local() => format!("{} := {call}", self.place(f, d)),
@@ -293,41 +383,37 @@ impl Printer<'_> {
     fn rvalue(&self, f: &Function, v: &Rvalue) -> String {
         match v {
             Rvalue::Use(o) => self.operand(f, o),
-            Rvalue::Ref { mutable, place } => {
-                let m = if *mutable { "&mut " } else { "&" };
-                format!("{m}{}", self.place(f, place))
-            }
-            Rvalue::Builtin { op, args, checked } => {
+            Rvalue::Ref(place) => format!("&{}", self.place(f, place)),
+            // The operation, the type it runs at, then its operands. The type is
+            // part of the instruction because `lt.u64` and `lt.i64` are
+            // different instructions and a constant operand carries no type.
+            Rvalue::Op { op, ty, args } => {
                 let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();
-                let c = if *checked { "checked_" } else { "" };
-                // Only the operation's name is lowercased; an operand may be a
-                // string or a type name, and case is part of it.
-                format!("{c}{}({})", format!("{op:?}").to_lowercase(), args.join(", "))
-            }
-            Rvalue::Binary { op, lhs, rhs } => format!(
-                "{} {} {}",
-                self.operand(f, lhs),
-                bin_str(*op),
-                self.operand(f, rhs)
-            ),
-            Rvalue::Unary { op, operand } => {
-                format!("{}{}", un_str(*op), self.operand(f, operand))
+                format!("{}.{} {}", op.name(), self.ty(ty), args.join(", "))
             }
             Rvalue::Cast { value, from, to } => format!(
                 "cast {} : {} -> {}",
                 self.operand(f, value),
-                from.display(self.defs),
-                to.display(self.defs)
+                self.ty(from),
+                self.ty(to)
             ),
             Rvalue::Aggregate { kind, fields } => {
                 let fields: Vec<String> = fields.iter().map(|x| self.operand(f, x)).collect();
                 let head = match kind {
-                    AggregateKind::Struct(d) => self.defs.get(*d).name.to_string(),
-                    AggregateKind::Tuple => String::new(),
-                    AggregateKind::Array => "array".to_string(),
-                    AggregateKind::Variant { name, index, .. } => format!(".{name}#{index}"),
-                    AggregateKind::Slice => "slice".to_string(),
-                    AggregateKind::Dyn => "dyn".to_string(),
+                    Aggregate::Struct(id) => match self.unit.types.get(id.0 as usize) {
+                        Some(t) => t.name.clone(),
+                        None => format!("<unknown type #{}>", id.0),
+                    },
+                    Aggregate::Array => "array".to_string(),
+                    Aggregate::Variant {
+                        ty, name, index, ..
+                    } => {
+                        let e = match self.unit.types.get(ty.0 as usize) {
+                            Some(t) => t.name.clone(),
+                            None => format!("<unknown type #{}>", ty.0),
+                        };
+                        format!("{e}.{name}#{index}")
+                    }
                 };
                 format!("{head}({})", fields.join(", "))
             }
@@ -342,21 +428,19 @@ impl Printer<'_> {
     fn operand(&self, f: &Function, o: &Operand) -> String {
         match o {
             Operand::Copy(p) => self.place(f, p),
-            Operand::Const(c) => match c {
-                Constant::Value(v) => v.display(),
-                Constant::Func { name, .. } => format!("&{name}"),
-                Constant::Vtable(id) => format!("&vtable#{}", id.0),
-                Constant::Undef => "undef".to_string(),
-            },
+            Operand::Const(c) => self.constant(c),
         }
     }
 
     /// A place, printed as §1 writes one: `p.x`, `p.*`, `p[i]`,
-    /// `(p as Some).0`.
+    /// `(p.payload as Shape.circle)`.
     fn place(&self, f: &Function, p: &Place) -> String {
         let mut s = match p.base {
             Base::Local(id) => self.local_name(f, id),
-            Base::Global(def) => format!("@{}", self.defs.get(def).name),
+            Base::Global(id) => match self.unit.globals.get(id.0 as usize) {
+                Some(g) => format!("@{}", g.name),
+                None => format!("@<unknown global #{}>", id.0),
+            },
         };
         for proj in &p.projection {
             match proj {
@@ -367,7 +451,13 @@ impl Printer<'_> {
                 Projection::Field { name, .. } => s = format!("{s}.{name}"),
                 Projection::Index(i) => s = format!("{s}[{}]", self.operand(f, i)),
                 Projection::Deref => s = format!("{s}.*"),
-                Projection::Variant { name, .. } => s = format!("({s} as {name})"),
+                Projection::Cast(t) => {
+                    let name = match self.unit.types.get(t.0 as usize) {
+                        Some(d) => d.name.clone(),
+                        None => format!("<unknown type #{}>", t.0),
+                    };
+                    s = format!("({s} as {name})");
+                }
             }
         }
         s
@@ -386,40 +476,5 @@ impl Printer<'_> {
         // directory the compiler was run from says nothing about the program.
         let name = file.name.rsplit('/').next().unwrap_or(&file.name);
         format!("   // {name}:{}:{}", pos.line, pos.column)
-    }
-}
-
-fn bin_str(op: crate::parser::ast::BinOp) -> &'static str {
-    use crate::parser::ast::BinOp::*;
-    match op {
-        And => "&&",
-        Or => "||",
-        Eq => "==",
-        Ne => "!=",
-        Lt => "<",
-        Le => "<=",
-        Gt => ">",
-        Ge => ">=",
-        BitOr => "|",
-        BitXor => "^",
-        BitAnd => "&",
-        Shl => "<<",
-        Shr => ">>",
-        Add => "+",
-        Sub => "-",
-        Mul => "*",
-        Div => "/",
-        Rem => "%",
-    }
-}
-
-fn un_str(op: crate::parser::ast::UnOp) -> &'static str {
-    use crate::parser::ast::UnOp::*;
-    match op {
-        Ref => "&",
-        RefMut => "&mut ",
-        Neg => "-",
-        Not => "!",
-        BitNot => "~",
     }
 }

@@ -115,6 +115,14 @@ pub struct Options {
     pub overflow: OverflowMode,
     /// The build profile's name; see [`PROFILES`].
     pub profile: &'static str,
+    /// How many codegen units the program is split into (`design/lir.md` §8).
+    ///
+    /// One is the whole program in one unit, which is what a backend that wants
+    /// to see everything at once — and what a reader of the dump — wants. More
+    /// than one buys parallel code generation and costs a declaration in one
+    /// unit for every definition in another; the split is per source file, and
+    /// the smallest units are merged until there are no more than this many.
+    pub codegen_units: usize,
 }
 
 impl Default for Options {
@@ -123,6 +131,7 @@ impl Default for Options {
             target: Target::default(),
             overflow: OverflowMode::default(),
             profile: "debug",
+            codegen_units: 1,
         }
     }
 }
@@ -158,6 +167,15 @@ impl Options {
             "os" => self.target.os = one_of(OSES, "os", value)?,
             "arch" => self.target.arch = one_of(ARCHES, "arch", value)?,
             "profile" => self.profile = one_of(PROFILES, "profile", value)?,
+            "codegen-units" => {
+                let n: usize = value.parse().map_err(|_| {
+                    format!("`codegen-units` must be a number, not `{value}`")
+                })?;
+                if n == 0 {
+                    return Err("`codegen-units` must be at least 1".to_string());
+                }
+                self.codegen_units = n;
+            }
             other => return Err(format!("unknown setting `{other}`")),
         }
         Ok(())
@@ -167,8 +185,9 @@ impl Options {
     /// prints, so a build tool can check what its profile actually resolved to.
     pub fn render(&self) -> String {
         format!(
-            "arch={}\noverflow={}\nos={}\npointer-width={}\nprofile={}\n",
+            "arch={}\ncodegen-units={}\noverflow={}\nos={}\npointer-width={}\nprofile={}\n",
             self.target.arch,
+            self.codegen_units,
             self.overflow.name(),
             self.target.os,
             self.target.pointer_bits,

@@ -2,49 +2,38 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
 
-func cleanup() -> void  // _NC7cleanup
-bb0:                    // entry
-  return
+  func cleanup() -> void  // _NC7cleanup
+  bb0:                    // entry
+    return
 
-func run(n_0: i32) -> i32  // _NC3run
-  let _1: bool
-  let _2: i32
-  let _3: bool
-bb0:                    // entry
-  _1 := n_0 > 10
-  switch _1 { 1 => bb1, _ => bb2 }
-bb1:                    // then
-  _2 := 1
-  goto bb5
-bb2:                    // else
-  goto bb3
-bb3:                    // join
-  _3 := n_0 > 5
-  switch _3 { 1 => bb6, _ => bb7 }
-bb4:                    // return
-  return _2
-bb5:                    // cleanup 0 (return)
-  call cleanup()
-  goto bb4
-bb6:                    // then
-  _2 := 2
-  goto bb5
-bb7:                    // else
-  goto bb8
-bb8:                    // join
-  _2 := 3
-  goto bb5
+  func run(n_0: i32) -> i32  // _NC3run
+    let _1: bool
+    let _2: i32
+    let _3: bool
+  bb0:                    // entry
+    _1 := gt.i32 n_0, 10
+    switch.bool _1 { 1 => bb1, _ => bb2 }
+  bb1:                    // then
+    _2 := 1
+    goto bb5
+  bb2:                    // else
+    goto bb3
+  bb3:                    // join
+    _3 := gt.i32 n_0, 5
+    switch.bool _3 { 1 => bb6, _ => bb7 }
+  bb4:                    // return
+    return _2
+  bb5:                    // cleanup 0 (return)
+    call cleanup()
+    goto bb4
+  bb6:                    // then
+    _2 := 2
+    goto bb5
+  bb7:                    // else
+    goto bb8
+  bb8:                    // join
+    _2 := 3
+    goto bb5
+}

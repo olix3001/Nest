@@ -1382,6 +1382,37 @@ fn mangle(
     Symbol::new(&s)
 }
 
+/// The symbol a **global** is emitted under.
+///
+/// A `#static` is not instantiated, so it has no [`Instance`] to carry a name —
+/// but it still needs one the linker can see, so it mangles the way a function
+/// does: the same length-prefixed path, under its own tag. `@link_name` wins
+/// outright, for the reason it wins on a function.
+///
+/// It is **not** injective on its own, and cannot be: a `#static` written inside
+/// a function body has no canonical path — its name is whatever the source wrote
+/// in that body, and two functions may each write `n`. Uniqueness is therefore
+/// the caller's, and `lir::lower` is where it happens, because that is the one
+/// place every global in the program passes through.
+pub fn global_symbol(defs: &DefTable, def: DefId) -> Symbol {
+    let d = defs.get(def);
+    if let Some(link) = d.directives.iter().find(|x| x.is("link_name"))
+        && let Some(crate::sema::def::DirectiveArg::Str(name)) = link.args.first()
+    {
+        return name.clone();
+    }
+    let path = if d.canonical.is_empty() {
+        vec![d.name.clone()]
+    } else {
+        d.canonical.clone()
+    };
+    let mut s = String::from("_NG");
+    for seg in &path {
+        push_len(&mut s, seg.as_str());
+    }
+    Symbol::new(&s)
+}
+
 /// The mangled encoding of one type, on its own.
 ///
 /// Exposed because it is the right **cache key** for anything keyed by a type:

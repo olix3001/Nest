@@ -54,20 +54,21 @@ use std::collections::HashMap;
 use crate::common::options::{Options, OverflowMode};
 use crate::common::source::{FileSpan, SourceMap};
 use crate::common::symbol::Symbol;
-use crate::ir::layout::Layouts;
+use crate::ir::layout::{Layout, Layouts};
 use crate::ir::{
     self, ConstValue, Dispatch, Expr, ExprKind, IrId, Linked, Meta, Pattern, PatternKind, StmtKind,
     TypeDefKind,
 };
-use crate::parser::ast::{BinOp, Lit};
+use crate::parser::ast::{BinOp, Lit, UnOp};
 use crate::sema::builtins::BuiltinOp;
-use crate::sema::def::{DefId, DefTable, LangItems};
+use crate::sema::def::{DefId, DefTable, Directive, DirectiveArg, LangItems};
 use crate::sema::ty::Ty;
 
 use super::{
-    AggregateKind, Base, Block, BlockId, Callee, Constant, Function, Global, Local, LocalId,
-    Operand, Origin, Place, Program, Projection, Rvalue, Stmt, StmtKind as LirStmtKind, TermKind,
-    Terminator, TypeDef, TypeMember, VariantDef, Vtable, VtableId, VtableSlot,
+    Aggregate, Base, Block, BlockId, Callee, Constant, FuncId, Function, FunctionAttrs, Global,
+    GlobalId, Inline, Intrinsic, Local, LocalId, Op, Operand, Origin, Place, Program, Projection,
+    Rvalue, Stmt, StmtKind as LirStmtKind, TermKind, Terminator, Ty as LirTy, TypeDef, TypeId,
+    TypeMember, VariantDef,
 };
 
 /// Lower the whole monomorphized program.
@@ -90,44 +91,72 @@ pub fn lower(
         lang,
         sources,
         drops: super::escape::analyze(linked.funcs()),
-        program: Program::default(),
+        types: Vec::new(),
         type_index: HashMap::new(),
+        globals: Vec::new(),
+        global_of: HashMap::new(),
+        data_index: HashMap::new(),
         vtable_index: HashMap::new(),
+        vtable_types: HashMap::new(),
+        funcs: Vec::new(),
+        func_of: HashMap::new(),
     };
+
+    // Every function gets its slot **before** any body is lowered, because a
+    // call names its callee by index and a program is full of calls that run
+    // ahead of the definition they name.
+    let irfuncs: Vec<&ir::Function> = linked.funcs().collect();
+    for f in &irfuncs {
+        cx.reserve_func(f);
+    }
 
     // A `#static` region is program-lifetime storage, so it belongs to the
     // program rather than to any function. A `::` constant is **not** here: it
-    // *is* its value (§2.5), and every use of one carries that value.
+    // *is* its value (§2.5), and every use of one carries that value — unless
+    // the value is a blob, which is storage again and comes back as a global of
+    // its own (see [`Cx::data_global`]).
+    let mut taken: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
     for g in linked.globals() {
         if !g.mutable {
             continue;
         }
-        cx.program.globals.push(Global {
-            def: g.def,
-            name: g.name.clone(),
-            ty: cx.strip(&meta.ty_or_error(g.id)),
-            init: meta.get::<ConstValue>(g.id),
+        let ty = meta.ty_or_error(g.id);
+        let lty = cx.lir(&ty);
+        let init = meta
+            .get::<ConstValue>(g.id)
+            .map(|v| cx.const_data(&v, &ty));
+        let id = GlobalId(cx.globals.len() as u32);
+        cx.globals.push(Global {
+            name: defs.canonical_string(g.def),
+            symbol: unique(&mut taken, crate::ir::mono::global_symbol(defs, g.def)),
+            ty: lty,
+            init,
+            mutable: true,
+            // A `#static` is one region for the whole program, wherever it is
+            // read from, so the linker has to see the name (§11).
+            linkage: super::Linkage::External,
             span: meta.span(g.id),
         });
+        cx.global_of.insert(g.def, id);
     }
 
-    let funcs: Vec<&ir::Function> = linked.funcs().collect();
-    for f in funcs {
+    for f in irfuncs {
         let func = Lowerer::new(&mut cx, f).run();
-        cx.program.funcs.push(func);
+        let id = cx.func_of[&f.def];
+        cx.funcs[id.0 as usize] = func;
     }
-
-    // The type table last, because it is the closure of what the functions
-    // turned out to mention. "Every type" is not a set anyone can enumerate —
-    // the same reason layout is a query — so what LIR carries is what LIR uses.
-    cx.collect_types();
 
     // Safepoints after everything, and they have to be: what is live at a call
     // is a property of the finished graph, and which types hold references is a
     // question for the table that was only just built (§6).
-    let mut program = cx.program;
-    super::safepoint::annotate(defs, &mut program);
-    program
+    let mut unit = super::Unit {
+        name: String::new(),
+        types: cx.types,
+        globals: cx.globals,
+        funcs: cx.funcs,
+    };
+    super::safepoint::annotate(&mut unit);
+    super::unit::split(unit, options.codegen_units, sources)
 }
 
 /// State shared by every function's lowering: the tables that answer questions
@@ -151,11 +180,24 @@ struct Cx<'a> {
     /// Which allocations each IR block may free on the way out (§5), from
     /// [`super::escape`].
     drops: super::escape::Drops,
-    program: Program,
-    /// Flattened type definitions, by [`crate::ir::mono::type_key`].
-    type_index: HashMap<String, usize>,
-    /// Vtables, by `(trait, concrete type key)`.
-    vtable_index: HashMap<(DefId, String), VtableId>,
+    /// The flattened type table being built, indexed by [`TypeId`].
+    types: Vec<TypeDef>,
+    /// Where each type is, by [`crate::ir::mono::type_key`].
+    type_index: HashMap<String, TypeId>,
+    globals: Vec<Global>,
+    /// Where each `#static` is.
+    global_of: HashMap<DefId, GlobalId>,
+    /// Where the storage for a constant blob is, by its contents (§2.5). Two
+    /// occurrences of `"hello"` are one global: the bytes are immutable, so
+    /// sharing them is invisible to the program.
+    data_index: HashMap<String, GlobalId>,
+    /// The vtable global for one `(trait, concrete type)` pair (§7b).
+    vtable_index: HashMap<(DefId, String), GlobalId>,
+    /// The struct type one trait's vtable has — one per trait, whatever the
+    /// impl, which is what makes a dispatch an ordinary member read.
+    vtable_types: HashMap<DefId, TypeId>,
+    funcs: Vec<Function>,
+    func_of: HashMap<DefId, FuncId>,
 }
 
 impl Cx<'_> {
@@ -163,7 +205,8 @@ impl Cx<'_> {
         self.strip(&self.meta.ty_or_error(id))
     }
 
-    /// `ty` with every `distinct` replaced by what it is distinct *from*.
+    /// `ty` with every `distinct` replaced by what it is distinct *from*, and
+    /// every mutability dropped.
     ///
     /// A `distinct T` has exactly `T`'s representation (§2.4) — the difference
     /// between the two is a rule about which values may be assigned to which
@@ -179,6 +222,16 @@ impl Cx<'_> {
     /// nominal type's generic arguments: `Vec.<usize>` is the instantiation
     /// monomorphization made and named, and renaming it here would name a
     /// function that does not exist.
+    ///
+    /// **Mutability goes the same way, and for the same reason.** No target has
+    /// two kinds of address: LLVM, C and wasm each have one, and the rule that
+    /// needed the distinction — who may write through this pointer — was
+    /// enforced in sema, long before here (§9). Keeping it would put `*T` and
+    /// `*mut T` in the type table as two entries describing one machine type,
+    /// and would make a backend read a field it has no use for. The **symbol**
+    /// is the exception: `mono::type_key` mangles mutability and monomorphization
+    /// already decided every name, so nothing here recomputes one from a
+    /// stripped type.
     fn strip(&self, ty: &Ty) -> Ty {
         self.strip_at(ty, 0)
     }
@@ -202,21 +255,17 @@ impl Cx<'_> {
                     _ => ty.clone(),
                 }
             }
-            Ty::Ptr { mutable, inner } => Ty::Ptr {
-                mutable: *mutable,
+            Ty::Ptr { inner, .. } => Ty::Ptr {
+                mutable: false,
                 inner: Box::new(self.strip_at(inner, depth + 1)),
             },
-            Ty::Slice { mutable, inner } => Ty::Slice {
-                mutable: *mutable,
+            Ty::Slice { inner, .. } => Ty::Slice {
+                mutable: false,
                 inner: Box::new(self.strip_at(inner, depth + 1)),
             },
-            Ty::Array {
-                len,
-                inner,
-                mutable,
-            } => Ty::Array {
+            Ty::Array { len, inner, .. } => Ty::Array {
                 len: len.clone(),
-                mutable: *mutable,
+                mutable: false,
                 inner: Box::new(self.strip_at(inner, depth + 1)),
             },
             Ty::Tuple(elems) => Ty::Tuple(
@@ -273,6 +322,10 @@ impl Cx<'_> {
     }
 
     /// `usize`, as wide as this target's pointer.
+    fn usize_ty(&self) -> Ty {
+        Ty::int((self.layouts.pointer_size() * 8) as u16, false)
+    }
+
     /// The bytes between one `ty` and the next in an array of them — its
     /// layout's size, which already includes tail padding.
     ///
@@ -282,48 +335,518 @@ impl Cx<'_> {
         self.layouts.of(ty).map(|l| l.size).unwrap_or(0)
     }
 
-    fn usize_ty(&self) -> Ty {
-        Ty::int((self.layouts.pointer_size() * 8) as u16, false)
+    // ===< Functions >===
+
+    /// Give a function its slot, before any body is lowered.
+    fn reserve_func(&mut self, f: &ir::Function) {
+        if self.func_of.contains_key(&f.def) {
+            return;
+        }
+        let (name, symbol) = self.names(f.id, &f.name);
+        let id = FuncId(self.funcs.len() as u32);
+        let ret = match self.meta.ty(f.id) {
+            Some(Ty::Func { ret, .. }) => self.lir(&ret),
+            _ => LirTy::Void,
+        };
+        let mut params: Vec<Local> = Vec::with_capacity(f.params.len());
+        for p in &f.params {
+            let ty = self.strip(&self.meta.ty_or_error(p.id));
+            if is_void(&ty) {
+                continue;
+            }
+            let lty = self.lir(&ty);
+            params.push(Local {
+                id: LocalId(params.len() as u32),
+                name: Some(p.name.clone()),
+                ty: lty,
+                span: self.meta.span(p.id),
+            });
+        }
+        let n = params.len();
+        self.funcs.push(Function {
+            name,
+            symbol,
+            locals: params,
+            params: n,
+            ret,
+            blocks: Vec::new(),
+            extern_abi: f.extern_abi.clone(),
+            span: self.meta.span(f.id),
+            attrs: attrs_of(
+                &self.meta.directives(f.id),
+                self.defs.get(f.def).vis.is_public(),
+            ),
+        });
+        self.func_of.insert(f.def, id);
+    }
+
+    /// The function `def` names, declared if the program never lowered a body
+    /// for it — a trait method that only states a signature is still something
+    /// a call can name.
+    fn func_id(&mut self, def: DefId) -> FuncId {
+        if let Some(id) = self.func_of.get(&def) {
+            return *id;
+        }
+        let id = FuncId(self.funcs.len() as u32);
+        let d = self.defs.get(def);
+        self.funcs.push(Function {
+            name: self.defs.canonical_string(def),
+            symbol: d.name.clone(),
+            locals: Vec::new(),
+            params: 0,
+            ret: LirTy::Void,
+            blocks: Vec::new(),
+            extern_abi: None,
+            span: None,
+            attrs: FunctionAttrs::default(),
+        });
+        self.func_of.insert(def, id);
+        id
+    }
+
+    // ===< Types (§7b) >===
+
+    /// A front-end type, as LIR holds it.
+    ///
+    /// This is where the type system stops being about what a program may say
+    /// and starts being about what a machine holds: `distinct` is peeled (§9),
+    /// mutability is dropped (no target has two kinds of address), a `char` is
+    /// the 32-bit number it is, and every aggregate becomes an index into the
+    /// type table.
+    fn lir(&mut self, ty: &Ty) -> LirTy {
+        self.lir_at(&self.strip(ty), 0)
+    }
+
+    fn lir_at(&mut self, ty: &Ty, depth: u32) -> LirTy {
+        if depth > 64 {
+            return LirTy::Void;
+        }
+        match ty {
+            Ty::Int { signed, width } => LirTy::Int {
+                bits: width.bits().unwrap_or(64) as u16,
+                signed: *signed,
+            },
+            Ty::Float(w) => LirTy::Float {
+                bits: float_bits(*w),
+            },
+            Ty::Bool => LirTy::Bool,
+            // A `char` is a Unicode scalar value, which is a number in
+            // `0..=0x10FFFF` — `u32` on every target, and a case a backend would
+            // have had to map to one anyway.
+            Ty::Char => LirTy::Int {
+                bits: 32,
+                signed: false,
+            },
+            Ty::Void => LirTy::Void,
+            Ty::Never => LirTy::Never,
+            // A pointer to a trait object is the **fat** pointer, which is a
+            // struct and not a pointer at all (§7b). `dyn Trait` on its own is
+            // unsized and is only ever reached through one (§3.4).
+            Ty::Ptr { inner, .. } if matches!(**inner, Ty::Dyn(_)) => {
+                LirTy::Named(self.intern(ty, depth))
+            }
+            Ty::Ptr { inner, .. } => LirTy::ptr(self.lir_at(&self.strip(inner), depth + 1)),
+            Ty::Array { len, inner, .. } => {
+                let elem = self.lir_at(&self.strip(inner), depth + 1);
+                LirTy::Array {
+                    len: len.value().unwrap_or(0),
+                    elem: Box::new(elem),
+                }
+            }
+            // A function *pointer*'s type is the signature the call will have,
+            // which is the erased one: a `void` parameter is not passed (§9), so
+            // it is not in the type either.
+            Ty::Func { params, ret } => {
+                let stripped: Vec<Ty> = params
+                    .iter()
+                    .map(|p| self.strip(p))
+                    .filter(|p| !is_void(p))
+                    .collect();
+                let mut params = Vec::with_capacity(stripped.len());
+                for p in &stripped {
+                    params.push(self.lir_at(p, depth + 1));
+                }
+                let ret = self.lir_at(&self.strip(ret), depth + 1);
+                LirTy::Func {
+                    params,
+                    ret: Box::new(ret),
+                }
+            }
+            Ty::Slice { .. } | Ty::Tuple(_) => LirTy::Named(self.intern(ty, depth)),
+            Ty::Nominal { def, .. } => match self.linked.ty(*def).map(|t| &t.kind) {
+                Some(TypeDefKind::Struct { .. } | TypeDefKind::Enum { .. }) => {
+                    LirTy::Named(self.intern(ty, depth))
+                }
+                // A name with no shape behind it: a type parameter that reached
+                // this far (a trait method's `Self`), or a definition analysis
+                // rejected. An opaque pointer is the honest stand-in — it is
+                // what the value is reached through in every case that gets
+                // here.
+                _ => LirTy::ptr(LirTy::Void),
+            },
+            // Unsized on its own, and never the type of a slot.
+            Ty::Dyn(_) => LirTy::ptr(LirTy::Void),
+            // A literal's type survives only until inference is done with it
+            // (§6.5); one here is a fold that did not happen, and the widest
+            // machine type is the honest answer.
+            Ty::ComptimeInt => LirTy::Int {
+                bits: 64,
+                signed: true,
+            },
+            Ty::ComptimeFloat => LirTy::Float { bits: 64 },
+            Ty::ComptimeStr => LirTy::ptr(LirTy::Int {
+                bits: 8,
+                signed: false,
+            }),
+            // A program that did not type-check is not emitted.
+            Ty::Var(_) | Ty::Error => LirTy::Void,
+        }
+    }
+
+    /// Record `ty`'s flattened definition and hand back its index.
+    ///
+    /// The id is reserved **before** the members are computed, because a struct
+    /// may contain a pointer to itself and the recursion has to find the entry
+    /// already there.
+    fn intern(&mut self, ty: &Ty, depth: u32) -> TypeId {
+        let key = self.key(ty);
+        if let Some(id) = self.type_index.get(&key) {
+            return *id;
+        }
+        let id = TypeId(self.types.len() as u32);
+        self.type_index.insert(key.clone(), id);
+        self.types.push(TypeDef {
+            id,
+            key: key.clone(),
+            name: ty.display(self.defs),
+            members: Vec::new(),
+            layout: Layout::ZERO,
+            origin: Origin::Struct,
+        });
+        let def = self.flatten(ty, id, depth);
+        self.types[id.0 as usize] = def;
+        id
+    }
+
+    /// `ty` as a struct: its members, its layout and what it was.
+    fn flatten(&mut self, ty: &Ty, id: TypeId, depth: u32) -> TypeDef {
+        let key = self.key(ty);
+        let name = ty.display(self.defs);
+        let layout = self.layouts.of(ty).unwrap_or(Layout::ZERO);
+        let mut def = TypeDef {
+            id,
+            key,
+            name,
+            members: Vec::new(),
+            layout,
+            origin: Origin::Struct,
+        };
+        match ty {
+            // A trait object's fat pointer: the data, and the vtable. The
+            // vtable's type is the **trait's**, not the impl's — a `dyn` has
+            // erased the concrete type, and one struct type per trait is what
+            // makes a dispatch an ordinary member read at a known offset.
+            Ty::Ptr { inner, .. } => {
+                let Ty::Dyn(trait_def) = &**inner else {
+                    return def;
+                };
+                let w = self.layouts.pointer_size();
+                let vt = self.vtable_type(*trait_def);
+                def.members = vec![
+                    TypeMember {
+                        name: Symbol::new("data"),
+                        ty: LirTy::ptr(LirTy::Void),
+                        offset: 0,
+                    },
+                    TypeMember {
+                        name: Symbol::new("vtable"),
+                        ty: LirTy::ptr(LirTy::Named(vt)),
+                        offset: w,
+                    },
+                ];
+                def.layout = Layout {
+                    size: w * 2,
+                    align: w,
+                };
+                def.origin = Origin::Dyn {
+                    trait_name: self.defs.canonical_string(*trait_def),
+                };
+            }
+            Ty::Tuple(elems) => {
+                let offsets = self
+                    .layouts
+                    .fields(ty)
+                    .and_then(|f| f.ok())
+                    .map(|f| f.offsets)
+                    .unwrap_or_default();
+                def.members = elems
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| TypeMember {
+                        name: Symbol::new(&i.to_string()),
+                        ty: self.lir_at(&self.strip(t), depth + 1),
+                        offset: offsets.get(i).copied().unwrap_or(0),
+                    })
+                    .collect();
+                def.origin = Origin::Tuple;
+            }
+            // A slice **does** flatten, and it is the interesting near-miss: it
+            // is a pointer and a length, and neither is indexed by a run-time
+            // value. The indexing happens through the pointer it holds (§7b).
+            Ty::Slice { inner, .. } => {
+                let w = self.layouts.pointer_size();
+                let elem = self.lir_at(&self.strip(inner), depth + 1);
+                def.members = vec![
+                    TypeMember {
+                        name: Symbol::new("ptr"),
+                        ty: LirTy::ptr(elem),
+                        offset: 0,
+                    },
+                    TypeMember {
+                        name: Symbol::new("len"),
+                        ty: LirTy::Int {
+                            bits: (w * 8) as u16,
+                            signed: false,
+                        },
+                        offset: w,
+                    },
+                ];
+                def.origin = Origin::Slice;
+            }
+            Ty::Nominal { def: tdef, .. } => {
+                let kind = self.linked.ty(*tdef).map(|t| t.kind.clone());
+                match kind {
+                    Some(TypeDefKind::Struct { .. }) => {
+                        let offsets = self
+                            .layouts
+                            .fields(ty)
+                            .and_then(|f| f.ok())
+                            .map(|f| f.offsets)
+                            .unwrap_or_default();
+                        let members = self.layouts.member_types(ty).unwrap_or_default();
+                        def.members = members
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (n, t))| TypeMember {
+                                name: n,
+                                ty: self.lir_at(&self.strip(&t), depth + 1),
+                                offset: offsets.get(i).copied().unwrap_or(0),
+                            })
+                            .collect();
+                        def.origin = Origin::Struct;
+                    }
+                    // An enum becomes `{ tag, payload }`, and each variant
+                    // becomes a struct type of its own saying how to read those
+                    // payload bytes (§7b). The shared payload is aligned for
+                    // every variant, so the reinterpretation is always legal —
+                    // and the member offsets under it then come from the table
+                    // like every other type's.
+                    Some(TypeDefKind::Enum { variants }) => {
+                        let Some(Ok(e)) = self.layouts.enum_layout(ty) else {
+                            return def;
+                        };
+                        def.members = vec![
+                            TypeMember {
+                                name: Symbol::new("tag"),
+                                ty: LirTy::Int {
+                                    bits: (e.tag.size * 8) as u16,
+                                    signed: false,
+                                },
+                                offset: 0,
+                            },
+                            TypeMember {
+                                name: Symbol::new("payload"),
+                                ty: LirTy::Array {
+                                    len: e.payload.size,
+                                    elem: Box::new(LirTy::Int {
+                                        bits: 8,
+                                        signed: false,
+                                    }),
+                                },
+                                offset: e.payload_at,
+                            },
+                        ];
+                        let vs = variants
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| {
+                                let vty = self.variant_type(ty, i, &v.name, depth);
+                                VariantDef {
+                                    name: v.name.clone(),
+                                    tag: i as i128,
+                                    ty: vty,
+                                    tuple: v.tuple,
+                                }
+                            })
+                            .collect();
+                        def.origin = Origin::Enum { variants: vs };
+                    }
+                    // A `distinct` never reaches here: `Cx::strip` replaced it
+                    // with what it is distinct from before any type was
+                    // recorded (§9). A trait is not a type with a shape.
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        def
+    }
+
+    /// One enum variant's payload, as a struct type of its own.
+    ///
+    /// Its members sit at offsets **relative to the payload**, which is exactly
+    /// what [`Projection::Cast`] reinterprets: the enum's `payload` member is
+    /// the address, and this type says what is at it.
+    fn variant_type(&mut self, enum_ty: &Ty, index: usize, name: &Symbol, depth: u32) -> TypeId {
+        let key = format!("{}$v{index}", self.key(enum_ty));
+        if let Some(id) = self.type_index.get(&key) {
+            return *id;
+        }
+        let id = TypeId(self.types.len() as u32);
+        self.type_index.insert(key.clone(), id);
+        let parent = enum_ty.display(self.defs);
+        self.types.push(TypeDef {
+            id,
+            key: key.clone(),
+            name: format!("{parent}.{name}"),
+            members: Vec::new(),
+            layout: Layout::ZERO,
+            origin: Origin::Variant {
+                parent: parent.clone(),
+            },
+        });
+        let e = match self.layouts.enum_layout(enum_ty) {
+            Some(Ok(e)) => e,
+            _ => return id,
+        };
+        let offsets = e
+            .variants
+            .get(index)
+            .map(|v| v.offsets.clone())
+            .unwrap_or_default();
+        let members: Vec<TypeMember> = self
+            .layouts
+            .variant_member_types(enum_ty, index)
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(j, (n, t))| TypeMember {
+                name: n,
+                ty: self.lir_at(&self.strip(&t), depth + 1),
+                offset: offsets.get(j).copied().unwrap_or(0),
+            })
+            .collect();
+        let layout = e
+            .variants
+            .get(index)
+            .map(|v| v.layout)
+            .unwrap_or(Layout::ZERO);
+        self.types[id.0 as usize].members = members;
+        self.types[id.0 as usize].layout = layout;
+        id
     }
 
     // ===< Vtables (§7b) >===
 
+    /// The struct type one trait's vtable has: one member per method, in the
+    /// trait's declaration order, each a pointer to code.
+    ///
+    /// One type per **trait** rather than per impl, because that is what a `dyn`
+    /// knows: the concrete type is erased, so every impl's table has to be a
+    /// value of one type for the slot offsets to be knowable at the call.
+    fn vtable_type(&mut self, trait_def: DefId) -> TypeId {
+        if let Some(id) = self.vtable_types.get(&trait_def) {
+            return *id;
+        }
+        let key = format!("$vt{}", trait_def.0);
+        let id = TypeId(self.types.len() as u32);
+        self.type_index.insert(key.clone(), id);
+        self.vtable_types.insert(trait_def, id);
+        let trait_name = self.defs.canonical_string(trait_def);
+        self.types.push(TypeDef {
+            id,
+            key,
+            name: format!("vtable.{trait_name}"),
+            members: Vec::new(),
+            layout: Layout::ZERO,
+            origin: Origin::Vtable {
+                trait_name: trait_name.clone(),
+            },
+        });
+        let methods = match self.linked.ty(trait_def).map(|t| t.kind.clone()) {
+            Some(TypeDefKind::Trait { methods, .. }) => methods,
+            _ => Vec::new(),
+        };
+        let w = self.layouts.pointer_size();
+        let members: Vec<TypeMember> = methods
+            .iter()
+            .enumerate()
+            .map(|(i, m)| TypeMember {
+                name: m.name.clone(),
+                ty: self.slot_ty(m.id),
+                offset: i as u64 * w,
+            })
+            .collect();
+        let layout = Layout {
+            size: members.len() as u64 * w,
+            align: w,
+        };
+        self.types[id.0 as usize].members = members;
+        self.types[id.0 as usize].layout = layout;
+        id
+    }
+
+    /// The type of one vtable slot: the method's signature with the receiver
+    /// erased, which is what a `dyn` call actually has in hand.
+    fn slot_ty(&mut self, method: IrId) -> LirTy {
+        let Some(Ty::Func { params, ret }) = self.meta.ty(method) else {
+            return LirTy::ptr(LirTy::Void);
+        };
+        let ret = self.lir(&ret);
+        let mut ps: Vec<LirTy> = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            // `self` is a `*dyn Trait` at the call site and the concrete type is
+            // gone; every implementation takes the data pointer.
+            if i == 0 {
+                ps.push(LirTy::ptr(LirTy::Void));
+                continue;
+            }
+            let p = self.strip(p);
+            if is_void(&p) {
+                continue;
+            }
+            ps.push(self.lir(&p));
+        }
+        LirTy::Func {
+            params: ps,
+            ret: Box::new(ret),
+        }
+    }
+
     /// The vtable for one `(trait, concrete type)` pair, built the first time a
-    /// coercion asks for it.
+    /// coercion asks for it — an ordinary immutable global of function
+    /// addresses.
     ///
     /// Which function fills each slot is **not** decided here: monomorphization
     /// decided it, because the instantiated method that fills a slot does not
     /// exist until that pass makes it, and re-selecting the impl would be a
     /// second implementation of a selection free to disagree with the first.
-    /// What this does is turn that answer into data — a struct of function
-    /// pointers, in the trait's declaration order (§7b).
-    fn vtable(&mut self, slots: &crate::ir::mono::VtableSlots) -> VtableId {
+    /// What this does is turn that answer into data.
+    fn vtable(&mut self, slots: &crate::ir::mono::VtableSlots) -> GlobalId {
         let key = (slots.trait_def, self.key(&slots.concrete));
         if let Some(id) = self.vtable_index.get(&key) {
             return *id;
         }
-        let id = VtableId(self.program.vtables.len() as u32);
-        self.vtable_index.insert(key, id);
-
-        let names: Vec<Symbol> = match self.linked.ty(slots.trait_def).map(|t| &t.kind) {
-            Some(TypeDefKind::Trait { methods, .. }) => {
-                methods.iter().map(|m| m.name.clone()).collect()
-            }
-            _ => Vec::new(),
-        };
-        let filled = slots
+        let ty = self.vtable_type(slots.trait_def);
+        let filled: Vec<Constant> = slots
             .slots
             .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                let def = (*slot)?;
-                let f = self.linked.get(def)?;
-                let (_, symbol) = self.names(f.id, &f.name);
-                Some(VtableSlot {
-                    method: names.get(i).cloned().unwrap_or_else(|| f.name.clone()),
-                    def,
-                    symbol,
-                })
+            .map(|slot| match slot {
+                // A slot object safety should have made impossible to leave
+                // empty. `undef` is how that shows up as a defect rather than as
+                // a call to the wrong function.
+                Some(def) => Constant::Func(self.func_id(*def)),
+                None => Constant::Undef,
             })
             .collect();
         let symbol = Symbol::new(&format!(
@@ -334,267 +857,245 @@ impl Cx<'_> {
             }),
             self.key(&slots.concrete)
         ));
-        self.program.vtables.push(Vtable {
-            id,
-            trait_def: slots.trait_def,
-            concrete: slots.concrete.clone(),
+        let id = GlobalId(self.globals.len() as u32);
+        self.globals.push(Global {
+            name: format!(
+                "vtable.{}.for.{}",
+                self.defs.canonical_string(slots.trait_def),
+                slots.concrete.display(self.defs)
+            ),
             symbol,
-            slots: filled,
+            ty: LirTy::Named(ty),
+            init: Some(Constant::Aggregate(filled)),
+            mutable: false,
+            // Nothing can name a vtable, so each unit that builds a trait object
+            // carries its own copy rather than depending on a neighbour's data.
+            linkage: super::Linkage::Internal,
+            span: None,
+        });
+        self.vtable_index.insert(key, id);
+        id
+    }
+
+    // ===< Constants that need storage (§2.5) >===
+
+    /// Where a `#static` lives. Every one of them was recorded before any body
+    /// was lowered; a name that is not there is a program analysis rejected, and
+    /// an empty region keeps the reference resolvable.
+    fn global_id(&mut self, def: DefId) -> GlobalId {
+        if let Some(id) = self.global_of.get(&def) {
+            return *id;
+        }
+        let id = GlobalId(self.globals.len() as u32);
+        self.globals.push(Global {
+            name: self.defs.canonical_string(def),
+            symbol: crate::ir::mono::global_symbol(self.defs, def),
+            ty: LirTy::Void,
+            init: None,
+            mutable: true,
+            linkage: super::Linkage::External,
+            span: None,
+        });
+        self.global_of.insert(def, id);
+        id
+    }
+
+    /// The stand-in type for an aggregate that is not one: a struct with no
+    /// members, so that every [`TypeId`] in a unit still resolves.
+    fn error_type(&mut self) -> TypeId {
+        let key = "$error".to_string();
+        if let Some(id) = self.type_index.get(&key) {
+            return *id;
+        }
+        let id = TypeId(self.types.len() as u32);
+        self.type_index.insert(key.clone(), id);
+        self.types.push(TypeDef {
+            id,
+            key,
+            name: "<error>".to_string(),
+            members: Vec::new(),
+            layout: Layout::ZERO,
+            origin: Origin::Struct,
         });
         id
     }
 
-    // ===< The flattened type table (§7b) >===
-
-    /// Walk everything the lowered program mentions and record the aggregate
-    /// behind each type, flattened to a struct.
-    fn collect_types(&mut self) {
-        let tys: Vec<Ty> = self
-            .program
-            .funcs
-            .iter()
-            .flat_map(|f| {
-                f.locals
-                    .iter()
-                    .map(|l| l.ty.clone())
-                    .chain(std::iter::once(f.ret.clone()))
-            })
-            .chain(self.program.globals.iter().map(|g| g.ty.clone()))
-            .collect();
-        for ty in tys {
-            self.intern(&ty, 0);
+    /// A global holding `init`, shared by every use of the same contents.
+    fn data_global(&mut self, name: &str, ty: LirTy, init: Constant, key: String) -> GlobalId {
+        if let Some(id) = self.data_index.get(&key) {
+            return *id;
         }
+        let n = self.globals.len();
+        let id = GlobalId(n as u32);
+        self.globals.push(Global {
+            name: format!("const.{name}.{n}"),
+            symbol: Symbol::new(&format!("_NK{n}")),
+            ty,
+            init: Some(init),
+            mutable: false,
+            linkage: super::Linkage::Internal,
+            span: None,
+        });
+        self.data_index.insert(key, id);
+        id
     }
 
-    /// Record `ty`'s flattened definition, and its members' after it. Idempotent,
-    /// and keyed by the type's mangled encoding for the same reason layout's
-    /// cache is: injectivity is exactly what a key wants.
-    fn intern(&mut self, ty: &Ty, depth: u32) {
-        // The same guard the layout query keeps, for the same reason: a type
-        // that contains itself has already been reported, and recursing on it
-        // here would not fail, it would fail to terminate.
-        if depth > 64 {
-            return;
-        }
-        let key = self.key(ty);
-        if self.type_index.contains_key(&key) {
-            return;
-        }
-        // A pointer to a trait object is the **fat** pointer, and that is the
-        // thing with two members: `dyn Trait` on its own is unsized and is only
-        // ever reached through one (§3.4, §7b).
-        if let Ty::Ptr { inner, .. } = ty
-            && let Ty::Dyn(trait_def) = &**inner
-        {
-            let w = self.layouts.pointer_size();
-            let void_ptr = Ty::Ptr {
-                mutable: false,
-                inner: Box::new(Ty::Void),
-            };
-            self.type_index.insert(key.clone(), self.program.types.len());
-            self.program.types.push(TypeDef {
-                key,
-                name: ty.display(self.defs),
-                members: vec![
-                    TypeMember {
-                        name: Symbol::new("data"),
-                        ty: void_ptr.clone(),
-                        offset: 0,
-                    },
-                    TypeMember {
-                        name: Symbol::new("vtable"),
-                        ty: void_ptr,
-                        offset: w,
-                    },
-                ],
-                layout: crate::ir::layout::Layout {
-                    size: w * 2,
-                    align: w,
-                },
-                origin: Origin::Dyn(*trait_def),
-            });
-            return;
-        }
-        // An array is not an aggregate at this level — it keeps its own shape
-        // (§7b) — but its element is one, and so is a pointer's pointee.
-        if let Ty::Array { inner, .. } | Ty::Ptr { inner, .. } = ty {
-            let inner = (**inner).clone();
-            self.intern(&inner, depth + 1);
-            return;
-        }
-        let inner_of_slice = match ty {
-            Ty::Slice { inner, .. } => Some((**inner).clone()),
-            _ => None,
-        };
-        let Some(def) = self.flatten(ty) else {
-            if let Some(inner) = inner_of_slice {
-                self.intern(&inner, depth + 1);
-            }
-            return;
-        };
-        self.type_index.insert(key, self.program.types.len());
-        let mut nested: Vec<Ty> = def.members.iter().map(|m| m.ty.clone()).collect();
-        if let Origin::Enum { variants, .. } = &def.origin {
-            nested.extend(
-                variants
-                    .iter()
-                    .flat_map(|v| v.members.iter().map(|m| m.ty.clone())),
-            );
-        }
-        self.program.types.push(def);
-        for m in nested {
-            self.intern(&m, depth + 1);
-        }
-    }
-
-    /// `ty` as a struct, or `None` if it is not an aggregate.
-    fn flatten(&self, ty: &Ty) -> Option<TypeDef> {
-        let key = self.key(ty);
-        let name = ty.display(self.defs);
-        let layout = self.layouts.of(ty).ok()?;
-        match ty {
-            Ty::Tuple(elems) => {
-                let f = self.layouts.fields(ty)?.ok()?;
-                let members = elems
+    /// A constant, as a global's initializer: the whole value, blobs included.
+    ///
+    /// This is the one place a composite constant is written out rather than
+    /// referred to, because a global's contents are exactly what a backend has
+    /// to emit into a section.
+    fn const_data(&mut self, v: &ConstValue, ty: &Ty) -> Constant {
+        let ty = self.strip(ty);
+        match v {
+            ConstValue::Int(n) => Constant::Int(n.clone()),
+            ConstValue::Float(f) => Constant::Float(*f),
+            ConstValue::Bool(b) => Constant::Bool(*b),
+            ConstValue::Char(c) => Constant::Int((*c as u32).into()),
+            ConstValue::Void => Constant::Undef,
+            // Text is bytes with an address. As the contents of a `[N]u8` the
+            // bytes *are* the value; as a `str` or a `[]u8` the value is a view
+            // of them, which is a pointer and a length.
+            ConstValue::Str(s) => self.text_data(s.as_bytes(), &ty),
+            ConstValue::Bytes(b) => self.text_data(b, &ty),
+            ConstValue::Aggregate(items) => {
+                let tys = self.member_tys(&ty);
+                let parts = items
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| TypeMember {
-                        name: Symbol::new(&i.to_string()),
-                        ty: self.strip(t),
-                        offset: f.offsets[i],
+                    .map(|(i, x)| {
+                        let t = tys.get(i).cloned().unwrap_or(Ty::Error);
+                        self.const_data(x, &t)
                     })
                     .collect();
-                Some(TypeDef {
-                    key,
-                    name,
-                    members,
-                    layout,
-                    origin: Origin::Tuple,
-                })
+                Constant::Aggregate(parts)
             }
-            // A slice **does** flatten, and it is the interesting near-miss: it
-            // is a pointer and a length, and neither is indexed by a run-time
-            // value. The indexing happens through the pointer it holds (§7b).
-            Ty::Slice { mutable, inner } => {
-                let w = self.layouts.pointer_size();
-                Some(TypeDef {
-                    key,
-                    name,
-                    members: vec![
-                        TypeMember {
-                            name: Symbol::new("ptr"),
-                            ty: Ty::Ptr {
-                                mutable: *mutable,
-                                inner: Box::new(self.strip(inner)),
-                            },
-                            offset: 0,
-                        },
-                        TypeMember {
-                            name: Symbol::new("len"),
-                            ty: self.usize_ty(),
-                            offset: w,
-                        },
-                    ],
-                    layout,
-                    origin: Origin::Slice,
-                })
-            }
-            Ty::Nominal { def, .. } => {
-                let t = self.linked.ty(*def)?;
-                match &t.kind {
-                    TypeDefKind::Struct { .. } => {
-                        let f = self.layouts.fields(ty)?.ok()?;
-                        let members = self
-                            .layouts
-                            .member_types(ty)?
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, (n, t))| TypeMember {
-                                name: n,
-                                ty: self.strip(&t),
-                                offset: f.offsets.get(i).copied().unwrap_or(0),
-                            })
-                            .collect();
-                        Some(TypeDef {
-                            key,
-                            name,
-                            members,
-                            layout,
-                            origin: Origin::Struct(*def),
-                        })
-                    }
-                    // An enum becomes `{ tag, payload }`. The variants do not go
-                    // with the shape: a debugger showing `2` instead of `.green`
-                    // is a worse debugger (§7c), so they ride on the definition,
-                    // which the flattening does not touch.
-                    TypeDefKind::Enum { variants } => {
-                        let e = self.layouts.enum_layout(ty)?.ok()?;
-                        let members = vec![
-                            TypeMember {
-                                name: Symbol::new("tag"),
-                                ty: Ty::int((e.tag.size * 8) as u16, false),
-                                offset: 0,
-                            },
-                            TypeMember {
-                                name: Symbol::new("payload"),
-                                ty: bytes_ty(e.payload.size),
-                                offset: e.payload_at,
-                            },
-                        ];
-                        let vs = variants
-                            .iter()
-                            .enumerate()
-                            .map(|(i, v)| VariantDef {
-                                name: v.name.clone(),
-                                tag: i as i128,
-                                members: self
-                                    .layouts
-                                    .variant_member_types(ty, i)
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(j, (n, t))| TypeMember {
-                                        name: n,
-                                        ty: self.strip(&t),
-                                        offset: e.variants[i].offsets.get(j).copied().unwrap_or(0),
-                                    })
-                                    .collect(),
-                                tuple: v.tuple,
-                            })
-                            .collect();
-                        Some(TypeDef {
-                            key,
-                            name,
-                            members,
-                            layout,
-                            origin: Origin::Enum {
-                                def: *def,
-                                variants: vs,
-                            },
-                        })
-                    }
-                    // A `distinct` never reaches here: `Cx::strip` replaced it
-                    // with what it is distinct from before any type was
-                    // recorded (§9). A trait is not a type with a shape.
-                    TypeDefKind::Distinct { .. } | TypeDefKind::Trait { .. } => None,
+            ConstValue::Variant { name, payload } => {
+                let (tag, tys) = self.variant_info(&ty, name);
+                let parts = payload
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| {
+                        let t = tys.get(i).cloned().unwrap_or(Ty::Error);
+                        self.const_data(x, &t)
+                    })
+                    .collect();
+                Constant::Variant {
+                    tag,
+                    name: name.clone(),
+                    payload: parts,
                 }
             }
-            _ => None,
         }
+    }
+
+    /// A run of bytes at the type it is being used as.
+    fn text_data(&mut self, bytes: &[u8], ty: &Ty) -> Constant {
+        match ty {
+            // The bytes themselves.
+            Ty::Array { .. } => Constant::Bytes(bytes.to_vec()),
+            // A view of them: the address of the storage, and the length.
+            _ => {
+                let g = self.bytes_global(bytes);
+                Constant::Aggregate(vec![
+                    Constant::Global(g),
+                    Constant::Int((bytes.len() as i128).into()),
+                ])
+            }
+        }
+    }
+
+    /// The global holding these bytes.
+    fn bytes_global(&mut self, bytes: &[u8]) -> GlobalId {
+        let ty = LirTy::Array {
+            len: bytes.len() as u64,
+            elem: Box::new(LirTy::Int {
+                bits: 8,
+                signed: false,
+            }),
+        };
+        let key = format!("bytes:{}", crate::parser::ast::bytes_repr(bytes));
+        self.data_global("str", ty, Constant::Bytes(bytes.to_vec()), key)
+    }
+
+    /// The types of an aggregate's members, in declaration order.
+    fn member_tys(&self, ty: &Ty) -> Vec<Ty> {
+        match ty {
+            Ty::Ptr { inner, .. } => self.member_tys(inner),
+            Ty::Tuple(elems) => elems.clone(),
+            Ty::Array { inner, len, .. } => {
+                let n = len.value().unwrap_or(0) as usize;
+                vec![(**inner).clone(); n]
+            }
+            Ty::Slice { mutable, inner } => vec![
+                Ty::Ptr {
+                    mutable: *mutable,
+                    inner: inner.clone(),
+                },
+                self.usize_ty(),
+            ],
+            _ => self
+                .layouts
+                .member_types(ty)
+                .map(|ms| ms.into_iter().map(|(_, t)| t).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// A variant's tag and its payload element types.
+    fn variant_info(&self, ty: &Ty, name: &Symbol) -> (i128, Vec<Ty>) {
+        let Ty::Nominal { def, .. } = ty else {
+            return (0, Vec::new());
+        };
+        let Some(t) = self.linked.ty(*def) else {
+            return (0, Vec::new());
+        };
+        let TypeDefKind::Enum { variants } = &t.kind else {
+            return (0, Vec::new());
+        };
+        let Some(i) = variants.iter().position(|v| &v.name == name) else {
+            return (0, Vec::new());
+        };
+        let tys = self
+            .layouts
+            .variant_member_types(ty, i)
+            .map(|ms| ms.into_iter().map(|(_, t)| t).collect())
+            .unwrap_or_default();
+        (i as i128, tys)
     }
 }
 
-/// `[n]u8` — what an enum's payload member is: `n` bytes every variant shares.
-fn bytes_ty(n: u64) -> Ty {
-    Ty::Array {
-        len: crate::sema::ty::Const::Value(Box::new(crate::sema::ty::ConstArg {
-            ty: Ty::int(64, false),
-            value: ConstValue::Int(n.into()),
-        })),
-        mutable: false,
-        inner: Box::new(Ty::u8()),
+/// What a function's directives *mean*, decided once (§7).
+fn attrs_of(directives: &[Directive], public: bool) -> FunctionAttrs {
+    let mut attrs = FunctionAttrs {
+        public,
+        ..FunctionAttrs::default()
+    };
+    for d in directives {
+        match d.name.as_str() {
+            "section" => {
+                if let Some(DirectiveArg::Str(s)) = d.args.first() {
+                    attrs.section = Some(s.clone());
+                }
+            }
+            "inline" => {
+                attrs.inline = match d.args.first() {
+                    Some(DirectiveArg::Name(n)) if n.as_str() == "never" => Inline::Never,
+                    _ => Inline::Always,
+                };
+            }
+            "offset" => {
+                if let Some(DirectiveArg::Int(n)) = d.args.first() {
+                    attrs.offset = Some(*n);
+                }
+            }
+            "unsafe" => attrs.unchecked = true,
+            _ => {}
+        }
     }
+    attrs
 }
+
 
 // ===< One function >===
 
@@ -645,6 +1146,9 @@ struct Lowerer<'a, 'c> {
     /// that `cx` stays usable beside it.
     f: &'c ir::Function,
     locals: Vec<Local>,
+    /// The front-end type of each local, beside the machine type the slot
+    /// carries — see [`Lowerer::new_local`].
+    local_tys: Vec<Ty>,
     /// Where each bound name lives.
     local_of: HashMap<DefId, LocalId>,
     blocks: Vec<PartialBlock>,
@@ -681,6 +1185,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             cx,
             f,
             locals: Vec::new(),
+            local_tys: Vec::new(),
             local_of: HashMap::new(),
             blocks: Vec::new(),
             at: BlockId(0),
@@ -701,8 +1206,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         // search.
         for p in &self.f.params {
             let ty = self.cx.ty_of(p.id);
+            // A `void` parameter is no parameter: it holds nothing, so there is
+            // nothing to pass and nothing to hold it in. Both sides erase it by
+            // the same rule — see [`Lowerer::passed`] — so a caller and a callee
+            // cannot disagree about the signature.
+            if is_void(&ty) {
+                continue;
+            }
             let span = self.cx.meta.span(p.id);
-            let id = self.new_local(Some(p.name.clone()), ty, span);
+            let id = self.new_local(Some(p.name.clone()), &ty, span);
             self.local_of.insert(p.def, id);
         }
         let params = self.locals.len();
@@ -721,17 +1233,20 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         }
 
         let (name, symbol) = self.cx.names(self.f.id, &self.f.name);
+        let ret = self.cx.lir(&self.ret.clone());
         Function {
-            def: self.f.def,
             name,
             symbol,
             locals: self.locals,
             params,
-            ret: self.ret.clone(),
+            ret,
             blocks,
             extern_abi: self.f.extern_abi.clone(),
             span: self.cx.meta.span(self.f.id),
-            directives: self.cx.meta.directives(self.f.id),
+            attrs: attrs_of(
+                &self.cx.meta.directives(self.f.id),
+                self.cx.defs.get(self.f.def).vis.is_public(),
+            ),
         }
     }
 
@@ -758,21 +1273,44 @@ impl<'a, 'c> Lowerer<'a, 'c> {
 
     // ===< Blocks and locals >===
 
-    fn new_local(&mut self, name: Option<Symbol>, ty: Ty, span: Option<FileSpan>) -> LocalId {
+    /// A slot, and the front-end type it holds.
+    ///
+    /// The slot keeps the **LIR** type — what a machine holds — and the walk
+    /// keeps the front-end one beside it, because the questions still ahead of
+    /// it (which member is `len`, what a variant's payload contains) are asked
+    /// of a type the layout engine understands.
+    fn new_local(&mut self, name: Option<Symbol>, ty: &Ty, span: Option<FileSpan>) -> LocalId {
         let id = LocalId(self.locals.len() as u32);
+        let lty = self.cx.lir(ty);
         self.locals.push(Local {
             id,
             name,
-            ty,
+            ty: lty,
             span,
         });
+        self.local_tys.push(ty.clone());
         id
     }
 
     /// A slot no source name produced. It has none, which is honest: a debugger
     /// shows it as a slot rather than as an invented identifier (§7c).
     fn temp(&mut self, ty: Ty, span: Option<FileSpan>) -> LocalId {
-        self.new_local(None, ty, span)
+        self.new_local(None, &ty, span)
+    }
+
+    /// A slot whose type is already the machine's — the few places where there
+    /// is no front-end type to convert, because the value did not come from one
+    /// (a vtable slot's function pointer).
+    fn temp_lir(&mut self, ty: LirTy, span: Option<FileSpan>) -> LocalId {
+        let id = LocalId(self.locals.len() as u32);
+        self.locals.push(Local {
+            id,
+            name: None,
+            ty,
+            span,
+        });
+        self.local_tys.push(Ty::Error);
+        id
     }
 
     fn new_block(&mut self, label: Option<String>) -> BlockId {
@@ -837,6 +1375,16 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// what turns a tree into a straight run.
     #[allow(clippy::wrong_self_convention)]
     fn into_temp(&mut self, value: Rvalue, ty: Ty, span: Option<FileSpan>) -> Operand {
+        // Nothing to keep, and nowhere to keep it. The statement still runs: it
+        // is the *value* that is empty, not the work that produced it.
+        if is_void(&ty) {
+            if let Rvalue::Use(Operand::Const(_)) = value {
+                return Operand::Const(Constant::Undef);
+            }
+            let t = self.temp(Ty::Bool, span);
+            self.assign(Place::local(t), value, span);
+            return Operand::Const(Constant::Undef);
+        }
         let t = self.temp(ty, span);
         self.assign(Place::local(t), value, span);
         Operand::local(t)
@@ -845,11 +1393,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// Branch on `cond`, continuing in a fresh block when it is true.
     fn branch_if(&mut self, cond: Operand, on_false: BlockId, span: Option<FileSpan>) {
         let next = self.new_block(None);
-        self.terminate(Terminator::new(TermKind::Switch {
+        self.terminate(Terminator::new(
+            TermKind::Switch {
                 value: cond,
+                ty: LirTy::Bool,
                 arms: vec![(1, next)],
                 otherwise: on_false,
-            }, span));
+            },
+            span,
+        ));
         self.at = next;
     }
 
@@ -891,11 +1443,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             };
             let local = &self.locals[l.0 as usize];
             let span = local.span;
+            let ty = self.local_tys[l.0 as usize].clone();
             // `drop` frees **a pointer**, always. A `make`d slice is
             // `{ ptr, len }` by now (§7b) and the allocation is what the first
             // member names, so the projection happens here rather than becoming
             // a second shape every backend has to recognize.
-            let what = match &local.ty {
+            let what = match ty {
                 Ty::Slice { .. } => Operand::Copy(Place::local(l).then(Projection::Field {
                     index: 0,
                     name: Symbol::new("ptr"),
@@ -1019,8 +1572,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 let ty = self.cx.ty_of(init.id);
                 // A `let` pattern is irrefutable, so there is nothing to test:
                 // the initializer goes into a slot and the pattern's bindings
-                // are projections out of it.
+                // are projections out of it. A `void` initializer still runs and
+                // still has nothing to put anywhere.
                 let v = self.eval(init);
+                if is_void(&ty) {
+                    return;
+                }
                 let slot = self.temp(ty.clone(), span);
                 self.assign(Place::local(slot), Rvalue::Use(v), span);
                 self.bind_irrefutable(pattern, &Place::local(slot), &ty);
@@ -1081,7 +1638,10 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         match &p.kind {
             PatternKind::Wildcard => {}
             PatternKind::Binding { def, name } => {
-                let id = self.new_local(Some(name.clone()), ty.clone(), span);
+                if is_void(ty) {
+                    return;
+                }
+                let id = self.new_local(Some(name.clone()), ty, span);
                 self.local_of.insert(*def, id);
                 self.assign(
                     Place::local(id),
@@ -1090,7 +1650,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 );
             }
             PatternKind::At { binding, pattern } => {
-                let id = self.new_local(Some(binding.name.clone()), ty.clone(), span);
+                if is_void(ty) {
+                    self.bind_irrefutable(pattern, from, ty);
+                    return;
+                }
+                let id = self.new_local(Some(binding.name.clone()), ty, span);
                 self.local_of.insert(binding.def, id);
                 self.assign(
                     Place::local(id),
@@ -1196,7 +1760,10 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         let ty = self.cx.ty_of(e.id);
         let span = self.cx.meta.span(e.id);
         match &e.kind {
-            ExprKind::Lit(l) => Some(Rvalue::Use(Operand::Const(Constant::Value(lit_value(l))))),
+            ExprKind::Lit(l) => {
+                let v = lit_value(l);
+                Some(self.const_rvalue(&v, &ty, span))
+            }
             ExprKind::Local(_)
             | ExprKind::Field { .. }
             | ExprKind::TupleIndex { .. }
@@ -1209,35 +1776,44 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // instantiation chose. One still here is a program that did not get
             // that far.
             ExprKind::ConstParam(_) => Some(Rvalue::Use(Operand::Const(Constant::Undef))),
-            ExprKind::Ref { mutable, place } => {
+            // `&x` and `&mut x` are one instruction: what the second permits was
+            // decided in sema, and no target has two kinds of address (§9).
+            ExprKind::Ref { place, .. } => {
                 let p = self.place_of(place)?;
-                Some(Rvalue::Ref {
-                    mutable: *mutable,
-                    place: p,
-                })
+                Some(Rvalue::Ref(p))
             }
             ExprKind::Binary { op, lhs, rhs } => Some(self.lower_binary(*op, lhs, rhs, &ty, span)),
             ExprKind::Unary { op, operand } => {
+                let at = self.cx.ty_of(operand.id);
                 let v = self.eval(operand);
-                Some(Rvalue::Unary {
-                    op: *op,
-                    operand: v,
+                let at = self.cx.lir(&at);
+                Some(Rvalue::Op {
+                    op: op_of_un(*op),
+                    ty: at,
+                    args: vec![v],
                 })
+            }
+            // `()` is `void`, not an aggregate of nothing: there is no value to
+            // build and no slot to build it in.
+            ExprKind::Tuple { elems } if elems.is_empty() => {
+                Some(Rvalue::Use(Operand::Const(Constant::Undef)))
             }
             ExprKind::Tuple { elems } => {
                 let fields = elems.iter().map(|x| self.eval(x)).collect();
+                let ty = self.cx.lir(&ty);
                 Some(Rvalue::Aggregate {
-                    kind: AggregateKind::Tuple,
+                    kind: self.struct_kind(&ty),
                     fields,
                 })
             }
-            ExprKind::Construct { def, fields } => Some(self.lower_construct(*def, fields, &ty)),
+            ExprKind::Construct { fields, .. } => Some(self.lower_construct(fields, &ty)),
             ExprKind::Variant { name, args } => Some(self.lower_variant(name, args, &ty)),
             ExprKind::DynCast { value, .. } => {
                 let data = self.eval(value);
                 let vt = self.dyn_vtable(e.id);
+                let ty = self.cx.lir(&ty);
                 Some(Rvalue::Aggregate {
-                    kind: AggregateKind::Dyn,
+                    kind: self.struct_kind(&ty),
                     fields: vec![data, vt],
                 })
             }
@@ -1267,7 +1843,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // and code may have written to it since the initializer ran.
             if g.mutable {
                 return Operand::Copy(Place {
-                    base: Base::Global(def),
+                    base: Base::Global(self.cx.global_id(def)),
                     projection: Vec::new(),
                 });
             }
@@ -1275,12 +1851,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // and every use carries it, which is why constants are not in
             // `Program::globals`.
             if let Some(v) = self.cx.meta.get::<ConstValue>(g.id) {
-                return Operand::Const(Constant::Value(v));
+                let ty = self.cx.ty_of(g.id);
+                return self.const_operand(&v, &ty, None);
             }
         }
-        if let Some(f) = self.cx.linked.get(def) {
-            let (name, symbol) = self.cx.names(f.id, &f.name);
-            return Operand::Const(Constant::Func { def, name, symbol });
+        if self.cx.linked.get(def).is_some() {
+            return Operand::Const(Constant::Func(self.cx.func_id(def)));
         }
         Operand::Const(Constant::Undef)
     }
@@ -1312,11 +1888,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             } else {
                 (join, other)
             };
-            self.terminate(Terminator::new(TermKind::Switch {
+            self.terminate(Terminator::new(
+                TermKind::Switch {
                     value: a,
+                    ty: LirTy::Bool,
                     arms: vec![(1, t)],
                     otherwise: f,
-                }, span));
+                },
+                span,
+            ));
             self.at = other;
             let b = self.eval(rhs);
             self.assign(place.clone(), Rvalue::Use(b), span);
@@ -1324,16 +1904,18 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             self.at = join;
             return Rvalue::Use(Operand::Copy(place));
         }
+        let at = self.cx.ty_of(lhs.id);
         let a = self.eval(lhs);
         let b = self.eval(rhs);
-        Rvalue::Binary {
-            op,
-            lhs: a,
-            rhs: b,
+        let at = self.cx.lir(&at);
+        Rvalue::Op {
+            op: op_of_bin(op),
+            ty: at,
+            args: vec![a, b],
         }
     }
 
-    fn lower_construct(&mut self, def: DefId, fields: &[(Symbol, Expr)], ty: &Ty) -> Rvalue {
+    fn lower_construct(&mut self, fields: &[(Symbol, Expr)], ty: &Ty) -> Rvalue {
         let order = self.member_names(ty);
         let mut slots: Vec<Operand> = vec![Operand::Const(Constant::Undef); order.len()];
         for (name, value) in fields {
@@ -1344,25 +1926,22 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 slots[i] = v;
             }
         }
+        let ty = self.cx.lir(ty);
         Rvalue::Aggregate {
-            kind: AggregateKind::Struct(def),
+            kind: self.struct_kind(&ty),
             fields: slots,
         }
     }
 
     fn lower_variant(&mut self, name: &Symbol, args: &[Expr], ty: &Ty) -> Rvalue {
         let fields: Vec<Operand> = args.iter().map(|a| self.eval(a)).collect();
-        let Some((def, index)) = self.variant_index(ty, name) else {
+        let Some((_, index)) = self.variant_index(ty, name) else {
             return Rvalue::Use(Operand::Const(Constant::Undef));
         };
-        Rvalue::Aggregate {
-            kind: AggregateKind::Variant {
-                def,
-                index,
-                name: name.clone(),
-            },
-            fields,
-        }
+        let Some(kind) = self.variant_kind(ty, index) else {
+            return Rvalue::Use(Operand::Const(Constant::Undef));
+        };
+        Rvalue::Aggregate { kind, fields }
     }
 
     /// The vtable a `*T` → `*dyn Trait` coercion pairs with the data pointer.
@@ -1375,7 +1954,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             return Operand::Const(Constant::Undef);
         };
         let id = self.cx.vtable(&slots);
-        Operand::Const(Constant::Vtable(id))
+        Operand::Const(Constant::Global(id))
     }
 
     // ===< Panicking (§2) >===
@@ -1397,7 +1976,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// wrote (§5.2), and this is the same three numbers taken from the span the
     /// failing operation already carries.
     fn panic_at(&mut self, msg: &str, span: Option<FileSpan>) {
-        let message = Operand::Const(Constant::Value(ConstValue::Str(msg.to_string())));
+        let message = self.text_operand(msg.as_bytes(), span);
         let Some(def) = self.cx.lang.get("panic") else {
             // A `core` with no `#lang("panic")` item: inference has said so
             // already. Stop the block rather than lose the edge.
@@ -1428,18 +2007,18 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             def,
             args: Vec::new(),
         };
-        Some(self.into_temp(
-            Rvalue::Aggregate {
-                kind: AggregateKind::Struct(def),
-                fields: vec![
-                    Operand::Const(Constant::Value(ConstValue::Str(file))),
-                    Operand::Const(Constant::Value(ConstValue::Int(line.into()))),
-                    Operand::Const(Constant::Value(ConstValue::Int(column.into()))),
-                ],
-            },
-            ty,
-            span,
-        ))
+        let name = self.text_operand(file.as_bytes(), span);
+        let lty = self.cx.lir(&ty);
+        let kind = self.struct_kind(&lty);
+        let value = Rvalue::Aggregate {
+            kind,
+            fields: vec![
+                name,
+                Operand::int(line as i128),
+                Operand::int(column as i128),
+            ],
+        };
+        Some(self.into_temp(value, ty, span))
     }
 
     /// Read an enum's tag.
@@ -1491,14 +2070,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             if self.traps(op, &ty) {
                 return Some(self.checked_op(op, vals, &ty, span));
             }
-            return Some(Rvalue::Builtin {
-                op,
+            let at = self.cx.lir(&ty);
+            return Some(Rvalue::Op {
+                op: op_of_builtin(op, false),
+                ty: at,
                 args: vals,
-                checked: false,
             });
         }
 
-        let vals: Vec<Operand> = args.iter().map(|a| self.eval(a)).collect();
+        let vals = self.passed(args);
         let callee = match dispatch {
             // Which function a vtable slot holds is a property of the vtable,
             // not of the call. Reaching it is two ordinary projections and an
@@ -1520,20 +2100,28 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         self.emit_call(callee, vals, ty, span)
     }
 
+    /// The arguments a call actually passes.
+    ///
+    /// Every one of them is **evaluated** — an argument is an expression and its
+    /// effects happen whether or not its value goes anywhere — and the ones
+    /// whose type is `void` are then dropped, because the parameter they would
+    /// fill was dropped too. The rule is the same on both sides of the call, so
+    /// a caller and a callee cannot come out with different arities.
+    fn passed(&mut self, args: &[Expr]) -> Vec<Operand> {
+        let mut vals = Vec::with_capacity(args.len());
+        for a in args {
+            let ty = self.cx.ty_of(a.id);
+            let v = self.eval(a);
+            if !is_void(&ty) {
+                vals.push(v);
+            }
+        }
+        vals
+    }
+
     /// A direct callee, by the symbol monomorphization decided.
     fn static_callee(&mut self, def: DefId) -> Callee {
-        match self.cx.linked.get(def) {
-            Some(f) => {
-                let (name, symbol) = self.cx.names(f.id, &f.name);
-                Callee::Static { def, name, symbol }
-            }
-            // A declaration with no lowered body still has a name to call.
-            None => Callee::Static {
-                def,
-                name: self.cx.defs.canonical_string(def),
-                symbol: self.cx.defs.get(def).name.clone(),
-            },
-        }
+        Callee::Static(self.cx.func_id(def))
     }
 
     /// Load a vtable slot: the receiver is a `*dyn Trait` fat pointer, so the
@@ -1558,15 +2146,20 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             index,
             name: name.clone(),
         });
-        let f = self.into_temp(
-            Rvalue::Use(Operand::Copy(slot)),
-            Ty::Ptr {
-                mutable: false,
-                inner: Box::new(Ty::Void),
-            },
-            span,
-        );
-        Some(Callee::Indirect(f))
+        // The slot's type is the one the trait's vtable struct gives it, which
+        // is the whole point of the vtable being a struct: the offset and the
+        // signature both come from the table.
+        let vt = self.cx.vtable_type(trait_def);
+        let fty = self
+            .cx
+            .types
+            .get(vt.0 as usize)
+            .and_then(|t| t.members.get(index as usize))
+            .map(|m| m.ty.clone())
+            .unwrap_or(LirTy::ptr(LirTy::Void));
+        let f = self.temp_lir(fty, span);
+        self.assign(Place::local(f), Rvalue::Use(Operand::Copy(slot)), span);
+        Some(Callee::Indirect(Operand::local(f)))
     }
 
     /// Which slot of `trait_def`'s vtable `method` is. The order is the trait's
@@ -1595,39 +2188,8 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         ty: Ty,
         span: Option<FileSpan>,
     ) -> Option<Rvalue> {
-        if matches!(ty, Ty::Never) {
-            self.push(
-                LirStmtKind::Intrinsic {
-                    dest: None,
-                    name,
-                    args,
-                },
-                span,
-            );
-            self.terminate(Terminator::new(TermKind::Unreachable, span));
-            return None;
-        }
-        if matches!(ty, Ty::Void) {
-            self.push(
-                LirStmtKind::Intrinsic {
-                    dest: None,
-                    name,
-                    args,
-                },
-                span,
-            );
-            return Some(Rvalue::Use(Operand::Const(Constant::Undef)));
-        }
-        let dest = self.temp(ty, span);
-        self.push(
-            LirStmtKind::Intrinsic {
-                dest: Some(Place::local(dest)),
-                name,
-                args,
-            },
-            span,
-        );
-        Some(Rvalue::Use(Operand::local(dest)))
+        let callee = Callee::Intrinsic(Intrinsic::from_name(&name));
+        self.emit_call(callee, args, ty, span)
     }
 
     /// Emit the call, and end the block when the callee does not return.
@@ -1728,28 +2290,34 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             return;
         }
         let len = match n {
-            Some(n) => Operand::Const(Constant::Value(ConstValue::Int(n.into()))),
+            Some(n) => Operand::int(n as i128),
             None => Operand::Copy(base.clone().then(Projection::Field {
                 index: 1,
                 name: Symbol::new("len"),
             })),
         };
+        let usize_ty = self.cx.usize_ty();
+        let usize_ty = self.cx.lir(&usize_ty);
         let ok = self.into_temp(
-            Rvalue::Binary {
-                op: BinOp::Lt,
-                lhs: index.clone(),
-                rhs: len,
+            Rvalue::Op {
+                op: Op::Lt,
+                ty: usize_ty,
+                args: vec![index.clone(), len],
             },
             Ty::Bool,
             span,
         );
         let trap = self.new_block(Some("out of bounds".to_string()));
         let go_on = self.new_block(None);
-        self.terminate(Terminator::new(TermKind::Switch {
+        self.terminate(Terminator::new(
+            TermKind::Switch {
                 value: ok,
+                ty: LirTy::Bool,
                 arms: vec![(1, go_on)],
                 otherwise: trap,
-            }, span));
+            },
+            span,
+        ));
         self.at = trap;
         self.panic_at("index out of bounds", span);
         self.at = go_on;
@@ -1779,16 +2347,17 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             return;
         }
         let Some(divisor) = args.get(1) else { return };
-        if let Operand::Const(Constant::Value(v)) = divisor
-            && v.as_u64().is_some_and(|n| n != 0)
+        if let Operand::Const(Constant::Int(n)) = divisor
+            && *n != num_bigint::BigInt::from(0)
         {
             return;
         }
+        let at = self.cx.lir(ty);
         let ok = self.into_temp(
-            Rvalue::Binary {
-                op: BinOp::Ne,
-                lhs: divisor.clone(),
-                rhs: Operand::Const(Constant::Value(ConstValue::Int(0.into()))),
+            Rvalue::Op {
+                op: Op::Ne,
+                ty: at,
+                args: vec![divisor.clone(), Operand::int(0)],
             },
             Ty::Bool,
             span,
@@ -1798,6 +2367,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         self.terminate(Terminator::new(
             TermKind::Switch {
                 value: ok,
+                ty: LirTy::Bool,
                 arms: vec![(1, go_on)],
                 otherwise: trap,
             },
@@ -1846,12 +2416,13 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         // whether it wrapped. One instruction, because every machine that has
         // the operation has the flag beside it.
         let pair = self.temp(Ty::Tuple(vec![ty.clone(), Ty::Bool]), span);
+        let at = self.cx.lir(ty);
         self.assign(
             Place::local(pair),
-            Rvalue::Builtin {
-                op,
+            Rvalue::Op {
+                op: op_of_builtin(op, true),
+                ty: at,
                 args,
-                checked: true,
             },
             span,
         );
@@ -1865,11 +2436,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         });
         let trap = self.new_block(Some("overflow".to_string()));
         let ok = self.new_block(None);
-        self.terminate(Terminator::new(TermKind::Switch {
+        self.terminate(Terminator::new(
+            TermKind::Switch {
                 value: Operand::Copy(flag),
+                ty: LirTy::Bool,
                 arms: vec![(1, trap)],
                 otherwise: ok,
-            }, span));
+            },
+            span,
+        ));
 
         self.at = trap;
         self.panic_at("integer overflow", span);
@@ -1899,9 +2474,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 } else {
                     l.align
                 };
-                Some(Rvalue::Use(Operand::Const(Constant::Value(
-                    ConstValue::Int(n.into()),
-                ))))
+                Some(Rvalue::Use(Operand::int(n as i128)))
             }
             // A conversion between primitives. `from` travels beside `to`
             // because what the conversion *is* — a truncation, a sign extension,
@@ -1923,7 +2496,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 // machine type to cast *from*, so the fold is not an
                 // optimization but the only lowering there is.
                 if let Some(v) = self.cx.const_value(e) {
-                    return Some(Rvalue::Use(Operand::Const(Constant::Value(v))));
+                    return Some(self.const_rvalue(&v, &ty, span));
                 }
                 let v = self.eval(&args[0]);
                 // A cast between two names for one type is nothing to do. It
@@ -1933,10 +2506,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 if from == ty {
                     return Some(Rvalue::Use(v));
                 }
+                let from = self.cx.lir(&from);
+                let to = self.cx.lir(&ty);
                 Some(Rvalue::Cast {
                     value: v,
                     from,
-                    to: ty,
+                    to,
                 })
             }
             // An explicit release (§6.9). It is the *same* instruction escape
@@ -1965,7 +2540,6 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // pointer it holds moved along by `i` — pointer arithmetic, and the
             // only place in the compiler that does any.
             "index" | "index_mut" if args.len() == 2 => {
-                let mutable = name.as_str() == "index_mut";
                 let seq = match self.cx.ty_of(args[0].id) {
                     Ty::Ptr { inner, .. } => *inner,
                     other => other,
@@ -1990,10 +2564,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                             stride: self.cx.stride(&inner),
                         })
                     }
-                    _ => Some(Rvalue::Ref {
-                        mutable,
-                        place: base.then(Projection::Index(i)),
-                    }),
+                    _ => Some(Rvalue::Ref(base.then(Projection::Index(i)))),
                 }
             }
             // A sequence's length: a fixed array's is part of its type and a
@@ -2001,15 +2572,34 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             "len" if args.len() == 1 => {
                 let arg = self.cx.ty_of(args[0].id);
                 if let Ty::Array { len, .. } = arg {
-                    return len.value().map(|n| {
-                        Rvalue::Use(Operand::Const(Constant::Value(ConstValue::Int(n.into()))))
-                    });
+                    return len.value().map(|n| Rvalue::Use(Operand::int(n as i128)));
                 }
                 let p = self.place_of(&args[0])?;
                 Some(Rvalue::Use(Operand::Copy(p.then(Projection::Field {
                     index: 1,
                     name: Symbol::new("len"),
                 }))))
+            }
+            // Arithmetic the program asked to wrap (§6.6). It is an
+            // instruction on every target — the ordinary one, with the overflow
+            // check the build would otherwise have added left off — so it is an
+            // opcode rather than a name a backend has to know.
+            "wrapping_add" | "wrapping_sub" if args.len() == 2 => {
+                let vals: Vec<Operand> = args.iter().map(|a| self.eval(a)).collect();
+                let at = self.cx.lir(&ty);
+                // The same instruction `overflow=wrap` emits: an `add` wraps,
+                // by definition (§6.6, §7d). An opcode of its own would be a
+                // second spelling of one operation.
+                let op = if name.as_str() == "wrapping_add" {
+                    Op::Add
+                } else {
+                    Op::Sub
+                };
+                Some(Rvalue::Op {
+                    op,
+                    ty: at,
+                    args: vals,
+                })
             }
             // A composite literal. It is an intrinsic in the IR because the
             // surface form is one syntax over two types; here the array case is
@@ -2019,12 +2609,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             "array" if matches!(ty, Ty::Array { .. }) => {
                 let fields = args.iter().map(|a| self.eval(a)).collect();
                 Some(Rvalue::Aggregate {
-                    kind: AggregateKind::Array,
+                    kind: Aggregate::Array,
                     fields,
                 })
             }
             _ => {
-                let vals: Vec<Operand> = args.iter().map(|a| self.eval(a)).collect();
+                let vals = self.passed(args);
                 self.emit_intrinsic(name.clone(), vals, ty, span)
             }
         }
@@ -2055,10 +2645,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // asks for this — indexing goes through `&TABLE`, and a constant
             // with nowhere to point at would be a pointer to nothing.
             ExprKind::Global(def) => match self.cx.linked.global(*def) {
-                Some(g) if g.mutable => Some(Place {
-                    base: Base::Global(*def),
-                    projection: Vec::new(),
-                }),
+                Some(g) if g.mutable => Some(Place::global(self.cx.global_id(*def))),
                 _ => self.materialize(e),
             },
             ExprKind::Deref { base } => Some(self.place_of(base)?.then(Projection::Deref)),
@@ -2088,6 +2675,10 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     fn materialize(&mut self, e: &Expr) -> Option<Place> {
         let ty = self.cx.ty_of(e.id);
         let span = self.cx.meta.span(e.id);
+        if is_void(&ty) {
+            self.eval(e);
+            return None;
+        }
         match self.eval(e) {
             Operand::Copy(p) => Some(p),
             other => {
@@ -2095,6 +2686,176 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 self.assign(Place::local(slot), Rvalue::Use(other), span);
                 Some(Place::local(slot))
             }
+        }
+    }
+
+
+    // ===< Types, constants and aggregates, as LIR spells them >===
+
+    /// The aggregate kind for "build a value of this struct type".
+    ///
+    /// A struct literal, a tuple, a slice header and a trait object's fat
+    /// pointer are one operation with four spellings in the source and one here
+    /// (§7b): the destination's type says which struct, so the kind only has to
+    /// name it.
+    fn struct_kind(&mut self, ty: &LirTy) -> Aggregate {
+        match ty {
+            LirTy::Named(id) => Aggregate::Struct(*id),
+            // Not an aggregate: a program that did not type-check, already
+            // reported. The empty struct keeps every id in the unit resolvable.
+            _ => Aggregate::Struct(self.cx.error_type()),
+        }
+    }
+
+    /// The aggregate kind for building one variant of an enum.
+    fn variant_kind(&mut self, ty: &Ty, index: u32) -> Option<Aggregate> {
+        let lty = self.cx.lir(ty);
+        let LirTy::Named(id) = lty else { return None };
+        let (variant, tag, name) = {
+            let def = self.cx.types.get(id.0 as usize)?;
+            let Origin::Enum { variants } = &def.origin else {
+                return None;
+            };
+            let v = variants.get(index as usize)?;
+            (v.ty, v.tag, v.name.clone())
+        };
+        Some(Aggregate::Variant {
+            ty: id,
+            variant,
+            index,
+            tag,
+            name,
+        })
+    }
+
+    /// The place a variant's fields live at: the shared payload, read as the
+    /// variant's own struct type (§7b).
+    fn variant_place(&mut self, place: &Place, ty: &Ty, index: u32) -> Place {
+        let payload = place.clone().then(Projection::Field {
+            index: 1,
+            name: Symbol::new("payload"),
+        });
+        let lty = self.cx.lir(ty);
+        let LirTy::Named(id) = lty else { return payload };
+        let vty = match self.cx.types.get(id.0 as usize).map(|d| &d.origin) {
+            Some(Origin::Enum { variants }) => variants.get(index as usize).map(|v| v.ty),
+            _ => None,
+        };
+        match vty {
+            Some(v) => payload.then(Projection::Cast(v)),
+            None => payload,
+        }
+    }
+
+    /// The name a variant's `i`th field has, which is the name its own type
+    /// gives it (§7b).
+    ///
+    /// `.rect { w, h }` has members called `w` and `h`, not `0` and `1`: the
+    /// index is what a backend uses and the name is what a reader does, and a
+    /// projection that names a member its type does not have is a dump that
+    /// lies.
+    fn variant_member(&mut self, ty: &Ty, index: u32, i: usize) -> Symbol {
+        let lty = self.cx.lir(ty);
+        let fallback = || Symbol::new(&i.to_string());
+        let LirTy::Named(id) = lty else {
+            return fallback();
+        };
+        let vty = match self.cx.types.get(id.0 as usize).map(|d| &d.origin) {
+            Some(Origin::Enum { variants }) => variants.get(index as usize).map(|v| v.ty),
+            _ => None,
+        };
+        vty.and_then(|v| self.cx.types.get(v.0 as usize))
+            .and_then(|d| d.members.get(i))
+            .map(|m| m.name.clone())
+            .unwrap_or_else(fallback)
+    }
+
+    /// The width an enum's tag is switched at.
+    fn tag_ty(&mut self, ty: &Ty) -> LirTy {
+        let bits = match self.cx.layouts.enum_layout(ty) {
+            Some(Ok(e)) => (e.tag.size * 8) as u16,
+            _ => 8,
+        };
+        LirTy::Int {
+            bits,
+            signed: false,
+        }
+    }
+
+    /// A constant, as something an instruction can read.
+    ///
+    /// A scalar is itself. Anything that needs storage — a string, a byte
+    /// string, an array or a struct the evaluator folded — becomes a global and
+    /// the value becomes a reference to it, because an operand carrying a blob
+    /// asks every backend to invent read-only data emission on its own (§2.5).
+    fn const_operand(&mut self, v: &ConstValue, ty: &Ty, span: Option<FileSpan>) -> Operand {
+        match self.const_rvalue(v, ty, span) {
+            Rvalue::Use(o) => o,
+            other => {
+                let t = self.temp(ty.clone(), span);
+                self.assign(Place::local(t), other, span);
+                Operand::local(t)
+            }
+        }
+    }
+
+    /// The same, before it is forced into an operand: a `str` is two words and
+    /// is built rather than read, so it is an aggregate rather than a load.
+    fn const_rvalue(&mut self, v: &ConstValue, ty: &Ty, span: Option<FileSpan>) -> Rvalue {
+        let ty = self.cx.strip(ty);
+        match v {
+            ConstValue::Int(n) => Rvalue::Use(Operand::Const(Constant::Int(n.clone()))),
+            ConstValue::Float(f) => Rvalue::Use(Operand::Const(Constant::Float(*f))),
+            ConstValue::Bool(b) => Rvalue::Use(Operand::Const(Constant::Bool(*b))),
+            ConstValue::Char(c) => Rvalue::Use(Operand::int(*c as i128)),
+            ConstValue::Void => Rvalue::Use(Operand::Const(Constant::Undef)),
+            ConstValue::Str(s) => self.text_rvalue(s.as_bytes(), &ty, span),
+            ConstValue::Bytes(b) => self.text_rvalue(b, &ty, span),
+            // A composite the evaluator folded is data, and data has an address.
+            ConstValue::Aggregate(_) | ConstValue::Variant { .. } => {
+                let init = self.cx.const_data(v, &ty);
+                let lty = self.cx.lir(&ty);
+                let key = format!("{}:{}", self.cx.key(&ty), v.display());
+                let g = self.cx.data_global("data", lty, init, key);
+                Rvalue::Use(Operand::Copy(Place::global(g)))
+            }
+        }
+    }
+
+    /// Text, at the type it is used as: the bytes for a `[N]u8`, a view of them
+    /// for a `str` or a `[]u8`.
+    fn text_rvalue(&mut self, bytes: &[u8], ty: &Ty, span: Option<FileSpan>) -> Rvalue {
+        if let Ty::Array { .. } = ty {
+            let lty = self.cx.lir(ty);
+            let key = format!("array:{}", crate::parser::ast::bytes_repr(bytes));
+            let g = self
+                .cx
+                .data_global("bytes", lty, Constant::Bytes(bytes.to_vec()), key);
+            return Rvalue::Use(Operand::Copy(Place::global(g)));
+        }
+        let _ = span;
+        let g = self.cx.bytes_global(bytes);
+        let lty = self.cx.lir(ty);
+        let kind = self.struct_kind(&lty);
+        Rvalue::Aggregate {
+            kind,
+            fields: vec![
+                Operand::Const(Constant::Global(g)),
+                Operand::int(bytes.len() as i128),
+            ],
+        }
+    }
+
+    /// A text value as an operand — the `{ ptr, len }` a `str` is.
+    fn text_operand(&mut self, bytes: &[u8], span: Option<FileSpan>) -> Operand {
+        let ty = Ty::Slice {
+            mutable: false,
+            inner: Box::new(Ty::u8()),
+        };
+        let v = self.text_rvalue(bytes, &ty, span);
+        match v {
+            Rvalue::Use(o) => o,
+            other => self.into_temp(other, ty, span),
         }
     }
 
@@ -2158,11 +2919,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         let then_b = self.new_block(Some("then".to_string()));
         let else_b = self.new_block(Some("else".to_string()));
         let join = self.new_block(Some("join".to_string()));
-        self.terminate(Terminator::new(TermKind::Switch {
+        self.terminate(Terminator::new(
+            TermKind::Switch {
                 value: c,
+                ty: LirTy::Bool,
                 arms: vec![(1, then_b)],
                 otherwise: else_b,
-            }, span));
+            },
+            span,
+        ));
 
         self.at = then_b;
         let v = self.block_value(then);
@@ -2325,11 +3090,16 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             self.chain(place, sty, arms, &candidates, &bodies, Some(i as u32), dead, span);
         }
         self.at = switch_at;
-        self.terminate(Terminator::new(TermKind::Switch {
+        let tag_ty = self.tag_ty(sty);
+        self.terminate(Terminator::new(
+            TermKind::Switch {
                 value: disc,
+                ty: tag_ty,
                 arms: targets,
                 otherwise: default,
-            }, span));
+            },
+            span,
+        ));
 
         // A discriminant no variant claims cannot happen, but a catch-all arm
         // still has to be somewhere the graph can point at.
@@ -2445,7 +3215,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 binding,
                 pattern: inner,
             } => {
-                let id = self.new_local(Some(binding.name.clone()), ty.clone(), span);
+                if is_void(ty) {
+                    self.test_pattern(place, inner, ty, fail);
+                    return;
+                }
+                let id = self.new_local(Some(binding.name.clone()), ty, span);
                 self.local_of.insert(binding.def, id);
                 self.assign(
                     Place::local(id),
@@ -2464,11 +3238,13 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     self.test_bytes(place, ty, &bytes, fail, span);
                     return;
                 }
+                let at = self.cx.lir(ty);
+                let rhs = self.const_operand(&lit_value(l), ty, span);
                 let c = self.into_temp(
-                    Rvalue::Binary {
-                        op: BinOp::Eq,
-                        lhs: Operand::Copy(place.clone()),
-                        rhs: Operand::Const(Constant::Value(lit_value(l))),
+                    Rvalue::Op {
+                        op: Op::Eq,
+                        ty: at,
+                        args: vec![Operand::Copy(place.clone()), rhs],
                     },
                     Ty::Bool,
                     span,
@@ -2480,12 +3256,14 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 end,
                 inclusive,
             } => {
+                let at = self.cx.lir(ty);
                 if let Some(s) = start {
+                    let rhs = self.const_operand(&lit_value(s), ty, span);
                     let c = self.into_temp(
-                        Rvalue::Binary {
-                            op: BinOp::Ge,
-                            lhs: Operand::Copy(place.clone()),
-                            rhs: Operand::Const(Constant::Value(lit_value(s))),
+                        Rvalue::Op {
+                            op: Op::Ge,
+                            ty: at.clone(),
+                            args: vec![Operand::Copy(place.clone()), rhs],
                         },
                         Ty::Bool,
                         span,
@@ -2493,12 +3271,13 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     self.branch_if(c, fail, span);
                 }
                 if let Some(e) = end {
-                    let op = if *inclusive { BinOp::Le } else { BinOp::Lt };
+                    let op = if *inclusive { Op::Le } else { Op::Lt };
+                    let rhs = self.const_operand(&lit_value(e), ty, span);
                     let c = self.into_temp(
-                        Rvalue::Binary {
+                        Rvalue::Op {
                             op,
-                            lhs: Operand::Copy(place.clone()),
-                            rhs: Operand::Const(Constant::Value(lit_value(e))),
+                            ty: at,
+                            args: vec![Operand::Copy(place.clone()), rhs],
                         },
                         Ty::Bool,
                         span,
@@ -2512,21 +3291,24 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 };
                 let disc = self.tag_of(place, ty, span);
                 let ok = self.new_block(None);
-                self.terminate(Terminator::new(TermKind::Switch {
+                let tag_ty = self.tag_ty(ty);
+                self.terminate(Terminator::new(
+                    TermKind::Switch {
                         value: disc,
+                        ty: tag_ty,
                         arms: vec![(index as i128, ok)],
                         otherwise: fail,
-                    }, span));
+                    },
+                    span,
+                ));
                 self.at = ok;
-                let payload = place.clone().then(Projection::Variant {
-                    index,
-                    name: name.clone(),
-                });
+                let payload = self.variant_place(place, ty, index);
                 let tys = self.variant_tys(ty, index);
                 for (i, p) in sub.iter().enumerate() {
+                    let name = self.variant_member(ty, index, i);
                     let f = payload.clone().then(Projection::Field {
                         index: i as u32,
-                        name: Symbol::new(&i.to_string()),
+                        name,
                     });
                     let t = tys.get(i).cloned().unwrap_or(Ty::Error);
                     self.test_pattern(&f, p, &t, fail);
@@ -2596,15 +3378,14 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         sub: &[Pattern],
         fail: BlockId,
     ) {
-        let payload = place.clone().then(Projection::Variant {
-            index,
-            name: name.clone(),
-        });
+        let _ = name;
+        let payload = self.variant_place(place, sty, index);
         let tys = self.variant_tys(sty, index);
         for (i, p) in sub.iter().enumerate() {
+            let name = self.variant_member(sty, index, i);
             let f = payload.clone().then(Projection::Field {
                 index: i as u32,
-                name: Symbol::new(&i.to_string()),
+                name,
             });
             let t = tys.get(i).cloned().unwrap_or(Ty::Error);
             self.test_pattern(&f, p, &t, fail);
@@ -2643,7 +3424,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             self.goto(fail, span);
             return;
         };
-        let literal = Operand::Const(Constant::Value(ConstValue::Bytes(bytes.to_vec())));
+        let literal = self.text_operand(bytes, span);
         let args = vec![Operand::Copy(seq), literal];
         let Some(Rvalue::Use(same)) = self.emit_call(callee, args, Ty::Bool, span) else {
             return;
@@ -2724,16 +3505,14 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         let len = self.sequence_len(place, ty);
         // Without a `..` the length has to be exactly what was written; with one,
         // at least that many.
-        let op = if rest.is_some() {
-            BinOp::Ge
-        } else {
-            BinOp::Eq
-        };
+        let op = if rest.is_some() { Op::Ge } else { Op::Eq };
+        let usize_ty = self.cx.usize_ty();
+        let usize_lir = self.cx.lir(&usize_ty);
         let c = self.into_temp(
-            Rvalue::Binary {
+            Rvalue::Op {
                 op,
-                lhs: len.clone(),
-                rhs: Operand::Const(Constant::Value(ConstValue::Int(want.into()))),
+                ty: usize_lir.clone(),
+                args: vec![len.clone(), Operand::int(want)],
             },
             Ty::Bool,
             span,
@@ -2741,7 +3520,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         self.branch_if(c, fail, span);
 
         for (i, p) in prefix.iter().enumerate() {
-            let at = Operand::Const(Constant::Value(ConstValue::Int(i.into())));
+            let at = Operand::int(i as i128);
             let f = self.element_place(place, ty, at, span);
             self.test_pattern(&f, p, &elem, fail);
         }
@@ -2750,17 +3529,13 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         // own shape (§7b) rather than becoming a struct of members.
         for (k, p) in suffix.iter().enumerate() {
             let back = (suffix.len() - k) as i128;
-            let usize_ty = self.cx.usize_ty();
             let idx = self.into_temp(
-                Rvalue::Builtin {
-                    op: BuiltinOp::Sub,
-                    args: vec![
-                        len.clone(),
-                        Operand::Const(Constant::Value(ConstValue::Int(back.into()))),
-                    ],
-                    checked: false,
+                Rvalue::Op {
+                    op: Op::Sub,
+                    ty: usize_lir.clone(),
+                    args: vec![len.clone(), Operand::int(back)],
                 },
-                usize_ty,
+                usize_ty.clone(),
                 span,
             );
             let f = self.element_place(place, ty, idx, span);
@@ -2770,38 +3545,34 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         // ends, as a slice over the address of the first of them.
         if let Some(Some(b)) = rest {
             let bound = self.cx.ty_of(b.id);
-            let id = self.new_local(Some(b.name.clone()), bound, span);
+            let id = self.new_local(Some(b.name.clone()), &bound, span);
             self.local_of.insert(b.def, id);
-            let at = Operand::Const(Constant::Value(ConstValue::Int(prefix.len().into())));
+            let at = Operand::int(prefix.len() as i128);
             let first = self.element_place(place, ty, at, span);
             let ptr = self.into_temp(
-                Rvalue::Ref {
-                    mutable: false,
-                    place: first,
-                },
+                Rvalue::Ref(first),
                 Ty::Ptr {
                     mutable: false,
-                    inner: Box::new(Ty::Void),
+                    inner: Box::new(elem.clone()),
                 },
                 span,
             );
-            let usize_ty = self.cx.usize_ty();
             let n = self.into_temp(
-                Rvalue::Builtin {
-                    op: BuiltinOp::Sub,
-                    args: vec![
-                        len,
-                        Operand::Const(Constant::Value(ConstValue::Int(want.into()))),
-                    ],
-                    checked: false,
+                Rvalue::Op {
+                    op: Op::Sub,
+                    ty: usize_lir,
+                    args: vec![len, Operand::int(want)],
                 },
                 usize_ty,
                 span,
             );
+            let bound = self.local_tys[id.0 as usize].clone();
+            let lty = self.cx.lir(&bound);
+            let kind = self.struct_kind(&lty);
             self.assign(
                 Place::local(id),
                 Rvalue::Aggregate {
-                    kind: AggregateKind::Slice,
+                    kind,
                     fields: vec![ptr, n],
                 },
                 span,
@@ -2814,7 +3585,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     fn sequence_len(&mut self, place: &Place, ty: &Ty) -> Operand {
         match ty {
             Ty::Array { len, .. } => match len.value() {
-                Some(n) => Operand::Const(Constant::Value(ConstValue::Int(n.into()))),
+                Some(n) => Operand::int(n as i128),
                 None => Operand::Const(Constant::Undef),
             },
             _ => Operand::Copy(place.clone().then(Projection::Field {
@@ -2866,5 +3637,108 @@ fn exit_label(e: Exit) -> &'static str {
         Exit::Return => "return",
         Exit::Break(_) => "break",
         Exit::Continue(_) => "continue",
+    }
+}
+
+/// `symbol`, or the first spelling of it nothing has taken.
+///
+/// A `#static` written inside a function body has no path to mangle — two
+/// functions may each declare `n`, and `mono::global_symbol` gives both the same
+/// name. Two definitions of one symbol is what a linker refuses, so the second
+/// one and every one after it gets a `Z<k>` suffix, which the mangling scheme
+/// does not otherwise use. It is stable for a given program because this walk is:
+/// the globals are visited in the order the linked program holds them.
+fn unique(taken: &mut std::collections::HashSet<Symbol>, symbol: Symbol) -> Symbol {
+    if taken.insert(symbol.clone()) {
+        return symbol;
+    }
+    for k in 1.. {
+        let candidate = Symbol::new(&format!("{symbol}Z{k}"));
+        if taken.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+/// Whether a value of this type holds nothing at all.
+///
+/// `void` is a type the *language* has — it is what a function with no result
+/// returns and what `Residual :: void` makes an `Option`'s short-circuit carry —
+/// and it is not a type a *machine* has: there is no register, no slot and no
+/// argument for it. So it is erased wherever a value would be held, which is
+/// what keeps `let _7: void` out of a frame.
+fn is_void(ty: &Ty) -> bool {
+    matches!(ty, Ty::Void)
+}
+
+/// A float's width in bits. `f80` is ten bytes of data in a sixteen-byte slot
+/// (see the layout engine); the *type* is still eighty bits wide.
+fn float_bits(w: crate::sema::ty::FloatWidth) -> u16 {
+    use crate::sema::ty::FloatWidth::*;
+    match w {
+        F16 => 16,
+        F32 => 32,
+        F64 => 64,
+        F80 => 80,
+        F128 => 128,
+    }
+}
+
+/// A source binary operator, as an opcode. `&&` and `||` never arrive: they
+/// are control flow (§1).
+fn op_of_bin(op: BinOp) -> Op {
+    match op {
+        BinOp::Add => Op::Add,
+        BinOp::Sub => Op::Sub,
+        BinOp::Mul => Op::Mul,
+        BinOp::Div => Op::Div,
+        BinOp::Rem => Op::Rem,
+        BinOp::BitAnd => Op::BitAnd,
+        BinOp::BitOr | BinOp::Or => Op::BitOr,
+        BinOp::BitXor => Op::BitXor,
+        BinOp::Shl => Op::Shl,
+        BinOp::Shr => Op::Shr,
+        BinOp::Eq => Op::Eq,
+        BinOp::Ne => Op::Ne,
+        BinOp::Lt => Op::Lt,
+        BinOp::Le => Op::Le,
+        BinOp::Gt => Op::Gt,
+        BinOp::Ge => Op::Ge,
+        BinOp::And => Op::BitAnd,
+    }
+}
+
+/// A source unary operator, as an opcode. `&` and `&mut` are not operations —
+/// they are [`Rvalue::Ref`] — and never arrive here.
+fn op_of_un(op: UnOp) -> Op {
+    match op {
+        UnOp::Neg => Op::Neg,
+        UnOp::Not => Op::Not,
+        UnOp::BitNot => Op::BitNot,
+        UnOp::Ref | UnOp::RefMut => Op::Not,
+    }
+}
+
+/// A builtin operator, as an opcode, in the form the build asked for: checked
+/// arithmetic is its own instruction rather than a flag, because a flag that
+/// changes the result type is not a flag (§7d).
+fn op_of_builtin(op: BuiltinOp, checked: bool) -> Op {
+    match (op, checked) {
+        (BuiltinOp::Add, false) => Op::Add,
+        (BuiltinOp::Add, true) => Op::AddChecked,
+        (BuiltinOp::Sub, false) => Op::Sub,
+        (BuiltinOp::Sub, true) => Op::SubChecked,
+        (BuiltinOp::Mul, false) => Op::Mul,
+        (BuiltinOp::Mul, true) => Op::MulChecked,
+        (BuiltinOp::Div, _) => Op::Div,
+        (BuiltinOp::Rem, _) => Op::Rem,
+        (BuiltinOp::BitAnd, _) => Op::BitAnd,
+        (BuiltinOp::BitOr, _) => Op::BitOr,
+        (BuiltinOp::BitXor, _) => Op::BitXor,
+        (BuiltinOp::Shl, _) => Op::Shl,
+        (BuiltinOp::Shr, _) => Op::Shr,
+        (BuiltinOp::Neg, _) => Op::Neg,
+        (BuiltinOp::BitNot, _) => Op::BitNot,
     }
 }

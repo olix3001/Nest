@@ -2,47 +2,54 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type V = struct {           // was a struct; size 4, align 4
-  x: i32                    // +0
-}
-type (i32, bool) = struct {           // was a tuple; size 8, align 4
-  0: i32                    // +0
-  1: bool                    // +4
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  type V = struct {           // was a struct; size 4, align 4
+    x: i32                    // +0
+  }
+  type []u8 = struct {           // was a slice; size 16, align 8
+    ptr: *u8                    // +0
+    len: u64                    // +8
+  }
+  type core.Location = struct {           // was a struct; size 24, align 8
+    file: []u8                    // +0
+    line: u32                    // +16
+    column: u32                    // +20
+  }
+  type (i32, bool) = struct {           // was a tuple; size 8, align 4
+    0: i32                    // +0
+    1: bool                    // +4
+  }
+  private const const.str.0: [16]u8 = b"integer overflow"  // _NK0
+  private const const.str.1: [8]u8 = b"mem:main"  // _NK1
 
-func total(a_0: V, b_1: V) -> V  // _NC5total
-  let _2: V
-bb0:                    // entry
-  _2 := call V.<as core.Add>.add(a_0, b_1)
-  return _2
+  func total(a_0: V, b_1: V) -> V  // _NC5total
+    let _2: V
+  bb0:                    // entry
+    _2 := call V.<as core.Add>.add(a_0, b_1)
+    return _2
 
-func V.<as core.Add>.add(self_0: V, rhs_1: V) -> V  // _NC1VXN4core3AddIE3add
-  let _2: (i32, bool)
-  let _3: core.Location
-  let _4: V
-bb0:                    // entry
-  _2 := checked_add(self_0.x, rhs_1.x)
-  switch _2.1 { 1 => bb1, _ => bb2 }
-bb1:                    // overflow
-  _3 := Location("mem:main", 5, 54)
-  call core.panic("integer overflow", _3)
-    @safepoint { live: [_3]
-      _3 := reloc _3
-    }
-  unreachable
-bb2:
-  _4 := V(_2.0)
-  return _4
+  func V.<as core.Add>.add(self_0: V, rhs_1: V) -> V  // _NC1VXN4core3AddIE3add
+    let _2: (i32, bool)
+    let _3: []u8
+    let _4: []u8
+    let _5: core.Location
+    let _6: V
+  bb0:                    // entry
+    _2 := add_checked.i32 self_0.x, rhs_1.x
+    switch.bool _2.1 { 1 => bb1, _ => bb2 }
+  bb1:                    // overflow
+    _3 := []u8(&const.str.0, 16)
+    _4 := []u8(&const.str.1, 8)
+    _5 := core.Location(_4, 5, 54)
+    call core.panic(_3, _5)
+      @safepoint { live: [_3, _5]
+        _3 := reloc _3
+        _5 := reloc _5
+      }
+    unreachable
+  bb2:
+    _6 := V(_2.0)
+    return _6
+
+  declare func core.panic(msg_0: []u8, loc_1: core.Location) -> never @public  // _NC4core5panic
+}

@@ -23,6 +23,8 @@ const USAGE: &str = "\
 usage: nestc [-C key=value]... <file.nest>
 
 settings (-C):
+  codegen-units=N        how many codegen units the program is split into
+                         (default: 1 — the whole program in one)
   overflow=trap|wrap     what a run-time integer overflow does (default: trap)
   pointer-width=16|32|64 the target's pointer width (default: 64)
   print=options          print the resolved settings and exit
@@ -142,7 +144,7 @@ fn main() -> ExitCode {
         );
         print!(
             "\n===< LIR >===\n{}",
-            lir::pretty::program_to_string(&session.defs, Some(&session.sources), &program)
+            lir::pretty::program_to_string(Some(&session.sources), &program)
         );
     }
 

@@ -1,0 +1,41 @@
+---
+source: src/lir/tests.rs
+expression: out
+---
+unit mem:main {
+  type Point = struct {           // was a struct; size 8, align 4
+    x: i32                    // +0
+    y: i32                    // +4
+  }
+
+  func main() -> void @public  // _NC4main
+    let _0: Point
+    let _1: Point
+    let _2: Point
+    let q_3: Point
+  bb0:                    // entry
+    _0 := Point(1, 2)
+    _1 := call scale(_0, 3)
+    _2 := _1
+    q_3 := _2
+    return
+
+  declare func scale(p_0: Point, k_1: i32) -> Point @public  // _NC5scale
+}
+
+unit mem:shapes {
+  type Point = struct {           // was a struct; size 8, align 4
+    x: i32                    // +0
+    y: i32                    // +4
+  }
+
+  func scale(p_0: Point, k_1: i32) -> Point @public  // _NC5scale
+    let _2: i32
+    let _3: i32
+    let _4: Point
+  bb0:                    // entry
+    _2 := mul.i32 p_0.x, k_1
+    _3 := mul.i32 p_0.y, k_1
+    _4 := Point(_2, _3)
+    return _4
+}

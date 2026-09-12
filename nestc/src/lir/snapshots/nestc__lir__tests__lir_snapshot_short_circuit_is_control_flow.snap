@@ -2,27 +2,16 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
 
-func both(a_0: bool, b_1: bool) -> bool  // _NC4both
-  let _2: bool
-bb0:                    // entry
-  _2 := a_0
-  switch a_0 { 1 => bb1, _ => bb2 }
-bb1:                    // && rhs
-  _2 := b_1
-  goto bb2
-bb2:                    // join
-  return _2
+  func both(a_0: bool, b_1: bool) -> bool  // _NC4both
+    let _2: bool
+  bb0:                    // entry
+    _2 := a_0
+    switch.bool a_0 { 1 => bb1, _ => bb2 }
+  bb1:                    // && rhs
+    _2 := b_1
+    goto bb2
+  bb2:                    // join
+    return _2
+}

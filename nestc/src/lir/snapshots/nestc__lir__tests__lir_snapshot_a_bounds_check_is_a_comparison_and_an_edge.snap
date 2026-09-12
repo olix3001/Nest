@@ -2,40 +2,47 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type []i32 = struct {           // was a slice; size 16, align 8
-  ptr: *i32                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  type []i32 = struct {           // was a slice; size 16, align 8
+    ptr: *i32                    // +0
+    len: u64                    // +8
+  }
+  type []u8 = struct {           // was a slice; size 16, align 8
+    ptr: *u8                    // +0
+    len: u64                    // +8
+  }
+  type core.Location = struct {           // was a struct; size 24, align 8
+    file: []u8                    // +0
+    line: u32                    // +16
+    column: u32                    // +20
+  }
+  private const const.str.0: [19]u8 = b"index out of bounds"  // _NK0
+  private const const.str.1: [8]u8 = b"mem:main"  // _NK1
 
-func get(s_0: []i32, k_1: u64) -> i32  // _NC3get
-  let _2: *[]i32
-  let _3: bool
-  let _4: core.Location
-  let _5: *i32
-bb0:                    // entry
-  _2 := &s_0
-  _3 := k_1 < _2.*.len
-  switch _3 { 1 => bb2, _ => bb1 }
-bb1:                    // out of bounds
-  _4 := Location("mem:main", 1, 50)
-  call core.panic("index out of bounds", _4)
-    @safepoint { live: [_4]
-      _4 := reloc _4
-    }
-  unreachable
-bb2:
-  _5 := _2.*.ptr + k_1 * 4
-  return _5.*
+  func get(s_0: []i32, k_1: u64) -> i32  // _NC3get
+    let _2: *[]i32
+    let _3: bool
+    let _4: []u8
+    let _5: []u8
+    let _6: core.Location
+    let _7: *i32
+  bb0:                    // entry
+    _2 := &s_0
+    _3 := lt.u64 k_1, _2.*.len
+    switch.bool _3 { 1 => bb2, _ => bb1 }
+  bb1:                    // out of bounds
+    _4 := []u8(&const.str.0, 19)
+    _5 := []u8(&const.str.1, 8)
+    _6 := core.Location(_5, 1, 50)
+    call core.panic(_4, _6)
+      @safepoint { live: [_4, _6]
+        _4 := reloc _4
+        _6 := reloc _6
+      }
+    unreachable
+  bb2:
+    _7 := _2.*.ptr + k_1 * 4
+    return _7.*
+
+  declare func core.panic(msg_0: []u8, loc_1: core.Location) -> never @public  // _NC4core5panic
+}

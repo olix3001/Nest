@@ -2,40 +2,28 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  private const const.data.0: [3]i32 = { 1, 2, 3 }  // _NK0
 
-func from_constant() -> i32  // _NC13from_constant
-  let _0: [3]i32
-  let _1: *[3]i32
-  let _2: *i32
-bb0:                    // entry
-  _0 := { 1, 2, 3 }
-  _1 := &_0
-  _2 := &_1.*[1]
-  return _2.*
+  func from_constant() -> i32  // _NC13from_constant
+    let _0: *[3]i32
+    let _1: *i32
+  bb0:                    // entry
+    _0 := &@const.data.0
+    _1 := &_0.*[1]
+    return _1.*
 
-func from_local() -> i32  // _NC10from_local
-  let _0: [3]i32
-  let _1: [3]i32
-  let t_2: [3]i32
-  let _3: *[3]i32
-  let _4: *i32
-bb0:                    // entry
-  _0 := array(1, 2, 3)
-  _1 := _0
-  t_2 := _1
-  _3 := &t_2
-  _4 := &_3.*[1]
-  return _4.*
+  func from_local() -> i32  // _NC10from_local
+    let _0: [3]i32
+    let _1: [3]i32
+    let t_2: [3]i32
+    let _3: *[3]i32
+    let _4: *i32
+  bb0:                    // entry
+    _0 := array(1, 2, 3)
+    _1 := _0
+    t_2 := _1
+    _3 := &t_2
+    _4 := &_3.*[1]
+    return _4.*
+}

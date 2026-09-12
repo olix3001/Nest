@@ -2,58 +2,52 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type core.Option.<i32> = struct {           // was a enum; size 8, align 4
-  tag: u8                    // +0
-  payload: [4]u8                    // +4
-}
-  // tag 0 => .some(0: i32 +0)
-  // tag 1 => .none
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  type core.Option.<i32> = struct {           // was a enum; size 8, align 4
+    tag: u8                    // +0
+    payload: [4]u8                    // +4
+  }
+    // tag 0 => .some as core.Option.<i32>.some(0: i32 +0)
+    // tag 1 => .none as core.Option.<i32>.none
+  type core.Option.<i32>.some = struct {           // was a variant of core.Option.<i32>; size 4, align 4
+    0: i32                    // +0
+  }
+  type core.Option.<i32>.none = struct {           // was a variant of core.Option.<i32>; size 0, align 1
+  }
 
-func pick(o_0: core.Option.<i32>) -> i32  // _NC4pick
-  let _1: i32
-  let _2: u8
-  let x_3: i32
-  let _4: bool
-  let y_5: i32
-bb0:                    // entry
-  _2 := o_0.tag
-  switch _2 { 0 => bb7, 1 => bb10, _ => bb5 }
-bb1:                    // join
-  return _1
-bb2:                    // arm .some
-  _1 := x_3
-  goto bb1
-bb3:                    // arm .some
-  _1 := y_5
-  goto bb1
-bb4:                    // arm .none
-  _1 := 0
-  goto bb1
-bb5:                    // no variant matched
-  unreachable
-bb6:                    // unreachable
-  unreachable
-bb7:                    // .some
-  x_3 := (o_0 as some).0
-  _4 := x_3 > 0
-  switch _4 { 1 => bb9, _ => bb8 }
-bb8:
-  y_5 := (o_0 as some).0
-  goto bb3
-bb9:
-  goto bb2
-bb10:                    // .none
-  goto bb4
+  func pick(o_0: core.Option.<i32>) -> i32  // _NC4pick
+    let _1: i32
+    let _2: u8
+    let x_3: i32
+    let _4: bool
+    let y_5: i32
+  bb0:                    // entry
+    _2 := o_0.tag
+    switch.u8 _2 { 0 => bb7, 1 => bb10, _ => bb5 }
+  bb1:                    // join
+    return _1
+  bb2:                    // arm .some
+    _1 := x_3
+    goto bb1
+  bb3:                    // arm .some
+    _1 := y_5
+    goto bb1
+  bb4:                    // arm .none
+    _1 := 0
+    goto bb1
+  bb5:                    // no variant matched
+    unreachable
+  bb6:                    // unreachable
+    unreachable
+  bb7:                    // .some
+    x_3 := (o_0.payload as core.Option.<i32>.some).0
+    _4 := gt.i32 x_3, 0
+    switch.bool _4 { 1 => bb9, _ => bb8 }
+  bb8:
+    y_5 := (o_0.payload as core.Option.<i32>.some).0
+    goto bb3
+  bb9:
+    goto bb2
+  bb10:                    // .none
+    goto bb4
+}

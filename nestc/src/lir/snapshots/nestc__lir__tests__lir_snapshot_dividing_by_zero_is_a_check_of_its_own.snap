@@ -2,64 +2,82 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type (i32, bool) = struct {           // was a tuple; size 8, align 4
-  0: i32                    // +0
-  1: bool                    // +4
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  type []u8 = struct {           // was a slice; size 16, align 8
+    ptr: *u8                    // +0
+    len: u64                    // +8
+  }
+  type core.Location = struct {           // was a struct; size 24, align 8
+    file: []u8                    // +0
+    line: u32                    // +16
+    column: u32                    // +20
+  }
+  type (i32, bool) = struct {           // was a tuple; size 8, align 4
+    0: i32                    // +0
+    1: bool                    // +4
+  }
+  private const const.str.0: [16]u8 = b"division by zero"  // _NK0
+  private const const.str.1: [8]u8 = b"mem:main"  // _NK1
+  private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
 
-func by_value(a_0: i32, b_1: i32) -> i32  // _NC8by_value
-  let _2: bool
-  let _3: core.Location
-  let _4: (i32, bool)
-  let _5: core.Location
-bb0:                    // entry
-  _2 := b_1 != 0
-  switch _2 { 1 => bb2, _ => bb1 }
-bb1:                    // division by zero
-  _3 := Location("mem:main", 1, 51)
-  call core.panic("division by zero", _3)
-    @safepoint { live: [_3]
-      _3 := reloc _3
-    }
-  unreachable
-bb2:
-  _4 := checked_div(a_0, b_1)
-  switch _4.1 { 1 => bb3, _ => bb4 }
-bb3:                    // overflow
-  _5 := Location("mem:main", 1, 51)
-  call core.panic("integer overflow", _5)
-    @safepoint { live: [_5]
-      _5 := reloc _5
-    }
-  unreachable
-bb4:
-  return _4.0
+  func by_value(a_0: i32, b_1: i32) -> i32  // _NC8by_value
+    let _2: bool
+    let _3: []u8
+    let _4: []u8
+    let _5: core.Location
+    let _6: (i32, bool)
+    let _7: []u8
+    let _8: []u8
+    let _9: core.Location
+  bb0:                    // entry
+    _2 := ne.i32 b_1, 0
+    switch.bool _2 { 1 => bb2, _ => bb1 }
+  bb1:                    // division by zero
+    _3 := []u8(&const.str.0, 16)
+    _4 := []u8(&const.str.1, 8)
+    _5 := core.Location(_4, 1, 51)
+    call core.panic(_3, _5)
+      @safepoint { live: [_3, _5]
+        _3 := reloc _3
+        _5 := reloc _5
+      }
+    unreachable
+  bb2:
+    _6 := div.i32 a_0, b_1
+    switch.bool _6.1 { 1 => bb3, _ => bb4 }
+  bb3:                    // overflow
+    _7 := []u8(&const.str.2, 16)
+    _8 := []u8(&const.str.1, 8)
+    _9 := core.Location(_8, 1, 51)
+    call core.panic(_7, _9)
+      @safepoint { live: [_7, _9]
+        _7 := reloc _7
+        _9 := reloc _9
+      }
+    unreachable
+  bb4:
+    return _6.0
 
-func by_constant(a_0: i32) -> i32  // _NC11by_constant
-  let _1: (i32, bool)
-  let _2: core.Location
-bb0:                    // entry
-  _1 := checked_rem(a_0, 2)
-  switch _1.1 { 1 => bb1, _ => bb2 }
-bb1:                    // overflow
-  _2 := Location("mem:main", 2, 46)
-  call core.panic("integer overflow", _2)
-    @safepoint { live: [_2]
-      _2 := reloc _2
-    }
-  unreachable
-bb2:
-  return _1.0
+  func by_constant(a_0: i32) -> i32  // _NC11by_constant
+    let _1: (i32, bool)
+    let _2: []u8
+    let _3: []u8
+    let _4: core.Location
+  bb0:                    // entry
+    _1 := rem.i32 a_0, 2
+    switch.bool _1.1 { 1 => bb1, _ => bb2 }
+  bb1:                    // overflow
+    _2 := []u8(&const.str.2, 16)
+    _3 := []u8(&const.str.1, 8)
+    _4 := core.Location(_3, 2, 46)
+    call core.panic(_2, _4)
+      @safepoint { live: [_2, _4]
+        _2 := reloc _2
+        _4 := reloc _4
+      }
+    unreachable
+  bb2:
+    return _1.0
+
+  declare func core.panic(msg_0: []u8, loc_1: core.Location) -> never @public  // _NC4core5panic
+}

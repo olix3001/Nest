@@ -2,61 +2,74 @@
 source: src/lir/tests.rs
 expression: lir_text_with_spans(src)
 ---
-type []i32 = struct {           // was a slice; size 16, align 8
-  ptr: *i32                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type (i32, bool) = struct {           // was a tuple; size 8, align 4
-  0: i32                    // +0
-  1: bool                    // +4
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
+  type []i32 = struct {           // was a slice; size 16, align 8
+    ptr: *i32                    // +0
+    len: u64                    // +8
+  }
+  type []u8 = struct {           // was a slice; size 16, align 8
+    ptr: *u8                    // +0
+    len: u64                    // +8
+  }
+  type core.Location = struct {           // was a struct; size 24, align 8
+    file: []u8                    // +0
+    line: u32                    // +16
+    column: u32                    // +20
+  }
+  type (i32, bool) = struct {           // was a tuple; size 8, align 4
+    0: i32                    // +0
+    1: bool                    // +4
+  }
+  private const const.str.0: [19]u8 = b"index out of bounds"  // _NK0
+  private const const.str.1: [8]u8 = b"mem:main"  // _NK1
+  private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
 
-func sum(xs_0: []i32, k_1: u64) -> i32  // _NC3sum   // mem:main:1:8
-  let _2: i32   // mem:main:2:3
-  let total_3: i32   // mem:main:2:7
-  let _4: *[]i32   // mem:main:3:19
-  let _5: bool   // mem:main:3:19
-  let _6: core.Location   // mem:main:3:19
-  let _7: *i32   // mem:main:3:19
-  let _8: (i32, bool)   // mem:main:3:11
-  let _9: core.Location   // mem:main:3:11
-bb0:                    // entry
-  _2 := 0   // mem:main:2:3
-  total_3 := _2   // mem:main:2:7
-  _4 := &xs_0   // mem:main:3:19
-  _5 := k_1 < _4.*.len   // mem:main:3:19
-  switch _5 { 1 => bb2, _ => bb1 }   // mem:main:3:19
-bb1:                    // out of bounds
-  _6 := Location("mem:main", 3, 19)   // mem:main:3:19
-  call core.panic("index out of bounds", _6)   // mem:main:3:19
-    @safepoint { live: [_6]
-      _6 := reloc _6
-    }
-  unreachable   // mem:main:3:19
-bb2:
-  _7 := _4.*.ptr + k_1 * 4   // mem:main:3:19
-  _8 := checked_add(total_3, _7.*)   // mem:main:3:11
-  switch _8.1 { 1 => bb3, _ => bb4 }   // mem:main:3:11
-bb3:                    // overflow
-  _9 := Location("mem:main", 3, 11)   // mem:main:3:11
-  call core.panic("integer overflow", _9)   // mem:main:3:11
-    @safepoint { live: [_9]
-      _9 := reloc _9
-    }
-  unreachable   // mem:main:3:11
-bb4:
-  total_3 := _8.0   // mem:main:3:3
-  return total_3   // mem:main:4:3
+  func sum(xs_0: []i32, k_1: u64) -> i32  // _NC3sum   // mem:main:1:8
+    let _2: i32   // mem:main:2:3
+    let total_3: i32   // mem:main:2:7
+    let _4: *[]i32   // mem:main:3:19
+    let _5: bool   // mem:main:3:19
+    let _6: []u8   // mem:main:3:19
+    let _7: []u8   // mem:main:3:19
+    let _8: core.Location   // mem:main:3:19
+    let _9: *i32   // mem:main:3:19
+    let _10: (i32, bool)   // mem:main:3:11
+    let _11: []u8   // mem:main:3:11
+    let _12: []u8   // mem:main:3:11
+    let _13: core.Location   // mem:main:3:11
+  bb0:                    // entry
+    _2 := 0   // mem:main:2:3
+    total_3 := _2   // mem:main:2:7
+    _4 := &xs_0   // mem:main:3:19
+    _5 := lt.u64 k_1, _4.*.len   // mem:main:3:19
+    switch.bool _5 { 1 => bb2, _ => bb1 }   // mem:main:3:19
+  bb1:                    // out of bounds
+    _6 := []u8(&const.str.0, 19)   // mem:main:3:19
+    _7 := []u8(&const.str.1, 8)   // mem:main:3:19
+    _8 := core.Location(_7, 3, 19)   // mem:main:3:19
+    call core.panic(_6, _8)   // mem:main:3:19
+      @safepoint { live: [_6, _8]
+        _6 := reloc _6
+        _8 := reloc _8
+      }
+    unreachable   // mem:main:3:19
+  bb2:
+    _9 := _4.*.ptr + k_1 * 4   // mem:main:3:19
+    _10 := add_checked.i32 total_3, _9.*   // mem:main:3:11
+    switch.bool _10.1 { 1 => bb3, _ => bb4 }   // mem:main:3:11
+  bb3:                    // overflow
+    _11 := []u8(&const.str.2, 16)   // mem:main:3:11
+    _12 := []u8(&const.str.1, 8)   // mem:main:3:11
+    _13 := core.Location(_12, 3, 11)   // mem:main:3:11
+    call core.panic(_11, _13)   // mem:main:3:11
+      @safepoint { live: [_11, _13]
+        _11 := reloc _11
+        _13 := reloc _13
+      }
+    unreachable   // mem:main:3:11
+  bb4:
+    total_3 := _10.0   // mem:main:3:3
+    return total_3   // mem:main:4:3
+
+  declare func core.panic(msg_0: []u8, loc_1: core.Location) -> never @public  // _NC4core5panic   // fail.nest:25:18
+}

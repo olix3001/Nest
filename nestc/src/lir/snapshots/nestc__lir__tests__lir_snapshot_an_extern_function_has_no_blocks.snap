@@ -2,28 +2,16 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
+unit mem:main {
 
-extern("c") func puts(s_0: *u8) -> i32  // puts
-  // declaration only
+  declare extern("c") func puts(s_0: *u8) -> i32  // puts
 
-func shout(s_0: *u8) -> i32  // _NC5shout
-  let _1: i32
-bb0:                    // entry
-  _1 := call puts(s_0)
-    @safepoint { live: [s_0]
-      s_0 := reloc s_0
-    }
-  return _1
+  func shout(s_0: *u8) -> i32  // _NC5shout
+    let _1: i32
+  bb0:                    // entry
+    _1 := call puts(s_0)
+      @safepoint { live: [s_0]
+        s_0 := reloc s_0
+      }
+    return _1
+}

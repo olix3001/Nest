@@ -2,246 +2,277 @@
 source: src/lir/tests.rs
 expression: lir_text(src)
 ---
-type Square = struct {           // was a struct; size 4, align 4
-  s: i32                    // +0
-}
-type Circle = struct {           // was a struct; size 4, align 4
-  r: i32                    // +0
-}
-type Box.<i32> = struct {           // was a struct; size 4, align 4
-  v: i32                    // +0
-}
-type *dyn Draw = struct {           // was a dyn; size 16, align 8
-  data: *void                    // +0
-  vtable: *void                    // +8
-}
-type (i32, bool) = struct {           // was a tuple; size 8, align 4
-  0: i32                    // +0
-  1: bool                    // +4
-}
-type core.Location = struct {           // was a struct; size 24, align 8
-  file: []u8                    // +0
-  line: u32                    // +16
-  column: u32                    // +20
-}
-type []u8 = struct {           // was a slice; size 16, align 8
-  ptr: *u8                    // +0
-  len: u64                    // +8
-}
-type (u64, bool) = struct {           // was a tuple; size 16, align 8
-  0: u64                    // +0
-  1: bool                    // +8
-}
-vtable _NVN4DrawIEN6SquareIE for Square as Draw {
-  [0] area = _NC6SquareXN4DrawIE4area
-  [1] perimeter = _NC6SquareXN4DrawIE9perimeter
-  [2] sides = _NC6SquareXN4DrawIE5sides
-}
-vtable _NVN4DrawIEN6CircleIE for Circle as Draw {
-  [0] area = _NC6CircleXN4DrawIE4area
-  [1] perimeter = _NC6CircleXN4DrawIE9perimeter
-  [2] sides = _NC6CircleXN4DrawIE5sides
-}
-vtable _NVN4DrawIEN3BoxIi32E for Box.<i32> as Draw {
-  [0] area = _NC3BoxXN4DrawIE4area
-  [1] perimeter = _NC3BoxXN4DrawIE9perimeter
-  [2] sides = _NC3BoxXN4DrawIE5sides
-}
+unit mem:main {
+  type Square = struct {           // was a struct; size 4, align 4
+    s: i32                    // +0
+  }
+  type Circle = struct {           // was a struct; size 4, align 4
+    r: i32                    // +0
+  }
+  type Box.<i32> = struct {           // was a struct; size 4, align 4
+    v: i32                    // +0
+  }
+  type []u8 = struct {           // was a slice; size 16, align 8
+    ptr: *u8                    // +0
+    len: u64                    // +8
+  }
+  type core.Location = struct {           // was a struct; size 24, align 8
+    file: []u8                    // +0
+    line: u32                    // +16
+    column: u32                    // +20
+  }
+  type vtable.Draw = struct {           // was a vtable for Draw; size 24, align 8
+    area: func(*void) -> i32                    // +0
+    perimeter: func(*void) -> i32                    // +8
+    sides: func(*void) -> i32                    // +16
+  }
+  type *dyn Draw = struct {           // was a dyn Draw; size 16, align 8
+    data: *void                    // +0
+    vtable: *vtable.Draw                    // +8
+  }
+  type (i32, bool) = struct {           // was a tuple; size 8, align 4
+    0: i32                    // +0
+    1: bool                    // +4
+  }
+  private const vtable.Draw.for.Square: vtable.Draw = { &Square.<as Draw>.area, &Square.<as Draw>.perimeter, &Square.<as Draw>.sides }  // _NVN4DrawIEN6SquareIE
+  private const vtable.Draw.for.Circle: vtable.Draw = { &Circle.<as Draw>.area, &Circle.<as Draw>.perimeter, &Circle.<as Draw>.sides }  // _NVN4DrawIEN6CircleIE
+  private const vtable.Draw.for.Box.<i32>: vtable.Draw = { &Box.<as Draw>.area, &Box.<as Draw>.perimeter, &Box.<as Draw>.sides }  // _NVN4DrawIEN3BoxIi32E
+  private const const.str.3: [16]u8 = b"integer overflow"  // _NK3
+  private const const.str.4: [8]u8 = b"mem:main"  // _NK4
 
-func total(sq_0: *Square, ci_1: *Circle, bx_2: *Box.<i32>) -> i32  // _NC5total
-  let _3: *dyn Draw
-  let _4: *dyn Draw
-  let a_5: *dyn Draw
-  let _6: *dyn Draw
-  let _7: *dyn Draw
-  let b_8: *dyn Draw
-  let _9: *dyn Draw
-  let _10: *dyn Draw
-  let c_11: *dyn Draw
-  let _12: *dyn Draw
-  let _13: *dyn Draw
-  let d_14: *dyn Draw
-  let _15: *void
-  let _16: i32
-  let _17: *void
-  let _18: i32
-  let _19: (i32, bool)
-  let _20: core.Location
-  let _21: *void
-  let _22: i32
-  let _23: (i32, bool)
-  let _24: core.Location
-  let _25: *void
-  let _26: i32
-  let _27: (i32, bool)
-  let _28: core.Location
-bb0:                    // entry
-  _3 := dyn(sq_0, &vtable#0)
-  _4 := _3
-  a_5 := _4
-  _6 := dyn(ci_1, &vtable#1)
-  _7 := _6
-  b_8 := _7
-  _9 := dyn(bx_2, &vtable#2)
-  _10 := _9
-  c_11 := _10
-  _12 := dyn(sq_0, &vtable#0)
-  _13 := _12
-  d_14 := _13
-  _15 := a_5.vtable.*.area
-  _16 := call (_15)(a_5)
-    @safepoint { live: [a_5, b_8, c_11, d_14, _15]
-      a_5 := reloc a_5
-      b_8 := reloc b_8
-      c_11 := reloc c_11
-      d_14 := reloc d_14
-      _15 := reloc _15
-    }
-  _17 := b_8.vtable.*.perimeter
-  _18 := call (_17)(b_8)
-    @safepoint { live: [b_8, c_11, d_14, _17]
-      b_8 := reloc b_8
-      c_11 := reloc c_11
-      d_14 := reloc d_14
-      _17 := reloc _17
-    }
-  _19 := checked_add(_16, _18)
-  switch _19.1 { 1 => bb1, _ => bb2 }
-bb1:                    // overflow
-  _20 := Location("mem:main", 30, 10)
-  call core.panic("integer overflow", _20)
-    @safepoint { live: [_20]
-      _20 := reloc _20
-    }
-  unreachable
-bb2:
-  _21 := c_11.vtable.*.sides
-  _22 := call (_21)(c_11)
-    @safepoint { live: [c_11, d_14, _21]
-      c_11 := reloc c_11
-      d_14 := reloc d_14
-      _21 := reloc _21
-    }
-  _23 := checked_add(_19.0, _22)
-  switch _23.1 { 1 => bb3, _ => bb4 }
-bb3:                    // overflow
-  _24 := Location("mem:main", 30, 10)
-  call core.panic("integer overflow", _24)
-    @safepoint { live: [_24]
-      _24 := reloc _24
-    }
-  unreachable
-bb4:
-  _25 := d_14.vtable.*.sides
-  _26 := call (_25)(d_14)
-    @safepoint { live: [d_14, _25]
-      d_14 := reloc d_14
-      _25 := reloc _25
-    }
-  _27 := checked_add(_23.0, _26)
-  switch _27.1 { 1 => bb5, _ => bb6 }
-bb5:                    // overflow
-  _28 := Location("mem:main", 30, 10)
-  call core.panic("integer overflow", _28)
-    @safepoint { live: [_28]
-      _28 := reloc _28
-    }
-  unreachable
-bb6:
-  return _27.0
+  func total(sq_0: *Square, ci_1: *Circle, bx_2: *Box.<i32>) -> i32  // _NC5total
+    let _3: *dyn Draw
+    let _4: *dyn Draw
+    let a_5: *dyn Draw
+    let _6: *dyn Draw
+    let _7: *dyn Draw
+    let b_8: *dyn Draw
+    let _9: *dyn Draw
+    let _10: *dyn Draw
+    let c_11: *dyn Draw
+    let _12: *dyn Draw
+    let _13: *dyn Draw
+    let d_14: *dyn Draw
+    let _15: func(*void) -> i32
+    let _16: i32
+    let _17: func(*void) -> i32
+    let _18: i32
+    let _19: (i32, bool)
+    let _20: []u8
+    let _21: []u8
+    let _22: core.Location
+    let _23: func(*void) -> i32
+    let _24: i32
+    let _25: (i32, bool)
+    let _26: []u8
+    let _27: []u8
+    let _28: core.Location
+    let _29: func(*void) -> i32
+    let _30: i32
+    let _31: (i32, bool)
+    let _32: []u8
+    let _33: []u8
+    let _34: core.Location
+  bb0:                    // entry
+    _3 := *dyn Draw(sq_0, &vtable.Draw.for.Square)
+    _4 := _3
+    a_5 := _4
+    _6 := *dyn Draw(ci_1, &vtable.Draw.for.Circle)
+    _7 := _6
+    b_8 := _7
+    _9 := *dyn Draw(bx_2, &vtable.Draw.for.Box.<i32>)
+    _10 := _9
+    c_11 := _10
+    _12 := *dyn Draw(sq_0, &vtable.Draw.for.Square)
+    _13 := _12
+    d_14 := _13
+    _15 := a_5.vtable.*.area
+    _16 := call (_15)(a_5)
+      @safepoint { live: [a_5, b_8, c_11, d_14]
+        a_5 := reloc a_5
+        b_8 := reloc b_8
+        c_11 := reloc c_11
+        d_14 := reloc d_14
+      }
+    _17 := b_8.vtable.*.perimeter
+    _18 := call (_17)(b_8)
+      @safepoint { live: [b_8, c_11, d_14]
+        b_8 := reloc b_8
+        c_11 := reloc c_11
+        d_14 := reloc d_14
+      }
+    _19 := add_checked.i32 _16, _18
+    switch.bool _19.1 { 1 => bb1, _ => bb2 }
+  bb1:                    // overflow
+    _20 := []u8(&const.str.3, 16)
+    _21 := []u8(&const.str.4, 8)
+    _22 := core.Location(_21, 30, 10)
+    call core.panic(_20, _22)
+      @safepoint { live: [_20, _22]
+        _20 := reloc _20
+        _22 := reloc _22
+      }
+    unreachable
+  bb2:
+    _23 := c_11.vtable.*.sides
+    _24 := call (_23)(c_11)
+      @safepoint { live: [c_11, d_14]
+        c_11 := reloc c_11
+        d_14 := reloc d_14
+      }
+    _25 := add_checked.i32 _19.0, _24
+    switch.bool _25.1 { 1 => bb3, _ => bb4 }
+  bb3:                    // overflow
+    _26 := []u8(&const.str.3, 16)
+    _27 := []u8(&const.str.4, 8)
+    _28 := core.Location(_27, 30, 10)
+    call core.panic(_26, _28)
+      @safepoint { live: [_26, _28]
+        _26 := reloc _26
+        _28 := reloc _28
+      }
+    unreachable
+  bb4:
+    _29 := d_14.vtable.*.sides
+    _30 := call (_29)(d_14)
+      @safepoint { live: [d_14]
+        d_14 := reloc d_14
+      }
+    _31 := add_checked.i32 _25.0, _30
+    switch.bool _31.1 { 1 => bb5, _ => bb6 }
+  bb5:                    // overflow
+    _32 := []u8(&const.str.3, 16)
+    _33 := []u8(&const.str.4, 8)
+    _34 := core.Location(_33, 30, 10)
+    call core.panic(_32, _34)
+      @safepoint { live: [_32, _34]
+        _32 := reloc _32
+        _34 := reloc _34
+      }
+    unreachable
+  bb6:
+    return _31.0
 
-func Square.<as Draw>.area(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE4area
-  let _1: (i32, bool)
-  let _2: core.Location
-bb0:                    // entry
-  _1 := checked_mul(self_0.*.s, self_0.*.s)
-  switch _1.1 { 1 => bb1, _ => bb2 }
-bb1:                    // overflow
-  _2 := Location("mem:main", 10, 46)
-  call core.panic("integer overflow", _2)
-    @safepoint { live: [_2]
-      _2 := reloc _2
-    }
-  unreachable
-bb2:
-  return _1.0
+  func Square.<as Draw>.area(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE4area
+    let _1: (i32, bool)
+    let _2: []u8
+    let _3: []u8
+    let _4: core.Location
+  bb0:                    // entry
+    _1 := mul_checked.i32 self_0.*.s, self_0.*.s
+    switch.bool _1.1 { 1 => bb1, _ => bb2 }
+  bb1:                    // overflow
+    _2 := []u8(&const.str.3, 16)
+    _3 := []u8(&const.str.4, 8)
+    _4 := core.Location(_3, 10, 46)
+    call core.panic(_2, _4)
+      @safepoint { live: [_2, _4]
+        _2 := reloc _2
+        _4 := reloc _4
+      }
+    unreachable
+  bb2:
+    return _1.0
 
-func Square.<as Draw>.perimeter(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE9perimeter
-  let _1: (i32, bool)
-  let _2: core.Location
-bb0:                    // entry
-  _1 := checked_mul(self_0.*.s, 4)
-  switch _1.1 { 1 => bb1, _ => bb2 }
-bb1:                    // overflow
-  _2 := Location("mem:main", 11, 51)
-  call core.panic("integer overflow", _2)
-    @safepoint { live: [_2]
-      _2 := reloc _2
-    }
-  unreachable
-bb2:
-  return _1.0
+  func Square.<as Draw>.perimeter(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE9perimeter
+    let _1: (i32, bool)
+    let _2: []u8
+    let _3: []u8
+    let _4: core.Location
+  bb0:                    // entry
+    _1 := mul_checked.i32 self_0.*.s, 4
+    switch.bool _1.1 { 1 => bb1, _ => bb2 }
+  bb1:                    // overflow
+    _2 := []u8(&const.str.3, 16)
+    _3 := []u8(&const.str.4, 8)
+    _4 := core.Location(_3, 11, 51)
+    call core.panic(_2, _4)
+      @safepoint { live: [_2, _4]
+        _2 := reloc _2
+        _4 := reloc _4
+      }
+    unreachable
+  bb2:
+    return _1.0
 
-func Square.<as Draw>.sides(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE5sides
-bb0:                    // entry
-  return 4
+  func Square.<as Draw>.sides(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE5sides
+  bb0:                    // entry
+    return 4
 
-func Circle.<as Draw>.area(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE4area
-  let _1: (i32, bool)
-  let _2: core.Location
-  let _3: (i32, bool)
-  let _4: core.Location
-bb0:                    // entry
-  _1 := checked_mul(self_0.*.r, self_0.*.r)
-  switch _1.1 { 1 => bb1, _ => bb2 }
-bb1:                    // overflow
-  _2 := Location("mem:main", 15, 46)
-  call core.panic("integer overflow", _2)
-    @safepoint { live: [_2]
-      _2 := reloc _2
-    }
-  unreachable
-bb2:
-  _3 := checked_mul(_1.0, 3)
-  switch _3.1 { 1 => bb3, _ => bb4 }
-bb3:                    // overflow
-  _4 := Location("mem:main", 15, 46)
-  call core.panic("integer overflow", _4)
-    @safepoint { live: [_4]
-      _4 := reloc _4
-    }
-  unreachable
-bb4:
-  return _3.0
+  func Circle.<as Draw>.area(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE4area
+    let _1: (i32, bool)
+    let _2: []u8
+    let _3: []u8
+    let _4: core.Location
+    let _5: (i32, bool)
+    let _6: []u8
+    let _7: []u8
+    let _8: core.Location
+  bb0:                    // entry
+    _1 := mul_checked.i32 self_0.*.r, self_0.*.r
+    switch.bool _1.1 { 1 => bb1, _ => bb2 }
+  bb1:                    // overflow
+    _2 := []u8(&const.str.3, 16)
+    _3 := []u8(&const.str.4, 8)
+    _4 := core.Location(_3, 15, 46)
+    call core.panic(_2, _4)
+      @safepoint { live: [_2, _4]
+        _2 := reloc _2
+        _4 := reloc _4
+      }
+    unreachable
+  bb2:
+    _5 := mul_checked.i32 _1.0, 3
+    switch.bool _5.1 { 1 => bb3, _ => bb4 }
+  bb3:                    // overflow
+    _6 := []u8(&const.str.3, 16)
+    _7 := []u8(&const.str.4, 8)
+    _8 := core.Location(_7, 15, 46)
+    call core.panic(_6, _8)
+      @safepoint { live: [_6, _8]
+        _6 := reloc _6
+        _8 := reloc _8
+      }
+    unreachable
+  bb4:
+    return _5.0
 
-func Circle.<as Draw>.perimeter(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE9perimeter
-  let _1: (i32, bool)
-  let _2: core.Location
-bb0:                    // entry
-  _1 := checked_mul(self_0.*.r, 6)
-  switch _1.1 { 1 => bb1, _ => bb2 }
-bb1:                    // overflow
-  _2 := Location("mem:main", 16, 51)
-  call core.panic("integer overflow", _2)
-    @safepoint { live: [_2]
-      _2 := reloc _2
-    }
-  unreachable
-bb2:
-  return _1.0
+  func Circle.<as Draw>.perimeter(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE9perimeter
+    let _1: (i32, bool)
+    let _2: []u8
+    let _3: []u8
+    let _4: core.Location
+  bb0:                    // entry
+    _1 := mul_checked.i32 self_0.*.r, 6
+    switch.bool _1.1 { 1 => bb1, _ => bb2 }
+  bb1:                    // overflow
+    _2 := []u8(&const.str.3, 16)
+    _3 := []u8(&const.str.4, 8)
+    _4 := core.Location(_3, 16, 51)
+    call core.panic(_2, _4)
+      @safepoint { live: [_2, _4]
+        _2 := reloc _2
+        _4 := reloc _4
+      }
+    unreachable
+  bb2:
+    return _1.0
 
-func Circle.<as Draw>.sides(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE5sides
-bb0:                    // entry
-  return 0
+  func Circle.<as Draw>.sides(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE5sides
+  bb0:                    // entry
+    return 0
 
-func Box.<as Draw>.area(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE4area
-bb0:                    // entry
-  return self_0.*.v
+  func Box.<as Draw>.area(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE4area
+  bb0:                    // entry
+    return self_0.*.v
 
-func Box.<as Draw>.perimeter(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE9perimeter
-bb0:                    // entry
-  return self_0.*.v
+  func Box.<as Draw>.perimeter(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE9perimeter
+  bb0:                    // entry
+    return self_0.*.v
 
-func Box.<as Draw>.sides(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE5sides
-bb0:                    // entry
-  return 1
+  func Box.<as Draw>.sides(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE5sides
+  bb0:                    // entry
+    return 1
+
+  declare func core.panic(msg_0: []u8, loc_1: core.Location) -> never @public  // _NC4core5panic
+}

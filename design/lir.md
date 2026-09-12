@@ -1,9 +1,10 @@
 # LIR — the low-level IR
 
-**Status**: §1, §2, §3, §4, §7, §7b, §7cc, §7c and §7d are **built** —
-`nestc/src/lir/` is the representation (`mod.rs`), the lowering (`lower.rs`) and
-the dump (`pretty.rs`). §5 (drops) and §6 (GC safepoints) are not; they are the
-next phase, and both ride the ladder §3 already builds.
+**Status**: **all of it is built.** `nestc/src/lir/` is the representation
+(`mod.rs`), the lowering (`lower.rs`), the escape analysis (`escape.rs`), the
+safepoint pass (`safepoint.rs`), the codegen-unit split (`unit.rs`) and the dump
+(`pretty.rs`). §11 — codegen units — is the newest part, and §10 is the list a
+backend answers for.
 
 LIR is the last stage before code generation. It is deliberately *not* LLVM IR:
 it keeps Nest's type system, its GC model and its `defer` semantics, all of which
@@ -24,30 +25,50 @@ A function is locals plus blocks. Locals are declared up front; blocks are
 labelled and end in exactly one terminator.
 
 ```
-func f(a: i32, b: i32) -> bool {          // examples/f.nest:3:1
-  let p: Point                            // 4:7
-  let t0: i32
-  let t1: bool
-bb0:
-  t0 := a + b                             // 5:11
-  p.x = t0                                // 6:3
-  t1 := call g(&p)                        // 7:14
-    @safepoint { live: [p]
-      p := reloc p
-    }
-  switch t1 { 1 => bb1, _ => bb2 }
-bb1:
-  return t1
-bb2:
-  return false
+unit f {                                    // one codegen unit (§11)
+  type Point = struct {                     // size 8, align 4
+    x: i32                                  // +0
+    y: i32                                  // +4
+  }
+
+  func f(a_0: i32, b_1: i32) -> bool  // _NC1f   // examples/f.nest:3:1
+    let p_2: Point                          // 4:7
+    let _3: i32
+    let _4: bool
+  bb0:
+    _3 := add.i32 a_0, b_1                  // 5:11
+    p_2.x = _3                              // 6:3
+    _4 := call g(&p_2)                      // 7:14
+      @safepoint { live: [p_2]
+        p_2 := reloc p_2
+      }
+    switch.bool _4 { 1 => bb1, _ => bb2 }
+  bb1:
+    return _4
+  bb2:
+    return false
+
+  declare func g(p_0: *Point) -> bool  // _NC1g
 }
 ```
 
-There are **four** instructions — an assignment, a call, an intrinsic and a
-`drop` (§5) — and four terminators. That is the whole set, and keeping it that
-small is the point: a backend for C, for LLVM, or for wasm has to answer for each
-of them, so every operation this level invents is a question asked of every
-backend that will ever exist. §10 is that list from the backend's side.
+**Everything in a dump is written out in full**: an operation is a word and a
+type (`add.i32`, `lt.u64`), a type is named the way the source names it, a
+function is its whole path with its symbol beside it, and a global is its name
+and never its index. The indices the structures hold are how a *backend* resolves
+a reference; a person reading a dump should never have to.
+
+There are **three** instructions — an assignment, a call and a `drop` (§5) — and
+four terminators. That is the whole set, and keeping it that small is the point:
+a backend for C, for LLVM, or for wasm has to answer for each of them, so every
+operation this level invents is a question asked of every backend that will ever
+exist. §10 is that list from the backend's side.
+
+A **call** covers three things that differ only in how the code is reached: a
+symbol, a pointer, and an intrinsic. `call f(x)`, `call (t0)(x)` and `$new()` are
+one statement with three callees, not three statements, because everything else
+about them — arguments evaluated into operands, a result that may be discarded, a
+block that ends when the operation does not return — is the same question.
 
 `:=` **introduces** a value into a local; `=` **stores** into a place. That is
 the same distinction the source language draws, so it costs a reader nothing to
@@ -60,23 +81,24 @@ only reconstructed at the end is a span that is wrong.
 A **place** is an lvalue path: a local, plus a chain of projections.
 
 ```
-p               the local itself
-p.x             field `x`
-p.*             the pointee (dereference)
-p[i]            element `i`
-p.*.next.x      chained
-(p as Some).0   downcast to a variant, then its first field
+p                              the local itself
+p.x                            member `x`
+p.*                            the pointee (dereference)
+p[i]                           element `i`
+p.*.next.x                     chained
+(p.payload as Shape.circle).0  the payload, read as a variant's own type
 ```
 
-A place is never a value. `t0 := p.x` *loads* from a place; `p.x = t0` *stores*
+A place is never a value. `_3 := p_2.x` *loads* from a place; `p_2.x = _3` *stores*
 into one. Only the store form appears on the left of `=`.
 
-A **base** is a local or a `#static`, and nothing else. A `::` constant is not
-one: §2.5 says such a constant *is* its value, so it has no region and nothing
-can point at it. Where one is used as a place — `TABLE[1]`, since indexing goes
-through `core`'s `Index` impl and that takes `&TABLE` — the value is written
-into a slot first and the slot is the place. That is the same materialization
-`(a + b).x` gets, and it is why a backend never meets a base it cannot address.
+A **base** is a local or a global, and nothing else. A `::` constant that fits in
+a register is not one: §2.5 says such a constant *is* its value. One that does
+not fit — a string's bytes, an array constant — **is** a global by the time it
+gets here, because a blob is storage and storage has an address (§9, and §10's
+note on the data section). So `TABLE[1]` indexes the global holding `TABLE`, and
+`(a + b).x` still gets a slot of its own. Either way a backend never meets a base
+it cannot address.
 
 Field projections print **by name**, not by index. The index is what codegen
 wants, but a reader debugging a mis-lowered access needs to know which field it
@@ -87,14 +109,16 @@ does not tell them.
 
 ```
 goto bb1
-switch t { 0 => bb1, 1 => bb2, _ => bb3 }
+switch.u8 t { 0 => bb1, 1 => bb2, _ => bb3 }
 return t
 unreachable
 ```
 
 `switch` covers every branch: a two-way `if` is a switch on a `bool`, and a
-`match` is a switch on a discriminant (see §4). Calls are *instructions*, not
-terminators — a consequence of the panic model below.
+`match` is a switch on a tag (see §4). It carries the **type** it switches at,
+because the arm values are stored widened and the width they are compared at is
+the operand's, not the storage's. Calls are *instructions*, not terminators — a
+consequence of the panic model below.
 
 ## 2. Panics and the `never` type
 
@@ -251,20 +275,21 @@ e.match {
 
 ```
 bb0:
-  t0: u8 := discriminant(e)
-  switch t0 { 1 => bb1, 0 => bb4, _ => unreachable }
-bb1:                                 // Some
-  x := (e as Some).0
-  t1: bool := x > 0
-  switch t1 { true => bb2, false => bb3 }
+  _0 := e.tag                        // an ordinary member read (§7b)
+  switch.u8 _0 { 1 => bb1, 0 => bb4, _ => bb5 }
+bb1:                                 // .some
+  x_1 := (e.payload as Option.some).0
+  _2 := gt.i32 x_1, 0
+  switch.bool _2 { 1 => bb2, _ => bb3 }
 bb2: ... A ... goto join
 bb3: ... B ... goto join
 bb4: ... C ... goto join
+bb5: unreachable
 join:
 ```
 
-Tests are ordered so each is performed **once**: the discriminant is read a single
-time even though two arms match `Some`. A guard is a test like any other, except
+Tests are ordered so each is performed **once**: the tag is read a single
+time even though two arms match `.some`. A guard is a test like any other, except
 that a failed guard must fall through to the *next arm*, not to the next test —
 which is why the tree is built rather than a naive chain of comparisons emitted.
 
@@ -625,23 +650,26 @@ uniquely.
 Nothing outside monomorphization may construct a symbol. A pass that needs one
 asks the instantiation it already holds.
 
-### Directives that survive to LIR
+### Directives become decided attributes
 
-Directives are *carried* through the whole pipeline (`Def` and `ir::Function`
-both hold a `Vec<Directive>` and the front end deliberately passes along ones it
-has no opinion about). These are the ones LIR and codegen must still see:
+Directives are *carried* through the front end (`Def` and `ir::Function` both
+hold a `Vec<Directive>`, and the front end deliberately passes along ones it has
+no opinion about). A directive is an AST-shaped thing, though — a name and a list
+of arguments — and re-reading one is work every backend would do identically and
+could do differently. So the ones that still matter are **decided here**, into a
+`FunctionAttrs` a backend reads rather than interprets:
 
-| Directive | On | Meaning at this level |
+| Directive | Becomes | Meaning at this level |
 |---|---|---|
-| `#packed`, `#align(N)`, `#soa` | types, fields | already consumed by layout, but kept for debug info and for FFI checks |
-| `#section("...")` | functions, constants | which object-file section the symbol lands in |
-| `#offset(N)` | functions, constants | a fixed position in the generated binary |
-| `#inline` | functions | a codegen hint, never semantics |
-| `#raw` | fields | no zero-initialization |
-| `#unsafe` | functions, blocks | checks suppressed |
+| `#section("...")` | `attrs.section` | which object-file section the symbol lands in |
+| `#offset(N)` | `attrs.offset` | a fixed position in the generated binary |
+| `#inline` | `attrs.inline` | a codegen hint, never semantics |
+| `#unsafe` | `attrs.unchecked` | the checks this body was compiled without |
+| `@public` | `attrs.public` | whether the symbol must be visible outside the program — everything else may be given internal linkage (§11) |
 
-`#section` and `#offset` are the two that do not exist yet anywhere — see the
-plan.
+`#packed`, `#align(N)` and `#soa` do not appear: layout consumed them, and what
+they decided is in the offsets the type table already carries. `#raw` is a
+field's, and zero-initialization is the global's initializer being absent.
 
 ## 7b. Type definitions, and aggregates flattened to structs
 
@@ -658,12 +686,19 @@ codegen all need the contents. What LIR adds is the flattening:
 |---|---|
 | `struct { a: T, b: U }` | itself |
 | tuple struct, `(A, B)` | a struct with positional members `0`, `1` |
-| `distinct T` | **`T` itself** — the name is gone, see below |
-| `[]T` / `[]mut T` | `struct { ptr: *T, len: usize }` |
-| `enum { a, b(T) }` | `struct { tag: uN, payload: <union of the variants> }` |
-| `dyn Trait` | `struct { data: *void, vtable: *void }` |
-| a vtable | a struct of function pointers, and one constant per impl |
+| `distinct T` | **`T` itself** — the name is gone, see §9 |
+| `[]T` / `[]mut T` | `struct { ptr: *T, len: usize }` — **one** type, not two (§9) |
+| `enum { a, b(T) }` | `struct { tag: uN, payload: [N]u8 }`, plus a struct per variant |
+| `*dyn Trait` | `struct { data: *void, vtable: *vtable.Trait }` |
+| a vtable | `struct` of function pointers per **trait**, and a global per **impl** |
 | `[N]T` | **stays an array** |
+
+A type is a [`lir::Ty`], not the front end's: what a machine holds rather than
+what a program may say. Generics are gone (monomorphization), `distinct` is gone
+(§9), mutability is gone (§9), a `char` is the `u32` it is, and every aggregate
+is an **index into the unit's own type table**. That last one is what makes a
+unit self-contained (§11): nothing in it needs the compiler's def table to be
+understood.
 
 The reason to do it here rather than in codegen is that every LIR pass after this
 point asks structural questions — what is at this offset, is this field a
@@ -672,19 +707,58 @@ one more case every one of those passes has to learn. Flattened, a place
 projection is *always* "member `n` of a struct", and the drop, root and layout
 passes each have one rule instead of five.
 
-### Vtables are data, and data is a struct
+### Vtables are data, and data is an ordinary global
 
-A vtable is not a language construct at this level; it is a **constant**. Each
-`impl` that a `dyn Trait` may select gets one, whose type is a struct of function
-pointers in the trait's declaration order — the order `ir::TypeDef`'s
-`TypeDefKind::Trait` already fixes, for exactly this reason — and whose value is
-the addresses of that impl's methods. A `dyn` call is then two ordinary
-operations: project the slot, call through the pointer.
+A vtable is not a language construct at this level, and it is not a construct of
+LIR's either. It is **one struct type per trait** and **one immutable global per
+impl**:
 
-Making it a struct rather than a shape of its own is the same argument as the
-rest of the table: a vtable has an address, a layout and a member at an offset,
-and every pass that already handles those handles it for free. The trait
-disappears; the ordering it fixed does not.
+```
+type vtable.Draw = struct {           // one per trait, slots in declaration order
+  area:      func(*void) -> i32       // +0
+  perimeter: func(*void) -> i32       // +8
+  sides:     func(*void) -> i32       // +16
+}
+const vtable.Draw.for.Square: vtable.Draw = { &Square.area, &Square.perimeter, &Square.sides }
+type *dyn Draw = struct { data: *void, vtable: *vtable.Draw }
+```
+
+The slot order is the trait's declaration order — the order `ir::TypeDef`'s
+`TypeDefKind::Trait` already fixes, for exactly this reason — and *which*
+function fills each slot was decided by monomorphization, because the
+instantiated method that fills one does not exist until that pass makes it.
+
+Two consequences, and both are the point. Building a trait object is an ordinary
+aggregate over two operands, the second being the address of a global. And a
+dispatch is an ordinary member read: `s.vtable.*.area` is a `Field` on a struct
+whose offset is in the type table like every other, so a backend never computes
+`n * pointer_size` by hand. Nothing about vtables is left in the instruction set.
+
+The vtable pointer's type is the **trait's**, not the impl's. A `dyn` has erased
+the concrete type, so every impl's table has to be a value of one type for the
+slot offsets to be knowable at the call; a per-impl vtable type would put the
+backend straight back to computing offsets itself.
+
+### A variant is a type, so reading one is a member read
+
+An enum is `{ tag, payload }` with one payload big and aligned enough for every
+variant (§7cc). What the payload holds is **also a type** — one struct per
+variant, whose members sit at offsets relative to the payload:
+
+```
+type Shape = struct { tag: u8, payload: [8]u8 }
+  // tag 1 => .circle as Shape.circle(0: i32 +0)
+  // tag 2 => .rect   as Shape.rect { w: i32 +0, h: i32 +4 }
+```
+
+so `(s.payload as Shape.rect).w` is the whole of what reading a variant is: a
+member, a reinterpretation, and a member. The cast is a pointer cast on every
+target and is always legal — the shared payload is aligned for the widest
+variant, so it is aligned for each of them — and the field offsets under it come
+from the table rather than from a rule a backend has to know. The alternative,
+handing a backend `[N]u8` and the sentence "read these bytes as the variant's
+fields", is the one place where a place's type would not describe the bytes
+under it.
 
 ### Arrays do not flatten
 
@@ -732,17 +806,17 @@ unreachable by projection — a struct has members, not elements — so the
 arithmetic has to exist somewhere below the point where the bounds stopped being
 part of the type. This is that point.
 
-It is in **elements** and carries the element type rather than a byte stride,
-for the same reason everything else here carries a type: the stride is layout's
-answer (§7cc) and there should be one of it. An array needs none of this: it
-kept its own shape, so `a[i]` is an ordinary projection and `&a[i]` an ordinary
-address-of.
+It is in **elements**, and the stride beside it is a **number of bytes** — the
+element layout's size, tail padding included. Every other size in LIR is a number
+(a `TypeDef`'s layout, a member's offset), and a type here would send a backend
+back through the layout engine for an answer this compiler has already computed.
+An array needs none of this: it kept its own shape, so `a[i]` is an ordinary
+projection and `&a[i]` an ordinary address-of.
 
-The enum row is the one with a real decision in it: the tag's width and whether
-the payload is laid out as an overlapping union or as the widest variant are
-layout's to make, not the lowering's. What the lowering fixes is only the
-*shape* — a tag member and a payload member — so `(e as Some).0` becomes an
-ordinary two-step projection.
+The enum row is the one with a real decision in it: the tag's width and where
+the shared payload starts are layout's to make, not the lowering's. What the
+lowering fixes is only the *shape* — a tag member, a payload member, and a type
+per variant saying how to read it.
 
 Note this is a change of representation, not of information: the enum's variants
 and their names stay reachable through the type's definition, which is what a
@@ -887,9 +961,10 @@ first file is read and reaches LIR unchanged. Two of them change what gets
 
 | Setting | What changes at LIR |
 |---|---|
-| `overflow=trap` | an `add` becomes a checked add plus a branch to a panic block |
-| `overflow=wrap` | an `add` is a single wrapping instruction, no extra edge |
+| `overflow=trap` | `add` becomes `add_checked` plus a branch to a panic block |
+| `overflow=wrap` | `add` is a single instruction, no extra edge |
 | `pointer-width` | the width of `usize`/`isize`, and therefore every layout |
+| `codegen-units=N` | how many units the program is cut into (§11) |
 | debug level | how much of §7c survives to the object file |
 
 The overflow choice belongs at **LIR lowering**, not codegen, because the trap
@@ -903,13 +978,15 @@ emits a comparison against the length — the constant in a `[N]T`'s type, the
 `len` member of a `[]T` (§7b) — and a block that panics:
 
 ```
-t0 := k < s.len
-switch t0 { 1 => bb2, _ => bb1 }
+_0 := lt.u64 k_1, s_2.*.len
+switch.bool _0 { 1 => bb2, _ => bb1 }
 bb1:                    // out of bounds
-  call core.panic("index out of bounds", Location(...))
+  _3 := []u8(&const.str.0, 19)      // the message is data (§2.5)
+  _4 := core.Location(…)
+  call core.panic(_3, _4)
   unreachable
 bb2:
-  t1 := s.ptr + k * stride(i32)
+  _5 := s_2.*.ptr + k_1 * 4
 ```
 
 Two things elide it, and neither is an optimization: **`#unsafe`** (§9), whose
@@ -930,21 +1007,32 @@ Two things this setting does **not** change:
 - **Constants.** A `::` binding *is* its value (§2.5), and one that overflows is
   refused whatever the setting says — there is no running program for the wrapped
   answer to happen in. A written `$cast` is still how the low bits are asked for.
-- **The wrapping intrinsics.** `wrapping_add` wraps in a `trap` build too. That
-  is the whole point of it: the program said which behaviour it wanted, and a
-  setting that overrode it would make the intrinsic useless.
+- **The wrapping intrinsics.** `wrapping_add` lowers to `add` in a `trap` build
+  too — an `add` wraps by definition (§10), and what the setting changes is
+  whether a *check* is emitted around it, not what the instruction means. That is
+  the whole point of the intrinsic: the program said which behaviour it wanted,
+  and a setting that overrode it would make it useless.
 
 ## 8. What LIR still carries
 
 - **Types**, and the **definitions** behind them. Every local and every
-  instruction is typed; every nominal type's contents are reachable from its
-  `DefId`. Codegen needs layout, and the drop/root passes need to know what is a
-  pointer.
+  instruction is typed, and every aggregate's contents are an index into the
+  unit's own table (§7b). Codegen needs layout, and the drop and root passes need
+  to know what is a pointer.
 - **Spans.** On every instruction, for debug metadata (§7c).
-- **Def ids.** So a diagnostic raised in a LIR pass can name a source item.
-- **Names**: the symbol each function will have, and the source names of locals.
+- **Names**: the symbol each function will have, the unmangled name beside it,
+  and the source names of locals.
+- **Decided attributes**, not directives: the section, the inline hint, the
+  offset, whether the symbol is public (§7).
 - **Arrays**, as arrays (§7b).
 - **The build's settings**, already applied to the shape of the graph (§7d).
+
+What it does **not** carry is a reference to anything outside itself. There are
+no `DefId`s in a lowered program: a type is an index into the unit's type table,
+a function is an index into its function list, a global is an index into its
+globals. That is what makes a unit a thing that could be written to disk and
+compiled by another process (§11), and it is why a diagnostic raised this late
+has a span and a name rather than a def to look up.
 
 ## 9. What LIR no longer has
 
@@ -981,6 +1069,32 @@ operation beside it. What §4 requires is that it be read *once*, which is a
 property of the decision tree rather than of the instruction set.
 
 **And there is no `$panic`** — see §2.
+
+**Mutability is gone.** `*T` and `*mut T`, `[]T` and `[]mut T`, `&x` and `&mut x`
+are each one thing here. No target distinguishes them — LLVM, C and wasm each
+have one kind of address — and the rule that needed the distinction, who may
+write through this pointer, was enforced in sema long before now. Keeping it
+would put two entries in the type table describing one machine type and would
+hand a backend a field it has no use for. The **symbol** is the exception:
+`mono::type_key` mangles mutability and monomorphization already decided every
+name, so nothing here recomputes one from a stripped type.
+
+**`void` is gone from every slot.** It is a type the *language* has — what a
+function with no result returns, and what `Residual :: void` makes an `Option`'s
+short-circuit carry — and not one a machine has. So a `void` parameter is not
+passed, a `void` binding gets no slot, and a `void` argument is evaluated for its
+effects and then dropped. Both sides of a call erase it by the same rule, so a
+caller and a callee cannot come out with different arities. `never` goes the same
+way and for the same reason: a slot typed "does not return" is a slot no register
+file has, which is why a call is a statement with an *optional* destination
+rather than an rvalue.
+
+**Blobs are gone from operands.** A string's bytes, a byte string's, and an
+aggregate the const evaluator folded are data rather than values: each becomes an
+immutable global at lowering, and what an instruction carries is its address
+(§2.5). Otherwise every backend would have to invent read-only data emission on
+its own, from an operand, differently — and two programs holding the same bytes
+would emit two copies.
 
 **`distinct` types are gone, and not by being wrapped.** A `distinct T` *is* a
 `T` in memory (§2.4) — the difference between them is a rule about which values
@@ -1020,43 +1134,80 @@ complete list of what is still left to do when a backend receives one, so that
 
 ### The instruction set, in full
 
-**Four statements**, and one of them is a call:
+**Three statements**, and one of them is a call:
 
 | Statement | LLVM | C | wasm |
 |---|---|---|---|
 | `Assign { place, rvalue }` | the rvalue, then `store` (or an SSA def) | `p = e;` | the rvalue, then `local.set` / `store` |
-| `Call { dest, callee, args }` | `call` / indirect `call` | a call | `call` / `call_indirect` |
-| `Intrinsic { dest, name, args }` | an intrinsic or an instruction | a builtin or a call | an instruction |
+| `Call { dest, callee, args }` | `call` / indirect `call` / an instruction | a call, or a builtin | `call` / `call_indirect` |
 | `Drop(operand)` | a call to the runtime's free | a call | a call |
 
-**Four terminators**: `goto`, `switch`, `return`, `unreachable`. `switch` covers
-every branch there is, so there is no `br`/`switch` pair to keep in step.
+**Three callees**, which is where the intrinsic went: `Static(FuncId)` names a
+function this unit holds, `Indirect(operand)` calls through a pointer, and
+`Intrinsic(op)` is a machine operation named by the compiler rather than by the
+linker. They are one statement because they differ in exactly one way — how the
+code is reached — and an intrinsic is an **enum** rather than a name so that a
+backend's match is exhaustive: an intrinsic added upstream is then a compile
+error in every backend instead of a silent fall-through.
 
-**Eight rvalues**: `Use`, `Ref`, `Builtin`, `Binary`, `Unary`, `Cast`,
-`Aggregate`, `Offset`, and that is the set. `Builtin` is the checked arithmetic
-`overflow=trap` needs — `checked_add(a, b)` yielding `{ value, overflowed }`
-(§7d) — which is one LLVM overflow intrinsic, one C helper, or one wasm sequence. `Binary` and `Unary` are machine operations on **scalars** —
+**Four terminators**: `goto`, `switch`, `return`, `unreachable`. `switch` covers
+every branch there is, so there is no `br`/`switch` pair to keep in step, and it
+carries the type its arms are compared at.
+
+**Six rvalues**: `Use`, `Ref`, `Op`, `Cast`, `Aggregate`, `Offset`.
+
+`Op { op, ty, args }` is every primitive operation there is — unary, binary and
+checked alike — because the arity is the opcode's business and a backend that
+matches one enum once cannot forget a case. The `ty` is what the operation runs
+*at*: `lt.u64` and `lt.i64` are different instructions on every target, and a
+constant operand carries no type of its own. The opcodes:
+
+| Group | Opcodes |
+|---|---|
+| arithmetic | `add` `sub` `mul` `div` `rem` `neg` — **wrapping** on integer overflow, IEEE on floats |
+| checked (§7d) | `add_checked` `sub_checked` `mul_checked` — result `(T, bool)` |
+| bitwise | `bit_and` `bit_or` `bit_xor` `bit_not` `shl` `shr` |
+| logical | `not` |
+| comparison | `eq` `ne` `lt` `le` `gt` `ge` — result `bool` |
+
+Overflow is two opcodes rather than one and a flag, deliberately: a flag that
+changes the *result type* is not a flag. And the plain one **wraps**, by
+definition — `overflow=wrap`, `#unsafe` and `wrapping_add` all emit it, because
+all three mean the same instruction and an opcode whose meaning depended on a
+build setting a backend cannot see would be the one thing this level exists to
+prevent. An operation's operands are **scalars** —
 nothing structural ever reaches one, which is why text equality is a call to
 `core` (§6.13) rather than an `==` on a `{ ptr, len }`.
 
 `Cast` carries both types, so what the conversion *is* — a truncation, a sign
 extension, a rounding, an int-to-float — is a lookup rather than a derivation.
-`Offset` is a GEP in elements, carrying the element type rather than a byte
-stride, so the stride comes from the same layout everything else does.
+`Aggregate` builds a value of a struct type, an array, or one variant of an enum;
+the four names it used to have for "build a struct" were four names for one
+operation, and the type says which struct. `Offset` is a GEP in elements with the
+stride in bytes beside it.
 
-**Two shapes of intrinsic** remain by phase 10: the GC ones (`gc_collect`,
-`gc_keep_alive`, `gc_pin`), `transmute`, the wrapping arithmetic, and `trap`.
-Each is one instruction or one runtime call. `transmute` is the only one whose
-result type is read off `dest` rather than carried in the operation, because the
-operation *is* "reinterpret as whatever this slot holds".
+**Thirteen intrinsics** reach a backend, and each is one instruction or one
+runtime call: `new`, `make`, `trap`, `assert`, `transmute`, `slice`, `array`,
+`repeat`, `format`, `embed_file`, `gc_collect`, `gc_keep_alive`, `gc_pin`.
+Everything else a `#intrinsic` declares is *gone* by this point — `size_of`,
+`align_of` and `cast` are constants, `index` and `len` are projections,
+`wrapping_add` and `wrapping_sub` are opcodes, `drop` is a statement. A test
+asserts that mapping is total, so a row added to `sema::intrinsics` with no case
+here fails the build rather than arriving at a backend as a name.
+
+`transmute` is the only one whose result type is read off `dest` rather than
+carried in the operation, because the operation *is* "reinterpret as whatever
+this slot holds".
 
 ### The four things a backend genuinely does itself
 
-1. **Materialize constants.** A `Constant::Value` may be a `Str`, a `Bytes` or an
-   `Aggregate`. A text constant becomes a private global plus the `{ ptr, len }`
-   the type wants; an aggregate becomes an initializer laid out by the same
-   `TypeDef` a local of that type uses. This is emission, not analysis — the
-   value is fully known.
+1. **Emit the data section.** Every global in a unit has a type, a mutability and
+   an initializer written out member by member — a scalar, an address of a
+   function, an address of another global, an aggregate of those, or bytes. What
+   a backend does is lay those out by the same `TypeDef` a local of that type
+   uses and write them into a section. It is emission, not analysis: the values
+   are fully known, and *which* constants need storage was decided here (§9), so
+   two backends cannot disagree about it.
 2. **Turn safepoints into stack maps.** §6 computed the live set; what shape it
    takes — a shadow stack, an LLVM statepoint, a side table — is the backend's,
    and different collectors want different ones. A non-moving collector drops
@@ -1068,21 +1219,24 @@ operation *is* "reinterpret as whatever this slot holds".
 4. **Register allocation and instruction selection**, which is the backend's
    whole job and is not something an IR can pre-answer.
 
-### The one thing LIR does not carry on its own
+### There is nothing LIR does not carry
 
-**Resolving a `Ty::Nominal` to its `TypeDef` needs the compiler's def table.**
-`Program::types` is keyed by `mono::type_key`, and computing that key from a `Ty`
-takes a `&DefTable`. A backend living in this compiler has one, so it is not a
-blocker — but it does mean `Program` is not a standalone artifact that could be
-serialized and handed to another process. Closing that wants a `TypeId` on every
-local instead of a `Ty`, which is a change worth making when there is a second
-consumer to justify it and not before.
+A unit answers every question it raises. A type is a `TypeId` into its own table,
+a callee is a `FuncId` into its own list, a global is a `GlobalId` into its own
+globals, and a symbol is what ties one unit's declaration to another's definition
+(§11). No `DefId` survives lowering, so nothing here needs the compiler's tables
+to be read — a unit could be serialized and handed to another process, which is
+what makes parallel code generation a scheduling question rather than a design
+one.
 
 ### Known over-approximations, named rather than hidden
 
-- **A `*T` is a GC root whatever `T` is** (§6), so a vtable pointer — a `*void`
-  by this level — is traced with the rest. It wants a distinction between a
-  managed reference and a machine address that the type system does not draw.
+- **A `*T` is a GC root whatever `T` is** (§6), with two exceptions LIR can now
+  name: a pointer to a vtable and a function pointer are pointers to *code*, and
+  code is not in the heap. Every other machine address — a `*u8` into a buffer, a
+  pointer a `transmute` produced — is still traced, and narrowing that wants a
+  distinction between a managed reference and a machine address that the type
+  system does not draw.
 - **Escape analysis is intra-procedural and blunt** (§5). Per-function summaries
   are a change of precision, not of shape.
 - **A slice pattern's elements go through the pointer**, the same way `xs[i]`
@@ -1124,16 +1278,14 @@ rungs, the decision tree over enums and tuples and ranges and text, the checks
 (§7d), monomorphization, statics, casts, safepoints on the back edge, dynamic
 dispatch against a bound resolved at the call, and a declaration with no blocks.
 
-**One program, not one per file.** `link` merges the per-file IR into a single
-`Linked`, monomorphization runs over that, and this pass emits one
-`lir::Program` holding every function that survives — the entry file's,
-`core`'s, and every instantiation neither file wrote. Codegen receives that one
-value; there is nothing to link after it. The snapshots render only the entry
-file's functions, because a test about `while` should not be a record of the
-standard library, so a dump showing `call core.panic` without `core.panic`
-under it is the renderer filtering rather than the program being split. A test
-says so, and the invariant below — every direct call names a function the
-program defines — is checked over the whole thing, `core` included.
+**One lowering, then a split.** `link` merges the per-file IR into a single
+`Linked`, monomorphization runs over that, and this pass lowers every function
+that survives — the entry file's, `core`'s, and every instantiation neither file
+wrote — into one whole-program unit. §11 then cuts that into codegen units. The
+snapshots render the entry file's unit, because a test about `while` should not
+be a record of the standard library: a dump showing `call core.panic` and a
+`declare func core.panic` beside it is the split doing its job, and the function
+itself is in `core`'s unit.
 
 **Vtables.** One snapshot is about the dispatch — two projections and an
 indirect call — and one about the **data**: a trait with three methods so the
@@ -1144,8 +1296,72 @@ one type coerced twice, which shares its constant instead of emitting a second.
 **Invariants, over any lowering.** A snapshot catches a change; it cannot say
 what *any* program may produce. The invariant tests say that: every place and
 every live local names a slot that exists, block ids are dense and 0 is the
-entry, every direct call names a function the program defines, no `Binary` has
-an aggregate operand, no local has a type a machine cannot hold, and every
-nominal type a local mentions is in the type table. They run over `core` too —
-it is code a backend has to emit, and a shape it alone produces is exactly the
-one nothing else would catch.
+entry, every index a unit holds resolves inside that unit, no operation has an
+aggregate operand or the wrong arity, no operand carries a blob, no local is
+typed `void` or `never`, no place indexes a slice, every named type is in the
+table, every declared intrinsic has a case here, and every symbol is defined in
+exactly one unit at every split. They run over `core` too — it is code a backend
+has to emit, and a shape it alone produces is exactly the one nothing else would
+catch.
+
+**And over every example.** `every_example_lowers_to_well_formed_units` lowers
+each file in `examples/` at four settings of `-C codegen-units` and runs all of
+the above over every unit that comes out, plus one more: the dump must not
+contain `<unknown …>`, because rendering resolves every index the structures
+hold. The failures worth catching are the ones a hand-written test program does
+not contain — a type only `core`'s `Result` reaches, a global only one unit
+defines, an intrinsic only one example uses.
+
+## 11. Codegen units
+
+The lowering produces **one** whole-program unit; the last thing it does is cut
+that into `-C codegen-units=N` of them (default **1**, which is the whole program
+and is what a dump reads best). The cut is a **filter**, not a redesign, and §8
+is what makes it one: a unit refers to a type by an index into its own table, to
+a function by an index into its own list, and to a global the same way, so a unit
+is built by walking what its functions reach, copying that, and renumbering.
+
+**The partition is by source file, then merged.** A file is what a person writes
+and what a person recompiles, so it is the partition that makes an incremental
+build rebuild what changed; `-C codegen-units=N` then merges the smallest units
+together until there are no more than `N`. That is the shape rustc uses (one unit
+per module, merged down to the requested count) and for the same two reasons: the
+merge is what bounds the count, and merging the *smallest* is what keeps the
+units within reach of each other in size, which is what decides how long the
+slowest thread takes.
+
+**What a unit carries that it does not define** is a declaration: a [`Function`]
+with no blocks for every function it calls, and a `Global` with `external` set
+for every global it reads. That is the whole of what linking needs from this
+side — a name, a signature and a symbol — and it is why the symbol is printed
+beside every name in a dump. A definition appears in exactly one unit; a test
+says so at five different settings.
+
+```
+unit main {
+  type Point = struct { x: i32, y: i32 }
+  func main() -> void @public  // _NC4main
+    …
+    _1 := call scale(_0, 3)
+  declare func scale(p_0: Point, k_1: i32) -> Point @public  // _NC5scale
+}
+
+unit shapes {
+  type Point = struct { x: i32, y: i32 }
+  func scale(p_0: Point, k_1: i32) -> Point @public  // _NC5scale
+    …
+}
+```
+
+`Point` is in **both** units, because a unit that cannot describe its own
+arguments is not self-contained. The two copies are the same type and say so: a
+`TypeDef` carries the mangled key it was interned under, which is the one piece
+of identity that survives the renumbering and is what a backend merging debug
+info across units needs.
+
+**What this buys, and what it costs.** It buys parallel code generation — the
+units are independent values, so compiling them is a scheduling question rather
+than a design one — and it costs a declaration in one unit for every definition
+in another, plus a copy of each type more than one unit names. It also gives up
+the whole-program view an optimizer would want, which is exactly why the default
+is 1 and the number is the build's to choose.

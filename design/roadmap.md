@@ -8,7 +8,7 @@ is right about the future.
 Phases 0 through 9 are **complete**: the front end parses, resolves, infers,
 lowers to IR, validates the IR and evaluates constants; monomorphization,
 layout, and the LIR lowering turn that into a concrete control-flow graph with
-its drops and safepoints placed. **461 tests pass.** Phase 10 — codegen and the
+its drops and safepoints placed. **532 tests pass.** Phase 10 — codegen and the
 real driver — is what is left.
 
 ## The order, at a glance
@@ -23,7 +23,8 @@ real driver — is what is left.
 | 7 | Layout ✅ | 6 | medium | A generic type has no layout until its arguments are known |
 | 8 | LIR: shape and control flow ✅ | 7 | large | `design/lir.md` §1–4 |
 | 9 | LIR: defer, drops, safepoints ✅ | 8 | large | `design/lir.md` §3, 5, 6 |
-| 10 | Codegen and the real driver | 9 | large | The first executable |
+| 9b | LIR made ordinary, and codegen units ✅ | 9 | large | `design/lir.md` §7b, §10, §11 — every special case a backend would have to learn |
+| 10 | Codegen and the real driver | 9b | large | The first executable |
 
 Phases 2, 3 and 4 are independent of each other in principle. The order above is
 chosen so that each one lands on a tree the previous one has already tidied: 2
@@ -676,6 +677,49 @@ the `reloc` discipline.
   tag is an ordinary member read. §4's "read once" is a property of the decision
   tree, not of the instruction set.
 
+## Phase 9b — LIR made ordinary, and cut into codegen units ✅ **done**
+
+The special cases LIR still had, removed — the A–N list the previous handoff
+planned — and the split that makes code generation parallelizable.
+
+### What is built
+
+- **A vtable is a global** (`design/lir.md` §7b): one struct type per *trait*,
+  one immutable global per *impl*, and a dispatch that is an ordinary member read
+  at an offset the type table knows. The table, the id type, the constant form
+  and the aggregate kind it used to have are all gone.
+- **A blob constant is a global too.** A string's bytes, a byte string's and a
+  folded aggregate are data with an address; an operand is a scalar, an address
+  or `undef`, and an invariant test says so.
+- **One arithmetic rvalue.** `Op { op, ty, args }` covers unary, binary, checked
+  and wrapping alike; checked arithmetic is its own opcode rather than a flag
+  that changes the result type.
+- **One call statement.** A symbol, a pointer and an intrinsic are three
+  *callees*; the intrinsic set is an **enum**, so a backend's match is
+  exhaustive and a row added upstream with no case here fails a test.
+- **A type is LIR's own** (`lir::Ty`), with `Named(TypeId)` indexing the unit's
+  own table. No `DefId` survives lowering: a unit answers every question it
+  raises, which is what makes it a thing another process could compile.
+- **A variant is a type.** An enum's payload is read as the variant's own struct,
+  so a member's offset comes from the table instead of from a rule.
+- **Mutability and `void` are erased.** No target has two kinds of address, and a
+  slot that holds nothing is a slot no machine has.
+- **Directives become decided attributes**: the section, the inline hint, the
+  offset, whether the symbol is public.
+- **Codegen units** (§11, `nestc/src/lir/unit.rs`): one unit per source file,
+  merged smallest-first until there are at most `-C codegen-units=N` (default 1),
+  each carrying a declaration for every function it calls and every global it
+  reads.
+
+### What it does not do
+
+- **Emit anything.** The split is the shape codegen will consume; there is no
+  backend yet, so `-C codegen-units` buys nothing but a well-tested boundary.
+- **Optimize across units**, which is the cost of the split and the reason the
+  default is one.
+- **Answer the `Drop` trait, per-function escape summaries, or the object-start
+  table** — the same three §5 and §6 left open.
+
 ## Phase 10 — Codegen and the real driver
 
 The first executable. Also where `nestc`'s scaffold CLI is replaced: `-C` stays
@@ -683,26 +727,19 @@ the interface for build settings (`nestc/src/common/options.rs`), because a buil
 tool translating a profile should keep talking to the compiler the same way.
 
 **`design/lir.md` §10 is the brief.** It lists the whole instruction set a
-backend answers for — four statements, four terminators, eight rvalues — the four
-things a backend genuinely does itself (materialize constants, turn safepoints
-into stack maps, classify the ABI, select and allocate), and the one place LIR
-still reaches back into the compiler (resolving a `Ty::Nominal` to its `TypeDef`
-needs the def table). The invariant tests in `lir::tests` assert the shape
-rather than describing it: no local has a type a machine cannot hold, every place
-names a slot, block ids are dense, every direct call names a function the program
-defines, no `Binary` has an aggregate operand, no place indexes a slice, and
-every named type a local mentions is in the table.
+backend answers for — three statements, three callees, four terminators, six
+rvalues, twenty-four opcodes and thirteen intrinsics — and the four things a
+backend genuinely does itself (emit the data section, turn safepoints into stack
+maps, classify the ABI, select and allocate). There is no longer a list of things
+LIR reaches back into the compiler for: a unit is self-contained (§11).
 
-**Before or alongside it, `HANDOFF.md` carries a planned change list (A–H)**
-that removes the special cases LIR still has: a vtable becomes an ordinary
-immutable global of function pointers rather than a table, an id type and a
-constant form of its own (A); blob constants become globals (B); the three
-arithmetic rvalues become one (C); `AggregateKind` collapses into the type it
-names (D); `Offset` carries a stride instead of a `Ty` (E); a projection's name
-matches its type's members (F); the intrinsic set becomes an enum (G); and
-`Ty::Nominal` becomes a `TypeId`, which is what makes `Program` a standalone
-artifact (H). Each one is work a backend would otherwise do, three times, in
-three ways.
+The invariant tests in `lir::tests` assert the shape rather than describing it:
+every place names a slot, block ids are dense, every index a unit holds resolves
+inside it, no operation has an aggregate operand, no operand carries a blob, no
+local is typed `void` or `never`, no place indexes a slice, every declared
+intrinsic has a case, and every symbol is defined in exactly one unit at every
+split — checked over every file in `examples/` at four settings of
+`-C codegen-units`.
 
 ---
 
