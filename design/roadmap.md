@@ -683,15 +683,26 @@ the interface for build settings (`nestc/src/common/options.rs`), because a buil
 tool translating a profile should keep talking to the compiler the same way.
 
 **`design/lir.md` §10 is the brief.** It lists the whole instruction set a
-backend answers for — four statements, four terminators, seven rvalues — the four
+backend answers for — four statements, four terminators, eight rvalues — the four
 things a backend genuinely does itself (materialize constants, turn safepoints
 into stack maps, classify the ABI, select and allocate), and the one place LIR
 still reaches back into the compiler (resolving a `Ty::Nominal` to its `TypeDef`
-needs the def table). Six invariant tests in `sema::tests` assert the shape
+needs the def table). The invariant tests in `lir::tests` assert the shape
 rather than describing it: no local has a type a machine cannot hold, every place
 names a slot, block ids are dense, every direct call names a function the program
-defines, no `Binary` has an aggregate operand, and every named type a local
-mentions is in the table.
+defines, no `Binary` has an aggregate operand, no place indexes a slice, and
+every named type a local mentions is in the table.
+
+**Before or alongside it, `HANDOFF.md` carries a planned change list (A–H)**
+that removes the special cases LIR still has: a vtable becomes an ordinary
+immutable global of function pointers rather than a table, an id type and a
+constant form of its own (A); blob constants become globals (B); the three
+arithmetic rvalues become one (C); `AggregateKind` collapses into the type it
+names (D); `Offset` carries a stride instead of a `Ty` (E); a projection's name
+matches its type's members (F); the intrinsic set becomes an enum (G); and
+`Ty::Nominal` becomes a `TypeId`, which is what makes `Program` a standalone
+artifact (H). Each one is work a backend would otherwise do, three times, in
+three ways.
 
 ---
 

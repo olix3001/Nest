@@ -2,9 +2,14 @@
 
 **Generated**: 2026-09-12
 **Branch**: `main`
-**Status**: **513 tests pass**, `cargo clippy` reports 83 warnings (the same
+**Status**: **521 tests pass**, `cargo clippy` reports 83 warnings (the same
 dead-code-shaped set as before — fields codegen will read and nothing does yet).
 Every file in `examples/*.nest` compiles.
+
+**If you are picking this up to do the next piece of work, read
+"Next: LIR still has special cases that should be ordinary data" below first** —
+it is a planned, unimplemented change list, and item A (vtables become ordinary
+globals) is what the user asked for most recently.
 
 **Read `design/roadmap.md` §9 first**, then `design/lir.md` §5, §6 and **§10**.
 §10 is new and is phase 10's brief: the whole instruction set a backend answers
@@ -217,7 +222,7 @@ Everything in the previous handoffs' lists still stands. New this session:
 
 ## Current state
 
-**Working**: everything. `cd nestc && cargo test` → **513 passed**. `cargo
+**Working**: everything. `cd nestc && cargo test` → **521 passed**. `cargo
 clippy` → 83 warnings. Every file in `examples/*.nest` compiles clean.
 
 **Broken**: nothing.
@@ -260,6 +265,212 @@ Writing them found three defects, all fixed:
 | `TABLE[1]` on a `::` array constant lowered to `undef` — indexing takes `&TABLE` and a constant has no address, so `place_of` returned `None` and the caller made it undefined | `place_of` materializes a constant into a slot, the same path `(a + b).x` takes |
 | `cast.<u16>(7)` stayed a run-time cast between two constants, because the fold was gated on the *source* still being `comptime_int` | Any cast the evaluator can perform is folded |
 | `#unsafe` was documented as removing "bounds, init, null" checks but also removes the division-by-zero one | `spec/09` says so, and says the overflow trap is `overflow=`'s decision and stays |
+
+### Added after the suite (same session)
+
+- **A vtable snapshot about the data**, not the dispatch: a three-method trait
+  (slot order), two impls (two constants), an impl for `Box.<i32>` (the vtable
+  is the instantiation's), and one type coerced twice (one constant, shared).
+- **A `match` snapshot for scrutinees that are not enums** — `char`, float,
+  `bool`, slice patterns, a struct destructured by member.
+- **A snapshot rendered with spans**, since §7c's line table is built from the
+  position on every statement and nothing was checking they were there.
+- **`one_program_holds_core_and_every_instantiation`** — the snapshots render
+  only the entry file's functions, which makes a call to `core.panic` with no
+  `core.panic` under it look like a missing definition. It is the renderer
+  filtering; the program is one value with `core` in it.
+- **fix**: a slice pattern projected `xs[0]` off the header, an `Index` on a
+  slice, which `Projection::Index` says never happens. It goes through the
+  pointer now, like `xs[i]` always did, and `no_place_indexes_a_slice` type-
+  walks every projection so it cannot come back.
+- **fix (sema, not LIR)**: `Self` in `impl Trait for Box.<i32>` was the head
+  `Box.<?T>`, so a member whose body never mentions `self` was refused with
+  "type annotations needed" on its own parameter. Collection binds `Self` to
+  the whole target expression now, in a namespace belonging to the impl block.
+
+## Next: LIR still has special cases that should be ordinary data
+
+**Planned, not implemented. This section is the brief.**
+
+The standing requirement, from the user, in their words: *LIR should be as
+simple as possible without being platform-specific (aside from pointer size).*
+A vtable is the clearest violation — it is a struct of function pointers and
+nothing else, and LIR gives it a table of its own, an id type of its own, a
+constant form of its own and a line of its own in the dump. Every one of those
+is a thing a backend has to learn that it already knows how to do.
+
+What follows is that change and the others of its kind, each with the shape to
+move to, the obstacle in the way, and what it costs to leave alone. **A is the
+one that was asked for.** B–D are the same mistake in other places. E–G are
+cheaper and independent. H is the big one and goes last.
+
+### A. A vtable is a global, not a table beside the program
+
+**Now**: `Program::vtables: Vec<Vtable>`, `VtableId`, `Vtable { trait_def,
+concrete, symbol, slots: Vec<Option<VtableSlot>> }`, `Constant::Vtable(id)`,
+`AggregateKind::Dyn`, and a dump line `vtable _NV… for Dog as Speak { [0] say =
+… }`. A dispatch reads `s.vtable.*.say` — a `Field` projection on a `*void`, so
+the offset it means cannot be derived from the place's type; the backend has to
+know that slot *n* of a vtable is at `n * pointer_size`.
+
+**Wanted**: one struct type per **trait**, one immutable global per **impl**,
+and no other machinery.
+
+```
+type VT.Draw = struct {             // one per trait, slots in declaration order
+  area:      *func(*void) -> i32    // +0
+  perimeter: *func(*void) -> i32    // +8
+  sides:     *func(*void) -> i32    // +16
+}
+global vt.Square.as.Draw: VT.Draw = { Square.area, Square.perimeter, Square.sides }
+type *dyn Draw = struct { data: *void, vtable: *VT.Draw }
+```
+
+Then `dyn(p, &vtable#0)` is `Aggregate` of the `*dyn Draw` struct over two
+operands, the second being the address of a global; and `s.vtable.*.area` is a
+`Field` on a real struct type whose offset is in the type table like every
+other. Nothing about vtables remains in the instruction set.
+
+**What is in the way**, in the order it has to be cleared:
+
+1. **`Global::init` is `Option<ConstValue>`**, and a function address is not a
+   `ConstValue` — it is `Constant::Func`. So `Constant` needs an aggregate case
+   and `Global` needs to hold a `Constant`:
+   ```rust
+   pub enum Constant {
+       Value(ConstValue),
+       Func { def, name, symbol },
+       Aggregate(Vec<Constant>),   // new
+       Address(DefId),             // new: the address of a global
+       Undef,
+   }
+   pub struct Global { …, pub init: Option<Constant>, pub mutable: bool }
+   ```
+   `mutable` is new because today only `#static`s are emitted and immutability
+   is implied by there being nothing else. After this there is something else.
+2. **A vtable global needs a `DefId`**, since `Base::Global` and the proposed
+   `Constant::Address` are keyed by one and a vtable was never written in any
+   source. Monomorphization already allocates synthetic defs for the
+   instantiations it makes (`mono::run` takes `&mut DefTable` for exactly
+   this); do the same here, with the `_NV…` mangling as the symbol so the name
+   the linker sees does not change.
+3. **The vtable pointer's type must be the trait's, not the impl's.** A `dyn`
+   has erased the concrete type, so `*dyn Draw`'s second member is
+   `*VT.Draw` — the per-trait struct — and each impl's global is a value of
+   that one type. This is what makes the dispatch an ordinary field read; a
+   per-impl vtable type would put the backend back to computing `n *
+   pointer_size` by hand.
+4. **`Ty` has no function-pointer form** worth checking before starting: if
+   `Ty::Func` cannot be spelled as a member type here, the slots can stay
+   `*void` and the change still pays for itself — the offsets come from the
+   struct either way. Do not let this block the rest.
+
+**Also delete**: `Origin::Dyn` can stay as debug metadata (it says what the
+struct *was*, which is what `Origin` is for), but `AggregateKind::Dyn` should
+go — see D.
+
+**Tests that move**: `lir_snapshot_a_vtable_is_a_constant_per_trait_and_type`,
+`lir_snapshot_dynamic_dispatch_goes_through_a_vtable_slot`, and any snapshot
+with a `dyn(` in it. The claims they make do not change; the rendering does.
+
+### B. A constant that needs storage should be a global too
+
+`b"yes"` appears as an inline operand (`Constant::Value(ConstValue::Str(…))`),
+and so does an array constant (`{ 1, 2, 3 }`). Neither is a value a machine
+holds in a register, so every backend has to synthesize a read-only global and
+a reference to it — the same work, done three times, differently.
+
+Once A has given LIR immutable globals with constant initializers, the rule to
+enforce is: **an operand is a scalar or an address, never a blob.** Materialize
+string, byte-string and aggregate constants as globals at lowering, and hand
+out `Constant::Address`. An invariant test can then say it, which is worth more
+than the paragraph in the design doc.
+
+### C. There are three ways to write arithmetic
+
+`Rvalue::Binary { op, lhs, rhs }`, `Rvalue::Unary { op, operand }` and
+`Rvalue::Builtin { op, args, checked }` overlap: the last can express both
+others, and `checked` is a flag that changes the *result type* (to `(T, bool)`)
+rather than the operation. Three shapes, one idea.
+
+**Wanted**: one `Rvalue::Op { op: Op, args: Vec<Operand> }`, where checked
+arithmetic is its own opcode (`AddChecked`, `SubChecked`, …) rather than a
+flag. A backend then matches one enum once, and the arity is the opcode's own
+business. Keep the operand count validated by an invariant test rather than by
+the type.
+
+### D. `AggregateKind` says what the type table already says
+
+`Struct(DefId)`, `Tuple`, `Slice`, `Dyn` are four names for "build a value of
+this struct type", and the type is already on the destination place. Collapse
+them to one case carrying the type. Keep **`Array`**, because an array does not
+flatten (§7b), and keep **`Variant`**, because it is the one aggregate whose
+construction needs a value the fields do not carry — the tag.
+
+### E. `Offset` carries a `Ty` where everything else carries a number
+
+Every size in LIR is a number: `TypeDef::layout`, every `TypeMember::offset`.
+`Rvalue::Offset { ptr, index, elem: Ty }` is the exception, and it sends the
+backend back through the layout engine for a stride the compiler has already
+computed. Make it `stride: u64`. This is the pointer-size caveat the
+requirement allows, and it is already how the rest of the type table works.
+
+### F. A field's name and its type's member names should agree
+
+`checked_add` yields a `(i32, bool)` whose `TypeDef` members are named `0` and
+`1`, and the projections that read it are `.0` and **`.overflowed`** — a name
+the type does not have. The index is authoritative so nothing miscompiles, but
+a dump that names a member which is not in the type is a trap for the next
+reader. Either name the tuple's members `0`/`1` at the projection, or give the
+checked result a real `TypeDef` with `{ value, overflowed }`. The second is
+better and costs one type per width.
+
+### G. `StmtKind::Intrinsic` is keyed by a `Symbol`
+
+The set that survives to LIR is closed — `new`, `make`, `transmute`, `trap`,
+`assert`, `wrapping_add`, `wrapping_sub`, `gc_collect`, `gc_keep_alive`,
+`gc_pin`, and `embed_file` if it reaches here at all (check). A `Symbol` makes
+a backend's match non-exhaustive, so a name added upstream is a silent
+fall-through instead of a compile error. Make it an enum. Confirm the list by
+walking `sema::intrinsics` against what `lir::lower` handles before this pass.
+
+### H. `Program` is not standalone: `Ty::Nominal` needs the `DefTable`
+
+Already named in `design/lir.md` §10 and still true. Every local's type is a
+`sema::Ty`, and resolving a `Ty::Nominal` to its definition means
+`mono::type_key(&DefTable, ty)` — the one place LIR reaches back into the
+compiler. Replacing the nominal case with a `TypeId(u32)` index into
+`Program::types` makes the program serializable and a backend an independent
+consumer.
+
+It is last because it touches every file in `lir/` and every test that spells a
+type. Doing A–G first means doing it once, over the simpler shape.
+
+### Ordering, and what each one costs to skip
+
+| | Change | Depends on | Cost of leaving it |
+|---|---|---|---|
+| A | Vtables become globals | — | Four concepts a backend must learn; a field offset it must compute by hand |
+| B | Blob constants become globals | A's `Constant::Address` | Every backend re-implements read-only data emission |
+| C | One arithmetic rvalue | — | Three shapes for one idea |
+| D | `AggregateKind` collapses | — | Four names for one operation |
+| E | `Offset` carries a stride | — | The backend re-runs layout |
+| F | Member names agree with the type | — | A dump that lies quietly |
+| G | Intrinsics are an enum | — | A non-exhaustive match in every backend |
+| H | `TypeId` instead of `Ty::Nominal` | A–G, ideally | `Program` cannot leave the process |
+
+### How to work on any of these
+
+The snapshots are the safety net and the review surface both: make the change,
+run `cargo insta test`, and **read every diff before accepting it** — that is
+where a shape regression shows up as a shape regression rather than as a
+backend bug six months later. The invariant tests in `nestc/src/lir/tests.rs`
+under `// ===< LIR well-formedness >===` are the other half; each of A, B, D
+and F wants one more of them, stating the rule the change establishes.
+
+Update `design/lir.md` §1, §7b and §10 in the same commit as the code. §10 is
+the instruction-set table a backend reads; a change that does not land there
+did not happen.
 
 ## Deliberately not done
 
@@ -351,7 +562,7 @@ not have to be written at seventy literal sites.
 
 ## Resume instructions
 
-1. `cd nestc && cargo test` — expect **513 passed**.
+1. `cd nestc && cargo test` — expect **521 passed**.
 2. See the phase working:
    ```
    cargo build
