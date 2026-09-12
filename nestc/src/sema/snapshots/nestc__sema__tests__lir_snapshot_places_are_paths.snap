@@ -1,0 +1,32 @@
+---
+source: src/sema/tests.rs
+expression: lir_text(src)
+---
+type Outer = struct {           // was a struct; size 4, align 4
+  i: Inner                    // +0
+}
+type Inner = struct {           // was a struct; size 4, align 4
+  v: i32                    // +0
+}
+type []mut i32 = struct {           // was a slice; size 16, align 8
+  ptr: *mut i32                    // +0
+  len: u64                    // +8
+}
+type usize = struct {           // was a distinct; size 8, align 8
+  0: u64                    // +0
+}
+type core.str = struct {           // was a distinct; size 16, align 8
+  0: []u8                    // +0
+}
+type []u8 = struct {           // was a slice; size 16, align 8
+  ptr: *u8                    // +0
+  len: u64                    // +8
+}
+
+func reach(o_0: *mut Outer, xs_1: []mut i32, k_2: usize) -> void  // _NC5reach
+  let _3: i32
+bb0:                    // entry
+  _3 := cast 1 : comptime_int -> i32
+  o_0.*.i.v = _3
+  xs_1[k_2] = o_0.*.i.v
+  return

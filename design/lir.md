@@ -1,6 +1,9 @@
 # LIR — the low-level IR
 
-**Status**: design, not yet built. Nothing in `nestc/` implements this document.
+**Status**: §1, §2, §3, §4, §7, §7b, §7cc, §7c and §7d are **built** —
+`nestc/src/lir/` is the representation (`mod.rs`), the lowering (`lower.rs`) and
+the dump (`pretty.rs`). §5 (drops) and §6 (GC safepoints) are not; they are the
+next phase, and both ride the ladder §3 already builds.
 
 LIR is the last stage before code generation. It is deliberately *not* LLVM IR:
 it keeps Nest's type system, its GC model and its `defer` semantics, all of which
@@ -118,6 +121,11 @@ divergence check in the IR-pass plan. In LIR, a call to one is followed by
 `return`, by `break`, or by `continue`. Ordering is reverse of registration, and
 outer scopes run after inner ones.
 
+A deferred body is **not a construct at this level**: it is an ordinary block,
+reached by an ordinary jump, and the ladder is ordinary edges. Nothing in the
+representation records that it came from a `defer`, because nothing after this
+point needs to know.
+
 The requirement is that a `defer` body appears **once** in LIR no matter how many
 paths exit through it. Duplicating it inline at each `return` is the obvious
 lowering and the wrong one: it multiplies code size, and it means a reader
@@ -169,6 +177,12 @@ cleanup_a:                 // leaving the outer scope
   return ret
 }
 ```
+
+The rungs are shared per **kind** of exit and not per exit *site*: three
+`return`s inside one scope enter the same rung. They cannot be shared across
+kinds, because what follows the rung differs — a `return` continues outward to
+the function's exit and a `break` only to the loop's — which is why `cleanup_b`
+and `cleanup_b_fall` are two blocks above rather than one.
 
 The `defer b()` body is emitted once even though two paths run it. `return`
 writes its value into a dedicated `ret` local rather than returning directly,

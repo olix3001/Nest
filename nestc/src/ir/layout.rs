@@ -250,6 +250,59 @@ impl<'a> Layouts<'a> {
         }
     }
 
+    /// An aggregate's members as a **use site** sees them: each name paired
+    /// with its type after this instantiation's arguments are substituted in.
+    ///
+    /// A [`TypeDef`](super::TypeDef) is definition-relative — a field of
+    /// `Pair.<T>` is a `T` — and substituting is this module's job, so the
+    /// substitution has to be reachable from here rather than redone by every
+    /// caller. The LIR aggregate flattening (`design/lir.md` §7b) is the caller
+    /// this exists for: turning a type into a struct means knowing what its
+    /// members *are*, not only where they sit.
+    ///
+    /// `None` for anything that is not a struct or a `distinct`.
+    pub fn member_types(&self, ty: &Ty) -> Option<Vec<(crate::common::symbol::Symbol, Ty)>> {
+        let Ty::Nominal { def, .. } = ty else {
+            return None;
+        };
+        let t = self.linked.ty(*def)?;
+        let members = match &t.kind {
+            TypeDefKind::Struct { members } => members.as_slice(),
+            TypeDefKind::Distinct { repr } => std::slice::from_ref(repr),
+            _ => return None,
+        };
+        let subst = self.substitution(*def, ty);
+        Some(
+            members
+                .iter()
+                .map(|m| (m.name.clone(), subst_ty(&subst, &self.meta.ty_or_error(m.id))))
+                .collect(),
+        )
+    }
+
+    /// [`Layouts::member_types`] for one variant of an enum.
+    pub fn variant_member_types(
+        &self,
+        ty: &Ty,
+        variant: usize,
+    ) -> Option<Vec<(crate::common::symbol::Symbol, Ty)>> {
+        let Ty::Nominal { def, .. } = ty else {
+            return None;
+        };
+        let t = self.linked.ty(*def)?;
+        let TypeDefKind::Enum { variants } = &t.kind else {
+            return None;
+        };
+        let v = variants.get(variant)?;
+        let subst = self.substitution(*def, ty);
+        Some(
+            v.members
+                .iter()
+                .map(|m| (m.name.clone(), subst_ty(&subst, &self.meta.ty_or_error(m.id))))
+                .collect(),
+        )
+    }
+
     /// Where an enum's tag and payload sit, and how big each variant's payload
     /// is.
     ///

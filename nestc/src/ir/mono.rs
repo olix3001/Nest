@@ -101,6 +101,27 @@ pub struct Instance {
     pub symbol: Symbol,
 }
 
+/// Which function fills each slot of one vtable, stamped on the
+/// `*T` → `*dyn Trait` coercion that asked for it.
+///
+/// One coercion, one vtable: the pair `(trait, concrete)` is what a vtable *is*,
+/// and the coercion node is the only place in the program where both are written
+/// down together. Two coercions to the same pair record the same answer, and the
+/// LIR lowering keys its table on the pair so only one constant is emitted
+/// (`design/lir.md` §7b).
+///
+/// A `None` slot is one no impl and no default body fills, which object safety
+/// should have made impossible. It is recorded as a hole rather than filled with
+/// a guess, so that a defect shows up as a hole rather than as a call to the
+/// wrong function.
+#[derive(Debug, Clone)]
+pub struct VtableSlots {
+    pub trait_def: DefId,
+    pub concrete: Ty,
+    /// One entry per trait method, in the trait's declaration order.
+    pub slots: Vec<Option<DefId>>,
+}
+
 /// Monomorphize `linked` in place: instantiate every generic function reached
 /// from the program's entry points, resolve every call through a bound, and give
 /// every function a symbol.
@@ -632,28 +653,69 @@ impl Mono<'_> {
             .collect()
     }
 
-    /// Queue every method the vtable of `concrete` for `trait_def` will hold.
-    fn reach_vtable(&mut self, linked: &Linked, trait_def: DefId, concrete: &Ty, depth: u32) {
+    /// Queue every method the vtable of `concrete` for `trait_def` will hold,
+    /// and record **which** of them fills each slot.
+    ///
+    /// The slot order is the trait's declaration order, which
+    /// [`TypeDefKind::Trait`](super::TypeDefKind::Trait) fixes for exactly this
+    /// purpose, and walking it is also what makes two builds of one program
+    /// identical — the impl's own member map is a `HashMap`, whose order varies
+    /// between runs.
+    ///
+    /// Recording the answer is this pass's job for the same reason naming is:
+    /// which function a slot holds is a question about *identity*, and the
+    /// instantiated function that fills it does not exist until this pass makes
+    /// it. The LIR lowering builds the vtable constant out of this (§7b) rather
+    /// than re-selecting the impl, which would be a second implementation of the
+    /// selection free to disagree with the first.
+    fn reach_vtable(
+        &mut self,
+        linked: &Linked,
+        trait_def: DefId,
+        concrete: &Ty,
+        depth: u32,
+        at: IrId,
+    ) {
         // A vtable is built for a trait as a *type* (`*dyn Trait`), which has no
         // arguments to give — `dyn Add.<f64>` would carry them in the type
         // itself, and object safety is a separate question. Nothing to match.
         let Some((i, bindings)) = self.match_impl(trait_def, concrete, &[]) else {
             return;
         };
-        let mut members: Vec<DefId> = self.impls.impls[i].members.values().copied().collect();
-        // A `HashMap`'s iteration order varies between runs, and every queued
-        // job is a definition allocated in the order it was queued. Sorting is
-        // what keeps two builds of one program identical.
-        members.sort();
-        for m in members {
-            if self.defs.get(m).kind != DefKind::Func || !linked.contains(m) {
+        let methods: Vec<(Symbol, DefId)> = match linked.ty(trait_def).map(|t| &t.kind) {
+            Some(super::TypeDefKind::Trait { methods, .. }) => {
+                methods.iter().map(|m| (m.name.clone(), m.def)).collect()
+            }
+            _ => Vec::new(),
+        };
+        let mut slots = Vec::with_capacity(methods.len());
+        for (name, decl) in methods {
+            // An impl that does not override a method still supplies it when the
+            // trait gave it a default body; that body belongs to the trait, so
+            // the trait's own declaration is the function to put in the slot.
+            let target = self.impls.impls[i]
+                .members
+                .get(&name)
+                .copied()
+                .filter(|&m| linked.contains(m))
+                .unwrap_or(decl);
+            if self.defs.get(target).kind != DefKind::Func || !linked.contains(target) {
+                slots.push(None);
                 continue;
             }
             // A vtable slot takes no generic arguments of its own — that is what
             // object safety guarantees — so the impl's are the whole list.
-            let args = self.inherited_args(linked, m, &bindings);
-            self.reach(linked, m, args, depth);
+            let args = self.inherited_args(linked, target, &bindings);
+            slots.push(Some(self.reach(linked, target, args, depth)));
         }
+        self.meta.set(
+            at,
+            VtableSlots {
+                trait_def,
+                concrete: concrete.clone(),
+                slots,
+            },
+        );
     }
 
     // ===< Selecting the impl a bound stood for >===
@@ -828,7 +890,7 @@ impl VisitorMut for Rewriter<'_, '_> {
                 let concrete = concrete.clone();
                 if let Some(t) = dyn_trait(self.mono.meta, expr.id) {
                     self.mono
-                        .reach_vtable(self.linked, t, &concrete, self.depth + 1);
+                        .reach_vtable(self.linked, t, &concrete, self.depth + 1, expr.id);
                 }
             }
             _ => {}

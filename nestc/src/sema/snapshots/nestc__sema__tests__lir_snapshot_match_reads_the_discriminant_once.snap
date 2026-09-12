@@ -1,0 +1,54 @@
+---
+source: src/sema/tests.rs
+expression: lir_text(src)
+---
+type Shape = struct {           // was a enum; size 12, align 4
+  tag: u8                    // +0
+  payload: [8]u8                    // +4
+}
+  // tag 0 => .dot
+  // tag 1 => .circle(0: i32 +0)
+  // tag 2 => .rect { w: i32 +0, h: i32 +4 }
+type core.str = struct {           // was a distinct; size 16, align 8
+  0: []u8                    // +0
+}
+type []u8 = struct {           // was a slice; size 16, align 8
+  ptr: *u8                    // +0
+  len: u64                    // +8
+}
+
+func area(s_0: Shape) -> i32  // _NC4area
+  let _1: i32
+  let _2: u8
+  let r_3: i32
+  let w_4: i32
+  let h_5: i32
+  let _6: i32
+bb0:                    // entry
+  _2 := discriminant(s_0)
+  switch _2 { 0 => bb7, 1 => bb8, 2 => bb9, _ => bb5 }
+bb1:                    // join
+  return _1
+bb2:                    // arm .dot
+  _6 := cast 0 : comptime_int -> i32
+  _1 := _6
+  goto bb1
+bb3:                    // arm .circle
+  _1 := r_3
+  goto bb1
+bb4:                    // arm .rect
+  _1 := w_4
+  goto bb1
+bb5:                    // no variant matched
+  unreachable
+bb6:                    // unreachable
+  unreachable
+bb7:                    // .dot
+  goto bb2
+bb8:                    // .circle
+  r_3 := (s_0 as circle).0
+  goto bb3
+bb9:                    // .rect
+  w_4 := (s_0 as rect).0
+  h_5 := (s_0 as rect).1
+  goto bb4

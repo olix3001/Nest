@@ -7520,3 +7520,340 @@ main :: func () {}
     assert_eq!(msgs.len(), 1, "{msgs:#?}");
     assert!(msgs[0].contains("cannot resolve name"), "{msgs:#?}");
 }
+
+// ===< LIR snapshots (insta) >===
+//
+// The LIR is a graph, and a graph is the one representation where a reader
+// cannot reconstruct intent from the shape: every construct becomes the same
+// jumps. So these are snapshots rather than assertions about one line — what
+// they lock down is the *whole* lowering of each construct, which is the only
+// form in which "did this `while` become the right three blocks" is a question
+// anyone can answer by looking.
+
+/// Analyze `src` as the entry file and render the whole program's LIR.
+///
+/// Spans are left off: they are carried on every statement (§7c) and printing
+/// them here would make every snapshot a record of line numbers in this file.
+/// `lir_text_with_spans` is for the one test that is *about* them.
+fn lir_text(src: &str) -> String {
+    lir_program(src, Default::default())
+}
+
+/// [`lir_text`], for a chosen set of build options. Only `overflow=` changes
+/// what is lowered (§7d), which is what that test is for.
+fn lir_text_with(src: &str, options: crate::common::options::Options) -> String {
+    lir_program(src, options)
+}
+
+fn lir_program(src: &str, options: crate::common::options::Options) -> String {
+    let mut session = {
+        let mut loader = MemLoader::new();
+        loader = loader.with("main", src);
+        let mut s = Session::with_loader(Box::new(loader));
+        s.options = options;
+        s
+    };
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let layouts = crate::ir::layout::Layouts::new(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        session.options.target,
+    );
+    let program = crate::lir::lower(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        &layouts,
+        &session.options,
+    );
+    // Only the entry file's functions: `core` is linked into every program and
+    // its lowering is not what any of these tests is about.
+    let entry: Vec<crate::lir::Function> = program
+        .funcs
+        .iter()
+        .filter(|f| session.linked.file_of(f.def) == Some(file))
+        .cloned()
+        .collect();
+    let program = crate::lir::Program {
+        funcs: entry,
+        ..program
+    };
+    crate::lir::pretty::program_to_string(&session.defs, None, &program)
+}
+
+/// `while` is a `loop` with a guard by the time the IR has it (§ the IR's
+/// shape), and a `loop` is a back edge here. The three blocks a reader should
+/// see are the head that tests, the body that jumps back, and the exit.
+#[test]
+fn lir_snapshot_while_loop_and_break() {
+    let src = "\
+count :: func (n: i32) -> i32 {
+  let acc := 0
+  let i := 0
+  while i < n {
+    if i == 3 { break }
+    acc = acc + i
+    i = i + 1
+  }
+  return acc
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// §4's shape: the discriminant is read **once**, one switch chooses the
+/// variant, and each group projects only the payload its arm named.
+#[test]
+fn lir_snapshot_match_reads_the_discriminant_once() {
+    let src = "\
+Shape :: enum { dot, circle(i32), rect { w: i32, h: i32 } }
+area :: func (s: Shape) -> i32 {
+  return s.match {
+    .dot => 0,
+    .circle(r) => r,
+    .rect { w, h } => w,
+  }
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// A guard is a test like any other, except that failing it falls through to
+/// the **next arm** rather than to the next test — which is why the candidates
+/// are a chain (§4).
+#[test]
+fn lir_snapshot_a_failed_guard_falls_through_to_the_next_arm() {
+    let src = "\
+pick :: func (o: Option.<i32>) -> i32 {
+  return o.match {
+    .some(x) if x > 0 => x,
+    .some(y) => y,
+    .none => 0,
+  }
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// §3's ladder: a `defer` body is a block, every exit jumps into it, and it is
+/// emitted once per **kind** of exit rather than once per exit site. Two
+/// `return`s in one scope share a rung.
+#[test]
+fn lir_snapshot_defer_is_a_block_every_exit_jumps_through() {
+    let src = "\
+cleanup :: func () {}
+run :: func (n: i32) -> i32 {
+  defer cleanup()
+  if n > 10 { return 1 }
+  if n > 5 { return 2 }
+  return 3
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// `overflow=trap` is a **second block and an extra edge**, not a flag on an
+/// instruction — which is why it is lowering's decision and not codegen's
+/// (§7d).
+#[test]
+fn lir_snapshot_overflow_trap_is_an_edge() {
+    let src = "\
+add :: func (a: i32, b: i32) -> i32 { return a + b }
+";
+    insta::assert_snapshot!("overflow_trap", lir_text(src));
+    let wrap = crate::common::options::Options {
+        overflow: crate::common::options::OverflowMode::Wrap,
+        ..Default::default()
+    };
+    insta::assert_snapshot!("overflow_wrap", lir_text_with(src, wrap));
+}
+
+/// §7b: a tuple, an enum, a slice and a `distinct` are all structs here, and an
+/// array is not. The type table is what a backend and a debugger read.
+#[test]
+fn lir_snapshot_aggregates_are_flattened_to_structs() {
+    let src = "\
+Meters :: distinct f64
+Pair :: struct { a: u8, b: u32 }
+Tag :: enum { none, one(u8), two(u32, u8) }
+shapes :: func (p: Pair, t: Tag, s: []i32, a: [3]u8, q: (i32, bool), m: Meters) {}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// A `dyn` call is an indirect call through a vtable slot, and the vtable is a
+/// constant of function pointers in the trait's declaration order (§7b, §9).
+#[test]
+fn lir_snapshot_dynamic_dispatch_goes_through_a_vtable_slot() {
+    let src = "\
+Speak :: trait { say :: func (self: *Self) -> i32 }
+Dog :: struct { n: i32 }
+impl Speak for Dog { say :: func (self: *Self) -> i32 { return self.n } }
+heard :: func (d: *Dog) -> i32 {
+  let s: *dyn Speak := d
+  return s.say()
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// Places are paths (§1): a field by name, a deref, an index by a run-time
+/// value. Nothing else is a place, and everything else gets a slot.
+#[test]
+fn lir_snapshot_places_are_paths() {
+    let src = "\
+Inner :: struct { v: i32 }
+Outer :: struct { i: Inner }
+reach :: func (o: *mut Outer, xs: []mut i32, k: usize) {
+  o.*.i.v = 1
+  xs[k] = o.*.i.v
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// `&&` and `||` are control flow, not operations: the right operand must not
+/// run when the left already decided the answer.
+#[test]
+fn lir_snapshot_short_circuit_is_control_flow() {
+    let src = "\
+both :: func (a: bool, b: bool) -> bool { return a && b }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// §2: a panic does not unwind, so a call to a `-> never` function is an
+/// ordinary instruction followed by `unreachable`, and the block ends there.
+#[test]
+fn lir_snapshot_a_diverging_call_ends_the_block() {
+    let src = "\
+checked :: func (n: i32) -> i32 {
+  if n < 0 { panic(\"negative\") }
+  return n
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// §9: `size_of.<T>()` is the number layout computed. Nothing reaching codegen
+/// is ever a call to a function that does not exist.
+#[test]
+fn lir_snapshot_intrinsics_are_operations_not_calls() {
+    let src = "\
+{ size_of, align_of } :: import <core/mem>
+Header :: #packed struct { magic: u32, tag: u8 }
+sizes :: func () -> usize { return size_of.<Header>() + align_of.<Header>() }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+// ===< LIR well-formedness >===
+
+/// Every block ends in exactly one terminator and every edge points at a block
+/// that exists.
+///
+/// A snapshot says what one lowering produced; this says what *any* of them may
+/// produce. The two guard different things: a snapshot catches a change, and
+/// this catches a graph that is not a graph — an edge to a block that was
+/// allocated and never filled, which is the failure mode a CFG builder has.
+#[test]
+fn every_lir_edge_points_at_a_block_that_exists() {
+    let src = "\
+Shape :: enum { dot, circle(i32), rect { w: i32, h: i32 } }
+cleanup :: func () {}
+area :: func (s: Shape) -> i32 {
+  defer cleanup()
+  let acc := 0
+  let i := 0
+  while i < 4 {
+    if i == 2 { continue }
+    acc = acc + s.match { .dot => 0, .circle(r) => r, .rect { w, h } => w * h }
+    i = i + 1
+    if acc > 100 { return acc }
+  }
+  return acc
+}
+main :: func () { let x := area(.circle(3)) }
+";
+    let session = {
+        let mut loader = MemLoader::new();
+        loader = loader.with("main", src);
+        let mut s = Session::with_loader(Box::new(loader));
+        let file = s.load_entry("main").expect("entry loads");
+        analyze(&mut s, file);
+        s
+    };
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let layouts = crate::ir::layout::Layouts::new(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        session.options.target,
+    );
+    let program = crate::lir::lower(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        &layouts,
+        &session.options,
+    );
+    for f in &program.funcs {
+        for b in &f.blocks {
+            let targets: Vec<crate::lir::BlockId> = match &b.term.kind {
+                crate::lir::TermKind::Goto(t) => vec![*t],
+                crate::lir::TermKind::Switch {
+                    arms, otherwise, ..
+                } => arms.iter().map(|(_, t)| *t).chain([*otherwise]).collect(),
+                _ => Vec::new(),
+            };
+            for t in targets {
+                assert!(
+                    (t.0 as usize) < f.blocks.len(),
+                    "{}: bb{} jumps to bb{}, which does not exist",
+                    f.name,
+                    b.id.0,
+                    t.0
+                );
+            }
+        }
+        // Every local an instruction names has a slot. Slots are dense and
+        // assigned in order, so this is the check that a projection built for
+        // one function did not escape into another.
+        for b in &f.blocks {
+            for s in &b.stmts {
+                if let crate::lir::StmtKind::Assign { place, .. } = &s.kind
+                    && let crate::lir::Base::Local(id) = place.base
+                {
+                    assert!(
+                        (id.0 as usize) < f.locals.len(),
+                        "{}: local _{} has no slot",
+                        f.name,
+                        id.0
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// §3's requirement, as an assertion rather than a picture: a `defer` body
+/// appears **once** however many paths run it. Three `return`s in one scope
+/// share one rung.
+#[test]
+fn a_defer_body_is_emitted_once_per_kind_of_exit_not_once_per_site() {
+    let src = "\
+cleanup :: func () {}
+run :: func (n: i32) -> i32 {
+  defer cleanup()
+  if n > 10 { return 1 }
+  if n > 5 { return 2 }
+  return 3
+}
+";
+    let text = lir_text(src);
+    let calls = text.matches("call cleanup()").count();
+    assert_eq!(calls, 1, "{text}");
+}

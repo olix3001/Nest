@@ -1,270 +1,295 @@
-# Handoff: Phase 7 is done — layout, plus four fixes to phase 6
+# Handoff: Phase 8 is done — LIR, plus the four phase-7 audit fixes
 
-**Generated**: 2026-09-11
+**Generated**: 2026-09-12
 **Branch**: `main`
-**Status**: **417 tests pass**, `cargo clippy` reports 73 warnings (the 84
-baseline minus the dead-code entries these phases made live, plus three of the
-same kind — items only the tests use). Every file in `examples/*.nest` compiles.
+**Status**: **438 tests pass**, `cargo clippy` reports 90 warnings (the 73
+baseline plus 17 dead-code entries in the new `lir` module — fields codegen will
+read and nothing does yet). Every file in `examples/*.nest` compiles.
 
-**Read `design/roadmap.md` §7 first**, then its **Open questions** section —
-there is one decision there waiting on you. This document is the *state*.
-**Phase 8 (LIR: shape and control flow) is next and is unblocked.**
+**Read `design/roadmap.md` §8 first**, then `design/lir.md`. This document is the
+*state*. **Phase 9 (LIR: drops and safepoints) is next and is unblocked.**
 
 ## What is built (this session)
 
-### Four fixes to phase 6, all with tests
+### The four audit fixes, committed first (`588e605`)
 
-- [x] **`[SIZE * 2]T` is a legal array length.** §3.2 says a length is a
-      compile-time constant and an expression over constants is one. **Read the
-      roadmap's Open questions section**: this was built differently from the
-      note you left there, and the difference is yours to confirm.
-- [x] **A generic with no finite set of instantiations is reported.**
-      `grow.<T>` calling `grow.<Box.<T>>` used to run the compiler out of stack.
-      There is now a depth budget (`mono::INSTANTIATION_DEPTH`, 64) and one
-      diagnostic per declaration.
-- [x] **A bound's trait arguments reach monomorphization.** `impl Conv.<i32> for
-      Vec3` and `impl Conv.<bool> for Vec3` are coherent (§4.9) and both apply to
-      `Vec3`; selection used to pick one silently.
-- [x] **Two impls of one trait for one type no longer share a symbol.** Their
-      members have the same name *and* the same canonical path, so the
-      implemented trait is now part of the symbol (`_NC4Vec3XN4ConvIi32E2to`) and
-      of the name (`Vec3.<as Conv.<i32>>.to`). `design/lir.md` §7 records the
-      encoding.
+- [x] **Layout arithmetic is checked**, and a type the target cannot address is
+      a **diagnostic** rather than an overflow. `LayoutError::TooLarge`, reported
+      by the stamping pass — the one layout failure no earlier check owns. The
+      ceiling is `isize::MAX` on the target, and `design/lir.md` §7cc states the
+      rule and why it is `isize` and not `usize`.
+- [x] **A bad array length in a signature is reported once.**
+      `stamp_generics` re-resolved the signature purely to collect the generic
+      parameters it mentions, and resolving a type *reports*. It now reads back
+      what inference already recorded (`Inferer::inferred_sig_ty`).
+- [x] **A type alias's right-hand side is checked at its declaration**, and
+      reported once however often the alias is used. Two halves: a declaration
+      pass that expands every alias the file declares, and `ConstSlotReported`,
+      which makes every diagnostic in the `const_*` family at most once per node
+      — a type node is resolved once per *use*, not once.
+- [x] **`size_of` of a type already in error adds no second diagnostic.**
+      `ConstError::reported` is the channel; `Ty::mentions_error` is the test.
 
-### Phase 7 — layout
+### Phase 8 — LIR
 
-`nestc/src/ir/layout.rs` computes; `nestc/src/ir/check/layouts.rs` asks about
-every declared type and stamps the answer. The **rules** are in
-`design/lir.md` §7cc, and they are rules rather than derivations — a backend has
-to agree with them.
+`nestc/src/lir/mod.rs` is the representation, `lower.rs` the IR → LIR walk,
+`pretty.rs` the dump `design/lir.md` §1 writes. `main.rs` prints it as
+`===< LIR >===`.
 
-- [x] **Sizes, alignments and offsets** for every shape: scalars, pointers,
-      slices, arrays, tuples, structs, enums, `distinct`s.
-- [x] **A query, not a pass.** Asked about a concrete `Ty`, memoized by
-      `mono::type_key` — the mangled encoding, whose one job is injectivity, so
-      two types share it precisely when they are the same type. `Ty` cannot be a
-      key: a `const` argument may hold a float, so there is no `Hash`.
-- [x] **`#packed` and `#align(N)`**, on a type *and* on a field. A member now
-      carries its own directives into the IR; before this, `#align(8)` on a field
-      was silently ignored. `#packed` / `#soa` on a field are rejected.
-- [x] **`size_of` / `align_of` fold to constants**, including inside a generic
-      `#const` function.
-- [x] **The target comes back, here and only here.** A *pointer's* width is
-      written nowhere in a type; `usize`'s is (phase 5). `layout` asks the
-      target; everything else — the const evaluator included — asks `layout`.
-- [x] **Layouts print in the IR dump** (`}  // size 12, align 4`), which is what
-      the 22 regenerated snapshots assert.
+- [x] **Basic blocks, terminators, places** (§1). Locals up front; `goto`,
+      `switch`, `return`, `unreachable` and nothing else.
+- [x] **`match` as a decision tree** (§4) — the discriminant read **once**.
+- [x] **`defer` placed on every exit path** (§3), as ordinary blocks on a
+      cleanup ladder, one rung per *kind* of exit.
+- [x] **Aggregates flattened to structs** (§7b); arrays are not.
+- [x] **Vtables as constants**, with the slot filling recorded by
+      monomorphization (`mono::VtableSlots`).
+- [x] **`overflow=trap` as an edge** (§7d), through `distinct` integers too.
+- [x] **Intrinsics gone as calls** (§9).
+- [x] **Everything §7c lists carried**: a span per statement, a source name per
+      local, both names per function.
+- [x] **12 snapshot tests and 2 well-formedness tests.**
 
-## The three load-bearing decisions
+## The four load-bearing decisions
 
-### One arithmetic, two walks
+### `defer` came with this phase, not with phase 9
 
-`ir::const_eval::binary_values` / `int_binary` / `float_binary` / `unary_op` are
-**free functions over `ConstValue`s** with no tree and no node behind them. The
-IR evaluator calls them; so does inference's fold over the AST, which is what
-makes `[SIZE * 2]T` work.
+The roadmap put §3 in phase 9 with drops and safepoints. It is here instead,
+because the alternative was a control-flow lowering that silently discarded
+`defer` bodies — a wrong program that looks like a right one. Drops and
+safepoints stay in phase 9 and attach to the ladder this phase builds, which is
+the part of §3 they actually needed.
 
-That shape is the whole point. `SIZE * 2` must not mean one thing in a type and
-another in a value, so there is exactly one implementation of the semantics —
-and two walks, because the trees genuinely differ and one runs before the other
-exists. The error is a plain `String` for the same reason: the message about
-`2 / 0` is the same everywhere, and only the *place* to report it differs.
+The rungs are shared per **kind** of exit and not per exit *site*: three
+`return`s in one scope enter one rung. They cannot be shared across kinds,
+because what follows differs — a `return` continues to the function's exit, a
+`break` only to the loop's. That is also why `return` writes a slot instead of
+returning directly: the real `return` happens after the ladder, and a rung shared
+by three of them cannot tell which value it is carrying.
 
-### Layout is a query, and type definitions stay generic
+### No phi, and no block-level input list
 
-`TypeDef`s are **definition-relative**: a field of `Pair.<T>` is a `T`, exactly
-as lowering left it. Substituting the use site's arguments is layout's job.
+Both were tried and both were removed on the user's call. A local is a **slot**,
+addressable, and reading one written in another block is an ordinary read. The
+value of that is that everything downstream — drops, safepoints, codegen — sees
+one mechanism rather than two, and a merge needs no special form. What a merging
+expression (`if`, `match`, `&&`) does is write its branches' results into one
+slot and read it after the join.
 
-That is why monomorphization instantiates *functions* and not types, and it is
-what keeps one `Pair` in the program instead of one per instantiation. A generic
-type is skipped by the stamping pass for the same reason `T` is: it has no
-layout, and its instantiations do.
+### Monomorphization owns a vtable's slots, not the LIR lowering
 
-### The layout pass stamps and does not complain
+`mono::VtableSlots` is stamped on the `*T` → `*dyn Trait` coercion — the only
+place in the program where the trait and the concrete type are written down
+together. Re-selecting the impl in `lir` would be a second implementation of a
+selection free to disagree with the first, and the instantiated method that fills
+a slot **does not exist** until monomorphization makes it.
 
-It would be natural for it to report every type it cannot lay out. It does not,
-because **every one of those is already reported** by the check that owns the
-question: an unsized member by §3.4's rule, a cycle by
-`declarations::recursive_layouts` (which now marks the types it rejected, so
-layout stays quiet), an errored member by inference. A second diagnostic for one
-mistake is what the whole diagnostic discipline here is arranged to avoid.
+### Pattern types are threaded down, never read off the pattern node
+
+A pattern is matched *against* a type; its own node carries whatever inference
+left there, which for a variant payload element is nothing. The first version
+read `meta.ty(pattern.id)` and produced `checked_mul(undef, undef)` — the
+bindings were silently skipped. `test_pattern` and `bind_irrefutable` now take
+the type of the value at the place and derive each sub-pattern's from it.
 
 ## Failed approaches (don't repeat these)
 
 Everything in the previous handoffs' lists still stands. New this session:
 
-- **Rooting monomorphization at `main`** — already recorded, and the regression
-  test (`every_call_names_a_function_the_program_still_has`) is what caught it.
-- **Reporting from the layout pass.** Built, and every message was a second one
-  for a mistake already reported: `dyn Trait` by value, and a self-containing
-  type. Both showed up as test failures asserting *exactly one* diagnostic — the
-  guard working as designed.
-- **`Const::Unevaluated(DefId)` for a computed array length.** It cannot work: a
-  length is part of a type's identity (§3.2), so `[SIZE * 2]T` has to unify with
-  `[8]T` *during* inference, and an unevaluated length unifies with nothing until
-  after linking.
-- **Suggesting "bind it to a `::` constant first" for a call in a length.** The
-  first message said that; following the constant arrives right back at the call,
-  so the advice was wrong. The message now states the ordering limit instead.
-- **Putting a `Target` back into `ConstEval`.** Phase 5 took it out on purpose.
-  What it needed was not the target but a *layout*, so it holds a `&Layouts` —
-  the answerer, not the answer.
-- **Reading `size_of.<T>()`'s type from the signature.** There is none:
-  `func <T> () -> usize` mentions `T` nowhere. It comes from the call's
-  `Instantiation`, which meant carrying that onto **intrinsic** nodes too — the
-  intrinsic branch of `lower_call` returns early and was skipping it.
-- **Binding only `const` generic arguments in the evaluator's frame.** A
-  `size_of.<T>()` inside a generic `#const` body then asked about `T` itself.
-  There is now a `ty_frames` stack beside `frames`, and a nested call resolves
-  `T` against the frame it came from rather than passing the name on.
-- **Assuming a member's directives reach the IR.** They did not:
-  `Lowerer::member` built a `Member` with a type and a span and nothing else.
+- **A `phi` instruction, LLVM style.** Built, then removed: with locals as slots
+  it is a second mechanism for something the first already does, and a `break`
+  or `return` that leaves through a ladder cannot be a phi operand anyway — the
+  ladder is shared, so the predecessor cannot tell the exits apart.
+- **`Block::inputs`, a per-block list of locals read from elsewhere.** Also
+  built, also removed. It is derived data that can drift, and every consumer that
+  wants it (liveness, root maps) computes it in the form it actually needs.
+- **A `Cleanup` structure holding unplaced defer blocks.** The first attempt
+  lowered defer bodies into blocks nothing jumped to and recorded them beside the
+  function. It is not a representation of the program; the ladder is.
+- **Reading a pattern's type off its own node.** See above.
+- **Re-testing the discriminant inside a group.** The first grouped `match`
+  emitted the switch *and* then let each arm test the variant again — three extra
+  blocks per variant, for a question with a known answer. `chain` takes the
+  already-selected variant and tests only the payload.
+- **One "nothing matched" block per variant group.** They are all the same block.
+- **`Layouts::substitution` left private.** LIR needs a member's type *as a use
+  site sees it*, so `member_types` / `variant_member_types` are public now.
+  Substituting is layout's job and the answer has to be reachable from outside.
+- **`ty.is_int()` as the overflow test.** `usize` is `distinct uint.<PTR_BITS>`
+  since §3.1, so the commonest integer a program writes said no.
+- **Lowercasing a whole rendered instruction** to spell `Mul` as `mul`. It
+  lowercases the operands too, and an operand may be a string.
 
 ## Key decisions
 
 | Decision | Rationale |
 |---|---|
-| One arithmetic, two walks | `SIZE * 2` must not mean two things. The trees differ and one runs first; the semantics do not and must not |
-| A length is folded during inference | It is part of a type's identity, so it has to be a number before unification asks whether two types are the same |
-| A **call** in a type is refused, not worked around | A body is not compiled until its types are known, and a length is one of them. Naming it through a constant does not help |
-| Layout is a query, memoized by the mangled type encoding | "Every type" is not enumerable; injectivity is exactly what a cache key wants, and `Ty` has no `Hash` |
-| Type definitions stay definition-relative | One `Pair` in the program, not one per instantiation — and it is why mono instantiates functions, not types |
-| An integer's size rounds up to a power-of-two alignment, capped at 16 | `u24` has no three-byte load; `[N]u24` would otherwise have a stride nothing can use. The cap is because a 512-byte alignment for a `u4096` is absurd |
-| `Layout::size` is the **stride** | Every consumer wants it; two numbers would mean every one of them choosing |
-| Fields are never reordered | `#packed` is defined as removing *padding*, which only means something if the order is the written one |
-| An enum's payload overlaps | One variant is live at a time; end-to-end would make an enum as big as all of them |
-| The layout pass stamps and does not report | Every failure it can see is already reported by the check that owns the question |
-| `#soa` warns rather than being ignored | A silently ignored directive is worse than an unimplemented one. It waits on what a place projection *is*, which is phase 8 |
-| A trait impl's member carries its trait in the symbol | Two coherent impls for one type share a name and a path; without it they share a symbol |
-| `ConstEval` holds a `&Layouts`, not a `Target` | Phase 5's line still holds: how wide a pointer is is layout's question alone |
+| A local is a slot; no phi, no block inputs | One mechanism, and a ladder-shared exit could not be a phi operand anyway |
+| `defer` is lowered here, not in phase 9 | A CFG that drops `defer` bodies is not a CFG of the program |
+| A ladder rung per *kind* of exit | §3's requirement is once-per-body, not once-per-site; the continuation is what differs |
+| `return` writes a slot | The real `return` is after the ladder, and the rung is shared |
+| The discriminant is read once, and a group does not re-test it | §4's stated invariant, and three blocks per variant otherwise |
+| A guarded catch-all sends the match down the linear route | Its failure means a different next arm in each group |
+| A vtable's slots are monomorphization's answer | The instantiated method does not exist until that pass makes it |
+| A call is an instruction, not a terminator | A panic does not unwind (§2) — the whole reason the CFG stays the size of the source |
+| Pattern types are threaded down | A pattern is matched *against* a type; its node carries none |
+| `overflow=trap` is an edge in the graph | Every later pass has to see it to be correct (§7d) |
+| Arrays do not flatten | §7b's four reasons: a value index, a length in the type, size, and a GC run |
+| The type table is the closure of what LIR uses | "Every type" is not enumerable — the same reason layout is a query |
+| `TooLarge` is the one layout failure the stamping pass reports | Every other one is already somebody's diagnostic |
 
 ## Current state
 
-**Working**: everything. `cd nestc && cargo test` → **417 passed**. `cargo
-clippy` → 73 warnings. Every file in `examples/*.nest` compiles clean. The
-roadmap, `design/lir.md` §7 and §7cc, `spec/03-types.md` §3.2 and this document
-all describe what is actually built.
+**Working**: everything. `cd nestc && cargo test` → **438 passed**. `cargo
+clippy` → 90 warnings. Every file in `examples/*.nest` compiles clean.
 
-**Broken**: nothing.
+**Broken**: nothing in this session's work. See the bug below, which is older.
 
 **Uncommitted changes**: none.
 
-**Deliberately not done**:
+## Bugs found, not fixed
 
-- **`#soa`.** Warned about, not consumed. It waits on the LIR's place
-  projection: storing `[N]Particle` column-wise means `&a[i]` no longer names a
-  contiguous `Particle`, and what a projection *is* is phase 8's to say.
-- **A call or `size_of` inside a type.** `[double(4)]T` and
-  `[size_of.<H>()]u8` are both refused. Neither is a layout or a folding
-  question — both want dependency-ordered analysis, which is a phase of its own.
-  It is in the roadmap's Open questions.
-- **ABI classification.** How a struct is *passed* — registers, stack, hidden
-  pointer — is a different question from how it is stored. It belongs with §11.3
-  and codegen.
-- **Dead-code elimination** and **cross-compilation-unit generics**: unchanged
-  from the phase 6 handoff.
-- **Moving `+`, `-` and the rest out of `sema::builtins`** into `core` impls:
-  unchanged, and still cleanup rather than a fix.
+**`core`'s `.len()` method calls itself.** `packages/core/slice.nest` writes
+
+```nest
+@public len :: #intrinsic("len") func <T> (x: T) -> usize
+impl <T> []T {
+  len :: #inline func (self: *Self) -> usize { return len(self) }
+}
+```
+
+and the inner `len` resolves to the **impl's own member**, not to the namespace's
+intrinsic. The LIR makes it plain:
+
+```
+func core.<impl []T>.<i32>.len(self_0: *[]i32) -> usize #inline
+bb0:
+  _1 := call core.<impl []T>.<i32>.len(self_0)
+  return _1
+```
+
+Every `s.len()` on a slice is infinite recursion, and phase 10 would emit a
+binary that hangs. It is **not** a phase-8 regression — it dates from phase 3,
+when `len` became an intrinsic — and phase 8 is what made it visible.
+
+There is no workaround in the source: neither `core.slice.len(self)` nor
+`slice.len(self)` resolves from inside the file, so the fix is in **name
+resolution** — an impl member should not shadow the enclosing namespace for a
+bare call, which is what Rust does and what `sema::resolve` does not. That is a
+front-end change and it wants its own commit. A fixed-length `[N]T` is unaffected
+in practice because `len` folds to the literal count during lowering; only the
+slice impl is reached at run time.
+
+## Deliberately not done
+
+- **Drops (§5) and GC safepoints (§6).** Phase 9. Both attach to the ladder §3
+  now builds.
+- **`#soa`.** Still warned about rather than consumed. It now has what it was
+  waiting for — a place projection is `Projection::Index` over an array — so this
+  is a real task rather than a blocked one: a `#soa` `[N]Particle` needs a column
+  per field and an `&a[i]` that no longer names a contiguous `Particle`.
+- **A slice literal's storage.** `[]T { a, b }` reaches LIR as the composite
+  intrinsic; where the elements live is an allocation question.
+- **ABI classification**, dead-code elimination, cross-compilation-unit generics,
+  moving `+`/`-` out of `sema::builtins`: all unchanged.
+- **`Ty` in LIR.** Locals are typed with `sema::ty::Ty`, which is concrete by
+  here; there is no separate `LirTy`. The flattened definitions in
+  `Program::types` are what a backend reads for contents.
 
 ## Files to know
 
 | File | Why it matters |
 |---|---|
-| `design/roadmap.md` §7, §8, **Open questions** | §7 is what was built; §8 is next; Open questions has one waiting on you. |
-| `design/lir.md` §1, 2, 4 | Phase 8's brief: basic blocks, places, terminators, the `match` decision tree. |
-| `design/lir.md` §7b, §7cc, §7c, §7d | Aggregate flattening, the layout rules, debug info, what a build setting changes. All four are phase 8 input. |
-| `nestc/src/ir/layout.rs` | `Layouts::of` / `fields` / `enum_layout`, the rules, `subst_ty` (shared with the const evaluator). |
-| `nestc/src/ir/check/layouts.rs` | The stamping pass, and why it reports nothing. |
-| `nestc/src/ir/mono.rs` | Phase 6. `type_key` is here and layout uses it. |
-| `nestc/src/ir/const_eval.rs` | `binary_values` and friends (the shared arithmetic, at the bottom of the file); `frames` / `ty_frames`; `$size_of`. |
-| `nestc/src/sema/infer.rs` | `const_value_in` / `const_operand` (the AST fold), `Generics`, `Instantiation`, `ImplTarget`. |
-| `nestc/src/common/options.rs` | `Target` — `pointer_bits` is what layout reads. |
+| `design/lir.md` | The specification. §5 and §6 are what is left. |
+| `design/roadmap.md` §8, §9 | §8 is what was built; §9 is next. |
+| `nestc/src/lir/mod.rs` | `Program`, `Function`, `Block`, `Place`, `Rvalue`, `Terminator`, `TypeDef`. |
+| `nestc/src/lir/lower.rs` | The walk. The scope/ladder machinery is `push_scope` / `ladder` / `rung`; `match` is `lower_match` / `chain` / `test_pattern`. |
+| `nestc/src/lir/pretty.rs` | The dump. `:=` introduces, `=` stores. |
+| `nestc/src/ir/mono.rs` | `Instance` (names), `VtableSlots` (slot filling), `type_key`. |
+| `nestc/src/ir/layout.rs` | `of` / `fields` / `enum_layout` / `member_types` / `max_size`. |
+| `nestc/src/sema/tests.rs` | `lir_text`, the 12 `lir_snapshot_*` tests, and the two well-formedness ones. |
 
 ## Code context
 
-```nest
-Header  :: #packed struct { magic: u32, len: u16, tag: u8 }   // size 7,  align 1
-Padded  :: struct { a: u8, b: u32, c: u8 }                    // size 12, align 4
-Wide    :: #align(16) struct { x: f32, y: f32 }               // size 16, align 16
-Over    :: struct { a: u8, #align(8) b: u8, c: u8 }           // size 16, align 8
-Colour  :: enum { red, green, blue }                          // size 1,  align 1
-Payload :: enum { none, num(i64), pair(u8, u8) }              // size 16, align 8
-
-SIZE: usize :: 4
-buf :: func (x: [SIZE * 2]i32) -> usize { return x.len() }    // x: [8]i32
+```
+func run(n_0: i32) -> i32  // _NC3run
+  let _1: i32
+  let _4: i32
+bb0:                    // entry
+  _1 := cast 10 : comptime_int -> i32
+  _2 := n_0 > _1
+  switch _2 { 1 => bb1, _ => bb2 }
+bb1:                    // then
+  _4 := 1
+  goto bb5
+bb4:                    // return
+  return _4
+bb5:                    // defer 0 (return)
+  call cleanup()
+  goto bb4
 ```
 
 ```rust
-// ir/layout.rs
-pub struct Layout { pub size: u64, pub align: u64 }   // `size` is the stride
-pub struct Fields { pub layout: Layout, pub offsets: Vec<u64> }
-pub struct EnumLayout { pub layout: Layout, pub tag: Layout, pub payload_at: u64,
-                        pub payload: Layout, pub variants: Vec<Fields> }
-impl Layouts<'_> {
-    pub fn of(&self, ty: &Ty) -> Result<Layout, LayoutError>;
-    pub fn fields(&self, ty: &Ty) -> Option<Result<Fields, LayoutError>>;
-    pub fn enum_layout(&self, ty: &Ty) -> Option<Result<EnumLayout, LayoutError>>;
+// lir/mod.rs — the whole instruction set
+pub enum StmtKind {
+    Assign { place: Place, value: Rvalue },
+    Call { dest: Option<Place>, callee: Callee, args: Vec<Operand> },
 }
-
-// ir/const_eval.rs — the shared arithmetic, no tree behind it
-pub fn binary_values(op: BinOp, a: &ConstValue, b: &ConstValue) -> Result<ConstValue, String>;
-pub fn unary_op(op: UnOp, v: &ConstValue) -> Result<ConstValue, String>;
+pub enum TermKind {
+    Goto(BlockId),
+    Switch { value: Operand, arms: Vec<(i128, BlockId)>, otherwise: BlockId },
+    Return(Option<Operand>),
+    Unreachable,
+}
+pub enum Projection { Field { index, name }, Index(Operand), Deref, Variant { index, name } }
 ```
 
 **The non-obvious bits.**
 
-*A `Layout` is stamped on a `TypeDef`'s `IrId`, and the per-file `Program`s share
-those ids with `Linked`* — so the IR dump shows layouts even though it renders
-what lowering produced. That is the documented behaviour of `link` (it clones,
-preserving ids), and the const-value comments in the same dumps have always
-worked the same way.
+*The `Lowerer` holds `&'c ir::Function` beside `&mut Cx`.* Both come out of the
+same `Linked`, and the function reference is a copy of a shared one — that is
+what lets the walk read the body while mutating the program being built.
 
-*`layout::subst_ty` and `mono`'s are different functions on purpose.* Mono's also
-substitutes `const` parameters into widths and array lengths; layout's has no
-const map and does not need one. Do not "unify" them without giving layout the
-map.
+*A block whose terminator is already set silently drops later statements.*
+That is `push`'s job, and it is what makes "everything after a `return` in the
+same straight run" disappear without the walk having to track it.
 
-*The layout pass runs **last** in `check::run`.* Laying out a cycle does not fail,
-it does not terminate, so `declarations::recursive_layouts` has to have run and
-marked its types first.
+*`self.at` is moved around freely and always restored.* `rung` and
+`return_block` both build a block elsewhere and put `self.at` back; forgetting to
+is how statements end up in the wrong block.
 
-*`#align` on a member is read from `meta.directives(member.id)`*, which only
-exists because `Lowerer::member` now copies the field def's directives. Anything
-else that wants a member's directives gets them the same way.
+*The type table is built **last**, in `Cx::collect_types`, from the locals the
+functions ended up with.* Adding a type to a local after that point would not
+reach the table.
 
 ## Resume instructions
 
-1. `cd nestc && cargo test` — expect **417 passed**.
+1. `cd nestc && cargo test` — expect **438 passed**.
 2. See the phase working:
    ```
    cargo build
    cat > /tmp/e.nest <<'EOF'
-   { size_of, align_of } :: import <core/mem>
-   Header  :: #packed struct { magic: u32, len: u16, tag: u8 }
-   Padded  :: struct { a: u8, b: u32, c: u8 }
-   Payload :: enum { none, num(i64), pair(u8, u8) }
-   SIZE: usize :: 4
-   A: usize :: size_of.<Header>()
-   B: usize :: size_of.<Payload>()
-   C: usize :: align_of.<Padded>()
-   buf :: func (x: [SIZE * 2]i32) -> usize { return x.len() }
-   @public main :: func () { const z := A }
+   Shape :: enum { dot, circle(i32), rect { w: i32, h: i32 } }
+   cleanup :: func () {}
+   area :: func (s: Shape) -> i32 {
+     defer cleanup()
+     return s.match { .dot => 0, .circle(r) => r, .rect { w, h } => w * h }
+   }
+   @public main :: func () { let x := area(.circle(3)) }
    EOF
-   ./target/debug/nestc /tmp/e.nest | grep -E 'size |= [0-9]|func buf'
+   ./target/debug/nestc /tmp/e.nest | sed -n '/===< LIR/,$p'
    ```
-   Expected: `Header` 7/1, `Padded` 12/4, `Payload` 16/8, `A = 7`, `B = 16`,
-   `C = 4`, and `buf(x: [8]i32)`.
-3. **Answer the one open question** in `design/roadmap.md` — how `[SIZE * 2]T`
-   was built versus the note you left.
-4. **Phase 8 (LIR: shape and control flow) is next.** `design/roadmap.md` §8 is
-   the plan and `design/lir.md` §1, 2, 4, 7b is the content: basic blocks,
-   places, terminators, the `match` decision tree, aggregates flattened to
-   structs. Two things already in hand that it consumes: every function has a
-   symbol (phase 6) and every concrete type has a layout (phase 7). One thing it
-   has to decide before `#soa` can be consumed: what a place projection through a
-   column-wise array *is*.
+   Expect: one `discriminant`, one `switch` over three variants, a
+   `defer 0 (return)` block every exit goes through, and `checked_mul` with an
+   `overflow` edge.
+3. **Phase 9 (LIR: drops and safepoints) is next.** `design/lir.md` §5 and §6.
+   Both attach to the ladder: an allocation that does not outlive its scope is a
+   `drop` on the same rungs, and a safepoint carries the live pointers at a call.
+   §6's `reloc` discipline is the part with a real decision in it.
+4. Consider fixing the `core.<impl []T>.len` recursion above first — it is a
+   front-end change, it is small, and phase 10 cannot ship without it.
 5. Whatever you touch, verify with all three:
-   - `cargo test` (417 and rising)
+   - `cargo test` (438 and rising)
    - `for f in ../examples/*.nest; do ./target/debug/nestc "$f" >/dev/null || echo "FAIL $f"; done`
    - `cargo clippy` — compare the warning **set**, not the count.
 
@@ -272,60 +297,42 @@ else that wants a member's directives gets them the same way.
 
 Everything in the previous handoff's list still holds. New or changed:
 
-- **A `const` generic argument takes a literal or a named constant, not an
-  expression.** `repeat.<N * 2>` does not parse, and that is the **grammar**:
-  inside `.<...>` a `>` is the closing bracket. An array length has no such
-  problem because `]` closes it. Rust solves this with braces
-  (`foo::<{ N * 2 }>()`); Nest has not decided.
-- **`[N * 2]T` with `N` a `const` generic parameter is refused.** `[N]T` is fine.
-  A `Const` has no shape for an unevaluated expression, so the combined form
-  would have to stay symbolic to monomorphization — and it says so rather than
-  guessing.
-- **`int.<N>` inside a family impl has no layout**, and the stamping pass skips
-  it along with every other generic. The width is a `const` parameter, so the
-  type is as generic as one over a `T`.
-- **A zero-sized type is a real thing.** `void` and `never` are size 0, align 1,
-  and a member of one costs nothing and keeps its name.
-- **`f80` is size 16, align 16.** Ten bytes of data and six of padding, which is
-  what every ABI that has the type does. What a *slot* costs is what a layout is.
-- **`mono::type_key` is public** and is the key for anything keyed by a type.
-  Prefer it over a display string, which is not injective — two types in
-  different namespaces can print alike.
+- **A `distinct` is a one-member struct in LIR**, so `usize` prints as
+  `struct { 0: u64 }`. That is §2.4's rule made literal, and it is why the
+  overflow check has to look through one.
+- **An enum's payload is `[N]u8`.** The variants' real member types are on the
+  definition, not in the payload member: one variant is live at a time and the
+  bytes are shared, so there is no single type the member could have.
+- **The checked-arithmetic pair is a `(T, bool)` tuple**, which means it shows up
+  in the type table as an ordinary flattened tuple. That is correct — it is a
+  real value a real local holds — and it is why `overflow=wrap` produces a
+  smaller table.
+- **A block with no terminator after the walk is unreachable**, and is sealed as
+  `unreachable`. The well-formedness test is what catches an edge to one that was
+  allocated and never filled.
+- **Spans are off in the snapshots** (`lir_text` passes `None` for the source
+  map) so that a snapshot is not a record of line numbers in `tests.rs`. The
+  driver passes them.
+- **Only the entry file's functions are snapshotted.** `core` is linked into
+  every program and its lowering is not what any of those tests is about.
 
 ## Warnings
 
-- **Run everything from `nestc/`.** `packages/` and `examples/` are one level up.
-  A `cd` inside a compound Bash command silently changes the working directory
-  for later calls — use absolute paths.
-- **`cargo test` does not rebuild `target/debug/nestc`.** Run `cargo build`
-  before the examples loop or you are testing a stale binary.
-- **Compare the clippy warning *set*, not the count.** `cargo clippy
-  --message-format=short 2>&1 | grep -E '^src|^warning: ' | sed
-  's/:[0-9]*:[0-9]*:/:/' | sort`, then `comm` against the baseline. Note the
-  redirection: `2>&1 | grep`, **not** `2>&1 > file` — the second sends clippy's
-  stderr to the terminal and leaves you an empty file and a clean-looking diff.
-- **`cargo clippy` caches.** `touch` the file you changed, or you will compare
-  against a stale run.
-- **`rustfmt --edition 2024 <file>` follows `mod` declarations** and reformats
-  every file it reaches. **Never** run `cargo fmt` with no arguments. Note
-  `src/sema/infer.rs`, `lower.rs`, `session.rs` and `tests.rs` were *already*
-  unformatted before any of this work; leave them.
-- **Regenerating snapshots**: `INSTA_UPDATE=always cargo test`, then
-  `rm -f src/*/snapshots/*.snap.new` and
-  `sed -i '' '/^assertion_line: /d' src/*/snapshots/*.snap`. Then **read every
-  diff** — against `git`, not against `.snap.new`.
-- **Many tests assert *exactly one* diagnostic.** Deliberate: the regression
-  guard against cascades. Fix the cascade rather than loosening the assertion.
-  Both layout cascades this session were caught by exactly that.
-- **A new intrinsic is a row in `sema/intrinsics.rs` first.**
-- **`#lang` discovery is by tag only.** Never hardcode a core type's name, file
-  or position.
-- **Nest syntax worth restating**: `f :: func () { … }`, not `func f() { … }`;
-  `let x: T := v`; a typed constant is `A: u8 :: 5` (the type goes **before** the
-  binder); a directive is its own line above the binding (`#const\nf :: func …`);
-  an `extern` function is `puts :: extern("c") func (…)`; an array literal is
-  `[_]T { a, b }`; match arms are comma-separated.
-- **Comments explain *why*, at length, and cite spec sections inline.**
+Everything in the previous handoff's Warnings section still applies — run
+everything from `nestc/`, `cargo test` does not rebuild the binary, compare the
+clippy warning *set*, `touch` before re-running clippy, never `cargo fmt` with no
+arguments, regenerate snapshots with `INSTA_UPDATE=always cargo test` then
+`rm -f src/*/snapshots/*.snap.new` and `sed -i '' '/^assertion_line: /d'`, many
+tests assert *exactly one* diagnostic, a new intrinsic is a row in
+`sema/intrinsics.rs` first, `#lang` discovery is by tag only.
+
+New:
+
+- **`src/lir/` is not `rustfmt`-clean by accident.** It was written formatted;
+  if you reformat, pass the file explicitly, never `cargo fmt` bare.
+- **The LIR dump is printed by the driver for every file**, so a panic in
+  lowering shows up as a failure of the examples loop. That is deliberate: the
+  loop is the only place the whole of `core` gets lowered.
 
 ## User notes
 
@@ -334,4 +341,4 @@ Everything in the previous handoff's list still holds. New or changed:
 - The design moves. Commit green states often so a redesign costs one commit,
   not a session.
 - When a note in `design/roadmap.md` is departed from, say so *there* and in the
-  reply — the `[SIZE * 2]T` row is the worked example.
+  reply — `defer` landing in phase 8 is this session's worked example.

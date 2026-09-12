@@ -2,6 +2,7 @@
 
 pub(crate) mod common;
 mod ir;
+mod lir;
 mod parser;
 mod sema;
 
@@ -116,6 +117,30 @@ fn main() -> ExitCode {
         print!(
             "\n===< MONO >===\n{}",
             ir::pretty::mono_to_string(&session.defs, &session.ir_meta, &session.linked)
+        );
+    }
+
+    // The LIR: the same program as a graph. Locals up front, basic blocks,
+    // explicit jumps, every aggregate flattened to a struct, every symbol
+    // decided (`design/lir.md` §1). Like the mono dump it is empty when
+    // analysis reported an error, for the same reason.
+    if !session.linked.is_empty() && !session.has_errors() {
+        let layouts = ir::layout::Layouts::new(
+            &session.defs,
+            &session.ir_meta,
+            &session.linked,
+            session.options.target,
+        );
+        let program = lir::lower(
+            &session.defs,
+            &session.ir_meta,
+            &session.linked,
+            &layouts,
+            &session.options,
+        );
+        print!(
+            "\n===< LIR >===\n{}",
+            lir::pretty::program_to_string(&session.defs, Some(&session.sources), &program)
         );
     }
 

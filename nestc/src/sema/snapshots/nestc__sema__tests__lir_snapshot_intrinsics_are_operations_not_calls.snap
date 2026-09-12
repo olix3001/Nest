@@ -1,0 +1,30 @@
+---
+source: src/sema/tests.rs
+expression: lir_text(src)
+---
+type (usize, bool) = struct {           // was a tuple; size 16, align 8
+  0: usize                    // +0
+  1: bool                    // +8
+}
+type usize = struct {           // was a distinct; size 8, align 8
+  0: u64                    // +0
+}
+type core.str = struct {           // was a distinct; size 16, align 8
+  0: []u8                    // +0
+}
+type []u8 = struct {           // was a slice; size 16, align 8
+  ptr: *u8                    // +0
+  len: u64                    // +8
+}
+
+func sizes() -> usize  // _NC5sizes
+  let _0: (usize, bool)
+  let _1: never
+bb0:                    // entry
+  _0 := checked_add(5, 1)
+  switch _0.overflowed { 1 => bb1, _ => bb2 }
+bb1:                    // overflow
+  _1 := $panic("integer overflow")
+  unreachable
+bb2:
+  return _0.0

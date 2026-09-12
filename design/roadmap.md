@@ -24,7 +24,7 @@ Phase 6 and everything after it is unbuilt.
 | 5 | The integer families `int.<N>` / `uint.<N>` ✅ | 3, 4 | large | The deepest type-system change; everything after it is easier |
 | 6 | Monomorphization ✅ | 5 | large | Was the old "Phase 2"; 5 changes what it must substitute |
 | 7 | Layout ✅ | 6 | medium | A generic type has no layout until its arguments are known |
-| 8 | LIR: shape and control flow | 7 | large | `design/lir.md` §1–4 |
+| 8 | LIR: shape and control flow ✅ | 7 | large | `design/lir.md` §1–4 |
 | 9 | LIR: defer, drops, safepoints | 8 | large | `design/lir.md` §3, 5, 6 |
 | 10 | Codegen and the real driver | 9 | large | The first executable |
 
@@ -554,12 +554,66 @@ written down in `design/lir.md` §7cc.
   by hidden pointer — is a different question from how it is stored, and it
   belongs with the C FFI work (§11.3) and codegen.
 
-## Phase 8 — LIR: shape and control flow
+## Phase 8 — LIR: shape and control flow ✅ **done**
 
 `design/lir.md` §1, 2, 4, 7, 7b, 7c: basic blocks, places, terminators, the
 `match` decision tree, mangled names, flattened aggregates, debug info. The
 overflow setting becomes real here — `overflow=trap` is a checked instruction and
 a panic edge, which is why it is lowering's decision and not codegen's (§7d).
+
+### What is built
+
+`nestc/src/lir/mod.rs` is the representation, `lower.rs` the IR → LIR walk, and
+`pretty.rs` the dump §1 writes. A function is locals declared up front, basic
+blocks, one terminator each.
+
+- **Control flow becomes a graph.** `if` is a switch on a `bool`, `loop` is a
+  back edge, `break` / `continue` / `return` are jumps, `&&` and `||` are edges
+  rather than operations, and a call to a `-> never` function is an ordinary
+  instruction followed by `unreachable` (§2 — a panic does not unwind, so a call
+  never needs two successors).
+- **`match` is a decision tree** (§4). The discriminant is read **once**; one
+  switch chooses the variant and each group projects only the payload its arm
+  named. A guard failure falls through to the next *arm*, which is why the
+  candidates in a group are a chain. A catch-all arm joins every group, and one
+  with a guard sends the whole match down the linear route — its failure would
+  mean a different next arm in each group, and a test that means different things
+  in different places is not one test.
+- **Places are paths** (§1): a local (or a `#static`) plus field, index, deref
+  and variant-downcast projections, printed by name. Everything that is not an
+  lvalue gets a slot, so `(a + b).x` needs no special case downstream.
+- **Aggregates are flattened to structs** (§7b) and arrays are not. The type
+  table is the closure of what the lowered program mentions — a tuple, an enum
+  (`{ tag, payload }`), a slice (`{ ptr, len }`), a `distinct`, and a `*dyn
+  Trait` (`{ data, vtable }`) — each with its layout and its members' offsets,
+  and each remembering what it was, because a debugger showing `2` instead of
+  `.green` is a worse debugger.
+- **Vtables are constants** (§7b). Which function fills which slot is recorded by
+  **monomorphization** (`mono::VtableSlots`, stamped on the `*T` → `*dyn Trait`
+  coercion), because the instantiated method that fills a slot does not exist
+  until that pass makes it. A `dyn` call is two projections and an indirect call.
+- **`defer` is placed** (§3), as ordinary blocks on a cleanup ladder, one rung
+  per kind of exit rather than per exit site — which is why `return` writes a
+  slot rather than returning directly.
+- **`overflow=trap` is an edge** (§7d): a checked operation, a switch on the
+  flag, and a block that panics and does not come back. Integers reached through
+  a `distinct` count — `usize` is one (§3.1).
+- **Intrinsics are gone as calls** (§9): `size_of` / `align_of` are the numbers
+  layout computed, `cast` is a cast carrying both types, `len` is a constant or a
+  member, an array literal is an aggregate.
+- **Everything a debugger needs is carried** (§7c): a span on every statement, a
+  source name on every local that had one, both names on every function.
+
+### What it does not do
+
+- **Drops (§5) and GC safepoints (§6).** Phase 9. Both ride the ladder §3 now
+  builds, which is why that section came with this phase rather than after it —
+  a lowering that dropped `defer` bodies would produce wrong programs, and the
+  ladder is what the next two passes attach to.
+- **ABI classification and register allocation.** Codegen's, with §11.3.
+- **A slice literal's storage.** `[]T { a, b }` still reaches LIR as the
+  composite intrinsic: where its elements live is an allocation question, not a
+  shape one.
 
 ## Phase 9 — LIR: defer, drops, safepoints
 

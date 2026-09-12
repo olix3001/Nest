@@ -1,0 +1,75 @@
+---
+source: src/sema/tests.rs
+expression: lir_text(src)
+---
+type (i32, bool) = struct {           // was a tuple; size 8, align 4
+  0: i32                    // +0
+  1: bool                    // +4
+}
+type core.str = struct {           // was a distinct; size 16, align 8
+  0: []u8                    // +0
+}
+type []u8 = struct {           // was a slice; size 16, align 8
+  ptr: *u8                    // +0
+  len: u64                    // +8
+}
+
+func count(n_0: i32) -> i32  // _NC5count
+  let _1: i32
+  let _2: i32
+  let acc_3: i32
+  let _4: i32
+  let _5: i32
+  let i_6: i32
+  let _7: bool
+  let _8: bool
+  let _9: i32
+  let _10: bool
+  let _11: (i32, bool)
+  let _12: never
+  let _13: i32
+  let _14: (i32, bool)
+  let _15: never
+bb0:                    // entry
+  _1 := cast 0 : comptime_int -> i32
+  _2 := _1
+  acc_3 := _2
+  _4 := cast 0 : comptime_int -> i32
+  _5 := _4
+  i_6 := _5
+  goto bb1
+bb1:                    // loop
+  _7 := i_6 < n_0
+  _8 := !_7
+  switch _8 { 1 => bb3, _ => bb4 }
+bb2:                    // loop exit
+  return acc_3
+bb3:                    // then
+  goto bb2
+bb4:                    // else
+  goto bb5
+bb5:                    // join
+  _9 := cast 3 : comptime_int -> i32
+  _10 := i_6 == _9
+  switch _10 { 1 => bb6, _ => bb7 }
+bb6:                    // then
+  goto bb2
+bb7:                    // else
+  goto bb8
+bb8:                    // join
+  _11 := checked_add(acc_3, i_6)
+  switch _11.overflowed { 1 => bb9, _ => bb10 }
+bb9:                    // overflow
+  _12 := $panic("integer overflow")
+  unreachable
+bb10:
+  acc_3 := _11.0
+  _13 := cast 1 : comptime_int -> i32
+  _14 := checked_add(i_6, _13)
+  switch _14.overflowed { 1 => bb11, _ => bb12 }
+bb11:                    // overflow
+  _15 := $panic("integer overflow")
+  unreachable
+bb12:
+  i_6 := _14.0
+  goto bb1
