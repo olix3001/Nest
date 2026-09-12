@@ -1913,6 +1913,13 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     return Some(Rvalue::Use(Operand::Const(Constant::Value(v))));
                 }
                 let v = self.eval(&args[0]);
+                // A cast between two names for one type is nothing to do. It
+                // is the shape the IR gives a `distinct` peel — `cast.<Point>`
+                // on a `Handle` — and since a `distinct` is its representation
+                // here (§9) both sides are the same type by the time this runs.
+                if from == ty {
+                    return Some(Rvalue::Use(v));
+                }
                 Some(Rvalue::Cast {
                     value: v,
                     from,

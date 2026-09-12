@@ -1000,9 +1000,17 @@ through pointers, slices, arrays and tuples for the same reason — `*usize` is
 the instantiation monomorphization named and renaming it here would name a
 function that does not exist.
 
-One consequence worth stating: the `$cast` the IR emits when a distinct type
-reaches an inherited method has nothing left to do here, because both sides of
-it are the same type.
+This holds for every representation, not only the scalar one: a `distinct` over
+a struct **is** that struct here, over an enum that enum, and over another
+`distinct` whatever that one ends at. No `TypeDef` is emitted for the name and
+none is emitted for what it wraps beyond the one the representation already
+had.
+
+One consequence worth stating: the `$cast` the IR emits to peel a `distinct` —
+when one reaches an inherited method, or where a program writes
+`cast.<Point>(h)` — has nothing left to do here, because both sides of it are
+the same type. LIR folds a cast whose two types are equal into a move, so the
+peel costs an instruction only until this pass runs.
 
 ## 10. What a backend has to supply
 

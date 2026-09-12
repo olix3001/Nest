@@ -1891,3 +1891,44 @@ f :: func () -> i32 {
 }
 
 
+
+/// A `distinct` adds **no type** at this level, whatever it is distinct from
+/// (§9). Over a struct it is that struct, over an enum that enum, over another
+/// `distinct` whatever that one ends at — and through a pointer or a slice as
+/// well, since `*Handle` is `*Point` for the same reason.
+///
+/// The peel the IR writes as a cast has nothing left to do: both sides of
+/// `cast.<Point>(h)` are `Point` here, so it is a move.
+#[test]
+fn lir_snapshot_a_distinct_is_its_representation() {
+    let src = "\
+Point :: struct { x: i32, y: i32 }
+Handle :: distinct Point
+Color :: enum { red, green, blue(i32) }
+Shade :: distinct Color
+Deep :: distinct Handle
+take :: func (h: Handle, s: Shade, d: Deep, p: *Handle, xs: []Handle) -> i32 {
+  return cast.<Point>(h).x
+}
+mk :: func (p: Point) -> Handle { return cast.<Handle>(p) }
+hue :: func (s: Shade) -> i32 {
+  return cast.<Color>(s).match { .red => 1, .green => 2, .blue(n) => n }
+}
+";
+    let lir = lir_text(src);
+    for gone in ["Handle", "Shade", "Deep"] {
+        assert!(!lir.contains(gone), "`{gone}` survived into LIR:\n{lir}");
+    }
+    insta::assert_snapshot!(lir);
+}
+
+/// The scalar case, which is the one every program hits: `usize` is
+/// `distinct uint.<64>` in `core` (§3.1), and a one-member struct wrapping a
+/// `u64` is not passed like a `u64` under any C ABI.
+#[test]
+fn a_distinct_scalar_is_the_scalar_and_not_a_wrapper() {
+    let lir = lir_text("f :: func (n: usize, m: str) -> usize { return n }\n");
+    assert!(lir.contains("func f(n_0: u64, m_1: []u8) -> u64"), "{lir}");
+    assert!(!lir.contains("type usize"), "{lir}");
+    assert!(!lir.contains("type core.str"), "{lir}");
+}
