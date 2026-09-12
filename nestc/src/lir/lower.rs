@@ -2652,6 +2652,47 @@ impl<'a, 'c> Lowerer<'a, 'c> {
 
     /// A slice pattern: a length test, then the elements it names from each end.
     #[allow(clippy::too_many_arguments)]
+    /// The place element `i` of a sequence lives at.
+    ///
+    /// An array kept its own shape (§7b), so the element is an ordinary
+    /// projection. A slice did not: it is `{ ptr, len }`, and a struct has
+    /// members rather than elements — so the element is reached through the
+    /// pointer it holds, moved along by `i` and dereferenced. That is the same
+    /// pointer arithmetic `a[i]` does, and doing anything else here would put
+    /// an `Index` on a slice, which [`Projection::Index`] says never happens.
+    fn element_place(
+        &mut self,
+        place: &Place,
+        ty: &Ty,
+        index: Operand,
+        span: Option<FileSpan>,
+    ) -> Place {
+        let Ty::Slice { inner, mutable } = ty else {
+            return place.clone().then(Projection::Index(index));
+        };
+        let ptr = place.clone().then(Projection::Field {
+            index: 0,
+            name: Symbol::new("ptr"),
+        });
+        let at = self.temp(
+            Ty::Ptr {
+                mutable: *mutable,
+                inner: inner.clone(),
+            },
+            span,
+        );
+        self.assign(
+            Place::local(at),
+            Rvalue::Offset {
+                ptr: Operand::Copy(ptr),
+                index,
+                elem: (**inner).clone(),
+            },
+            span,
+        );
+        Place::local(at).then(Projection::Deref)
+    }
+
     fn test_slice(
         &mut self,
         place: &Place,
@@ -2687,11 +2728,8 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         self.branch_if(c, fail, span);
 
         for (i, p) in prefix.iter().enumerate() {
-            let f = place
-                .clone()
-                .then(Projection::Index(Operand::Const(Constant::Value(
-                    ConstValue::Int(i.into()),
-                ))));
+            let at = Operand::Const(Constant::Value(ConstValue::Int(i.into())));
+            let f = self.element_place(place, ty, at, span);
             self.test_pattern(&f, p, &elem, fail);
         }
         // A suffix element is counted from the end, which is a *computed* index:
@@ -2712,20 +2750,17 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 usize_ty,
                 span,
             );
-            let f = place.clone().then(Projection::Index(idx));
+            let f = self.element_place(place, ty, idx, span);
             self.test_pattern(&f, p, &elem, fail);
         }
         // The `..` segment, when it was named: the elements between the two
         // ends, as a slice over the address of the first of them.
         if let Some(Some(b)) = rest {
-            let ty = self.cx.ty_of(b.id);
-            let id = self.new_local(Some(b.name.clone()), ty, span);
+            let bound = self.cx.ty_of(b.id);
+            let id = self.new_local(Some(b.name.clone()), bound, span);
             self.local_of.insert(b.def, id);
-            let first = place
-                .clone()
-                .then(Projection::Index(Operand::Const(Constant::Value(
-                    ConstValue::Int(prefix.len().into()),
-                ))));
+            let at = Operand::Const(Constant::Value(ConstValue::Int(prefix.len().into())));
+            let first = self.element_place(place, ty, at, span);
             let ptr = self.into_temp(
                 Rvalue::Ref {
                     mutable: false,

@@ -1085,6 +1085,10 @@ consumer to justify it and not before.
   managed reference and a machine address that the type system does not draw.
 - **Escape analysis is intra-procedural and blunt** (§5). Per-function summaries
   are a change of precision, not of shape.
+- **A slice pattern's elements go through the pointer**, the same way `xs[i]`
+  does, since a slice has members and not elements (§7b). An earlier lowering
+  projected `xs[0]` off the header instead; an invariant test now says no place
+  indexes a slice.
 - **A `str` pattern longer than a handful of bytes** still calls the same byte
   comparison every other one does. A length-dispatched jump table would be
   faster and is an optimization, not a lowering.
@@ -1119,6 +1123,17 @@ lowering can answer. There is one per construct: the loops, the ladder's four
 rungs, the decision tree over enums and tuples and ranges and text, the checks
 (§7d), monomorphization, statics, casts, safepoints on the back edge, dynamic
 dispatch against a bound resolved at the call, and a declaration with no blocks.
+
+**One program, not one per file.** `link` merges the per-file IR into a single
+`Linked`, monomorphization runs over that, and this pass emits one
+`lir::Program` holding every function that survives — the entry file's,
+`core`'s, and every instantiation neither file wrote. Codegen receives that one
+value; there is nothing to link after it. The snapshots render only the entry
+file's functions, because a test about `while` should not be a record of the
+standard library, so a dump showing `call core.panic` without `core.panic`
+under it is the renderer filtering rather than the program being split. A test
+says so, and the invariant below — every direct call names a function the
+program defines — is checked over the whole thing, `core` included.
 
 **Invariants, over any lowering.** A snapshot catches a change; it cannot say
 what *any* program may produce. The invariant tests say that: every place and

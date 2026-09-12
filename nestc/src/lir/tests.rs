@@ -65,7 +65,22 @@ fn lir_text_with(src: &str, options: crate::common::options::Options) -> String 
     lir_program(src, options)
 }
 
+/// [`lir_text`], with the `file:line:column` of every statement, local and
+/// block. This is what `nestc` itself prints, and what §7c's line table is
+/// built from.
+fn lir_text_with_spans(src: &str) -> String {
+    lir_program_rendered(src, Default::default(), true)
+}
+
 fn lir_program(src: &str, options: crate::common::options::Options) -> String {
+    lir_program_rendered(src, options, false)
+}
+
+fn lir_program_rendered(
+    src: &str,
+    options: crate::common::options::Options,
+    spans: bool,
+) -> String {
     let mut session = {
         let mut loader = MemLoader::new();
         loader = loader.with("main", src);
@@ -103,7 +118,8 @@ fn lir_program(src: &str, options: crate::common::options::Options) -> String {
         funcs: entry,
         ..program
     };
-    crate::lir::pretty::program_to_string(&session.defs, None, &program)
+    let sources = spans.then_some(&session.sources);
+    crate::lir::pretty::program_to_string(&session.defs, sources, &program)
 }
 
 /// `while` is a `loop` with a guard by the time the IR has it (§ the IR's
@@ -526,6 +542,79 @@ grade :: func (n: u8) -> i32 {
 }
 ";
     insta::assert_snapshot!(lir_text(src));
+}
+
+/// The scrutinee kinds the other two decision-tree snapshots do not reach.
+///
+/// `lir_snapshot_a_decision_tree_mixes_tuples_ranges_and_guards` has the
+/// integer ranges, the or-pattern and the guard;
+/// `lir_snapshot_a_text_pattern_calls_bytes_eq` has the `str` literals. What is
+/// left is every other kind of value a `match` can test — a `char`, a float, a
+/// `bool`, a slice by its length and its ends, and a struct destructured into
+/// its members — and none of them is an enum, so none of them reads a
+/// discriminant. Each is the comparison its type calls for, on the same chain
+/// of candidates §4 describes.
+#[test]
+fn lir_snapshot_matching_on_things_that_are_not_enums() {
+    let src = "\
+Point :: struct { x: i32, y: i32 }
+letter :: func (c: char) -> i32 {
+  return c.match {
+    'a' => 1,
+    'b' | 'c' => 2,
+    _ => 0,
+  }
+}
+scale :: func (f: f64) -> i32 {
+  return f.match {
+    0.0 => 0,
+    1.5 => 1,
+    _ => 2,
+  }
+}
+flag :: func (b: bool) -> i32 {
+  return b.match {
+    true => 1,
+    false => 0,
+  }
+}
+ends :: func (xs: []i32) -> i32 {
+  return xs.match {
+    [] => 0,
+    [only] => only,
+    [first, .., last] => first + last,
+  }
+}
+corner :: func (p: Point) -> i32 {
+  return p.match {
+    .{ x: 0, y: 0 } => 0,
+    .{ x, y: 0 } => x,
+    .{ x: _, y } => y,
+  }
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// **Every statement carries the source position it came from** (§7c), which is
+/// what a line table is built out of: `address -> source position`, emitted
+/// from LIR because this is the last level where the mapping is still known.
+///
+/// A span reconstructed later is a span that is wrong. So this is the one
+/// snapshot rendered *with* the positions, and what it shows is that the
+/// compiler's own instructions have them too — the bounds comparison, the trap
+/// block, the `Location` the panic is handed — all pointing at the line the
+/// program wrote, not at nothing.
+#[test]
+fn lir_snapshot_every_statement_carries_its_source_position() {
+    let src = "\
+sum :: func (xs: []i32, k: usize) -> i32 {
+  let mut total := 0
+  total = total + xs[k]
+  return total
+}
+";
+    insta::assert_snapshot!(lir_text_with_spans(src));
 }
 
 // ===< LIR well-formedness >===
@@ -1220,6 +1309,107 @@ fn every_direct_call_names_a_function_in_the_program() {
                 }
             }
         }
+    }
+}
+
+/// **There is one program, and `core` is in it.**
+///
+/// Lowering is whole-program: `link` merges the per-file IR into one
+/// [`Linked`](crate::ir::Linked), monomorphization runs over that, and this
+/// pass emits a single [`Program`](crate::lir::Program) holding every function
+/// that survives — the entry file's, `core`'s, and every instantiation made
+/// along the way. Codegen is handed that one value; there is no per-file LIR
+/// and nothing to link afterwards.
+///
+/// The snapshots render only the entry file's functions, because a test about
+/// `while` should not be a record of the standard library. That is the
+/// renderer filtering, not the program being split — which is what this test
+/// is here to say, since a dump showing a call to `core.panic` and no
+/// `core.panic` in it invites exactly the wrong conclusion.
+#[test]
+fn one_program_holds_core_and_every_instantiation() {
+    let program = lir_whole_program(
+        "f :: func <T> (x: T) -> T { return x }\nmain :: func () -> i32 { return f.<i32>(1) }\n",
+    );
+    let named = |n: &str| program.funcs.iter().any(|f| f.name == n);
+    assert!(named("main"), "the entry file's function");
+    assert!(named("core.panic"), "`core`'s, in the same program");
+    assert!(named("f.<i32>"), "and the instantiation, which no file wrote");
+    // Bodies and all: `core.panic` is a definition here, not a declaration.
+    let panic = program
+        .funcs
+        .iter()
+        .find(|f| f.name == "core.panic")
+        .expect("core.panic");
+    assert!(!panic.blocks.is_empty(), "core.panic has a body");
+}
+
+/// **No place indexes a slice.** A slice is `{ ptr, len }` by §7b and a struct
+/// has members rather than elements, so element `i` of one is reached through
+/// the pointer it holds — `Projection::Index` says as much, and this is the
+/// test that it is true.
+///
+/// It is here because the slice **pattern** broke it: `[first, .., last]`
+/// projected `xs[0]` straight off the slice local, a place no backend can
+/// emit without knowing the header's layout, while `xs[i]` in an expression
+/// went through the pointer. Two lowerings of one thing, and only one of them
+/// was the documented shape.
+#[test]
+fn no_place_indexes_a_slice() {
+    let src = "\
+ends :: func (xs: []i32, ys: [4]i32) -> i32 {
+  let a := xs.match { [] => 0, [one] => one, [f, .., l] => f + l }
+  let b := ys.match { [p, q, .., r] => p + q + r }
+  return a + b + xs[1] + ys[2]
+}
+";
+    let program = lir_whole_program(src);
+    for f in &program.funcs {
+        each_place(f, |place| {
+            let mut ty = match place.base {
+                crate::lir::Base::Local(id) => Some(f.locals[id.0 as usize].ty.clone()),
+                // A global's type is not on the place; nothing here indexes one.
+                crate::lir::Base::Global(_) => None,
+            };
+            for p in &place.projection {
+                let Some(current) = ty.clone() else { break };
+                if matches!(p, crate::lir::Projection::Index(_)) {
+                    assert!(
+                        !matches!(current, Ty::Slice { .. }),
+                        "{}: a place with base {:?} indexes a slice",
+                        f.name,
+                        place.base
+                    );
+                }
+                ty = step(&program, &current, p);
+            }
+        });
+    }
+}
+
+/// The type a projection lands on, or `None` where this test stops caring —
+/// an enum payload, whose shape §4's decision tree owns.
+fn step(
+    program: &crate::lir::Program,
+    ty: &Ty,
+    p: &crate::lir::Projection,
+) -> Option<Ty> {
+    use crate::lir::Projection;
+    match p {
+        Projection::Deref => match ty {
+            Ty::Ptr { inner, .. } => Some((**inner).clone()),
+            _ => None,
+        },
+        Projection::Index(_) => match ty {
+            Ty::Array { inner, .. } | Ty::Ptr { inner, .. } => Some((**inner).clone()),
+            _ => None,
+        },
+        Projection::Field { index, .. } => {
+            let key = crate::ir::mono::type_key(&Default::default(), ty);
+            let def = program.types.iter().find(|t| t.key == key)?;
+            def.members.get(*index as usize).map(|m| m.ty.clone())
+        }
+        Projection::Variant { .. } => None,
     }
 }
 
