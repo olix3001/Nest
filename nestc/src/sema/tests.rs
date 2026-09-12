@@ -7544,6 +7544,35 @@ main :: func () {}
 // form in which "did this `while` become the right three blocks" is a question
 // anyone can answer by looking.
 
+/// Analyze `src` as the entry file and hand back the whole lowered program,
+/// `core` included.
+///
+/// The rendered forms below filter `core` out, because a test about one
+/// construct should not be a record of the standard library. The invariant
+/// checks want the opposite: `core` is code a backend has to emit too, and a
+/// shape it alone produces is exactly the one nothing else would catch.
+fn lir_whole_program(src: &str) -> crate::lir::Program {
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let layouts = crate::ir::layout::Layouts::new(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        session.options.target,
+    );
+    crate::lir::lower(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        &layouts,
+        &session.options,
+        &session.lang_items,
+        &session.sources,
+    )
+}
+
 /// Analyze `src` as the entry file and render the whole program's LIR.
 ///
 /// Spans are left off: they are carried on every statement (§7c) and printing
@@ -8231,6 +8260,895 @@ f :: func (c: bool) -> i32 {
   if c { return p.*.x }
   report(p.*.x)
   return 0
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+// ===< Is LIR low enough? (`design/lir.md` §1, §10) >===
+//
+// The question phase 10 turns on: can a backend walk this and emit code without
+// re-deriving anything? A snapshot cannot answer it — it says what one program
+// lowered to. These walk **every** function of a program that uses most of the
+// language, `core` included, and assert the properties an LLVM (or C, or wasm)
+// emitter needs to be true of all of them.
+
+/// A program broad enough for the invariants below to have something to chew on.
+const BROAD: &str = "\
+{ new, make, drop, size_of } :: import <core/mem>
+Shape :: enum { dot, circle(i32), rect { w: i32, h: i32 } }
+Node :: struct { x: i32, tag: u8 }
+Speak :: trait { say :: func (self: *Self) -> i32 }
+Dog :: struct { n: i32 }
+impl Speak for Dog { say :: func (self: *Self) -> i32 { return self.*.n } }
+cleanup :: func () {}
+area :: func (s: Shape) -> i32 {
+  defer cleanup()
+  return s.match {
+    .dot => 0,
+    .circle(r) if r > 3 => r,
+    .circle(r) => -r,
+    .rect { w, h } => w * h,
+  }
+}
+words :: func (s: str) -> i32 { return s.match { \"hi\" => 1, \"\" => 2, _ => 0 } }
+sum :: func (xs: []i32) -> i32 {
+  let acc := 0
+  let i: usize := 0
+  while i < xs.len() { acc = acc + xs[i] i = i + 1 }
+  return acc
+}
+ratio :: func (a: i32, b: i32) -> i32 { return a / b }
+scoped :: func () -> i32 {
+  let p := new.<Node>()
+  p.*.x = 1
+  return p.*.x
+}
+manual :: func () -> i32 {
+  let q := new.<Node>()
+  let v := q.*.x
+  drop(q)
+  return v
+}
+dyn_call :: func (d: *Dog) -> i32 { let s: *dyn Speak := d return s.say() }
+widen :: func (n: u8) -> i64 { return n }
+@public main :: func () {
+  let a := area(.circle(4))
+  let b := sum(make.<[]i32>(3))
+  let c := ratio(9, 3)
+  let d := scoped()
+  let e := manual()
+  let f := dyn_call(&Dog { n: 1 })
+  let g := widen(2)
+  let h := words(\"hi\")
+  let i := size_of.<Node>()
+}
+";
+
+/// Visit every place and operand a function mentions, wherever they hide.
+fn each_place(f: &crate::lir::Function, mut visit: impl FnMut(&crate::lir::Place)) {
+    use crate::lir::{Callee, Operand, Rvalue, StmtKind, TermKind};
+    fn op(o: &Operand, visit: &mut impl FnMut(&crate::lir::Place)) {
+        if let Operand::Copy(p) = o {
+            visit(p);
+        }
+    }
+    let visit = &mut visit;
+    for b in &f.blocks {
+        for s in &b.stmts {
+            match &s.kind {
+                StmtKind::Assign { place, value } => {
+                    visit(place);
+                    match value {
+                        Rvalue::Use(o) | Rvalue::Unary { operand: o, .. } => op(o, visit),
+                        Rvalue::Ref { place, .. } => visit(place),
+                        Rvalue::Cast { value, .. } => op(value, visit),
+                        Rvalue::Binary { lhs, rhs, .. } => {
+                            op(lhs, visit);
+                            op(rhs, visit);
+                        }
+                        Rvalue::Offset { ptr, index, .. } => {
+                            op(ptr, visit);
+                            op(index, visit);
+                        }
+                        Rvalue::Aggregate { fields, .. } => {
+                            fields.iter().for_each(|o| op(o, visit))
+                        }
+                        Rvalue::Builtin { args, .. } => args.iter().for_each(|o| op(o, visit)),
+                    }
+                }
+                StmtKind::Call { dest, callee, args } => {
+                    if let Some(d) = dest {
+                        visit(d);
+                    }
+                    if let Callee::Indirect(o) = callee {
+                        op(o, visit);
+                    }
+                    args.iter().for_each(|o| op(o, visit));
+                }
+                StmtKind::Intrinsic { dest, args, .. } => {
+                    if let Some(d) = dest {
+                        visit(d);
+                    }
+                    args.iter().for_each(|o| op(o, visit));
+                }
+                StmtKind::Drop(o) => op(o, visit),
+            }
+        }
+        match &b.term.kind {
+            TermKind::Switch { value, .. } => op(value, visit),
+            TermKind::Return(Some(v)) => op(v, visit),
+            _ => {}
+        }
+    }
+}
+
+/// Nothing in a lowered program has a type a machine cannot hold.
+///
+/// `comptime_int` is the one that used to get through — the `$cast` out of a
+/// literal left the source type on an operand (§9). `Never` and `Void` are the
+/// other two, and they are why an intrinsic is a statement with an optional
+/// destination rather than an [`Rvalue`]: a slot typed "no value" is a slot no
+/// register file has.
+#[test]
+fn no_local_has_a_type_a_machine_cannot_hold() {
+    let program = lir_whole_program(BROAD);
+    for f in &program.funcs {
+        for l in &f.locals {
+            assert!(
+                !matches!(
+                    l.ty,
+                    Ty::ComptimeInt
+                        | Ty::ComptimeFloat
+                        | Ty::ComptimeStr
+                        | Ty::Never
+                        | Ty::Void
+                        | Ty::Error
+                        | Ty::Var(_)
+                ),
+                "{}: _{} is typed `{}`",
+                f.name,
+                l.id.0,
+                l.ty.display(&crate::sema::def::DefTable::new())
+            );
+        }
+    }
+}
+
+/// Every place names a slot the function has, wherever the place appears — an
+/// argument, a switch operand, a drop, a safepoint's live set.
+#[test]
+fn every_place_and_live_local_names_a_slot_that_exists() {
+    let program = lir_whole_program(BROAD);
+    for f in &program.funcs {
+        each_place(f, |p| {
+            if let crate::lir::Base::Local(id) = p.base {
+                assert!(
+                    (id.0 as usize) < f.locals.len(),
+                    "{}: _{} has no slot",
+                    f.name,
+                    id.0
+                );
+            }
+        });
+        for b in &f.blocks {
+            let points = b
+                .stmts
+                .iter()
+                .filter_map(|s| s.safepoint.as_ref())
+                .chain(b.term.safepoint.as_ref());
+            for sp in points {
+                for l in &sp.live {
+                    assert!(
+                        (l.0 as usize) < f.locals.len(),
+                        "{}: safepoint names _{}, which has no slot",
+                        f.name,
+                        l.0
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Block ids are their index, and block 0 is the entry. A backend that builds
+/// LLVM blocks in one pass needs both, and neither is worth re-deriving.
+#[test]
+fn block_ids_are_dense_and_zero_is_the_entry() {
+    let program = lir_whole_program(BROAD);
+    for f in &program.funcs {
+        for (i, b) in f.blocks.iter().enumerate() {
+            assert_eq!(b.id.0 as usize, i, "{}: bb{} is at index {i}", f.name, b.id.0);
+        }
+    }
+}
+
+/// Every direct call names a function the program contains. A `Callee::Static`
+/// carries the symbol the linker sees (§7), so a name with nothing behind it is
+/// a link failure the compiler could have caught.
+#[test]
+fn every_direct_call_names_a_function_in_the_program() {
+    let program = lir_whole_program(BROAD);
+    let known: std::collections::HashSet<&str> =
+        program.funcs.iter().map(|f| f.symbol.as_str()).collect();
+    for f in &program.funcs {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                if let crate::lir::StmtKind::Call {
+                    callee: crate::lir::Callee::Static { symbol, .. },
+                    ..
+                } = &s.kind
+                {
+                    assert!(
+                        known.contains(symbol.as_str()),
+                        "{} calls `{symbol}`, which the program does not define",
+                        f.name
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A `Binary` is a **machine** instruction, so neither side of one is ever an
+/// aggregate.
+///
+/// This is the invariant the `str` literal pattern broke: it emitted
+/// `s == "hi"` on a `{ ptr, len }`, which no target can compare and which would
+/// have compared *addresses* if a backend had tried. Text equality is a call to
+/// `core`'s `#lang("bytes_eq")` now, so nothing structural reaches an `icmp`.
+#[test]
+fn no_binary_operation_has_an_aggregate_operand() {
+    let program = lir_whole_program(BROAD);
+    for f in &program.funcs {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                let crate::lir::StmtKind::Assign {
+                    value: crate::lir::Rvalue::Binary { op, lhs, rhs },
+                    ..
+                } = &s.kind
+                else {
+                    continue;
+                };
+                for side in [lhs, rhs] {
+                    let scalar = match side {
+                        crate::lir::Operand::Const(crate::lir::Constant::Value(v)) => !matches!(
+                            v,
+                            crate::ir::ConstValue::Str(_)
+                                | crate::ir::ConstValue::Bytes(_)
+                                | crate::ir::ConstValue::Aggregate(_)
+                                | crate::ir::ConstValue::Variant { .. }
+                        ),
+                        _ => true,
+                    };
+                    assert!(scalar, "{}: {op:?} has an aggregate operand", f.name);
+                }
+            }
+        }
+    }
+}
+
+/// Every named type a local has is in the program's own table, so a backend
+/// never has to reach back into the compiler's def table for a layout (§7b).
+#[test]
+fn every_nominal_local_type_is_in_the_type_table() {
+    let program = lir_whole_program(BROAD);
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", BROAD)));
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
+    let keys: std::collections::HashSet<&str> =
+        program.types.iter().map(|t| t.key.as_str()).collect();
+    // Through pointers and arrays too: a `*Node` is useless to a backend
+    // unless `Node`'s layout is reachable, and the table is where it lives.
+    fn walk(defs: &crate::sema::def::DefTable, ty: &Ty, f: &mut impl FnMut(&Ty), depth: usize) {
+        if depth > 6 {
+            return;
+        }
+        match ty {
+            Ty::Nominal { .. } | Ty::Tuple(_) | Ty::Slice { .. } => f(ty),
+            _ => {}
+        }
+        match ty {
+            Ty::Ptr { inner, .. } | Ty::Array { inner, .. } | Ty::Slice { inner, .. } => {
+                walk(defs, inner, f, depth + 1)
+            }
+            Ty::Tuple(elems) => elems.iter().for_each(|t| walk(defs, t, f, depth + 1)),
+            _ => {}
+        }
+    }
+    for func in &program.funcs {
+        for l in &func.locals {
+            walk(
+                &session.defs,
+                &l.ty,
+                &mut |ty| {
+                    let key = crate::ir::mono::type_key(&session.defs, ty);
+                    assert!(
+                        keys.contains(key.as_str()),
+                        "{}: _{} mentions `{key}`, which has no definition in the table",
+                        func.name,
+                        l.id.0
+                    );
+                },
+                0,
+            );
+        }
+    }
+}
+
+// ===< `drop`, written by hand (§6.9) >===
+
+/// The program's `drop(p)` and the compiler's are the **same instruction**, so
+/// there is one thing for a backend to implement rather than two.
+#[test]
+fn a_written_drop_is_the_same_instruction_the_compiler_emits() {
+    let lir = lir_text(
+        "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func () -> i32 {
+  let p := new.<Node>()
+  let v := p.*.x
+  drop(p)
+  return v
+}
+",
+    );
+    assert_eq!(lir.matches("drop p_").count(), 1, "{lir}");
+}
+
+/// Writing it takes the question on: escape analysis stops answering, because
+/// passing a local to anything is what disqualifies it (§5's whitelist). Two
+/// drops of one object would be a double free.
+#[test]
+fn a_written_drop_replaces_the_automatic_one() {
+    let lir = lir_text(
+        "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func () {
+  let p := new.<Node>()
+  p.*.x = 1
+  drop(p)
+}
+",
+    );
+    assert_eq!(lir.matches("drop ").count(), 1, "{lir}");
+    assert!(!lir.contains("cleanup"), "{lir}");
+}
+
+/// `drop` of something no local names is allowed and tracks nothing: there is
+/// no name to forbid afterwards.
+#[test]
+fn dropping_through_a_field_is_allowed_and_untracked() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { next: *mut Node }
+f :: func (n: *mut Node) { drop(n.*.next) }
+@public main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    let lir = lir_text(src);
+    assert!(lir.contains("drop "), "{lir}");
+}
+
+/// A pointer whose object was freed is the one thing a collected language exists
+/// to make impossible, so it is a compile error rather than a run-time surprise.
+#[test]
+fn using_a_value_after_dropping_it_is_refused() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func () -> i32 {
+  let p := new.<Node>()
+  drop(p)
+  return p.*.x
+}
+";
+    assert!(
+        messages(src)
+            .iter()
+            .any(|m| m.contains("`p` is used after it was dropped")),
+        "{:#?}",
+        messages(src)
+    );
+}
+
+#[test]
+fn dropping_the_same_value_twice_is_refused() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func () {
+  let p := new.<Node>()
+  drop(p)
+  drop(p)
+}
+";
+    assert!(
+        messages(src)
+            .iter()
+            .any(|m| m.contains("`p` is dropped twice")),
+        "{:#?}",
+        messages(src)
+    );
+}
+
+/// A drop on **either** side of a branch counts afterwards: "dropped on some
+/// paths" is not a state a program can be in, and only one of the two answers
+/// is safe.
+#[test]
+fn a_drop_in_one_branch_forbids_the_use_after_the_branch() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func (c: bool) -> i32 {
+  let p := new.<Node>()
+  if c { drop(p) }
+  return p.*.x
+}
+";
+    assert!(
+        messages(src)
+            .iter()
+            .any(|m| m.contains("used after it was dropped")),
+        "{:#?}",
+        messages(src)
+    );
+}
+
+/// The same, through a `match` arm.
+#[test]
+fn a_drop_in_a_match_arm_forbids_the_use_after_the_match() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+Pick :: enum { yes, no }
+f :: func (k: Pick) -> i32 {
+  let p := new.<Node>()
+  let _ := k.match { .yes => { drop(p) 1 }, .no => 0 }
+  return p.*.x
+}
+";
+    assert!(
+        messages(src)
+            .iter()
+            .any(|m| m.contains("used after it was dropped")),
+        "{:#?}",
+        messages(src)
+    );
+}
+
+/// A loop body runs again. Dropping something declared outside it is a double
+/// free with no use in between to blame, so the *drop* is the diagnostic.
+#[test]
+fn dropping_an_outer_value_inside_a_loop_is_refused() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func () {
+  let p := new.<Node>()
+  loop { drop(p) break }
+}
+";
+    assert!(
+        messages(src)
+            .iter()
+            .any(|m| m.contains("`p` is dropped inside a loop")),
+        "{:#?}",
+        messages(src)
+    );
+}
+
+/// A value declared **inside** the loop is a different object each iteration,
+/// so dropping it there is exactly right.
+#[test]
+fn dropping_a_value_declared_inside_the_loop_is_fine() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func (n: i32) {
+  let i := 0
+  while i < n {
+    let p := new.<Node>()
+    drop(p)
+    i = i + 1
+  }
+}
+@public main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+/// Assigning to the local gives it an object again; refusing the next use would
+/// be refusing a correct program.
+#[test]
+fn assigning_after_a_drop_revives_the_value() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func () -> i32 {
+  let mut p := new.<Node>()
+  drop(p)
+  p = new.<Node>()
+  return p.*.x
+}
+@public main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+/// Reading the value on the way *into* the drop is not a use after it.
+#[test]
+fn the_drops_own_argument_is_not_a_use_after_drop() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func () { let p := new.<Node>() drop(p) }
+@public main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+// ===< Dividing by zero (§7d) >===
+
+/// It is **not** overflow, so it is not the `overflow=` setting's to turn off:
+/// `wrap` says what `i32::MAX + 1` means and has nothing to say about `x / 0`.
+#[test]
+fn division_by_zero_traps_even_when_overflow_wraps() {
+    let lir = lir_text_with(
+        "f :: func (a: i32, b: i32) -> i32 { return a / b }\n",
+        crate::common::options::Options {
+            overflow: crate::common::options::OverflowMode::Wrap,
+            ..Default::default()
+        },
+    );
+    assert!(lir.contains("division by zero"), "{lir}");
+    assert!(lir.contains("call core.panic(\"division by zero\""), "{lir}");
+}
+
+/// `%` has the same fault for the same reason.
+#[test]
+fn remainder_by_zero_traps_too() {
+    let lir = lir_text("f :: func (a: i32, b: i32) -> i32 { return a % b }\n");
+    assert!(lir.contains("division by zero"), "{lir}");
+}
+
+/// A divisor that is a known non-zero constant has a comparison whose answer
+/// cannot change, so it gets no branch — the same rule the bounds check follows.
+#[test]
+fn a_constant_non_zero_divisor_needs_no_check() {
+    let lir = lir_text("f :: func (a: i32) -> i32 { return a / 2 }\n");
+    assert!(!lir.contains("division by zero"), "{lir}");
+}
+
+/// `#unsafe` is the one thing that removes it (§9), because that is the whole
+/// meaning of the directive.
+#[test]
+fn unsafe_turns_the_zero_check_off() {
+    let lir = lir_text("f :: #unsafe func (a: i32, b: i32) -> i32 { return a / b }\n");
+    assert!(!lir.contains("division by zero"), "{lir}");
+}
+
+/// A float divided by zero is an infinity, which is a value and not a fault.
+#[test]
+fn a_float_division_has_no_zero_check() {
+    let lir = lir_text("f :: func (a: f64, b: f64) -> f64 { return a / b }\n");
+    assert!(!lir.contains("division by zero"), "{lir}");
+}
+
+// ===< Text equality (§6.13) >===
+
+/// A `str` is `{ ptr, len }` by LIR (§7b), so comparing one with `==` would
+/// compare *addresses*. Text compares by its bytes, and the comparison lives in
+/// `core` so a pattern and an `==` cannot disagree.
+#[test]
+fn a_string_literal_pattern_calls_cores_byte_equality() {
+    let lir = lir_text("f :: func (s: str) -> i32 { return s.match { \"hi\" => 1, _ => 0 } }\n");
+    assert!(lir.contains("call core.bytes_eq(s_0.0, b\"hi\")"), "{lir}");
+}
+
+/// `==` on two `str`s now resolves at all — it did not before, because nothing
+/// implemented `Eq` for `str` — and it reaches the same `bytes_eq` the pattern
+/// does, one hop further along.
+#[test]
+fn str_equality_goes_through_the_eq_impl_to_the_same_function() {
+    let src = "eq :: func (a: str, b: str) -> bool { return a == b }\n@public main :: func () {}\n";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    assert!(
+        lir_text(src).contains("call core.<impl str>.<as core.Eq>.eq"),
+        "{}",
+        lir_text(src)
+    );
+    // And that impl is the one line of forwarding it looks like.
+    let whole = lir_whole_program(src);
+    let eq = whole
+        .funcs
+        .iter()
+        .find(|f| f.name.contains("<impl str>") && f.name.ends_with(".eq"))
+        .expect("core implements Eq for str");
+    let calls: Vec<&str> = eq
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match &s.kind {
+            crate::lir::StmtKind::Call {
+                callee: crate::lir::Callee::Static { name, .. },
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(calls.contains(&"core.bytes_eq"), "{calls:?}");
+}
+
+/// A byte-string literal is the same question one level down: `[]u8` needs no
+/// projection to reach its bytes.
+#[test]
+fn a_byte_string_pattern_compares_bytes_directly() {
+    let lir = lir_text("f :: func (b: []u8) -> i32 { return b.match { b\"hi\" => 1, _ => 0 } }\n");
+    assert!(lir.contains("call core.bytes_eq(b_0, b\"hi\")"), "{lir}");
+}
+
+/// The empty pattern is a length test and nothing else, which is what the
+/// library function does with it — there is no special case here.
+#[test]
+fn an_empty_string_pattern_is_the_same_call() {
+    let lir = lir_text("f :: func (s: str) -> i32 { return s.match { \"\" => 1, _ => 0 } }\n");
+    assert!(lir.contains("call core.bytes_eq(s_0.0, b\"\")"), "{lir}");
+}
+
+// ===< Safepoints, the cases the first pass got wrong >===
+
+/// `gc_collect` asks for a collection outright, so it is a safepoint like a call
+/// is (§6).
+#[test]
+fn a_gc_collect_is_a_safepoint() {
+    let lir = lir_text(
+        "\
+{ new, gc_collect } :: import <core/mem>
+{ gc_collect } :: import <core/gc>
+Node :: struct { x: i32 }
+f :: func () -> i32 {
+  let p := new.<Node>()
+  gc_collect()
+  return p.*.x
+}
+",
+    );
+    assert!(lir.contains("$gc_collect()"), "{lir}");
+    assert!(lir.contains("@safepoint { live: [p_"), "{lir}");
+}
+
+/// Liveness ends at the last **read**, and `gc_keep_alive` is a read (§6). It
+/// needs no special case in the pass, which is the test.
+#[test]
+fn gc_keep_alive_extends_a_live_range_across_a_call() {
+    let lir = lir_text(
+        "\
+{ new } :: import <core/mem>
+{ gc_keep_alive } :: import <core/gc>
+Node :: struct { x: i32 }
+sink :: func (n: i32) {}
+f :: func () {
+  let p := new.<Node>()
+  sink(p.*.x)
+  gc_keep_alive(p)
+}
+",
+    );
+    // Without the keep-alive `p` is dead at the `sink` call — its last read was
+    // the argument. With it, the call has to trace `p`.
+    let at_call = lir
+        .lines()
+        .skip_while(|l| !l.contains("call sink"))
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(at_call.contains("p_"), "{lir}");
+}
+
+/// A struct holding a pointer is a root: the frame slot holding it is where that
+/// pointer lives (§6).
+#[test]
+fn a_struct_holding_a_pointer_is_a_root() {
+    let lir = lir_text(
+        "\
+{ new } :: import <core/mem>
+Node :: struct { x: i32 }
+Pair :: struct { p: *mut Node, n: i32 }
+sink :: func (n: i32) {}
+f :: func (pair: Pair) -> i32 {
+  sink(pair.n)
+  return pair.p.*.x
+}
+",
+    );
+    assert!(lir.contains("reloc pair_0"), "{lir}");
+}
+
+/// An enum whose flattened payload is `[N]u8` says nothing about pointers, so
+/// the question has to be asked of the **variants**.
+#[test]
+fn an_enum_variant_holding_a_pointer_makes_the_enum_a_root() {
+    let lir = lir_text(
+        "\
+{ new } :: import <core/mem>
+Node :: struct { x: i32 }
+Maybe :: enum { none, some(*mut Node) }
+sink :: func () {}
+f :: func (m: Maybe) -> i32 {
+  sink()
+  return m.match { .none => 0, .some(p) => p.*.x }
+}
+",
+    );
+    assert!(lir.contains("reloc m_0"), "{lir}");
+}
+
+/// An `i32` is never a root, and precision is not only a performance question:
+/// with a moving collector an over-approximate set relocates objects nothing
+/// will read again (§6).
+#[test]
+fn a_call_taking_only_integers_has_an_empty_live_set() {
+    let lir = lir_text(
+        "\
+g :: func (n: i32) -> i32 { return n }
+f :: func () -> i32 { return g(1) + 2 }
+",
+    );
+    assert!(lir.contains("@safepoint { live: [] }"), "{lir}");
+}
+
+/// Both back edges of a nested loop are safepoints: an inner loop that never
+/// finishes would otherwise pin the collector out just as an outer one would.
+#[test]
+fn every_loop_back_edge_is_a_safepoint() {
+    let lir = lir_text(
+        "\
+f :: func (n: i32) -> i32 {
+  let t := 0
+  let i := 0
+  while i < n {
+    let j := 0
+    while j < n { t = t + 1 j = j + 1 }
+    i = i + 1
+  }
+  return t
+}
+",
+    );
+    let lines: Vec<&str> = lir.lines().collect();
+    let edges = lines
+        .windows(2)
+        .filter(|w| {
+            w[0].trim_start().starts_with("goto") && w[1].trim_start().starts_with("@safepoint")
+        })
+        .count();
+    assert_eq!(edges, 2, "{lir}");
+}
+
+/// A branch that **leaves** has no "afterwards", so its drop must not reach the
+/// code below it. Merging it anyway refused a program with nothing wrong.
+#[test]
+fn a_drop_in_a_branch_that_returns_does_not_reach_the_code_after_it() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func (c: bool) -> i32 {
+  let p := new.<Node>()
+  if c { drop(p) return 0 }
+  return p.*.x
+}
+@public main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+/// A `defer` body runs on the way out, which is *after* everything above it —
+/// including a drop.
+#[test]
+fn a_defer_that_reads_a_dropped_value_is_refused() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+sink :: func (n: i32) {}
+f :: func () {
+  let p := new.<Node>()
+  defer sink(p.*.x)
+  drop(p)
+}
+";
+    assert!(
+        messages(src)
+            .iter()
+            .any(|m| m.contains("used after it was dropped")),
+        "{:#?}",
+        messages(src)
+    );
+}
+
+/// The loop rule is about the loop the value was declared *outside* of, so an
+/// inner loop dropping an outer loop's value is caught too.
+#[test]
+fn dropping_an_outer_loops_value_in_an_inner_loop_is_refused() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+f :: func (n: i32) {
+  let i := 0
+  while i < n {
+    let p := new.<Node>()
+    let j := 0
+    while j < n {
+      drop(p)
+      j = j + 1
+    }
+    i = i + 1
+  }
+}
+";
+    assert!(
+        messages(src)
+            .iter()
+            .any(|m| m.contains("dropped inside a loop")),
+        "{:#?}",
+        messages(src)
+    );
+}
+
+/// A `make`d slice drops through its **pointer**: the header is `{ ptr, len }`
+/// by this level (§7b) and the allocation is what the first member names, so the
+/// instruction's operand is an address like every other one's.
+#[test]
+fn an_allocated_slice_drops_through_its_pointer() {
+    let lir = lir_text(
+        "\
+{ make } :: import <core/mem>
+f :: func () -> i32 {
+  let xs := make.<[]i32>(4)
+  return 1
+}
+",
+    );
+    assert!(lir.contains("drop xs_2.ptr"), "{lir}");
+}
+
+/// And in practice a slice a program actually *uses* is not dropped, because
+/// every use of one goes through `&xs` — `.len()` and `xs[i]` both do — and
+/// taking a local's address is not on §5's whitelist.
+///
+/// It is recorded as a test rather than left to be discovered: the blunt rule is
+/// deliberate, but "slices are effectively never freed early" is a consequence
+/// of it worth knowing before someone reads the pass and expects otherwise.
+#[test]
+fn a_slice_that_is_read_from_escapes_and_is_not_dropped() {
+    let lir = lir_text(
+        "\
+{ make } :: import <core/mem>
+f :: func () -> usize {
+  let xs := make.<[]i32>(4)
+  return xs.len()
+}
+",
+    );
+    assert!(!lir.contains("drop "), "{lir}");
+}
+
+/// §5 and §6 with a written `drop` in them: the program's free and the
+/// compiler's are one instruction, and the object stays traceable up to it.
+#[test]
+fn lir_snapshot_a_written_drop_is_the_compilers_own_instruction() {
+    let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+report :: func (n: i32) {}
+f :: func () -> i32 {
+  let kept := new.<Node>()
+  let freed := new.<Node>()
+  report(freed.*.x)
+  drop(freed)
+  return kept.*.x
 }
 ";
     insta::assert_snapshot!(lir_text(src));

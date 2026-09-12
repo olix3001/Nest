@@ -74,3 +74,27 @@ impl <T, const N: usize> Index.<usize> for [N]T {
   Output :: T
   index :: #intrinsic("index") func (self: *Self, i: usize) -> *T
 }
+
+// ===< Byte equality >===
+
+// Whether two byte slices hold the same bytes.
+//
+// It carries a `#lang` tag because the **compiler** needs it: a `match` on a
+// `str` with a literal arm (`s.match { "hi" => ... }`) is a question about the
+// bytes, and by the time the lowering sees it a `str` is a pointer and a length
+// (`design/lir.md` §7b) — comparing those two words would compare *addresses*,
+// which is not what the pattern asked. So the lowering emits a call to whatever
+// carries this tag, exactly the way it emits a call to `#lang("panic")`.
+//
+// Writing it here rather than as an unrolled comparison in the compiler is what
+// keeps one answer to "are these bytes equal": `impl Eq for str` calls this, the
+// pattern calls this, and a program that replaces `core` replaces both together.
+@public bytes_eq :: #lang("bytes_eq") func (a: []u8, b: []u8) -> bool {
+  if a.len() != b.len() { return false }
+  let mut i: usize := 0
+  while i < a.len() {
+    if a[i] != b[i] { return false }
+    i = i + 1
+  }
+  return true
+}

@@ -81,9 +81,13 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // Layout queries (§12). Constants once the type argument is concrete.
     plain("size_of"),
     plain("align_of"),
-    // Allocation (§6.9).
+    // Allocation (§6.9), and the one explicit release. `drop` is the same
+    // instruction the escape analysis emits on its own (`design/lir.md` §5); a
+    // program writing it takes on the question that analysis would have
+    // answered, which is why `check::dropped` then refuses a later use.
     plain("new"),
     special("make", Special::MutableArg),
+    plain("drop"),
     // Sequences (§3.2). `core`'s `.len()` methods **are** these — the members
     // are marked `#intrinsic` rather than given a body that forwards to one.
     special("len", Special::SequenceArg),

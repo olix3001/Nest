@@ -107,8 +107,10 @@ fn annotate_function(cx: &Roots, f: &mut Function) {
         for s in b.stmts.iter_mut().rev() {
             let is_point = match &s.kind {
                 StmtKind::Call { .. } => true,
-                StmtKind::Assign { value, .. } => allocates(value),
-                StmtKind::Drop(_) => false,
+                StmtKind::Intrinsic { name, .. } => {
+                    matches!(name.as_str(), "new" | "make" | "gc_collect")
+                }
+                StmtKind::Assign { .. } | StmtKind::Drop(_) => false,
             };
             // The set is the one live **before** the statement, not after it.
             // Collection happens while the statement is running — inside the
@@ -128,14 +130,6 @@ fn point(live: &HashSet<LocalId>) -> Safepoint {
     // is a dump nothing can be tested against.
     live.sort_by_key(|l| l.0);
     Safepoint { live }
-}
-
-/// Whether this rvalue may start a collection.
-fn allocates(v: &Rvalue) -> bool {
-    match v {
-        Rvalue::Intrinsic { name, .. } => matches!(name.as_str(), "new" | "make" | "gc_collect"),
-        _ => false,
-    }
 }
 
 // ===< Liveness >===
@@ -199,11 +193,15 @@ fn stmt_effect(k: &StmtKind, live: &mut HashSet<LocalId>, roots: &HashSet<LocalI
         }
         // A `drop` **reads** the pointer it frees, which is what keeps the
         // allocation traceable right up to the point it stops existing.
-        StmtKind::Drop(l) => {
-            if roots.contains(l) {
-                live.insert(*l);
+        StmtKind::Intrinsic { dest, args, .. } => {
+            if let Some(d) = dest {
+                write(d, live, roots);
+            }
+            for a in args {
+                operand_reads(a, live, roots);
             }
         }
+        StmtKind::Drop(o) => operand_reads(o, live, roots),
     }
 }
 
@@ -246,7 +244,7 @@ fn rvalue_reads(v: &Rvalue, live: &mut HashSet<LocalId>, roots: &HashSet<LocalId
             operand_reads(ptr, live, roots);
             operand_reads(index, live, roots);
         }
-        Rvalue::Builtin { args, .. } | Rvalue::Intrinsic { args, .. } => {
+        Rvalue::Builtin { args, .. } => {
             for o in args {
                 operand_reads(o, live, roots);
             }

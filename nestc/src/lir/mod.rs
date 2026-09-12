@@ -280,14 +280,45 @@ pub enum StmtKind {
         callee: Callee,
         args: Vec<Operand>,
     },
-    /// Free the allocation this local points at, without involving the
-    /// collector (§5).
+    /// A named machine operation with effects and, sometimes, a value (§9).
     ///
-    /// It is emitted only where escape analysis proved the object does not
-    /// outlive the scope, and it rides the same cleanup ladder `defer` does, one
-    /// rung per kind of exit — an allocation in a scope with three exits is
-    /// freed once, in a block all three reach.
-    Drop(LocalId),
+    /// It mirrors [`StmtKind::Call`] deliberately, down to the optional
+    /// destination, because the two differ in exactly one way: a call transfers
+    /// to a symbol and this does not. Everything else about them — arguments
+    /// evaluated into operands, a result that may be discarded, a block that
+    /// ends when the operation does not return — is the same question, and a
+    /// backend answers it once.
+    ///
+    /// `dest` is `None` for an operation with no value (`$gc_collect()`) and for
+    /// one that does not return (`$trap()`, whose block ends in
+    /// [`TermKind::Unreachable`]). That is the whole reason it is a statement
+    /// rather than an [`Rvalue`]: a slot typed `void` or `never` is a slot no
+    /// machine has, and giving one to every `$trap()` made the representation
+    /// claim something false.
+    Intrinsic {
+        dest: Option<Place>,
+        name: Symbol,
+        args: Vec<Operand>,
+    },
+    /// Free the allocation this pointer names, without involving the collector
+    /// (§5).
+    ///
+    /// It arrives here two ways and they are the same instruction. The compiler
+    /// emits one where escape analysis proved an object does not outlive its
+    /// scope, on the same cleanup ladder `defer` rides — an allocation in a
+    /// scope with three exits is freed once, in a block all three reach. A
+    /// program emits one by writing `drop(p)` (§6.9), having taken on the
+    /// question the analysis would otherwise have answered.
+    ///
+    /// It takes an **operand** rather than a local because the second way needs
+    /// it to: `drop(node.*.next)` frees a pointer no local names. For a backend
+    /// the two are one case — a pointer value, and a free.
+    ///
+    /// The operand is a **pointer**, always. A `make`d slice is `{ ptr, len }`
+    /// by this level (§7b), and the lowering projects the member rather than
+    /// handing over the header: an instruction whose operand is sometimes an
+    /// address and sometimes a struct is one a backend has to switch on.
+    Drop(Operand),
 }
 
 /// How a call reaches its code.
@@ -466,10 +497,6 @@ pub enum Rvalue {
         index: Operand,
         elem: Ty,
     },
-    /// A compiler intrinsic that survives as an operation rather than folding to
-    /// a constant — the GC ones, the wrapping arithmetic. Nothing here is ever
-    /// "a call to a function that does not exist" (§9).
-    Intrinsic { name: Symbol, args: Vec<Operand> },
 }
 
 /// Which aggregate an [`Rvalue::Aggregate`] builds.

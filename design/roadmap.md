@@ -682,6 +682,17 @@ The first executable. Also where `nestc`'s scaffold CLI is replaced: `-C` stays
 the interface for build settings (`nestc/src/common/options.rs`), because a build
 tool translating a profile should keep talking to the compiler the same way.
 
+**`design/lir.md` §10 is the brief.** It lists the whole instruction set a
+backend answers for — four statements, four terminators, seven rvalues — the four
+things a backend genuinely does itself (materialize constants, turn safepoints
+into stack maps, classify the ABI, select and allocate), and the one place LIR
+still reaches back into the compiler (resolving a `Ty::Nominal` to its `TypeDef`
+needs the def table). Six invariant tests in `sema::tests` assert the shape
+rather than describing it: no local has a type a machine cannot hold, every place
+names a slot, block ids are dense, every direct call names a function the program
+defines, no `Binary` has an aggregate operand, and every named type a local
+mentions is in the table.
+
 ---
 
 ## Open questions, and who owns them

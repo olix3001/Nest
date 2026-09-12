@@ -5,17 +5,24 @@ expression: lir_text(src)
 type Node = struct {           // was a struct; size 4, align 4
   x: i32                    // +0
 }
-type core.str = struct {           // was a distinct; size 16, align 8
-  0: []u8                    // +0
-}
 type []u8 = struct {           // was a slice; size 16, align 8
   ptr: *u8                    // +0
   len: u64                    // +8
+}
+type usize = struct {           // was a distinct; size 8, align 8
+  0: u64                    // +0
 }
 type core.Location = struct {           // was a struct; size 24, align 8
   file: core.str                    // +0
   line: u32                    // +16
   column: u32                    // +20
+}
+type core.str = struct {           // was a distinct; size 16, align 8
+  0: []u8                    // +0
+}
+type (usize, bool) = struct {           // was a tuple; size 16, align 8
+  0: usize                    // +0
+  1: bool                    // +8
 }
 
 func report(n_0: i32) -> void  // _NC6report

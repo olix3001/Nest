@@ -141,6 +141,10 @@ impl ConstValue {
     pub fn display(&self) -> String {
         match self {
             ConstValue::Int(n) => n.to_string(),
+            // `.0` on a whole number, so a dump never reads a float as an
+            // integer: `x == 0` and `x == 0.0` are different instructions, and
+            // the point of the dump is to say which one this is.
+            ConstValue::Float(f) if f.fract() == 0.0 && f.is_finite() => format!("{f:.1}"),
             ConstValue::Float(f) => f.to_string(),
             ConstValue::Bool(b) => b.to_string(),
             ConstValue::Char(c) => format!("'{c}'"),

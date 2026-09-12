@@ -812,10 +812,23 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// wrote.
     fn emit_drops(&mut self, drops: &[DefId]) {
         for def in drops.iter().rev() {
-            if let Some(&l) = self.local_of.get(def) {
-                let span = self.locals[l.0 as usize].span;
-                self.push(LirStmtKind::Drop(l), span);
-            }
+            let Some(&l) = self.local_of.get(def) else {
+                continue;
+            };
+            let local = &self.locals[l.0 as usize];
+            let span = local.span;
+            // `drop` frees **a pointer**, always. A `make`d slice is
+            // `{ ptr, len }` by now (§7b) and the allocation is what the first
+            // member names, so the projection happens here rather than becoming
+            // a second shape every backend has to recognize.
+            let what = match &local.ty {
+                Ty::Slice { .. } => Operand::Copy(Place::local(l).then(Projection::Field {
+                    index: 0,
+                    name: Symbol::new("ptr"),
+                })),
+                _ => Operand::local(l),
+            };
+            self.push(LirStmtKind::Drop(what), span);
         }
     }
 
@@ -1395,6 +1408,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         // setting becomes a second block rather than a flag (§7d).
         if let Some(op) = builtin {
             let vals: Vec<Operand> = args.iter().map(|a| self.eval(a)).collect();
+            // Dividing by zero is **not** overflow, so it is not the `overflow=`
+            // setting's to turn off (§7d): there is no wrapped answer for it the
+            // way there is for `i32::MAX + 1`. It is the shape §3.2's bounds
+            // check takes, for the same reason — a comparison, an edge, and a
+            // block that does not come back.
+            self.zero_check(op, &vals, &ty, span);
             if self.traps(op, &ty) {
                 return Some(self.checked_op(op, vals, &ty, span));
             }
@@ -1487,6 +1506,54 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             .iter()
             .position(|m| m.def == method)
             .map(|i| i as u32)
+    }
+
+    /// Emit an intrinsic, and end the block when it does not return.
+    ///
+    /// The same three cases [`Self::emit_call`] has, for the same reasons — a
+    /// `never` operation ends the block (§2), a `void` one keeps no
+    /// destination, and only the third needs a slot. A `void` or `never` local
+    /// would be a slot no machine has.
+    fn emit_intrinsic(
+        &mut self,
+        name: Symbol,
+        args: Vec<Operand>,
+        ty: Ty,
+        span: Option<FileSpan>,
+    ) -> Option<Rvalue> {
+        if matches!(ty, Ty::Never) {
+            self.push(
+                LirStmtKind::Intrinsic {
+                    dest: None,
+                    name,
+                    args,
+                },
+                span,
+            );
+            self.terminate(Terminator::new(TermKind::Unreachable, span));
+            return None;
+        }
+        if matches!(ty, Ty::Void) {
+            self.push(
+                LirStmtKind::Intrinsic {
+                    dest: None,
+                    name,
+                    args,
+                },
+                span,
+            );
+            return Some(Rvalue::Use(Operand::Const(Constant::Undef)));
+        }
+        let dest = self.temp(ty, span);
+        self.push(
+            LirStmtKind::Intrinsic {
+                dest: Some(Place::local(dest)),
+                name,
+                args,
+            },
+            span,
+        );
+        Some(Rvalue::Use(Operand::local(dest)))
     }
 
     /// Emit the call, and end the block when the callee does not return.
@@ -1615,6 +1682,57 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     }
 
     // ===< The overflow setting, made real (§7d) >===
+
+    /// Guard an integer division against a zero divisor.
+    ///
+    /// It is unconditional, unlike the overflow trap beside it. `overflow=wrap`
+    /// says what `i32::MAX + 1` *means*; it says nothing about `x / 0`, which
+    /// has no meaning to give — the machine instruction faults, and on a target
+    /// where it does not the answer would be a number nobody can name. So the
+    /// only thing that removes this check is `#unsafe` (§9), the directive whose
+    /// meaning is that the checks in that scope are off.
+    ///
+    /// A divisor the evaluator proves non-zero needs no branch, for the reason
+    /// the bounds check skips a known-good index: the comparison would have an
+    /// answer nothing can change.
+    fn zero_check(&mut self, op: BuiltinOp, args: &[Operand], ty: &Ty, span: Option<FileSpan>) {
+        if self.unguarded || !matches!(op, BuiltinOp::Div | BuiltinOp::Rem) {
+            return;
+        }
+        if !self.is_integer(ty) {
+            // A float divided by zero is an infinity, which is a value and not a
+            // fault (§3.1).
+            return;
+        }
+        let Some(divisor) = args.get(1) else { return };
+        if let Operand::Const(Constant::Value(v)) = divisor
+            && v.as_u64().is_some_and(|n| n != 0)
+        {
+            return;
+        }
+        let ok = self.into_temp(
+            Rvalue::Binary {
+                op: BinOp::Ne,
+                lhs: divisor.clone(),
+                rhs: Operand::Const(Constant::Value(ConstValue::Int(0.into()))),
+            },
+            Ty::Bool,
+            span,
+        );
+        let trap = self.new_block(Some("division by zero".to_string()));
+        let go_on = self.new_block(None);
+        self.terminate(Terminator::new(
+            TermKind::Switch {
+                value: ok,
+                arms: vec![(1, go_on)],
+                otherwise: trap,
+            },
+            span,
+        ));
+        self.at = trap;
+        self.panic_at("division by zero", span);
+        self.at = go_on;
+    }
 
     /// Whether this operation traps on overflow in this build.
     ///
@@ -1770,6 +1888,20 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     to: ty,
                 })
             }
+            // An explicit release (§6.9). It is the *same* instruction escape
+            // analysis emits on its own (§5) — a pointer and a free — so there
+            // is one thing for a backend to implement rather than two, and the
+            // program's `drop(p)` and the compiler's are the same statement in
+            // the dump.
+            //
+            // Nothing here has to stop the automatic drop as well: passing a
+            // local to a call is what disqualifies it from being one (§5's
+            // whitelist), and `drop(p)` is a call.
+            "drop" if args.len() == 1 => {
+                let v = self.eval(&args[0]);
+                self.push(LirStmtKind::Drop(v), span);
+                Some(Rvalue::Use(Operand::Const(Constant::Undef)))
+            }
             // Indexing a built-in sequence. `core`'s `Index` / `IndexMut` impls
             // are these (§6.13), and both promise a **pointer** to the element,
             // which is what makes `a[i]` a place.
@@ -1842,19 +1974,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             }
             _ => {
                 let vals: Vec<Operand> = args.iter().map(|a| self.eval(a)).collect();
-                let value = Rvalue::Intrinsic {
-                    name: name.clone(),
-                    args: vals,
-                };
-                // `panic` and its neighbours return `never`: the block ends, for
-                // the same reason a call to a `-> never` function does.
-                if matches!(ty, Ty::Never) {
-                    let sink = self.temp(Ty::Never, span);
-                    self.assign(Place::local(sink), value, span);
-                    self.terminate(Terminator::new(TermKind::Unreachable, span));
-                    return None;
-                }
-                Some(value)
+                self.emit_intrinsic(name.clone(), vals, ty, span)
             }
         }
     }
@@ -2273,6 +2393,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 self.test_pattern(place, inner, ty, fail);
             }
             PatternKind::Lit(l) => {
+                // A **text** literal is not a scalar comparison. A `str` is
+                // `{ ptr, len }` by the time it gets here (§7b), so `==` on it
+                // would compare two addresses — which is not what
+                // `s.match { "hi" => ... }` asked and is not an instruction any
+                // machine has either. Its bytes are what the pattern is about.
+                if let Some(bytes) = text_of(l) {
+                    self.test_bytes(place, ty, &bytes, fail, span);
+                    return;
+                }
                 let c = self.into_temp(
                     Rvalue::Binary {
                         op: BinOp::Eq,
@@ -2420,6 +2549,73 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         }
     }
 
+    /// A text literal pattern: a call to `core`'s byte equality.
+    ///
+    /// It is a **call**, not a comparison, for the reason the panic is one
+    /// (§2): the answer belongs to a library. A `str` is `{ ptr, len }` by this
+    /// level (§7b), so `==` on it would compare the address a view points at
+    /// rather than the text it spells — two copies of `"hi"` in different
+    /// buffers would not match, which is not what the pattern asked. Unrolling
+    /// the bytes here instead would put a second definition of "are these bytes
+    /// equal" in the compiler, free to disagree with the one `impl Eq for str`
+    /// uses.
+    ///
+    /// The function is found by `#lang("bytes_eq")`, so `s == "hi"` and
+    /// `s.match { "hi" => ... }` reach the same code.
+    fn test_bytes(
+        &mut self,
+        place: &Place,
+        ty: &Ty,
+        bytes: &[u8],
+        fail: BlockId,
+        span: Option<FileSpan>,
+    ) {
+        // A `str` is a `distinct []u8` (§2.4) and a distinct is a one-member
+        // struct here, so the slice is one projection in.
+        let seq = self.byte_slice(place, ty);
+        let callee = self.cx.lang.get("bytes_eq").map(|d| self.static_callee(d));
+        let (Some(seq), Some(callee)) = (seq, callee) else {
+            // Not a shape whose bytes this can reach, or a `core` with no
+            // comparison in it — inference has said so already. Fail the arm
+            // rather than emit a comparison that means the wrong thing.
+            self.goto(fail, span);
+            return;
+        };
+        let literal = Operand::Const(Constant::Value(ConstValue::Bytes(bytes.to_vec())));
+        let args = vec![Operand::Copy(seq), literal];
+        let Some(Rvalue::Use(same)) = self.emit_call(callee, args, Ty::Bool, span) else {
+            return;
+        };
+        self.branch_if(same, fail, span);
+    }
+
+    /// The `{ ptr, len }` a text value's bytes live behind. `None` for anything
+    /// else.
+    fn byte_slice(&mut self, place: &Place, ty: &Ty) -> Option<Place> {
+        match ty {
+            Ty::Slice { .. } => Some(place.clone()),
+            // One `distinct` hop, which is what `str` is. The recursion is for a
+            // `distinct` over a `distinct`, which the language allows.
+            Ty::Nominal { def, .. }
+                if matches!(
+                    self.cx.linked.ty(*def).map(|t| &t.kind),
+                    Some(TypeDefKind::Distinct { .. })
+                ) =>
+            {
+                let repr = match self.cx.layouts.member_types(ty).as_deref() {
+                    Some([(_, repr)]) => repr.clone(),
+                    _ => return None,
+                };
+                let inner = place.clone().then(Projection::Field {
+                    index: 0,
+                    name: Symbol::new("0"),
+                });
+                self.byte_slice(&inner, &repr)
+            }
+            _ => None,
+        }
+    }
+
     /// A slice pattern: a length test, then the elements it names from each end.
     #[allow(clippy::too_many_arguments)]
     fn test_slice(
@@ -2555,6 +2751,18 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             PatternKind::Lit(l) => lit_value(l).display(),
             _ => "pattern".to_string(),
         }
+    }
+}
+
+/// The bytes a text literal is, or `None` for a scalar one.
+///
+/// A `str` literal and a `b"..."` literal are the same question at this level:
+/// what the pattern tests is a run of bytes.
+fn text_of(l: &Lit) -> Option<Vec<u8>> {
+    match l {
+        Lit::Str(s) => Some(s.as_bytes().to_vec()),
+        Lit::Bytes(b) => Some(b.clone()),
+        _ => None,
     }
 }
 

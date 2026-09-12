@@ -32,7 +32,7 @@
 @public size_of  :: #intrinsic("size_of") func <T> () -> usize
 @public align_of :: #intrinsic("align_of") func <T> () -> usize
 
-// Allocation (§6.9). The language is collected, so there is no free.
+// Allocation (§6.9).
 //
 // `new.<T>()` yields one zeroed, GC-managed `T`.
 @public new :: #intrinsic("new") func <T> () -> *mut T
@@ -44,6 +44,27 @@
 // is what the allocation adds, and no bound expresses that. The compiler applies
 // it at the call site; the `[]T` written here is the shape, not the promise.
 @public make :: #intrinsic("make") func <T> (len: usize) -> T
+
+// Free `p`'s object **now**, rather than when the collector next runs (§6.9).
+//
+// The language is collected, so this is never required and is not how memory is
+// normally released. It exists because the compiler already does exactly this
+// wherever escape analysis proves an object cannot outlive its scope
+// (`design/lir.md` §5), and a program that knows something the analysis cannot
+// see — that a buffer is finished with well before its scope ends, say — has no
+// other way to say so.
+//
+// Writing it takes the question on. The compiler stops inserting its own drop
+// for that value, and **using the value afterwards is a compile error**: a
+// pointer whose object was freed is the one thing the collector's whole point is
+// to make impossible, so it is not left to a run-time surprise. What that check
+// can see is one function's worth of a local's own name — an alias made before
+// the drop is not tracked, and freeing through one is a way to get a dangling
+// pointer past it.
+//
+// It takes `*mut T` because freeing an object is the most destructive write
+// there is, and the permission to do it belongs in the type.
+@public drop :: #intrinsic("drop") func <T> (p: *mut T) -> void
 
 // Splice a file's bytes into the binary as a compile-time `[]u8`.
 @public embed_file :: #intrinsic("embed_file") func (path: str) -> []u8

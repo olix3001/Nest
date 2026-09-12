@@ -33,6 +33,19 @@
 //! provably fine, because a whitelist that is wrong leaks and a blacklist that
 //! is wrong corrupts memory.
 //!
+//! Two consequences are worth knowing before reading the code and expecting
+//! otherwise:
+//!
+//! - **A written `drop(p)`** (spec §6.9) disqualifies `p`, because passing a
+//!   local to anything does and a `drop` is a call. That is not a special case,
+//!   it is the rule doing exactly what it should: the program took the question
+//!   on, so the compiler stops answering it, and the object is freed once.
+//! - **A slice a program reads from is never a candidate.** Every use of one
+//!   goes through `&xs` — `.len()` and `xs[i]` both do — and taking a local's
+//!   address is not on the whitelist. So `make` allocations are in practice
+//!   collected rather than dropped, and only a slice nothing touches gets a
+//!   `drop`.
+//!
 //! ### The one ordering rule
 //!
 //! A rung of the ladder is built at the first exit that needs it and shared by

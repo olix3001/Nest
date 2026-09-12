@@ -28,6 +28,7 @@ pub mod constants;
 pub mod constness;
 pub mod declarations;
 pub mod divergence;
+pub mod dropped;
 pub mod exhaustive;
 pub mod layouts;
 pub mod mutability;
@@ -49,6 +50,7 @@ pub fn run(
     constness::check(defs, meta, linked, &mut out);
     constants::check(defs, meta, linked, layouts, &mut out);
     bounds::check(defs, meta, linked, layouts, &mut out);
+    dropped::check(defs, meta, linked, &mut out);
     object_safety::check(defs, meta, linked, &mut out);
     reachability::check(defs, meta, linked, &mut out);
     declarations::check(defs, meta, linked, &mut out);

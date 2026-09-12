@@ -43,11 +43,11 @@ bb2:
 }
 ```
 
-There are **three** instructions — an assignment, a call, and a `drop` (§5) —
-and four terminators. That is the whole set, and keeping it that small is the
-point: a backend for C, for LLVM, or for wasm has to answer for each of them, so
-every operation this level invents is a question asked of every backend that will
-ever exist.
+There are **four** instructions — an assignment, a call, an intrinsic and a
+`drop` (§5) — and four terminators. That is the whole set, and keeping it that
+small is the point: a backend for C, for LLVM, or for wasm has to answer for each
+of them, so every operation this level invents is a question asked of every
+backend that will ever exist. §10 is that list from the backend's side.
 
 `:=` **introduces** a value into a local; `=` **stores** into a place. That is
 the same distinction the source language draws, so it costs a reader nothing to
@@ -309,6 +309,28 @@ read the object and the memory has to survive until it has.
 
 Extending this to per-function escape summaries later is a change of *precision*,
 not of shape — the drop insertion machinery does not move.
+
+### The same instruction, written by hand
+
+`drop(p)` in the source (spec §6.9) lowers to **this** instruction, not to a
+second one. A program writing it has taken on the question the analysis would
+otherwise have answered, and two things follow: it is no longer a candidate for
+an automatic drop — passing a local to anything disqualifies it, and a call is a
+call — and `check::dropped` refuses a later use of the name, because a pointer
+whose object was freed is the one thing a collected language exists to make
+impossible.
+
+That is why the instruction takes an **operand** rather than a local:
+`drop(node.*.next)` frees a pointer no local names. For a backend the two are one
+case — a pointer value, and a free. A `make`d slice is `{ ptr, len }` by here, so
+the lowering projects the member: the operand is an address in every case, and
+not sometimes a struct.
+
+One consequence of the whitelist is worth stating rather than leaving to be
+found. **A slice a program reads from is never dropped**, because every use of
+one goes through `&xs` — `.len()` and `xs[i]` both do — and taking a local's
+address is not on the list. `make` allocations are collected, not freed early,
+unless nothing touches them.
 
 ### Where the analysis runs
 
@@ -887,6 +909,13 @@ evaluator already worked out to be in range, whose comparison has a known answer
 — the out-of-range case having been reported by `check::bounds` rather than
 compiled.
 
+**Dividing by zero is not overflow**, and is not this setting's to turn off.
+`overflow=wrap` says what `i32::MAX + 1` *means*; there is no wrapped answer for
+`x / 0` to have. So an integer `/` or `%` gets a comparison, an edge, and a block
+that panics — §3.2's shape again — whatever the setting says, and only `#unsafe`
+removes it. A divisor that is a known non-zero constant gets no branch, for the
+reason a known-good index gets none.
+
 Two things this setting does **not** change:
 
 - **Constants.** A `::` binding *is* its value (§2.5), and one that overflows is
@@ -942,3 +971,92 @@ so the `$cast` the IR emits when a distinct type reaches an inherited method is 
 no-op here: by this point the check that the method is *available* has already
 happened, and LIR sees two names for one layout. It does not need to know which
 was written.
+
+## 10. What a backend has to supply
+
+Everything above says what LIR *is*. This section is the other side of it: the
+complete list of what is still left to do when a backend receives one, so that
+"is LIR low enough" has an answer somebody can check rather than believe.
+
+### The instruction set, in full
+
+**Four statements**, and one of them is a call:
+
+| Statement | LLVM | C | wasm |
+|---|---|---|---|
+| `Assign { place, rvalue }` | the rvalue, then `store` (or an SSA def) | `p = e;` | the rvalue, then `local.set` / `store` |
+| `Call { dest, callee, args }` | `call` / indirect `call` | a call | `call` / `call_indirect` |
+| `Intrinsic { dest, name, args }` | an intrinsic or an instruction | a builtin or a call | an instruction |
+| `Drop(operand)` | a call to the runtime's free | a call | a call |
+
+**Four terminators**: `goto`, `switch`, `return`, `unreachable`. `switch` covers
+every branch there is, so there is no `br`/`switch` pair to keep in step.
+
+**Nine rvalues**: `Use`, `Ref`, `Binary`, `Unary`, `Cast`, `Aggregate`, `Offset`,
+and that is the set. `Binary` and `Unary` are machine operations on **scalars** —
+nothing structural ever reaches one, which is why text equality is a call to
+`core` (§6.13) rather than an `==` on a `{ ptr, len }`.
+
+`Cast` carries both types, so what the conversion *is* — a truncation, a sign
+extension, a rounding, an int-to-float — is a lookup rather than a derivation.
+`Offset` is a GEP in elements, carrying the element type rather than a byte
+stride, so the stride comes from the same layout everything else does.
+
+**Two shapes of intrinsic** remain by phase 10: the GC ones (`gc_collect`,
+`gc_keep_alive`, `gc_pin`), `transmute`, the wrapping arithmetic, and `trap`.
+Each is one instruction or one runtime call. `transmute` is the only one whose
+result type is read off `dest` rather than carried in the operation, because the
+operation *is* "reinterpret as whatever this slot holds".
+
+### The four things a backend genuinely does itself
+
+1. **Materialize constants.** A `Constant::Value` may be a `Str`, a `Bytes` or an
+   `Aggregate`. A text constant becomes a private global plus the `{ ptr, len }`
+   the type wants; an aggregate becomes an initializer laid out by the same
+   `TypeDef` a local of that type uses. This is emission, not analysis — the
+   value is fully known.
+2. **Turn safepoints into stack maps.** §6 computed the live set; what shape it
+   takes — a shadow stack, an LLVM statepoint, a side table — is the backend's,
+   and different collectors want different ones. A non-moving collector drops
+   the `reloc`s as identity.
+3. **ABI classification.** Which arguments go in registers, which are returned
+   indirectly, what an `extern("c")` function's signature means on this target
+   (§11.3). LIR carries the ABI name and the types; the classification is
+   per-target and belongs where the target is.
+4. **Register allocation and instruction selection**, which is the backend's
+   whole job and is not something an IR can pre-answer.
+
+### The one thing LIR does not carry on its own
+
+**Resolving a `Ty::Nominal` to its `TypeDef` needs the compiler's def table.**
+`Program::types` is keyed by `mono::type_key`, and computing that key from a `Ty`
+takes a `&DefTable`. A backend living in this compiler has one, so it is not a
+blocker — but it does mean `Program` is not a standalone artifact that could be
+serialized and handed to another process. Closing that wants a `TypeId` on every
+local instead of a `Ty`, which is a change worth making when there is a second
+consumer to justify it and not before.
+
+### Known over-approximations, named rather than hidden
+
+- **A `*T` is a GC root whatever `T` is** (§6), so a vtable pointer — a `*void`
+  by this level — is traced with the rest. It wants a distinction between a
+  managed reference and a machine address that the type system does not draw.
+- **Escape analysis is intra-procedural and blunt** (§5). Per-function summaries
+  are a change of precision, not of shape.
+- **A `str` pattern longer than a handful of bytes** still calls the same byte
+  comparison every other one does. A length-dispatched jump table would be
+  faster and is an optimization, not a lowering.
+
+### Things that look like gaps and are not
+
+- **A block with no predecessors.** An exhaustive `match`'s fallback is
+  `unreachable` and nothing jumps to it. That is the guarantee, written down.
+- **`&p.*` on a pointer.** An identity that any backend folds, produced where the
+  source took the address of a dereference.
+- **A `switch` on a `bool`.** One-bit switches are fine everywhere; there is no
+  separate two-way branch precisely so that there is one form to handle.
+- **An `i128` arm value on a narrower switch.** Arm values are widened for
+  storage, not for meaning; each fits the operand's own type.
+- **Division.** `x / 0` traps before the divide (§7d), so the instruction a
+  backend emits has no undefined case left except `INT_MIN / -1`, which the
+  checked form catches under `overflow=trap`.

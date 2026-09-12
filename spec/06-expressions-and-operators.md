@@ -161,6 +161,7 @@ The intrinsics (extensible; not a closed list):
 | `make.<[]T>(len[, cap])` | allocate a zeroed, GC-managed slice (§6.9) |
 | `size_of.<T>()` / `align_of.<T>()` | layout queries (`usize`), `#const` |
 | `len(x)` | element count of an array or slice (`usize`); the core library's `.len()` method is written in terms of it |
+| `drop(p)` | free `p`'s object now, rather than when the collector next runs (§6.9) |
 | `assert(cond[, msg])` | compile-time assertion (§6.10) |
 | `trap()` | stop the process immediately, without unwinding — the last instruction of a panic |
 | `embed_file("path")` | splice a file's bytes as a compile-time `[]u8` |
@@ -369,15 +370,17 @@ Loops and iteration have their own chapter (see
 [10-loops-and-iteration.md](10-loops-and-iteration.md)); a `loop` exited with
 `break value` yields that value.
 
-## 6.9 Allocation intrinsics (`new`, `make`)
+## 6.9 Allocation intrinsics (`new`, `make`, `drop`)
 
-The language is garbage-collected, so there is no free. Fresh memory comes from
-two intrinsics; std containers (`Vector`, `HashMap`, …) are built on top of them.
+The language is garbage-collected, so a free is never *required*. Fresh memory
+comes from two intrinsics; std containers (`Vector`, `HashMap`, …) are built on
+top of them.
 
 ```
 new.<T>()               // one zeroed, GC-managed T          -> *mut T
 make.<[]T>(len)         // zeroed slice of `len` elements    -> []mut T
 make.<[]T>(len, cap)    // as above, with reserved capacity
+drop(p)                 // free `p`'s object now             -> void
 ```
 
 ```
@@ -389,6 +392,43 @@ let   xs  := Vector.<int>.new()         // std, wraps make internally
 Memory is zero-initialized unless the element type is `#raw` (see
 [09-directives-and-attributes.md](09-directives-and-attributes.md)), in which
 case it is left uninitialized and reads are only permitted in `#unsafe` scopes.
+
+### `drop`, and why it is not `#unsafe`
+
+`drop(p)` releases an object before the collector would have. The compiler
+already does exactly this wherever it can prove an object does not outlive the
+scope that made it (`design/lir.md` §5); `drop` is that same operation written by
+hand, for the cases the proof cannot reach — a buffer finished with well before
+its scope ends, say.
+
+Writing it **takes the question on**, and the language holds you to the part it
+can check:
+
+- the compiler stops inserting a drop of its own for that value, so the object is
+  freed once;
+- **using the name afterwards is a compile error**, along with dropping it twice
+  and dropping — inside a loop — something declared outside it.
+
+```
+let p := new.<Node>()
+let v := p.*.x
+drop(p)
+return p.*.x            // error: `p` is used after it was dropped
+```
+
+Assigning to the name gives it an object again and clears the state. What the
+check cannot see is an **alias** made before the drop:
+
+```
+let q := p
+drop(p)
+q.*.x                   // not caught
+```
+
+Catching that wants ownership, which this language does not have. So `drop` is
+the one intrinsic whose correctness is partly the author's, which is also why the
+parameter is `*mut T`: freeing an object is the most destructive write there is,
+and the permission to do it belongs in the type.
 
 ## 6.10 Compile-time statement items (`assert`)
 

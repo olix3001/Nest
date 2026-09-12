@@ -25,6 +25,10 @@ type (i32, bool) = struct {           // was a tuple; size 8, align 4
   0: i32                    // +0
   1: bool                    // +4
 }
+type (usize, bool) = struct {           // was a tuple; size 16, align 8
+  0: usize                    // +0
+  1: bool                    // +8
+}
 
 func read(s_0: []i32, a_1: [3]i32, k_2: usize) -> i32  // _NC4read
   let _3: *[]i32

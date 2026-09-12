@@ -25,6 +25,9 @@
 // `std`, built on top of this one, and will carry its own `#lang` tag so that a
 // `str` coerces into it implicitly.
 
+{ Eq } :: import "cmp.nest"
+{ bytes_eq } :: import "slice.nest"
+
 @public str :: #lang("str") distinct []u8
 
 // `len` is deliberately absent: a `distinct` type inherits the methods of the
@@ -37,4 +40,17 @@ impl str {
   // subset of arbitrary bytes. The reverse needs a check, and lives in `std`
   // until there is enough machinery here to write it.
   as_bytes :: #inline func (self: str) -> []u8 { return cast.<[]u8>(self) }
+}
+
+// Text compares by its **bytes**, not by where they are. Two `str`s cut out of
+// different buffers are equal when they spell the same thing, which is the only
+// answer `==` can usefully have for a borrowed view — the alternative compares a
+// pointer and a length and calls two copies of `"hi"` different.
+//
+// It is the same `bytes_eq` a `"..."` **pattern** calls, so `s == "hi"` and
+// `s.match { "hi" => ... }` cannot disagree.
+impl Eq for str {
+  eq :: func (self: Self, rhs: Self) -> bool {
+    return bytes_eq(self.as_bytes(), rhs.as_bytes())
+  }
 }

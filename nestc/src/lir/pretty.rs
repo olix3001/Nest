@@ -264,7 +264,16 @@ impl Printer<'_> {
                     self.rvalue(f, value)
                 )
             }
-            StmtKind::Drop(l) => format!("drop {}", self.local_name(f, *l)),
+            StmtKind::Intrinsic { dest, name, args } => {
+                let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();
+                let call = format!("${name}({})", args.join(", "));
+                match dest {
+                    Some(d) if d.is_whole_local() => format!("{} := {call}", self.place(f, d)),
+                    Some(d) => format!("{} = {call}", self.place(f, d)),
+                    None => call,
+                }
+            }
+            StmtKind::Drop(o) => format!("drop {}", self.operand(f, o)),
             StmtKind::Call { dest, callee, args } => {
                 let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();
                 let call = match callee {
@@ -329,10 +338,6 @@ impl Printer<'_> {
                 self.operand(f, index),
                 elem.display(self.defs)
             ),
-            Rvalue::Intrinsic { name, args } => {
-                let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();
-                format!("${name}({})", args.join(", "))
-            }
         }
     }
 
