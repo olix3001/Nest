@@ -1042,7 +1042,6 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             ExprKind::Local(_)
             | ExprKind::Field { .. }
             | ExprKind::TupleIndex { .. }
-            | ExprKind::Index { .. }
             | ExprKind::Deref { .. } => {
                 let p = self.place_of(e)?;
                 Some(Rvalue::Use(Operand::Copy(p)))
@@ -1545,6 +1544,43 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     to: ty,
                 })
             }
+            // Indexing a built-in sequence. `core`'s `Index` / `IndexMut` impls
+            // are these (§6.13), and both promise a **pointer** to the element,
+            // which is what makes `a[i]` a place.
+            //
+            // The two sequences reach it differently, and that is §7b's whole
+            // point about the slice being the interesting near-miss. An array
+            // kept its own shape, so element `i` is an ordinary projection and
+            // its address is a `&`. A slice did **not**: it is `{ ptr, len }`,
+            // a struct has members rather than elements, so the address is the
+            // pointer it holds moved along by `i` — pointer arithmetic, and the
+            // only place in the compiler that does any.
+            "index" | "index_mut" if args.len() == 2 => {
+                let mutable = name.as_str() == "index_mut";
+                let seq = match self.cx.ty_of(args[0].id) {
+                    Ty::Ptr { inner, .. } => *inner,
+                    other => other,
+                };
+                let base = self.place_of(&args[0])?.then(Projection::Deref);
+                let i = self.eval(&args[1]);
+                match seq {
+                    Ty::Slice { inner, .. } => {
+                        let ptr = base.then(Projection::Field {
+                            index: 0,
+                            name: Symbol::new("ptr"),
+                        });
+                        Some(Rvalue::Offset {
+                            ptr: Operand::Copy(ptr),
+                            index: i,
+                            elem: *inner,
+                        })
+                    }
+                    _ => Some(Rvalue::Ref {
+                        mutable,
+                        place: base.then(Projection::Index(i)),
+                    }),
+                }
+            }
             // A sequence's length: a fixed array's is part of its type and a
             // slice keeps it in its second member, so neither needs code.
             "len" if args.len() == 1 => {
@@ -1634,12 +1670,6 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     name: Symbol::new(&index.to_string()),
                 }))
             }
-            ExprKind::Index { base, index } => {
-                let i = self.eval(index);
-                let bty = self.cx.ty_of(base.id);
-                let p = self.place_of(base)?;
-                Some(self.index_into(p, &bty, i))
-            }
             _ => {
                 let ty = self.cx.ty_of(e.id);
                 let span = self.cx.meta.span(e.id);
@@ -1653,36 +1683,6 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     }
                 }
             }
-        }
-    }
-
-    /// Index a sequence.
-    ///
-    /// An **array** is indexed directly: it kept its own shape (§7b) precisely
-    /// so that `base + i * stride` stays one operation on one aggregate.
-    ///
-    /// A **slice** is not an aggregate you can index. It flattened into
-    /// `{ ptr, len }` (§7b), and a struct has members rather than elements — so
-    /// the indexing happens *through the pointer it holds*, which is the whole
-    /// content of that row in §7b's table. Emitting `s[i]` on the struct would
-    /// be an offset into the two-word header.
-    fn index_into(&mut self, place: Place, base_ty: &Ty, index: Operand) -> Place {
-        match base_ty {
-            Ty::Slice { .. } => place
-                .then(Projection::Field {
-                    index: 0,
-                    name: Symbol::new("ptr"),
-                })
-                .then(Projection::Index(index)),
-            // A pointer to a sequence that lowering did not deref for us, and a
-            // bare `*T` being walked as an array: both index through the
-            // pointee, which is what `Index` on a pointer means.
-            Ty::Ptr { inner, .. } => {
-                let inner = (**inner).clone();
-                let p = place.then(Projection::Deref);
-                self.index_into(p, &inner, index)
-            }
-            _ => place.then(Projection::Index(index)),
         }
     }
 

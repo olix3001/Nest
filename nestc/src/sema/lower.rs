@@ -981,24 +981,17 @@ impl Lowerer<'_> {
                     },
                 )
             }
+            // Indexing goes through `Index` / `IndexMut`, which hand back a
+            // *pointer* to the element: `a[i]` is `index(&a, i).*` (§6.13). The
+            // built-in sequences included — their impls are in `core` and their
+            // members are `#intrinsic`, so the call becomes the operation on
+            // the way through `lower_call`.
+            //
+            // The `None` arm is a base whose type was already in error: there is
+            // no impl to name, and inference has reported it.
             NodeKind::Index { base, index } => match self.ast.meta::<OpResolution>(node) {
-                // A user type indexes through `Index` / `IndexMut`, which hand
-                // back a *pointer* to the element: `a[i]` is `index(&a, i).*`.
                 Some(res) => self.lower_index_call(node, res, base, index, ty),
-                // Arrays and slices index directly.
-                None => {
-                    let b = self.lower_expr(base);
-                    let b = self.autoderef(b);
-                    let index = self.lower_expr(index);
-                    self.expr(
-                        node,
-                        ty,
-                        ExprKind::Index {
-                            base: Box::new(b),
-                            index: Box::new(index),
-                        },
-                    )
-                }
+                None => self.expr(node, ty, ExprKind::Error),
             },
             NodeKind::Slice { base, range } => {
                 let args = vec![self.lower_expr(base), self.lower_expr(range)];
@@ -1608,6 +1601,17 @@ impl Lowerer<'_> {
     /// `comptime_int` literal, say) presents its *converted* type to the call,
     /// so the reconstructed signature has to come from the lowered arguments.
     fn op_call(&mut self, node: NodeId, res: OpResolution, args: Vec<Expr>, ty: Ty) -> Expr {
+        // An impl member may be `#intrinsic`, and then the call *is* the
+        // operation (§6.4) — there is no body on the other end of it. `core`'s
+        // `Index` / `IndexMut` on the built-in sequences are written that way,
+        // which is what keeps `a[i]` one construct for every type while still
+        // compiling to an address computation for the two the machine knows.
+        //
+        // The same question a direct call asks in `lower_call`, asked here
+        // because an operator never goes through that path.
+        if let Some(tag) = self.defs.get(res.method).intrinsic_tag() {
+            return self.lower_intrinsic(node, tag, args, ty);
+        }
         let callee_ty = Ty::Func {
             params: args.iter().map(|a| self.ty_of(a)).collect(),
             ret: Box::new(ty.clone()),
@@ -1713,26 +1717,59 @@ impl Lowerer<'_> {
         ty: Ty,
     ) -> Expr {
         // `IndexMut` is the write side; its `self` and its result are `*mut`.
-        let mutable = self
+        let mut mutable = self
             .lang
             .get("index_mut")
             .map(|t| self.defs.resolve_alias(t))
             == Some(res.trait_def);
         let base_node = base;
         let base = self.lower_expr(base);
-        let recv = match self.ty_of(&base) {
+        // A built-in sequence goes through `Index` whether it is being read or
+        // written (`core/slice.nest` says why), so the declared `-> *Self.Output`
+        // is not the whole answer: what the element pointer **permits** follows
+        // the receiver, which is the one thing no signature in the language can
+        // state. It is the same gap `make.<[]T>(n)` has, and it is filled the
+        // same way — here, where the receiver's type is in hand.
+        //
+        // A `[]mut T` yields a `*mut T` however immutably the binding holding it
+        // was declared, because that is what a `[]mut T` *is* (§2.3). An array's
+        // elements belong to whatever holds the array, so the pointer is mutable
+        // and the mutability check walks to the base to decide — which is
+        // exactly the rule it applied to `a[i]` before this went through a
+        // trait.
+        let recv_ty = self.ty_of(&base);
+        let seq = match &recv_ty {
+            Ty::Ptr { inner, .. } => (**inner).clone(),
+            other => other.clone(),
+        };
+        match seq {
+            Ty::Slice { mutable: m, .. } => mutable = m,
+            // An array's elements are part of whatever holds the array, so
+            // there is nothing in the *type* to read the permission off. What
+            // decides is whether this `a[i]` is being written, which only the
+            // statement knew — see [`IndexWrite`].
+            Ty::Array { .. } => {
+                mutable = self.ast.meta::<crate::sema::infer::IndexWrite>(node).is_some()
+            }
+            _ => {}
+        }
+        // The *receiver* is only read even on the write path: a sequence's
+        // header is never written by indexing it, and asking for `&mut s` would
+        // refuse every `s: []mut T` the program did not also declare `mut`.
+        let recv_mut = mutable && !matches!(seq, Ty::Slice { .. } | Ty::Array { .. });
+        let recv = match recv_ty {
             // Already a pointer (an auto-deref site): pass it straight through.
             Ty::Ptr { .. } => base,
             other => {
                 let ptr = Ty::Ptr {
-                    mutable,
+                    mutable: recv_mut,
                     inner: Box::new(other),
                 };
                 self.expr(
                     base_node,
                     ptr,
                     ExprKind::Ref {
-                        mutable,
+                        mutable: recv_mut,
                         place: Box::new(base),
                     },
                 )

@@ -2,8 +2,8 @@
 
 **Generated**: 2026-09-12
 **Branch**: `main`
-**Status**: **438 tests pass**, `cargo clippy` reports 90 warnings (the 73
-baseline plus 17 dead-code entries in the new `lir` module — fields codegen will
+**Status**: **443 tests pass**, `cargo clippy` reports 85 warnings (the 73
+baseline plus dead-code entries in the new `lir` module — fields codegen will
 read and nothing does yet). Every file in `examples/*.nest` compiles.
 
 **Read `design/roadmap.md` §8 first**, then `design/lir.md`. This document is the
@@ -131,6 +131,8 @@ Everything in the previous handoffs' lists still stands. New this session:
 | The discriminant is read once, and a group does not re-test it | §4's stated invariant, and three blocks per variant otherwise |
 | A guarded catch-all sends the match down the linear route | Its failure means a different next arm in each group |
 | A vtable's slots are monomorphization's answer | The instantiated method does not exist until that pass makes it |
+| The sequences implement `Index` and not `IndexMut` | A sequence's write permission is in its type, not in its receiver (§2.3, §3.2) |
+| Pointer arithmetic exists in LIR and nowhere above | A flattened slice has no element to project; the source has bounds in the type and needs none |
 | A call is an instruction, not a terminator | A panic does not unwind (§2) — the whole reason the CFG stays the size of the source |
 | Pattern types are threaded down | A pattern is matched *against* a type; its node carries none |
 | `overflow=trap` is an edge in the graph | Every later pass has to see it to be correct (§7d) |
@@ -146,6 +148,58 @@ clippy` → 90 warnings. Every file in `examples/*.nest` compiles clean.
 **Broken**: nothing.
 
 **Uncommitted changes**: none.
+
+## Indexing goes through `Index` now, like every other operator
+
+`core/ops.nest` had declared `Index` / `IndexMut` since the start and spec §6.13
+had said `a[i]` is `Index.index(&a, i).*` — but only *user* types went that way.
+The two built-in sequences were special-cased in inference and in lowering. They
+are not any more:
+
+```nest
+impl <T> Index.<usize> for []T {
+  Output :: T
+  index :: #intrinsic("index") func (self: *Self, i: usize) -> *T
+}
+```
+
+plus the same for `[N]T`, and `ExprKind::Index` is **gone from the IR** — nothing
+constructed it once the special case went, so it was removed from the node, both
+walkers, the pretty printer, the const evaluator and three checks.
+
+Four things fell out of it:
+
+- **The index is a `usize`.** `Index.<usize>` says so. It used to be whatever an
+  unconstrained integer literal defaulted to, which was `isize`.
+- **A constant array folds, and can be indexed.** `$array` / `$repeat` now
+  produce a `ConstValue::Aggregate` — a composite literal is a value, and §2.5
+  says a `::` binding *is* its value — and the evaluator recognizes the
+  `index(&a, i).*` shape, so `B: i32 :: A[1]` is `20`. None of that worked
+  before.
+- **An impl member may be `#intrinsic` and an operator will notice.** `op_call`
+  asks the same question `lower_call` does; it did not before, so the first
+  attempt produced a *call* to `core.<impl []T>.index`.
+- **There is pointer arithmetic in LIR** (`Rvalue::Offset`), and only in LIR.
+
+### The one design decision in it: no `IndexMut` for the sequences
+
+`IndexMut`'s `self: *mut Self` asks for permission over the **container**. That
+is the right question for a user container and the wrong one for a sequence: a
+`[]mut T` is writable through however immutably the binding holding it was
+declared (§2.3), so routing the write side through `IndexMut` refused
+`s[0] = 1` for every `s: []mut T` a program did not also declare `mut`. It was
+the first thing the test suite caught.
+
+So `core` gives the sequences `Index` and nothing else, a write goes through the
+same impl a read does, and what the **element pointer** permits follows the
+receiver — a `[]mut T` yields `*mut T`, a `[]T` yields `*T`, and an array yields
+`*mut T` exactly when the `a[i]` is a write, which only the statement knows
+(`infer::IndexWrite`). That last part is the same gap `make.<[]T>(n)` has: no
+signature in the language can say "the same type, made mutable".
+
+The mutability check keeps its precise messages by recognizing the
+`index(&a, i).*` shape and asking the question of the *sequence*, which is what
+the surface form asked.
 
 ## `core`'s `.len()` was calling itself — fixed
 
@@ -193,15 +247,7 @@ Rust does and is a trap anywhere else it comes up. Nothing depends on it now.
   per field and an `&a[i]` that no longer names a contiguous `Particle`.
 - **A slice literal's storage.** `[]T { a, b }` reaches LIR as the composite
   intrinsic; where the elements live is an allocation question.
-- **`a[i]` on a sequence is still compiler syntax.** `core/ops.nest` already
-  declares `Index` / `IndexMut` with `#lang` tags, spec §6.13 already says `a[i]`
-  is `Index.index(&a, i).*`, and a *user* type already goes that route — the two
-  built-in sequences are the anomaly, special-cased in inference and lowering.
-  The `len` change above is the pattern for closing it: an `index` /
-  `index_mut` intrinsic row, `impl <T> Index.<usize> for []T` in core with the
-  member marked `#intrinsic`, and the special case deleted. It is a front-end
-  change and wants its own commit. LIR needs nothing: `$index` is a `Ref` to the
-  place `index_into` already builds.
+- **`a[i]` on a `#soa` array.** The projection now exists; the columns do not.
 - **ABI classification**, dead-code elimination, cross-compilation-unit generics,
   moving `+`/`-` out of `sema::builtins`: all unchanged.
 - **`Ty` in LIR.** Locals are typed with `sema::ty::Ty`, which is concrete by
@@ -276,7 +322,7 @@ reach the table.
 
 ## Resume instructions
 
-1. `cd nestc && cargo test` — expect **438 passed**.
+1. `cd nestc && cargo test` — expect **443 passed**.
 2. See the phase working:
    ```
    cargo build
@@ -301,7 +347,7 @@ reach the table.
 4. The natural follow-up, if you want a small one first: close the `a[i]`
    special case the same way `.len()` was closed — see **Deliberately not done**.
 5. Whatever you touch, verify with all three:
-   - `cargo test` (438 and rising)
+   - `cargo test` (443 and rising)
    - `for f in ../examples/*.nest; do ./target/debug/nestc "$f" >/dev/null || echo "FAIL $f"; done`
    - `cargo clippy` — compare the warning **set**, not the count.
 

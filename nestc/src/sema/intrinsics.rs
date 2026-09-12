@@ -84,8 +84,20 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // Allocation (§6.9).
     plain("new"),
     special("make", Special::MutableArg),
-    // Sequences (§3.2). `core`'s `.len()` methods are written in terms of this.
+    // Sequences (§3.2). `core`'s `.len()` methods **are** these — the members
+    // are marked `#intrinsic` rather than given a body that forwards to one.
     special("len", Special::SequenceArg),
+    // Indexing a built-in sequence (§3.2, §6.13). This is the body of `core`'s
+    // `Index` impls on `[]T` and `[N]T`, so `a[i]` on a sequence goes through
+    // the same trait a user type does and the compiler carries no special case
+    // for what indexing *means*.
+    //
+    // It hands back a **pointer** to the element, because that is what the trait
+    // promises: `a[i]` is `index(&a, i).*`, and the indirection is what makes
+    // `a[i] = v` a place rather than a value. What that pointer *permits* is the
+    // one thing the declared signature cannot say — see
+    // [`crate::sema::lower::Lowerer::lower_index_call`].
+    plain("index"),
     // Compile-time data.
     plain("embed_file"),
     // Failing, at run time and at compile time (§6.10, §8). `panic` returns

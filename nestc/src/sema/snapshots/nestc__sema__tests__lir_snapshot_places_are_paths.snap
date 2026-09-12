@@ -25,8 +25,12 @@ type []u8 = struct {           // was a slice; size 16, align 8
 
 func reach(o_0: *mut Outer, xs_1: []mut i32, k_2: usize) -> void  // _NC5reach
   let _3: i32
+  let _4: *[]mut i32
+  let _5: *mut i32
 bb0:                    // entry
   _3 := cast 1 : comptime_int -> i32
   o_0.*.i.v = _3
-  xs_1.ptr[k_2] = o_0.*.i.v
+  _4 := &xs_1
+  _5 := _4.*.ptr + k_2 * stride(i32)
+  _5.* = o_0.*.i.v
   return

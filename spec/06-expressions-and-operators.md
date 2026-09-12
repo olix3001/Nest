@@ -505,6 +505,20 @@ Applied **after** parsing, to the operator tree §6.7 produced:
   **user** type is compared by.
 - Indexing: `a[i]` in value position ⇒ `Index.index(&a, i).*`; `a[i]` as the
   place of an assignment ⇒ `IndexMut.index_mut(&mut a, i).*`.
+  The **built-in sequences are the exception**, and it is a rule rather than a
+  carve-out: `[]T`, `[]mut T` and `[N]T` implement `Index` and **not**
+  `IndexMut`, so a write to one of them goes through `Index` too. A sequence's
+  write permission is in its *type* — a `[]mut T` is writable through however
+  immutably the binding holding it was declared (§2.3), and an array's elements
+  belong to whatever holds the array — while `IndexMut`'s `self: *mut Self` asks
+  for permission over the *container*, which is the right question for a user
+  container and the wrong one for these. What the element pointer permits
+  follows the receiver, which is the one thing the declared signature cannot
+  say; it is the same gap `make.<[]T>(n)` has (§6.9).
+  Both impls live in `core` and both members are `#intrinsic` (§6.4): there is
+  no body to write, only a compiler operation to name. `a[i]` is therefore one
+  construct for every type, with no special case in the compiler for what
+  indexing *means*.
 - Compound assignment: `a += b` ⇒ `a = a + b` (and likewise for `-=` `*=` `/=`
   `%=` and the bitwise/shift forms), so it dispatches through the same `Add` the
   plain `+` does.

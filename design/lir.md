@@ -591,6 +591,30 @@ slice is the interesting near-miss: `[]T` *does* flatten, because a slice is a
 pointer and a length, and neither of those is indexed by a run-time value. The
 indexing happens through the pointer it holds.
 
+### Pointer arithmetic exists here and nowhere above
+
+That last sentence is an instruction, not a figure of speech. `s[i]` on a slice
+is `s.ptr + i` in elements, and LIR has an `offset` rvalue for it:
+
+```
+t0 := s.ptr
+t1 := t0 + i * stride(i32)
+t2 := t1.*
+```
+
+The **source language has no pointer arithmetic**, deliberately: an address you
+can move is an address you can move wrongly, and every sequence the language has
+carries its own bounds. But the flattening above is what makes a slice's element
+unreachable by projection — a struct has members, not elements — so the
+arithmetic has to exist somewhere below the point where the bounds stopped being
+part of the type. This is that point.
+
+It is in **elements** and carries the element type rather than a byte stride,
+for the same reason everything else here carries a type: the stride is layout's
+answer (§7cc) and there should be one of it. An array needs none of this: it
+kept its own shape, so `a[i]` is an ordinary projection and `&a[i]` an ordinary
+address-of.
+
 The enum row is the one with a real decision in it: the tag's width and whether
 the payload is laid out as an overlapping union or as the widest variant are
 layout's to make, not the lowering's. What the lowering fixes is only the

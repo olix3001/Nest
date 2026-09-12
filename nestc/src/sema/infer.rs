@@ -181,6 +181,19 @@ pub struct RangeReported;
 #[derive(Debug, Clone, Copy)]
 pub struct ConstSlotReported;
 
+/// An `a[i]` that is the **place of an assignment** rather than a value.
+///
+/// For a user container the two are different traits and the resolution says
+/// which. For the built-in sequences they are the same impl (`core` gives them
+/// `Index` only — see `core/slice.nest`), so the distinction has to be recorded:
+/// an array's element pointer is `*mut T` when it is about to be written and
+/// `*T` when it is only read, and only the statement knows which.
+///
+/// Set by [`Inferer::infer_index_place`], which is called for exactly the nodes
+/// that are places.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexWrite;
+
 #[derive(Debug, Clone)]
 pub struct Coercion {
     /// The type the value is converted to.
@@ -1215,14 +1228,14 @@ impl Inferer<'_> {
                 let bty = self.infer_expr(base);
                 let bty = self.pin_str(&bty);
                 let ity = self.infer_expr(index);
-                match self.autoderef(&bty) {
-                    // Indexing the built-in sequences is the language's own: the
-                    // element type is right there in the type (§3.2).
-                    Ty::Slice { inner, .. } | Ty::Array { inner, .. } => *inner,
-                    // Anything else indexes through `Index` (§6.13): the result
-                    // is the impl's `Output`, and `a[i]` means `index(&a, i).*`.
-                    other => self.infer_index_op(node, other, ity),
-                }
+                // **Every** `a[i]` goes through `Index` (§6.13): the result is
+                // the impl's `Output`, and `a[i]` means `index(&a, i).*`. The
+                // built-in sequences have impls in `core` like everything else
+                // — theirs happen to be `#intrinsic` — so there is no case here
+                // for them, and no way for the two routes to disagree about
+                // what indexing means.
+                let head = self.autoderef(&bty);
+                self.infer_index_op(node, head, ity)
             }
             NodeKind::Slice { base, range } => {
                 let bty = self.infer_expr(base);
@@ -1614,9 +1627,11 @@ impl Inferer<'_> {
         out
     }
 
-    /// Type an assignment's place, routing a user-type `a[i]` through
-    /// `IndexMut` instead of `Index`. Every other place — including indexing an
-    /// array or a slice, which needs no trait — types as an ordinary expression.
+    /// Type an assignment's place, routing `a[i]` through `IndexMut` instead of
+    /// `Index`. Every other place types as an ordinary expression.
+    ///
+    /// Which of the two traits a `a[i]` means is decided **here**, because this
+    /// is the only place that knows the node is a place rather than a value.
     fn infer_index_place(&mut self, place: NodeId) -> Ty {
         let NodeKind::Index { base, index } = self.ast.node(place).kind.clone() else {
             return self.infer_expr(place);
@@ -1624,13 +1639,26 @@ impl Inferer<'_> {
         let bty = self.infer_expr(base);
         let ity = self.infer_expr(index);
         let head = self.autoderef(&bty);
-        if matches!(head, Ty::Slice { .. } | Ty::Array { .. } | Ty::Error) {
-            let ty = match head {
-                Ty::Slice { inner, .. } | Ty::Array { inner, .. } => *inner,
-                _ => Ty::Error,
-            };
-            self.types.insert(place, ty.clone());
-            return ty;
+        // An errored base has already been reported; registering an obligation
+        // about it would add a second diagnostic for one mistake.
+        if matches!(head, Ty::Error) {
+            self.types.insert(place, Ty::Error);
+            return Ty::Error;
+        }
+        // The built-in sequences implement `Index` and **not** `IndexMut`, and
+        // that is a fact about `core` rather than a case in the compiler: a
+        // sequence's write permission is in its type, not in its receiver, so
+        // `IndexMut`'s `*mut Self` asks the wrong question of it (§2.3, §3.2 —
+        // and `core/slice.nest` says the same at length). A write therefore goes
+        // through the same impl a read does, and what the element pointer
+        // permits is decided when the call is lowered.
+        if matches!(head, Ty::Slice { .. } | Ty::Array { .. }) {
+            // The impl is the same one a read uses, so what tells lowering this
+            // is a write is this mark and nothing else (see [`IndexWrite`]).
+            self.ast.set_meta(place, IndexWrite);
+            let out = self.infer_index_op(place, head, ity);
+            self.types.insert(place, out.clone());
+            return out;
         }
         let Some(trait_def) = self.lang.get("index_mut") else {
             return Ty::Error;
@@ -1650,8 +1678,7 @@ impl Inferer<'_> {
         out
     }
 
-    /// Type `a[i]` on a type that is not an array or a slice, through the
-    /// `#lang("index")` trait: `Index.<Idx>`'s `Output` is the element type, and
+    /// Type `a[i]` through the `#lang("index")` trait: `Index.<Idx>`'s `Output` is the element type, and
     /// lowering emits `Index.index(&a, i).*` for it (§6.13).
     ///
     /// The write side (`a[i] = v` through `IndexMut`) is decided at the

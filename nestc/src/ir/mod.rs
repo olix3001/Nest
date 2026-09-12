@@ -34,7 +34,10 @@
 //!   [`Dispatch`] says how the callee is reached: directly, through a trait
 //!   object's vtable, or through a bound that monomorphization will resolve.
 //! - **Every operator is a call too** (§6.13), with [`BuiltinOp`] marking the
-//!   ones that are machine instructions. `&&` / `||`, `!`, and comparisons on
+//!   ones that are machine instructions. Indexing included: there is no `Index`
+//!   node, because `a[i]` is `Index.index(&a, i).*` for a `[]T` exactly as it is
+//!   for a user container — `core` supplies the impl and its member is
+//!   `#intrinsic`, so the call *is* the address computation. `&&` / `||`, `!`, and comparisons on
 //!   the numeric core are the exceptions: they dispatch on nothing and stay
 //!   [`ExprKind::Binary`] / [`ExprKind::Unary`].
 //! - **Pointers keep their permission in the type**: `*T` and `*mut T` are one
@@ -588,8 +591,6 @@ pub enum ExprKind {
     },
     /// `base.N` — tuple element access.
     TupleIndex { base: Box<Expr>, index: u64 },
-    /// `base[index]`.
-    Index { base: Box<Expr>, index: Box<Expr> },
     /// `(a, b, ...)`.
     Tuple { elems: Vec<Expr> },
     /// A nested block expression.
@@ -713,10 +714,6 @@ pub fn walk_expr<V: Visitor>(v: &mut V, expr: &Expr) {
         ExprKind::Deref { base }
         | ExprKind::Field { base, .. }
         | ExprKind::TupleIndex { base, .. } => v.visit_expr(base),
-        ExprKind::Index { base, index } => {
-            v.visit_expr(base);
-            v.visit_expr(index);
-        }
         ExprKind::Tuple { elems } => {
             for e in elems {
                 v.visit_expr(e);
@@ -870,10 +867,6 @@ pub fn walk_expr_mut<V: VisitorMut>(v: &mut V, expr: &mut Expr) {
         ExprKind::Deref { base }
         | ExprKind::Field { base, .. }
         | ExprKind::TupleIndex { base, .. } => v.visit_expr(base),
-        ExprKind::Index { base, index } => {
-            v.visit_expr(base);
-            v.visit_expr(index);
-        }
         ExprKind::Tuple { elems } => {
             for e in elems {
                 v.visit_expr(e);

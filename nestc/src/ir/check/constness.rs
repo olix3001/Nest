@@ -285,9 +285,6 @@ impl Cx<'_> {
             ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => {
                 self.non_const(base)
             }
-            ExprKind::Index { base, index } => {
-                self.non_const(base).or_else(|| self.non_const(index))
-            }
             ExprKind::DynCast { .. } => {
                 Some((e.id, "building a trait object is not constant".into()))
             }
@@ -303,7 +300,6 @@ impl Cx<'_> {
             ExprKind::Local(def) => self.defs.get(*def).kind == DefKind::Param,
             ExprKind::Field { base, .. }
             | ExprKind::TupleIndex { base, .. }
-            | ExprKind::Index { base, .. }
             | ExprKind::Deref { base } => self.rooted_in_param(base),
             ExprKind::Ref { place, .. } => self.rooted_in_param(place),
             _ => false,

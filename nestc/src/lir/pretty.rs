@@ -301,6 +301,12 @@ impl Printer<'_> {
                 };
                 format!("{head}({})", fields.join(", "))
             }
+            Rvalue::Offset { ptr, index, elem } => format!(
+                "{} + {} * stride({})",
+                self.operand(f, ptr),
+                self.operand(f, index),
+                elem.display(self.defs)
+            ),
             Rvalue::Discriminant(p) => format!("discriminant({})", self.place(f, p)),
             Rvalue::Intrinsic { name, args } => {
                 let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();

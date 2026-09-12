@@ -16,6 +16,8 @@
 // count at compile time, so the inlined call costs nothing; on a `[]T` it reads
 // the slice header's length.
 
+{ Index, IndexMut } :: import "ops.nest"
+
 // The element count of an array or slice. This is the second intrinsic whose
 // signature cannot state its own rule: `T` is unbounded here and the compiler
 // rejects an argument that is neither an array nor a slice, because no bound in
@@ -36,4 +38,39 @@ impl <T> []T {
 
 impl <T, const N: usize> [N]T {
   len :: #intrinsic("len") func (self: *Self) -> usize
+}
+
+// ===< Indexing >===
+//
+// `a[i]` is **not** compiler syntax either (§6.13): it is `Index.index(&a, i).*`
+// for every type, the built-in sequences included. They are here rather than in
+// the compiler for the same reason `.len()` is — one spelling with one meaning —
+// and the members are `#intrinsic` for the same reason too: there is no body to
+// write, only a compiler operation to name.
+//
+// The trait hands back a **pointer** to the element. That is what makes `a[i]` a
+// *place*: `a[i] = v` writes through it, and a method returning the element by
+// value could not be assigned to.
+//
+// There is deliberately **no `IndexMut`** here, and it is not an omission. A
+// sequence's write permission is in its *type*, not in its receiver: a `[]mut T`
+// is writable through however immutably the binding holding it was declared
+// (§2.3, §3.2), and an array's elements belong to whatever holds the array.
+// `IndexMut`'s `self: *mut Self` asks for permission over the *container*, which
+// is the right question for a user container and the wrong one for these two —
+// it would refuse `s[0] = 1` for every `s: []mut T` the program did not also
+// declare `mut`. So a write goes through this impl too, and what the element
+// pointer permits is the compiler's answer for the receiver it was given.
+//
+// One impl covers `[]T` and `[]mut T`: the permission is on the slice, not on
+// which impl applies.
+
+impl <T> Index.<usize> for []T {
+  Output :: T
+  index :: #intrinsic("index") func (self: *Self, i: usize) -> *T
+}
+
+impl <T, const N: usize> Index.<usize> for [N]T {
+  Output :: T
+  index :: #intrinsic("index") func (self: *Self, i: usize) -> *T
 }

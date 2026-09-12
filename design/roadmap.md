@@ -582,6 +582,10 @@ blocks, one terminator each.
 - **Places are paths** (§1): a local (or a `#static`) plus field, index, deref
   and variant-downcast projections, printed by name. Everything that is not an
   lvalue gets a slot, so `(a + b).x` needs no special case downstream.
+- **Pointer arithmetic exists here and nowhere above** (§7b). The source
+  language has none on purpose; a slice flattened into `{ ptr, len }` has no
+  element to project, so reaching one is `s.ptr + i * stride(T)` — an `offset`
+  rvalue, in elements, carrying the element type rather than a byte stride.
 - **Aggregates are flattened to structs** (§7b) and arrays are not. The type
   table is the closure of what the lowered program mentions — a tuple, an enum
   (`{ tag, payload }`), a slice (`{ ptr, len }`), a `distinct`, and a `*dyn
@@ -600,7 +604,8 @@ blocks, one terminator each.
   a `distinct` count — `usize` is one (§3.1).
 - **Intrinsics are gone as calls** (§9): `size_of` / `align_of` are the numbers
   layout computed, `cast` is a cast carrying both types, `len` is a constant or a
-  member, an array literal is an aggregate.
+  member, `index` is a projection or pointer arithmetic, an array literal is an
+  aggregate.
 - **Everything a debugger needs is carried** (§7c): a span on every statement, a
   source name on every local that had one, both names on every function.
 

@@ -487,17 +487,6 @@ impl<'a> ConstEval<'a> {
                 }
                 Self::project(e.id, v, *index as usize)
             }
-            ExprKind::Index { base, index } => {
-                let v = self.expr(base)?;
-                let i = self.expr(index)?;
-                if self.unwinding() {
-                    return Ok(ConstValue::Void);
-                }
-                let Some(i) = i.as_u64() else {
-                    return Err(ConstError::new(e.id, "an index must be an integer"));
-                };
-                Self::project(e.id, v, i as usize)
-            }
 
             ExprKind::Block(b) => {
                 let flow = self.block(b)?;
@@ -540,10 +529,28 @@ impl<'a> ConstEval<'a> {
                 e.id,
                 "taking an address has no compile-time value",
             )),
-            ExprKind::Deref { .. } => Err(ConstError::new(
-                e.id,
-                "reading through a pointer has no compile-time value",
-            )),
+            // `a[i]` is `index(&a, i).*` (§6.13), so an indexed constant arrives
+            // here as a dereference. The pointer in the middle is not one the
+            // program wrote and does not exist at run time either — the whole
+            // shape is "element `i` of `a`", and that is a question this
+            // evaluator can answer.
+            ExprKind::Deref { base } => match indexed_place(base) {
+                Some((seq, index)) => {
+                    let v = self.expr(seq)?;
+                    let i = self.expr(index)?;
+                    if self.unwinding() {
+                        return Ok(ConstValue::Void);
+                    }
+                    let Some(i) = i.as_u64() else {
+                        return Err(ConstError::new(e.id, "an index must be an integer"));
+                    };
+                    Self::project(e.id, v, i as usize)
+                }
+                None => Err(ConstError::new(
+                    e.id,
+                    "reading through a pointer has no compile-time value",
+                )),
+            },
             ExprKind::DynCast { .. } => Err(ConstError::new(
                 e.id,
                 "building a trait object needs a vtable, which does not exist yet",
@@ -1169,6 +1176,45 @@ impl<'a> ConstEval<'a> {
             // `T` nowhere — so it comes from the instantiation the call site
             // recorded, which is also what makes it correct inside a generic:
             // monomorphization substituted `T` before this ran.
+            // A composite literal is a value, and §2.5 says a `::` binding *is*
+            // its value — so `A: [3]i32 :: .{ 1, 2, 3 }` has to have one. The
+            // elements are already evaluated by the time they get here; the
+            // aggregate is the list of them, which is exactly what a struct or
+            // a tuple constant already is (see [`ConstValue::Aggregate`]).
+            "array" => {
+                let mut items = Vec::with_capacity(args.len());
+                for a in args {
+                    items.push(self.expr(a)?);
+                    if self.unwinding() {
+                        return Ok(ConstValue::Void);
+                    }
+                }
+                Ok(ConstValue::Aggregate(items))
+            }
+            // `[value; count]` — the same list, written once.
+            "repeat" => {
+                let [value, count] = args else {
+                    return Err(ConstError::new(e.id, "`$repeat` wants two arguments"));
+                };
+                let v = self.expr(value)?;
+                let n = self.expr(count)?;
+                if self.unwinding() {
+                    return Ok(ConstValue::Void);
+                }
+                let Some(n) = n.as_u64() else {
+                    return Err(ConstError::new(e.id, "a repeat count must be an integer"));
+                };
+                // The same ceiling a layout has, and for the same reason: a
+                // count the target could not address is not a length, and
+                // building the list first would be building it to find out.
+                if n > self.layouts.max_size() {
+                    return Err(ConstError::new(
+                        e.id,
+                        "this repeat count is larger than the target can address",
+                    ));
+                }
+                Ok(ConstValue::Aggregate(vec![v; n as usize]))
+            }
             "size_of" | "align_of" => {
                 let ty = self.type_argument(e.id).ok_or_else(|| {
                     ConstError::new(e.id, format!("`${name}` needs a type argument"))
@@ -1662,5 +1708,23 @@ pub fn unary_op(op: UnOp, v: &ConstValue) -> Result<ConstValue, String> {
             "cannot apply this operator to `{}`",
             other.display()
         )),
+    }
+}
+
+/// The sequence and the index behind an `index(&a, i)` call, when `e` is one.
+///
+/// Only the `&a` form: a constant is a value, so the thing being indexed has to
+/// be one here too. An `index` through a pointer the program is holding is a
+/// run-time read, and that genuinely has no compile-time answer.
+fn indexed_place(e: &Expr) -> Option<(&Expr, &Expr)> {
+    let ExprKind::Intrinsic { name, args } = &e.kind else {
+        return None;
+    };
+    if name.as_str() != "index" || args.len() != 2 {
+        return None;
+    }
+    match &args[0].kind {
+        ExprKind::Ref { place, .. } => Some((place, &args[1])),
+        _ => None,
     }
 }

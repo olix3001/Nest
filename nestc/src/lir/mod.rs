@@ -402,6 +402,24 @@ pub enum Rvalue {
         kind: AggregateKind,
         fields: Vec<Operand>,
     },
+    /// `ptr + index * stride(elem)` — **pointer arithmetic**, in elements.
+    ///
+    /// The source language has none, deliberately: an address you can move is an
+    /// address you can move wrongly, and every sequence the language has carries
+    /// its own bounds. LIR needs it anyway, because a slice flattened into
+    /// `{ ptr, len }` (§7b) and reaching its element `i` is exactly this — the
+    /// struct has members, not elements, so the arithmetic has to be somewhere
+    /// and this is where.
+    ///
+    /// It is in **elements** rather than bytes, and carries the element type
+    /// rather than a byte stride, for the reason every other type in LIR is
+    /// carried: the stride is layout's answer and there should be one of it. A
+    /// byte offset computed here would be a second one.
+    Offset {
+        ptr: Operand,
+        index: Operand,
+        elem: Ty,
+    },
     /// Read an enum's tag. The one operation that is not a projection even
     /// though the tag *is* a member: what a decision tree switches on is a
     /// number, and asking for it by name would tie every consumer to the tag's

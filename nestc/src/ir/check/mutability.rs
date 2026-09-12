@@ -165,22 +165,36 @@ impl Walk<'_> {
             }
             // A projection out of a value: whatever the value allows.
             ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => self.denial(base),
+            // `a[i]` is `index(&a, i).*` (§6.13), so by the time a place
+            // reaches here the sequence the program wrote is three nodes down.
+            // Ask the question the surface form asked, rather than the one the
+            // pointer in between happens to answer — the two agree, and only one
+            // of them can say "a read-only slice".
+            ExprKind::Deref { base } if sequence_index(base).is_some() => {
+                let recv = sequence_index(base).expect("checked");
+                match self.meta.ty_or_error(recv.id) {
+                    // A slice is a *view*: its own permission decides, exactly
+                    // as a pointer's does.
+                    Ty::Ptr { inner, .. } => match *inner {
+                        Ty::Slice { mutable: true, .. } => None,
+                        Ty::Slice { mutable: false, .. } => Some(Denial::Slice { at: recv.id }),
+                        // An array is a value. Its elements are part of whatever
+                        // holds it, so the base decides.
+                        Ty::Array { .. } => match &recv.kind {
+                            ExprKind::Ref { place, .. } => self.denial(place),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
             // A dereference restarts the question at the pointer's permission.
             // The *binding* holding the pointer has nothing to say about it.
             ExprKind::Deref { base } => match self.meta.ty_or_error(base.id) {
                 Ty::Ptr { mutable: true, .. } => None,
                 Ty::Ptr { mutable: false, .. } => Some(Denial::Pointer { at: base.id }),
                 // Not a pointer: already diagnosed as a type error.
-                _ => None,
-            },
-            ExprKind::Index { base, .. } => match self.meta.ty_or_error(base.id) {
-                // A slice is a *view*: its own permission decides, exactly as a
-                // pointer's does.
-                Ty::Slice { mutable: true, .. } => None,
-                Ty::Slice { mutable: false, .. } => Some(Denial::Slice { at: base.id }),
-                // An array is a value. Its elements are part of whatever holds
-                // it, so the base decides.
-                Ty::Array { .. } => self.denial(base),
                 _ => None,
             },
             // Not a place at all — assigning to one is a different error, and
@@ -258,5 +272,20 @@ impl Denial {
         match self {
             Denial::Binding { at, .. } | Denial::Pointer { at } | Denial::Slice { at } => *at,
         }
+    }
+}
+
+/// The receiver of an `index` intrinsic call, when `e` is one.
+///
+/// `a[i]` lowers to `index(&a, i).*` for every type (§6.13), and for the two
+/// built-in sequences the member that resolves to is `#intrinsic`, so what the
+/// IR holds is the operation rather than a call. This is how a place walk finds
+/// the sequence again.
+fn sequence_index(e: &Expr) -> Option<&Expr> {
+    match &e.kind {
+        ExprKind::Intrinsic { name, args } if name.as_str() == "index" && args.len() == 2 => {
+            Some(&args[0])
+        }
+        _ => None,
     }
 }

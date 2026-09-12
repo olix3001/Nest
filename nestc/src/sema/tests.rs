@@ -7871,3 +7871,74 @@ run :: func (n: i32) -> i32 {
     let calls = text.matches("call cleanup()").count();
     assert_eq!(calls, 1, "{text}");
 }
+
+// ===< Indexing, through the trait like every other operator >===
+
+/// `a[i]` is `Index.index(&a, i).*` for **every** type (§6.13), the built-in
+/// sequences included. Their impls are in `core` and their members are
+/// `#intrinsic`, so the call is the address computation and the compiler
+/// carries no special case for what indexing means.
+#[test]
+fn indexing_a_sequence_goes_through_the_index_trait() {
+    let src = "\
+f :: func (s: []i32, a: [3]i32) -> i32 { return s[0] + a[1] }
+";
+    let ir = ir_text(src);
+    assert!(ir.contains("$index("), "{ir}");
+    // And the index is a `usize`, because that is what `Index.<usize>` says it
+    // is. It used to be whatever an unconstrained integer literal defaulted to.
+    assert!(ir.contains(": usize"), "{ir}");
+}
+
+/// A sequence's write permission is in its **type**, not in its receiver — so
+/// the sequences implement `Index` and not `IndexMut`, and `s[0] = 1` on a
+/// `[]mut T` is legal however immutably the binding holding it was declared
+/// (§2.3). Routing the write side through `IndexMut`'s `*mut Self` would refuse
+/// every one of them.
+#[test]
+fn a_mutable_slice_is_writable_through_an_immutable_binding() {
+    let src = "\
+f :: func (s: []mut i32) { s[0] = 1 }
+g :: func () { const a := [_]i32 { 1, 2, 3 }\n  let b := a[0] }
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+/// ...and the message when the permission is absent still names the sequence,
+/// not the pointer the desugaring put in between.
+#[test]
+fn writing_to_a_read_only_slice_still_names_the_slice() {
+    let msgs = messages("f :: func (s: []i32) { s[0] = 1 }\n");
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(
+        msgs[0].contains("element of a read-only slice"),
+        "{msgs:#?}"
+    );
+}
+
+/// A composite literal is a value and a `::` binding *is* its value (§2.5), so
+/// a constant array has one — and indexing it is a question the evaluator can
+/// answer, even though the desugaring puts a pointer in the middle.
+#[test]
+fn a_constant_array_folds_and_can_be_indexed() {
+    let src = "\
+A: [3]i32 :: .{ 10, 20, 30 }
+B: i32 :: A[1]
+main :: func () {}
+";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    let ir = ir_text(src);
+    assert!(ir.contains("// = { 10, 20, 30 }"), "{ir}");
+    assert!(ir.contains("// = 20"), "{ir}");
+}
+
+/// §7b: an array kept its own shape, so element `i` is a projection. A slice
+/// did not — it is `{ ptr, len }` — so reaching its element is the pointer it
+/// holds moved along by `i`. That arithmetic exists in LIR and nowhere above it.
+#[test]
+fn lir_snapshot_indexing_a_slice_is_pointer_arithmetic() {
+    let src = "\
+read :: func (s: []i32, a: [3]i32, k: usize) -> i32 { return s[k] + a[k] }
+";
+    insta::assert_snapshot!(lir_text(src));
+}

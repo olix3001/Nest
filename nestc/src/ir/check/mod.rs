@@ -87,10 +87,6 @@ pub(super) fn children_of(e: &Expr, f: &mut impl FnMut(&Expr)) {
         ExprKind::Deref { base }
         | ExprKind::Field { base, .. }
         | ExprKind::TupleIndex { base, .. } => f(base),
-        ExprKind::Index { base, index } => {
-            f(base);
-            f(index);
-        }
         ExprKind::Tuple { elems } => elems.iter().for_each(f),
         ExprKind::Construct { fields, .. } => fields.iter().for_each(|(_, e)| f(e)),
         ExprKind::Variant { args, .. } | ExprKind::Intrinsic { args, .. } => {

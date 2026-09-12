@@ -413,11 +413,6 @@ impl Printer<'_> {
                 let b = self.expr(base);
                 format!("({b}.{index}): {ty}")
             }
-            ExprKind::Index { base, index, .. } => {
-                let b = self.expr(base);
-                let i = self.expr(index);
-                format!("({b}[{i}]): {ty}")
-            }
             ExprKind::Tuple { elems, .. } => {
                 let es = elems
                     .iter()
