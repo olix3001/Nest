@@ -143,13 +143,13 @@ Everything in the previous handoffs' lists still stands. New this session:
 **Working**: everything. `cd nestc && cargo test` → **438 passed**. `cargo
 clippy` → 90 warnings. Every file in `examples/*.nest` compiles clean.
 
-**Broken**: nothing in this session's work. See the bug below, which is older.
+**Broken**: nothing.
 
 **Uncommitted changes**: none.
 
-## Bugs found, not fixed
+## `core`'s `.len()` was calling itself — fixed
 
-**`core`'s `.len()` method calls itself.** `packages/core/slice.nest` writes
+`packages/core/slice.nest` used to write
 
 ```nest
 @public len :: #intrinsic("len") func <T> (x: T) -> usize
@@ -158,27 +158,30 @@ impl <T> []T {
 }
 ```
 
-and the inner `len` resolves to the **impl's own member**, not to the namespace's
-intrinsic. The LIR makes it plain:
+and the inner `len` resolved to the **impl's own member**, not to the
+namespace's intrinsic, so every `s.len()` on a slice was infinite recursion. The
+LIR is what made it plain — `_1 := call core.<impl []T>.<i32>.len(self_0)` inside
+`len` itself — and it dated from phase 3, when `len` became an intrinsic.
 
+The fix is not to qualify the call (nothing in the language spells the
+namespace from inside its own file). It is that **the method is the intrinsic**:
+
+```nest
+impl <T> []T {
+  len :: #intrinsic("len") func (self: *Self) -> usize
+}
 ```
-func core.<impl []T>.<i32>.len(self_0: *[]i32) -> usize #inline
-bb0:
-  _1 := call core.<impl []T>.<i32>.len(self_0)
-  return _1
-```
 
-Every `s.len()` on a slice is infinite recursion, and phase 10 would emit a
-binary that hangs. It is **not** a phase-8 regression — it dates from phase 3,
-when `len` became an intrinsic — and phase 8 is what made it visible.
+There was never a body to write. `#intrinsic` means the compiler supplies one
+(§6.4), and a forwarding call was only ever a way of naming which one. The
+result is better in three ways: the recursion is gone, a fixed array's `.len()`
+now folds to its literal length at the call site (it could not before — the fold
+happens in `lower_intrinsic`, and the method call was not one), and a slice's is
+a single member read in LIR (`_7.*.len`) rather than a call.
 
-There is no workaround in the source: neither `core.slice.len(self)` nor
-`slice.len(self)` resolves from inside the file, so the fix is in **name
-resolution** — an impl member should not shadow the enclosing namespace for a
-bare call, which is what Rust does and what `sema::resolve` does not. That is a
-front-end change and it wants its own commit. A fixed-length `[N]T` is unaffected
-in practice because `len` folds to the literal count during lowering; only the
-slice impl is reached at run time.
+The **resolution** question behind it is still open and is worth its own look: an
+impl member shadows the enclosing namespace for a bare call, which is not what
+Rust does and is a trap anywhere else it comes up. Nothing depends on it now.
 
 ## Deliberately not done
 
@@ -190,6 +193,15 @@ slice impl is reached at run time.
   per field and an `&a[i]` that no longer names a contiguous `Particle`.
 - **A slice literal's storage.** `[]T { a, b }` reaches LIR as the composite
   intrinsic; where the elements live is an allocation question.
+- **`a[i]` on a sequence is still compiler syntax.** `core/ops.nest` already
+  declares `Index` / `IndexMut` with `#lang` tags, spec §6.13 already says `a[i]`
+  is `Index.index(&a, i).*`, and a *user* type already goes that route — the two
+  built-in sequences are the anomaly, special-cased in inference and lowering.
+  The `len` change above is the pattern for closing it: an `index` /
+  `index_mut` intrinsic row, `impl <T> Index.<usize> for []T` in core with the
+  member marked `#intrinsic`, and the special case deleted. It is a front-end
+  change and wants its own commit. LIR needs nothing: `$index` is a `Ref` to the
+  place `index_into` already builds.
 - **ABI classification**, dead-code elimination, cross-compilation-unit generics,
   moving `+`/`-` out of `sema::builtins`: all unchanged.
 - **`Ty` in LIR.** Locals are typed with `sema::ty::Ty`, which is concrete by
@@ -286,8 +298,8 @@ reach the table.
    Both attach to the ladder: an allocation that does not outlive its scope is a
    `drop` on the same rungs, and a safepoint carries the live pointers at a call.
    §6's `reloc` discipline is the part with a real decision in it.
-4. Consider fixing the `core.<impl []T>.len` recursion above first — it is a
-   front-end change, it is small, and phase 10 cannot ship without it.
+4. The natural follow-up, if you want a small one first: close the `a[i]`
+   special case the same way `.len()` was closed — see **Deliberately not done**.
 5. Whatever you touch, verify with all three:
    - `cargo test` (438 and rising)
    - `for f in ../examples/*.nest; do ./target/debug/nestc "$f" >/dev/null || echo "FAIL $f"; done`

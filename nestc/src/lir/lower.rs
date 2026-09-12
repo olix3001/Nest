@@ -1636,7 +1636,9 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             }
             ExprKind::Index { base, index } => {
                 let i = self.eval(index);
-                Some(self.place_of(base)?.then(Projection::Index(i)))
+                let bty = self.cx.ty_of(base.id);
+                let p = self.place_of(base)?;
+                Some(self.index_into(p, &bty, i))
             }
             _ => {
                 let ty = self.cx.ty_of(e.id);
@@ -1651,6 +1653,36 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     }
                 }
             }
+        }
+    }
+
+    /// Index a sequence.
+    ///
+    /// An **array** is indexed directly: it kept its own shape (§7b) precisely
+    /// so that `base + i * stride` stays one operation on one aggregate.
+    ///
+    /// A **slice** is not an aggregate you can index. It flattened into
+    /// `{ ptr, len }` (§7b), and a struct has members rather than elements — so
+    /// the indexing happens *through the pointer it holds*, which is the whole
+    /// content of that row in §7b's table. Emitting `s[i]` on the struct would
+    /// be an offset into the two-word header.
+    fn index_into(&mut self, place: Place, base_ty: &Ty, index: Operand) -> Place {
+        match base_ty {
+            Ty::Slice { .. } => place
+                .then(Projection::Field {
+                    index: 0,
+                    name: Symbol::new("ptr"),
+                })
+                .then(Projection::Index(index)),
+            // A pointer to a sequence that lowering did not deref for us, and a
+            // bare `*T` being walked as an array: both index through the
+            // pointee, which is what `Index` on a pointer means.
+            Ty::Ptr { inner, .. } => {
+                let inner = (**inner).clone();
+                let p = place.then(Projection::Deref);
+                self.index_into(p, &inner, index)
+            }
+            _ => place.then(Projection::Index(index)),
         }
     }
 

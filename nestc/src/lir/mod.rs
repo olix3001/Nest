@@ -311,9 +311,14 @@ pub enum Base {
 pub enum Projection {
     /// Member `index` of a struct.
     Field { index: u32, name: Symbol },
-    /// Element `index` of an array or a slice. The index is a **value**, which
-    /// is what keeps arrays from flattening (§7b): this is `base + i * stride`,
-    /// not a constant offset.
+    /// Element `index` of an **array**, or of the pointee a pointer addresses.
+    /// The index is a **value**, which is what keeps arrays from flattening
+    /// (§7b): this is `base + i * stride`, not a constant offset.
+    ///
+    /// Never a slice: a slice flattened into `{ ptr, len }`, and a struct has
+    /// members rather than elements. Indexing one goes through the pointer it
+    /// holds, which is what §7b means by calling the slice the interesting
+    /// near-miss.
     Index(Operand),
     /// `base.*` — the pointee.
     Deref,

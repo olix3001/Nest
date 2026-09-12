@@ -4642,13 +4642,18 @@ fn len_is_an_inherent_method_the_receiver_type_picks() {
     // sequences, and which impl runs is decided by the receiver's type — the
     // `[N]T` one for an array, the `[]T` one for a slice. Neither call names a
     // trait, because neither impl has one.
+    //
+    // Both methods **are** the `len` intrinsic (§6.4), so what each resolves to
+    // shows up as the two different answers the intrinsic gives: a fixed array's
+    // length is part of its type and folds to the literal here, and a slice's is
+    // a header read that stays.
     let s = analyze_clean(
         "f :: func (s: []i32) {\n  const a := [_]i32 { 1, 2, 3 }\n  const n := a.len()\n  const m := s.len()\n}\n",
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
-    assert!(ir.contains("(&a: [3]i32): *[3]i32"), "{ir}");
-    assert!(ir.contains("(&s: []i32): *[]i32"), "{ir}");
+    assert!(ir.contains("let n: usize = 3: usize"), "{ir}");
+    assert!(ir.contains("$len(") && ir.contains("(&s: []i32): *[]i32"), "{ir}");
     assert!(!ir.contains("#virtual") && !ir.contains("#generic"), "{ir}");
 }
 
@@ -5045,8 +5050,10 @@ fn a_string_literal_is_the_core_str_lang_item() {
     let text =
         crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
     assert!(text.contains("core.str"), "{text}");
-    // The length is the *byte* length, inherited from the slice impl.
-    assert!(text.contains("core.<impl []T>.len"), "{text}");
+    // The length is the *byte* length, inherited from the slice impl — whose
+    // `len` **is** the intrinsic (§6.4), so the call is the operation rather
+    // than a jump to a body.
+    assert!(text.contains("$len"), "{text}");
 }
 
 #[test]
@@ -5867,7 +5874,7 @@ fn a_method_call_pins_a_string_literal_to_str() {
     let file = entry_file(&session);
     let ir =
         crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
-    assert!(ir.contains("core.<impl []T>.len"), "{ir}");
+    assert!(ir.contains("$len"), "{ir}");
 }
 
 /// `b"..."` is bytes and only bytes: no UTF-8 promise, and no openness either.
@@ -6782,15 +6789,22 @@ fn every_call_names_a_function_the_program_still_has() {
     });
     assert!(dangling.is_empty(), "calls with no callee: {dangling:?}");
 
-    // And the generic `len` really was instantiated, once per element type.
+    // And the walk really did reach through the receivers: `str.as_bytes` is a
+    // body, and it was instantiated.
+    //
+    // `len` is deliberately **not** in this list. The slice impl's `len` is
+    // itself `#intrinsic` (§6.4), so there is no body to instantiate and no
+    // symbol to emit — a call to it is the operation, not a jump. That is the
+    // difference this test would notice if the declaration went back to
+    // forwarding to a separate intrinsic.
     let names = instances(&session);
     assert!(
-        names.contains(&"core.<impl []T>.<u8>.len".to_string()),
+        names.contains(&"core.<impl str>.as_bytes".to_string()),
         "{names:?}"
     );
     assert!(
-        names.contains(&"core.<impl []T>.<i32>.len".to_string()),
-        "{names:?}"
+        !names.iter().any(|n| n.ends_with(".len")),
+        "an intrinsic method has no instance: {names:?}"
     );
 }
 

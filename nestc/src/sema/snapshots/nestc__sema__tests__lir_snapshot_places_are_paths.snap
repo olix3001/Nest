@@ -28,5 +28,5 @@ func reach(o_0: *mut Outer, xs_1: []mut i32, k_2: usize) -> void  // _NC5reach
 bb0:                    // entry
   _3 := cast 1 : comptime_int -> i32
   o_0.*.i.v = _3
-  xs_1[k_2] = o_0.*.i.v
+  xs_1.ptr[k_2] = o_0.*.i.v
   return
