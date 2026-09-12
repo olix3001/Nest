@@ -36,6 +36,11 @@
 //! the rung differs: a `return` continues outward to the function's exit and a
 //! `break` continues outward only to the loop's.
 //!
+//! They are also built once per **registration count**, because a `defer` runs
+//! only on the exits below it (spec §8.4): a `return` written above a `defer`
+//! and one written below it are leaving scopes with different contents, and
+//! sharing a rung between them would run a body control never registered.
+//!
 //! That is also why a `return` writes its value into a **slot** rather than
 //! returning directly (§3's `ret`): the real `return` happens after the ladder,
 //! and a rung shared by three of them cannot tell which value it is carrying. A
@@ -1111,10 +1116,12 @@ enum Exit {
     Continue(usize),
 }
 
-/// One lexical scope: the `defer` bodies registered in it, and the ladder rungs
-/// already built for it.
+/// One lexical scope: the `defer` bodies registered in it **so far**, and the
+/// ladder rungs already built for it.
 struct Scope {
     id: u32,
+    /// Grows as the lowering walks past each `defer` statement, so an exit
+    /// reads the ones control has actually reached — and only those.
     defers: Vec<Expr>,
     /// The allocations escape analysis proved do not outlive this scope (§5).
     /// They are freed on every exit, after the `defer` bodies — a `defer` may
@@ -1157,10 +1164,12 @@ struct Lowerer<'a, 'c> {
     loops: Vec<LoopCtx>,
     scopes: Vec<Scope>,
     next_scope: u32,
-    /// Ladder rungs already built, by the scope they unwind and the kind of exit
-    /// they continue to. This is what makes a rung once-per-kind rather than
-    /// once-per-site (§3).
-    rungs: HashMap<(u32, Exit), BlockId>,
+    /// Ladder rungs already built, by the scope they unwind, the kind of exit
+    /// they continue to, and how many of that scope's `defer`s were registered
+    /// when control reached the exit. This is what makes a rung once-per-kind
+    /// rather than once-per-site (§3), and what keeps an exit above a `defer`
+    /// from sharing a rung with one below it.
+    rungs: HashMap<(u32, Exit, usize), BlockId>,
     /// The slot a `return` writes, and the block that finally returns it.
     ret_slot: Option<LocalId>,
     ret_block: Option<BlockId>,
@@ -1407,11 +1416,17 @@ impl<'a, 'c> Lowerer<'a, 'c> {
 
     // ===< Scopes and the cleanup ladder (§3) >===
 
-    fn push_scope(&mut self, block: IrId, defers: Vec<Expr>) {
+    /// Open a scope. It starts with **no** defers: each is registered when the
+    /// walk reaches the statement that writes it.
+    fn push_scope(&mut self, block: IrId) {
         let id = self.next_scope;
         self.next_scope += 1;
         let drops = self.cx.drops.get(&block).cloned().unwrap_or_default();
-        self.scopes.push(Scope { id, defers, drops });
+        self.scopes.push(Scope {
+            id,
+            defers: Vec::new(),
+            drops,
+        });
     }
 
     /// Leave the innermost scope by falling off its end: its bodies run here,
@@ -1482,12 +1497,17 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         if defers.is_empty() && drops.is_empty() {
             return self.rung(exit, depth - 1, floor, span);
         }
-        if let Some(b) = self.rungs.get(&(id, exit)) {
+        // How many of this scope's defers control has registered by now. An
+        // exit reached before a `defer` was written runs fewer of them, and gets
+        // a rung of its own rather than sharing one that runs a body it never
+        // registered.
+        let count = defers.len();
+        if let Some(b) = self.rungs.get(&(id, exit, count)) {
             return *b;
         }
         let next = self.rung(exit, depth - 1, floor, span);
         let block = self.new_block(Some(format!("cleanup {} ({})", id, exit_label(exit))));
-        self.rungs.insert((id, exit), block);
+        self.rungs.insert((id, exit, count), block);
         let resume = self.at;
         self.at = block;
         for d in defers.iter().rev() {
@@ -1549,7 +1569,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         // out — and it only ever turns checks *off*, never back on.
         let outer = self.unguarded;
         self.unguarded |= self.cx.meta.has_directive(b.id, "unsafe");
-        self.push_scope(b.id, b.defers.clone());
+        self.push_scope(b.id);
         for s in &b.stmts {
             self.stmt(s);
         }
@@ -1621,6 +1641,13 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 };
                 let target = self.ladder(Exit::Continue(n), span);
                 self.goto(target, span);
+            }
+            // Registering one emits no code: it is the *exits below here* that
+            // grow a body to run (§3, spec §8.4).
+            StmtKind::Defer(e) => {
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.defers.push(e.clone());
+                }
             }
         }
     }

@@ -9,7 +9,6 @@ struct Point {
 func cleanup() -> void {
 }
 func dist(p: *Point, n: i32) -> i32 {
-  defer (cleanup: func() -> void)(): void
   let acc: i32 = #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(((p: *Point.*): Point.x): i32, ((p: *Point.*): Point.y): i32): i32
   let i: i32 = $cast(0: comptime_int): i32
   loop {
@@ -21,6 +20,7 @@ func dist(p: *Point, n: i32) -> i32 {
     i: i32 = #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(i: i32, $cast(1: comptime_int): i32): i32
   }
   <loop: void>
+  defer (cleanup: func() -> void)(): void
   if (acc: i32 Gt $cast(10: comptime_int): i32): bool {
     return acc: i32
   }

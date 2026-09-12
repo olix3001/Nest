@@ -47,17 +47,13 @@ unit mem:main {
   bb2:                    // loop exit
     return i_2
   bb3:                    // then
-    goto bb6
+    goto bb2
   bb4:                    // else
     goto bb5
   bb5:                    // join
     _5 := add_checked.i32 i_2, 1
-    switch.bool _5.1 { 1 => bb7, _ => bb8 }
-  bb6:                    // cleanup 1 (break)
-    call cleanup()
-      @safepoint { live: [] }
-    goto bb2
-  bb7:                    // overflow
+    switch.bool _5.1 { 1 => bb6, _ => bb7 }
+  bb6:                    // overflow
     _6 := []u8(&const.str.0, 16)
     _7 := []u8(&const.str.1, 8)
     _8 := core.Location(_7, 6, 9)
@@ -67,29 +63,33 @@ unit mem:main {
         _8 := reloc _8
       }
     unreachable
-  bb8:
+  bb7:
     i_2 := _5.0
     _9 := eq.i32 i_2, 2
-    switch.bool _9 { 1 => bb9, _ => bb10 }
-  bb9:                    // then
-    goto bb12
-  bb10:                    // else
+    switch.bool _9 { 1 => bb8, _ => bb9 }
+  bb8:                    // then
     goto bb11
-  bb11:                    // join
+  bb9:                    // else
+    goto bb10
+  bb10:                    // join
     _10 := eq.i32 i_2, 3
-    switch.bool _10 { 1 => bb13, _ => bb14 }
-  bb12:                    // cleanup 1 (continue)
+    switch.bool _10 { 1 => bb12, _ => bb13 }
+  bb11:                    // cleanup 1 (continue)
     call cleanup()
       @safepoint { live: [] }
     goto bb1
       @safepoint { live: [] }
-  bb13:                    // then
-    goto bb6
-  bb14:                    // else
+  bb12:                    // then
     goto bb15
-  bb15:                    // join
+  bb13:                    // else
+    goto bb14
+  bb14:                    // join
     _11 := eq.i32 i_2, 4
     switch.bool _11 { 1 => bb16, _ => bb17 }
+  bb15:                    // cleanup 1 (break)
+    call cleanup()
+      @safepoint { live: [] }
+    goto bb2
   bb16:                    // then
     _12 := 4
     goto bb20

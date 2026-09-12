@@ -250,6 +250,26 @@ kinds, because what follows the rung differs — a `return` continues outward to
 the function's exit and a `break` only to the loop's — which is why `cleanup_b`
 and `cleanup_b_fall` are two blocks above rather than one.
 
+They are not shared across **registration counts** either. Spec §8.4: *a `defer`
+never reached does not run*, so an exit written above a `defer` leaves a scope
+whose list is shorter, and it gets a rung of its own:
+
+```
+f :: func (n: i32) -> i32 {
+  if n > 10 { return 1 }      // registers nothing — returns directly
+  defer first()
+  if n > 5 { return 2 }       // runs first()
+  defer second()
+  return 3                    // runs second(), then first()
+}
+```
+
+That is what decides the `defer` body is a **statement** in the IR
+(`ir::StmtKind::Defer`) and not a list hoisted to the block: hoisting loses the
+position, and the position is the whole question. The lowering registers one as
+it walks past it, and a rung is keyed by `(scope, kind of exit, how many are
+registered)`.
+
 The `defer b()` body is emitted once even though two paths run it. `return`
 writes its value into a dedicated `ret` local rather than returning directly,
 because the actual `return` has to happen *after* the ladder — this is what makes

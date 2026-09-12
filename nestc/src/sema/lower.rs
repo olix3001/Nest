@@ -9,11 +9,11 @@
 //! - `if match p := v { .. }` → `match v { p => then, _ => els }`.
 //! - auto-deref: a field/index access whose base is a pointer gets an explicit
 //!   [`ir::Expr::Deref`].
-//! - `defer`: each block's defer bodies are collected once into
-//!   [`ir::Block::defers`], in written order, rather than copied to every exit.
-//!   Running them in reverse on each way out — and unwinding the enclosing
-//!   blocks' on a `return` — is left to the CFG stage, which emits one epilogue
-//!   per scope instead of one per exit path.
+//! - `defer`: the body stays where it was written, as an
+//!   [`ir::StmtKind::Defer`], rather than being copied to every exit. Running
+//!   the ones already registered in reverse on each way out — and unwinding the
+//!   enclosing blocks' on a `return` — is left to the CFG stage, which emits one
+//!   epilogue per scope instead of one per exit path.
 //!
 //! - implicit coercions become explicit: an `@using` upcast turns into the field
 //!   access it stands for (`e.t`, or `&e.t` through a pointer), and a `*T` →
@@ -76,7 +76,6 @@ pub fn lower_file(
         asts,
         meta,
         defaults: HashMap::new(),
-        defers: Vec::new(),
     };
     // Iterate the `Func` defs of this file: each carries the name/DefId and its
     // node is the `ConstBind` whose RHS is the `FuncExpr`. A **bodyless** one is
@@ -142,8 +141,6 @@ struct Lowerer<'a> {
     /// written in one place, and anything later that walks it — the `#const`
     /// check above all — should see it once.
     defaults: HashMap<DefId, Vec<Option<Expr>>>,
-    /// Stack of pending `defer` bodies, one frame per open block (innermost last).
-    defers: Vec<Vec<Expr>>,
 }
 
 impl Lowerer<'_> {
@@ -644,13 +641,11 @@ impl Lowerer<'_> {
             // A non-block body (an expression) becomes a tail-only block.
             _ => (vec![], Some(node)),
         };
-        self.defers.push(Vec::new());
         let mut out = Vec::new();
         for s in stmts {
             self.lower_stmt(s, &mut out);
         }
         let tail = tail.map(|t| Box::new(self.lower_expr(t)));
-        let defers = self.defers.pop().unwrap_or_default();
         let ty = tail.as_ref().map(|t| self.ty_of(t)).unwrap_or(Ty::Void);
         let id = self.id(node);
         self.meta.set_ty(id, ty);
@@ -658,7 +653,6 @@ impl Lowerer<'_> {
             id,
             stmts: out,
             tail,
-            defers,
         }
     }
 
@@ -692,8 +686,9 @@ impl Lowerer<'_> {
                 let _ = op;
                 out.push(self.stmt(node, StmtKind::Assign { place, value }));
             }
-            // Control-flow exits carry no defer copies: the block that owns the
-            // defers records them, and the CFG stage runs them on each way out.
+            // Control-flow exits carry no defer copies: each `defer` statement
+            // holds its own body, and the CFG stage runs the ones registered
+            // above the exit on each way out.
             NodeKind::Return { value } => {
                 let value = value.map(|v| self.lower_expr(v));
                 out.push(self.stmt(node, StmtKind::Return(value)));
@@ -703,11 +698,11 @@ impl Lowerer<'_> {
                 out.push(self.stmt(node, StmtKind::Break(value)));
             }
             NodeKind::Continue => out.push(self.stmt(node, StmtKind::Continue)),
+            // The body stays here, at the statement that registers it: an exit
+            // above this point does not run it (spec §8.4).
             NodeKind::Defer { body } => {
                 let d = self.lower_expr(body);
-                if let Some(frame) = self.defers.last_mut() {
-                    frame.push(d);
-                }
+                out.push(self.stmt(node, StmtKind::Defer(d)));
             }
             _ => {
                 let e = self.lower_expr(node);
@@ -1810,7 +1805,6 @@ impl Lowerer<'_> {
             id: break_id,
             stmts: vec![self.stmt(cond, StmtKind::Break(None))],
             tail: None,
-            defers: Vec::new(),
         };
         let guard_if = self.expr(
             cond,

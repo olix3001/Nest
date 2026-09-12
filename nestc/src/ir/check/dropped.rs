@@ -114,7 +114,7 @@ impl Dropped<'_> {
         }
         // A `defer` body runs on the way out, after everything above it, so it
         // sees the state the block ends in — including a drop the block did.
-        for d in &b.defers {
+        for d in crate::ir::defer_bodies(b) {
             self.expr(d, state);
         }
         leaves
@@ -141,7 +141,12 @@ impl Dropped<'_> {
             StmtKind::Expr(e) | StmtKind::Return(Some(e)) | StmtKind::Break(Some(e)) => {
                 self.expr(e, state)
             }
-            StmtKind::Return(None) | StmtKind::Break(None) | StmtKind::Continue => {}
+            // The body is walked once per block, after the statements, because
+            // that is the state it runs in.
+            StmtKind::Return(None)
+            | StmtKind::Break(None)
+            | StmtKind::Continue
+            | StmtKind::Defer(_) => {}
         }
     }
 

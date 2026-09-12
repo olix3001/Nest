@@ -596,7 +596,8 @@ blocks, one terminator each.
   until that pass makes it. A `dyn` call is two projections and an indirect call.
 - **`defer` is placed** (§3), as ordinary blocks on a cleanup ladder, one rung
   per kind of exit rather than per exit site — which is why `return` writes a
-  slot rather than returning directly.
+  slot rather than returning directly. A rung is also per **registration count**,
+  since a `defer` control never reached does not run (spec §8.4).
 - **`overflow=trap` is an edge** (§7d): a checked operation, a switch on the
   flag, and a block that panics and does not come back. Integers reached through
   a `distinct` count — `usize` is one (§3.1).

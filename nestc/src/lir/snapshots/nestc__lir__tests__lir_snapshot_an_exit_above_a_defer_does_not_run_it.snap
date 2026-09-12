@@ -1,0 +1,46 @@
+---
+source: src/lir/tests.rs
+expression: lir_text(src)
+---
+unit mem:main {
+
+  func first() -> void  // _NC5first
+  bb0:                    // entry
+    return
+
+  func second() -> void  // _NC6second
+  bb0:                    // entry
+    return
+
+  func run(n_0: i32) -> i32  // _NC3run
+    let _1: bool
+    let _2: bool
+    let _3: i32
+  bb0:                    // entry
+    _1 := gt.i32 n_0, 10
+    switch.bool _1 { 1 => bb1, _ => bb2 }
+  bb1:                    // then
+    return 1
+  bb2:                    // else
+    goto bb3
+  bb3:                    // join
+    _2 := gt.i32 n_0, 5
+    switch.bool _2 { 1 => bb4, _ => bb5 }
+  bb4:                    // then
+    _3 := 2
+    goto bb8
+  bb5:                    // else
+    goto bb6
+  bb6:                    // join
+    _3 := 3
+    goto bb9
+  bb7:                    // return
+    return _3
+  bb8:                    // cleanup 0 (return)
+    call first()
+    goto bb7
+  bb9:                    // cleanup 0 (return)
+    call second()
+    call first()
+    goto bb7
+}

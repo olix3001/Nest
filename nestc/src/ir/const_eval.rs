@@ -782,7 +782,7 @@ impl<'a> ConstEval<'a> {
         // value means they can only be effects on locals that are about to go out
         // of scope. Refusing is the honest answer rather than running them in the
         // wrong order.
-        if !b.defers.is_empty() {
+        if crate::ir::defer_bodies(b).next().is_some() {
             return Err(ConstError::new(b.id, "`defer` has no compile-time meaning"));
         }
         for s in &b.stmts {
@@ -854,6 +854,12 @@ impl<'a> ConstEval<'a> {
                 None => ConstValue::Void,
             })),
             StmtKind::Continue => Ok(Flow::Continue),
+            // Unreachable: `block` refuses a block that registers one before
+            // running any of its statements.
+            StmtKind::Defer(_) => Err(ConstError::new(
+                s.id,
+                "`defer` has no compile-time meaning",
+            )),
         }
     }
 

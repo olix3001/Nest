@@ -106,7 +106,7 @@ impl Walk<'_> {
         if let Some(t) = &b.tail {
             self.expr(t);
         }
-        for d in &b.defers {
+        for d in crate::ir::defer_bodies(b) {
             self.expr(d);
         }
     }
@@ -124,7 +124,8 @@ impl Walk<'_> {
                     self.expr(v);
                 }
             }
-            StmtKind::Continue => {}
+            // Walked with the block's, after the statements.
+            StmtKind::Continue | StmtKind::Defer(_) => {}
         }
     }
 

@@ -223,6 +223,28 @@ run :: func (n: i32) -> i32 {
     insta::assert_snapshot!(lir_text(src));
 }
 
+/// Spec §8.4: *a `defer` never reached does not run*. So the rung an exit
+/// climbs is the one for the defers registered **above** it — `return 1` leaves
+/// a scope that has registered nothing, `return 2` one that has registered
+/// `first()`, and the end of the body one that has registered both. Three
+/// exits, three different cleanups, and the two `return`s no longer share a
+/// rung the way two written below the same `defer` do.
+#[test]
+fn lir_snapshot_an_exit_above_a_defer_does_not_run_it() {
+    let src = "\
+first :: func () {}
+second :: func () {}
+run :: func (n: i32) -> i32 {
+  if n > 10 { return 1 }
+  defer first()
+  if n > 5 { return 2 }
+  defer second()
+  return 3
+}
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
 /// `overflow=trap` is a **second block and an extra edge**, not a flag on an
 /// instruction — which is why it is lowering's decision and not codegen's
 /// (§7d).
@@ -859,6 +881,30 @@ run :: func (n: i32) -> i32 {
     let text = lir_text(src);
     let calls = text.matches("call cleanup()").count();
     assert_eq!(calls, 1, "{text}");
+}
+
+/// The same rule as an assertion: the `return` above every `defer` reaches the
+/// function's exit with no cleanup in between, which is what makes it a
+/// `return` in its own block rather than a jump into the ladder.
+#[test]
+fn an_exit_above_every_defer_needs_no_rung() {
+    let src = "\
+cleanup :: func () {}
+run :: func (n: i32) -> i32 {
+  if n > 10 { return 1 }
+  defer cleanup()
+  return 2
+}
+";
+    let text = lir_text(src);
+    // One `return 1` block, and it does not pass through a cleanup: the only
+    // `call cleanup()` is the rung the second `return` climbs.
+    assert_eq!(text.matches("call cleanup()").count(), 1, "{text}");
+    let early = text
+        .split("bb1:")
+        .next()
+        .expect("the block the `n > 10` arm lands in");
+    assert!(!early.contains("call cleanup()"), "{text}");
 }
 
 // ===< Indexing, through the trait like every other operator >===

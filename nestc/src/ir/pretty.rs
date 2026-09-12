@@ -290,12 +290,6 @@ impl Printer<'_> {
     }
 
     fn block(&mut self, b: &Block) {
-        // The block's defers print first, before its statements: they are a
-        // property of the scope, not a step in its sequence.
-        for d in &b.defers {
-            let e = self.expr(d);
-            self.line(&format!("defer {e}"));
-        }
         for s in &b.stmts {
             self.stmt(s);
         }
@@ -333,6 +327,12 @@ impl Printer<'_> {
                 self.line(&format!("break {e}"));
             }
             StmtKind::Continue => self.line("continue"),
+            // Printed where it was written, because that is what decides which
+            // exits run it.
+            StmtKind::Defer(e) => {
+                let e = self.expr(e);
+                self.line(&format!("defer {e}"));
+            }
         }
     }
 

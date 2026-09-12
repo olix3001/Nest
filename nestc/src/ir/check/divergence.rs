@@ -145,13 +145,16 @@ impl Reachable<'_> {
         }
         // A `defer` body runs on the way out of the scope, so it is reachable
         // whenever the scope is entered at all.
-        for d in &b.defers {
+        for d in crate::ir::defer_bodies(b) {
             self.expr(d);
         }
     }
 
     fn stmt(&mut self, s: &Stmt) {
         match &s.kind {
+            // The body is walked once per block, after the statements: see
+            // `Walk::block`.
+            StmtKind::Defer(_) => {}
             StmtKind::Return(value) => {
                 // `return diverge()` never actually returns: the value is
                 // evaluated first, and control does not come back from it. This
@@ -230,6 +233,9 @@ pub fn diverges_stmt(meta: &Meta, s: &Stmt) -> bool {
             diverges_expr(meta, place) || diverges_expr(meta, value)
         }
         StmtKind::Expr(e) => diverges_expr(meta, e),
+        // Registering a `defer` cannot diverge: the body runs on the way out of
+        // the block, not here.
+        StmtKind::Defer(_) => false,
     }
 }
 
@@ -293,7 +299,7 @@ fn has_break(body: &Block) -> bool {
     fn in_block(b: &Block) -> bool {
         b.stmts.iter().any(in_stmt)
             || b.tail.as_deref().is_some_and(in_expr)
-            || b.defers.iter().any(in_expr)
+            || crate::ir::defer_bodies(b).any(in_expr)
     }
     fn in_stmt(s: &Stmt) -> bool {
         match &s.kind {
@@ -303,6 +309,9 @@ fn has_break(body: &Block) -> bool {
             StmtKind::Let { init, .. } => in_expr(init),
             StmtKind::Assign { place, value } => in_expr(place) || in_expr(value),
             StmtKind::Expr(e) => in_expr(e),
+            // A `break` inside a `defer` body leaves the loop the body runs in,
+            // which is this one — `crate::ir::defer_bodies` is where it is seen.
+            StmtKind::Defer(_) => false,
         }
     }
     fn in_expr(e: &Expr) -> bool {

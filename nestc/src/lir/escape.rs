@@ -122,7 +122,7 @@ impl Escape {
         if let Some(t) = &b.tail {
             self.scan_expr(t);
         }
-        for d in &b.defers {
+        for d in crate::ir::defer_bodies(b) {
             self.scan_expr(d);
         }
     }
@@ -137,7 +137,12 @@ impl Escape {
             StmtKind::Expr(e) | StmtKind::Return(Some(e)) | StmtKind::Break(Some(e)) => {
                 self.scan_expr(e)
             }
-            StmtKind::Return(None) | StmtKind::Break(None) | StmtKind::Continue => {}
+            // Both walks reach a `defer` body through `defer_bodies`, once per
+            // block, because that is where it runs.
+            StmtKind::Return(None)
+            | StmtKind::Break(None)
+            | StmtKind::Continue
+            | StmtKind::Defer(_) => {}
         }
     }
 
@@ -155,7 +160,7 @@ impl Escape {
         if let Some(t) = &b.tail {
             self.uses_expr(t, Ctx::Escaping);
         }
-        for d in &b.defers {
+        for d in crate::ir::defer_bodies(b) {
             self.uses_expr(d, Ctx::Escaping);
         }
     }
@@ -176,7 +181,10 @@ impl Escape {
             StmtKind::Expr(e) | StmtKind::Return(Some(e)) | StmtKind::Break(Some(e)) => {
                 self.uses_expr(e, Ctx::Escaping)
             }
-            StmtKind::Return(None) | StmtKind::Break(None) | StmtKind::Continue => {}
+            StmtKind::Return(None)
+            | StmtKind::Break(None)
+            | StmtKind::Continue
+            | StmtKind::Defer(_) => {}
         }
     }
 
@@ -229,6 +237,7 @@ fn exits(s: &Stmt) -> bool {
         StmtKind::Let { init, .. } => expr_exits(init),
         StmtKind::Assign { place, value } => expr_exits(place) || expr_exits(value),
         StmtKind::Expr(e) => expr_exits(e),
+        StmtKind::Defer(_) => false,
     }
 }
 

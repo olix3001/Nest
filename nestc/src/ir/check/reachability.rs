@@ -66,7 +66,7 @@ fn block(meta: &Meta, b: &Block, out: &mut Vec<Diagnostic>) {
     if let Some(t) = &b.tail {
         walk_expr(meta, t, out);
     }
-    for d in &b.defers {
+    for d in crate::ir::defer_bodies(b) {
         walk_expr(meta, d, out);
     }
 }

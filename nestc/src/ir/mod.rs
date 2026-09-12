@@ -17,9 +17,12 @@
 //!   but a [`Meta`] fact (`meta.ty(node.id)`) — see below.
 //! - Auto-deref is **explicit**: a field/index access through a pointer gets an
 //!   [`ExprKind::Deref`] inserted.
-//! - `defer` is **scoped, not duplicated**: each block records its defer bodies
-//!   once in [`Block::defers`]; every exit from that block runs them in reverse,
-//!   which the CFG stage emits as one epilogue per scope.
+//! - `defer` is a **statement, where it was written**: [`StmtKind::Defer`] holds
+//!   the body once, at the point control registers it. Every exit from the block
+//!   *below* that point runs it, in reverse of registration, which the CFG stage
+//!   emits as one epilogue per scope and registration count. Hoisting the bodies
+//!   to the block would lose the position, and a `defer` control never reached
+//!   would run (spec §8.4).
 //! - implicit coercions are **explicit**: an `@using` upcast is the field access
 //!   it stands for, and a `*T` → `*dyn Trait` unsizing is an
 //!   [`ExprKind::DynCast`] carrying the erased pointee.
@@ -399,12 +402,6 @@ pub struct Block {
     pub id: IrId,
     pub stmts: Vec<Stmt>,
     pub tail: Option<Box<Expr>>,
-    /// The block's `defer` bodies, in the order they were written. Every exit
-    /// from this block — the tail, a `return`, a `break`, a `continue` — runs
-    /// them **in reverse**; they are recorded once here rather than copied to
-    /// each exit, so a later CFG stage can emit a single epilogue per scope.
-    /// A `return` runs the defers of every enclosing block too, innermost first.
-    pub defers: Vec<Expr>,
 }
 
 /// A statement: an effect with no value contribution to its block.
@@ -431,14 +428,19 @@ pub enum StmtKind {
     Assign { place: Expr, value: Expr },
     /// An expression evaluated for effect.
     Expr(Expr),
-    /// `return [value]`. Running the [`defers`](Block::defers) of this block and
-    /// every enclosing one (innermost first) is the CFG stage's job — they are
-    /// not spliced in here.
+    /// `return [value]`. Running the [`Defer`](StmtKind::Defer) bodies already
+    /// registered in this block and in every enclosing one (innermost first) is
+    /// the CFG stage's job — they are not spliced in here.
     Return(Option<Expr>),
     /// `break [value]` out of the enclosing `loop`.
     Break(Option<Expr>),
     /// `continue` the enclosing `loop`.
     Continue,
+    /// `defer <body>`: register `body` to run on every exit from the enclosing
+    /// block that happens **after** this statement. The body is held here, at
+    /// the position control registers it, because "a `defer` never reached does
+    /// not run" (spec §8.4) is a fact about that position.
+    Defer(Expr),
 }
 
 /// One `match` arm; patterns stay structured (no decision tree yet).
@@ -660,15 +662,26 @@ pub fn walk_function<V: Visitor>(v: &mut V, func: &Function) {
     }
 }
 
+/// The `defer` bodies a block registers, in written order.
+///
+/// Everything about a `defer` is about *when* it runs, and a consumer that cares
+/// walks the statements and meets [`StmtKind::Defer`] at the point that
+/// registers it. This is for the ones that only care *that* a body is in the
+/// program — a check over every expression, say — and want it in the order the
+/// block ends up running them in reverse of.
+pub fn defer_bodies(block: &Block) -> impl Iterator<Item = &Expr> {
+    block.stmts.iter().filter_map(|s| match &s.kind {
+        StmtKind::Defer(e) => Some(e),
+        _ => None,
+    })
+}
+
 pub fn walk_block<V: Visitor>(v: &mut V, block: &Block) {
     for s in &block.stmts {
         v.visit_stmt(s);
     }
     if let Some(t) = &block.tail {
         v.visit_expr(t);
-    }
-    for d in &block.defers {
-        v.visit_expr(d);
     }
 }
 
@@ -682,7 +695,7 @@ pub fn walk_stmt<V: Visitor>(v: &mut V, stmt: &Stmt) {
             v.visit_expr(place);
             v.visit_expr(value);
         }
-        StmtKind::Expr(e) => v.visit_expr(e),
+        StmtKind::Expr(e) | StmtKind::Defer(e) => v.visit_expr(e),
         StmtKind::Return(e) | StmtKind::Break(e) => {
             if let Some(e) = e {
                 v.visit_expr(e);
@@ -820,9 +833,6 @@ pub fn walk_block_mut<V: VisitorMut>(v: &mut V, block: &mut Block) {
     if let Some(t) = &mut block.tail {
         v.visit_expr(t);
     }
-    for d in &mut block.defers {
-        v.visit_expr(d);
-    }
 }
 
 pub fn walk_stmt_mut<V: VisitorMut>(v: &mut V, stmt: &mut Stmt) {
@@ -835,7 +845,7 @@ pub fn walk_stmt_mut<V: VisitorMut>(v: &mut V, stmt: &mut Stmt) {
             v.visit_expr(place);
             v.visit_expr(value);
         }
-        StmtKind::Expr(e) => v.visit_expr(e),
+        StmtKind::Expr(e) | StmtKind::Defer(e) => v.visit_expr(e),
         StmtKind::Return(e) | StmtKind::Break(e) => {
             if let Some(e) = e {
                 v.visit_expr(e);

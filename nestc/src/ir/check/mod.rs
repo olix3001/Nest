@@ -122,7 +122,7 @@ pub(super) fn block_children(b: &Block, f: &mut impl FnMut(&Expr)) {
     if let Some(t) = &b.tail {
         f(t);
     }
-    b.defers.iter().for_each(|d| f(d));
+    crate::ir::defer_bodies(b).for_each(&mut *f);
 }
 
 pub(super) fn stmt_children(s: &Stmt, f: &mut impl FnMut(&Expr)) {
@@ -139,5 +139,8 @@ pub(super) fn stmt_children(s: &Stmt, f: &mut impl FnMut(&Expr)) {
             f(value);
         }
         StmtKind::Expr(e) => f(e),
+        // Visited by `block_children`, after the block's statements: that is
+        // where the body runs.
+        StmtKind::Defer(_) => {}
     }
 }

@@ -578,7 +578,7 @@ f :: func (n: i32) {
 }
 
 #[test]
-fn defer_is_recorded_on_its_block_not_copied_to_exits() {
+fn defer_stays_where_it_was_written_and_is_not_copied_to_exits() {
     let src = "\
 cleanup :: func () {}
 f :: func () -> i32 {
@@ -596,13 +596,26 @@ f :: func () -> i32 {
         .iter()
         .find(|f| f.name.as_str() == "f")
         .expect("func f");
-    // The deferred body is recorded once on the block that owns it...
+    // The deferred body is one statement, at the position that registers it —
+    // which is what decides that an exit *above* it does not run it (§8.4)...
     let body = body_of(func);
-    assert_eq!(body.defers.len(), 1, "{body:#?}");
+    let defers: Vec<_> = body
+        .stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::Defer(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(defers.len(), 1, "{body:#?}");
     assert!(
-        matches!(&body.defers[0].kind, ExprKind::Call { .. }),
-        "defer body is not the call: {:#?}",
-        body.defers
+        matches!(&defers[0].kind, ExprKind::Call { .. }),
+        "defer body is not the call: {defers:#?}",
+    );
+    assert!(
+        matches!(&body.stmts[0].kind, StmtKind::Defer(_)),
+        "the defer moved out of the position it was written at: {:#?}",
+        body.stmts
     );
     // ...and is not copied ahead of either `return`, even though there are two.
     assert!(
