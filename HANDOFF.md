@@ -1,221 +1,191 @@
-# Handoff: `nestc` is a real compiler driver, and a Nest program runs
+# Handoff: steps 2–5 are done, and reflection runs
 
 **Generated**: 2026-09-13
-**Branch**: `main`
-**Status**: **561 tests pass** without LLVM, **577** with it. `cargo clippy`
-reports the same ~80 dead-code-shaped warnings as before. **`nestc prog.nest`
-produces `prog`, and running it runs the program.** Everything is committed; the
-tree is clean.
+**Branch**: `main` (ahead 36)
+**Status**: **581 tests pass** without LLVM, **597** with it. `cargo build`
+reports 48 warnings, all dead-code-shaped. **A program reflects over a struct at
+run time, reads each member through a checked read, and reads back an
+`@attribute` a program declared itself.**
 
-**Read `design/toolchain.md` first** — it is the plan for everything after this
-session: `core/c`, then `std`, then `twig`, then the editor. Then
-`design/lir.md` §10 (the backend's brief) and §7e (the entry point).
+**Read `design/toolchain.md`** — its ten-step order of work is the plan. **Steps
+1–5 are done and committed.** Step 6 (`std`'s floor) is next and is not started.
 
 ## What happened this session
 
-Two commits:
+Five commits, one per step plus the bugs found inside them.
 
-1. `70e9a6b` — **a program runs**: the entry point, linking, JSON diagnostics,
-   `-L`.
-2. *(this one)* — **one object whatever the split**, `--package`, and the plan.
-
-## Completed
-
-### The entry point (`nestc/src/lir/entry.rs`, `design/lir.md` §7e)
-
-A linker looks for `main`; the program's `main :: func ()` (spec §5.6) has a
-mangled symbol. So LIR adds a second function — named `entry`, symbol `main`,
-returning C's `int` — whose whole body is `nest_init()`, then the program's
-`main`, then its status.
-
-- **Built in LIR, not in a backend**: it is two calls and a return, which LIR
-  already says. A backend that built it would build it again, differently, for
-  the next target.
-- **Built in LIR, not in the C runtime**: a `main` in `nest_runtime.c` would
-  have to encode this compiler's mangling, and encode it twice over because
-  `main` may return nothing or a status. The shim stays six functions that know
-  no names.
-- Named `entry` and *symbolled* `main` — the `name` on a `Function` is a source
-  name and this function has none. Two `main`s in one dump, one calling the
-  other, is a reader's problem for no gain.
-- `-> void` exits zero, `-> i32` returns its status, another integer width is
-  converted by a `CastKind`, `-> never` ends in `unreachable`.
-- **`-C entry=auto|none`.** `auto` adds one when there is a file-scope `main`,
-  so a library — having none — is already right without being told.
-- **The rule for which `main` that is now lives once**, in `Linked::mains`,
-  shared with `ir::check::declarations`. Two of them in one compilation is now
-  an error (`a program has one main`) rather than a silent choice.
-
-### Linking (`nestc/src/codegen/link.rs`, `nestc/build.rs`)
-
-- **Not a backend's job.** What to do with several objects is the same question
-  on every target, answered by a tool this compiler does not ship — so `nestc`
-  invokes the platform's C compiler as the linker driver, which is what knows
-  where `crt1.o` is. `-C linker=`, `-C link-arg=` (repeatable, in order),
-  `-C runtime=`.
-- **The runtime is built beside the compiler.** `build.rs` compiles
-  `runtime/nest_runtime.c` into `libnest_runtime.a` (leaking allocator, no
-  Boehm, no dependencies) and the path is embedded; every link picks it up. A
-  **failure to build it is not a build failure** — the C toolchain is needed to
-  link a program, not to compile one — and the driver names `-C runtime=` at the
-  point a link is actually attempted.
-- **`--emit` defaults to `link`**, which is what `cc foo.c` does. The dumps are
-  one flag away and unchanged.
-- **`--emit obj` produces one object however many codegen units there were.** A
-  unit is a unit of *work* (§11); what comes out should not say how it was
-  compiled. Several units are emitted to a scratch directory and merged with a
-  partial link (`ld -r`, `-C partial-linker=`), and the parts are deleted.
-  **Emission is still sequential** — parallel codegen is a backend instance and
-  an LLVM context per thread, and the merge step is already in place for it.
-- `-o` names the artifact; when a link also wants that name, other emissions
-  grow the extension (`--emit link,obj -o prog` → `prog` and `prog.o`).
-
-### The two things a build tool needs (`--error-format=json`, `-L`, `--package`)
-
-- **`--error-format=json`** — one JSON object per line on stderr (JSON Lines,
-  because a tool reads stderr as a stream and a top-level array could not be
-  parsed until the compiler exited). The shape mirrors `Diagnostic` and adds
-  what only the `SourceMap` knows: the file's name and each span's line and
-  column, **beside** the byte offsets. It carries `rendered` — the human text
-  verbatim — so a tool forwarding a message never reimplements the renderer.
-  The driver's own failures go out the same way.
-- **`-L <dir>`** — a package `foo` is `<dir>/foo/foo.nest`. Searched in order.
-- **`--package name=path`** — pins a package to its root file. This is what
-  `twig` will use: it has already resolved the dependency, and a search would be
-  a second, weaker answer.
-- **Precedence**: an explicit registration (`--package`) beats a `-L` search,
-  and a `-L` search beats the compiled-in `core` path — which is a *fallback*
-  pointing at this checkout, and a compiler run elsewhere should use the `core`
-  it was pointed at.
-
-### The driver as it stands (`nestc --help`)
-
-```
-usage: nestc [options] <file.nest>
-
-  -o <path>              where to write the output
-  --target <triple>      the machine to generate code for (default: the host)
-  --emit <list>          link (default), ast, ir, mono, lir, obj, asm, backend-ir
-  -L <dir>               a directory to search for packages
-  --package <name>=<path>  a package pinned to a root file
-  --error-format <form>  human (default) or json
-  -C <key>=<value>       backend=, codegen-units=, entry=, linker=, link-arg=,
-                         partial-linker=, runtime=, overflow=, pointer-width=,
-                         os=, arch=, profile=, print=options
-```
-
-## Next: the plan
-
-**`design/toolchain.md` ends with a ten-step order of work.** Each step is a
-whole feature, each ends in a commit, and **work stops after each commit** for
-review: `repeat`/`format` → blanket impls → `core/c` → `#comptime` → the whole
-reflection system → the `std` floor → `std/json` → `.nlib`/`.nmeta` and
-`-C opt-level` → `twig` → the editor.
-
-
-**`design/toolchain.md` is the whole thing.** In order, with the reason each
-arrow is real:
-
-1. **`core/c`** (spec §11, nothing implements it). C types as **aliases**, not
-   `distinct` — the user's decision, contradicting the spec text deliberately,
-   so that §11.4's coercions become nothing at all. `c.ptr.<T>` stays its own
-   type. **C strings are the one special case**: `c.str`, a `c"..."` literal
-   that emits a trailing NUL, and explicit `c.cstr` / `c.from_cstr` both ways —
-   no implicit conversion, because a `str` is `{ ptr, len }` and a C string is
-   not. `extern("c")` already works end to end; what is missing is the types.
-2. **`std`**, on **libc through `core/c`**, with a `std/libc` namespace exposing
-   the raw declarations unwrapped. Written so the backing implementation is
-   swappable (an internal `sys` namespace) without writing the syscall backend
-   now. Not linked automatically — that is `twig`'s job. `io`, `fs`, `process`,
-   `mem`, `str`, `collections`, `json`, `libc`.
-3. **`twig`**, written in Nest. The first real program in the language.
-4. **The editor** — syntax highlighting (needs nothing), then an LSP, which
-   waits for `twig` because a manifest is what tells a server what a workspace
-   is. It may be written in Nest itself.
-
-### Reflection, decided
-
-**Compile-time reflection *and* user-defined attributes, with attributes visible
-as data on the type information. No `comptime` keyword.**
-
-**The spelling is `#intrinsic`, not a sigil**: `$name` was retired in phase 3, so
-reflection is a `core/reflect.nest` of **bodyless `#intrinsic` functions** called
-like any other — the way `cast`, `size_of` and `make` already work. `@` stays the
-**attribute** sigil.
-
-- `type_info.<T>()` returns a **value** — ordinary data, constant-folded because
-  `T` is concrete after monomorphization. Its members are a slice of descriptors
-  whose `kind` is an **enum**, so a loop over the descriptions is an ordinary
-  loop and can run at run time like any other.
-- What must unroll is **typed access to the value**: an accessor yielding a
-  different type per member is what forces it — the loop's body, not the data.
-- **A field chosen at run time is read with `member_ptr` and an ordinary
-  `cast`** — the address is `base + m.offset`, which LIR already computes. A
-  *checked* read is **`TypeId`**: `ir::mono::type_key` is already a globally
-  unique string per monomorphized type, so `type_id.<T>()` is one bodyless
-  `#intrinsic` folding a 128-bit hash of it, a `Member` carries one, and the
-  check is the bounds check's lowering. It keeps `distinct` (unlike `Cx::strip`),
-  and it is what an `Any` would sit on. The GC
-  hazard is pre-existing: `&mut p.y` is already an interior pointer, Boehm
-  traces them, and a precise collector wants the **object-start table** that is
-  already open in §5/§6.
-- An `@attribute` declaration defines a struct; `@json(rename: "user_id")` on a
-  member puts that struct in the member's `attrs`. No expansion pass, no
-  generated code, no second program representation. This is a **new** §9
-  addition — today's attributes are a fixed set (`@public`, `@link_name`).
-
-### Decided this session
-
-| Question | Answer |
+| Commit | Step |
 |---|---|
-| C varargs | **Not supported.** `std` declares fixed-arity C functions and formats things itself; a variadic C function needs a fixed-arity shim |
-| How unrolling is spelled | **`#comptime`**, a *directive* like `#inline`/`#intrinsic` — not a statement keyword, since `comptime for` was rejected |
-| The manifest | **`nest.toml`**, TOML |
-| The tool's name | **`twig`** |
-| `std`'s scope | **Only what `twig` and the language server need.** Not a general-purpose library yet |
-| The library format | **`.nlib`** (compiled code) and **`.nmeta`** (metadata alone) |
+| `b65c4f3` | 2 — a method call on a literal receiver |
+| `ad68f90` | 3 — `core/c` |
+| `5e1417d` | 5a — reflection at run time |
+| `bda7434` | 5b — user-declared `@attribute`s |
+| `665776a` | 4 — `#comptime for` |
+
+**Steps 4 and 5 were done in that order on your instruction** — reflection first,
+`#comptime` after, because the reflective *read* is the part `std/json` needs and
+unrolling is only needed by the typed path.
+
+### Step 2 — a method call on a literal receiver
+
+The previous handoff had this right: it was never "blanket impls". `(5).tag()`
+left the receiver an open `comptime_int`, **a type no impl is written for**, so
+every lookup in the chain missed and the call lowered to `call (undef)()` into a
+`void` slot with no diagnostic at all.
+
+- **`Cx::pin_numeric`**, beside `pin_str` and for the same reason: a method call
+  asks a question only a concrete type can answer, so the literal settles on its
+  default (`isize` / `f64`) *before* the lookup. A literal receiver now reaches
+  exactly the impls a `let x: isize` would — through a concrete impl, a family
+  impl (`int.<N>`) and a blanket impl alike.
+- **A lookup that finds nothing is an error**, carrying the note that the type in
+  the message is the one inference chose and not one the source wrote. That note
+  is the difference between a puzzle and a fix: `impl Named for i32` with
+  `(5).tag()` says "no method `tag` on `isize`", which is correct and would
+  otherwise be baffling.
+
+### Step 3 — `core/c`
+
+`packages/core/c.nest`, re-exported from `core.nest`.
+
+- **The scalar types are aliases**, not `distinct` types, on your decision: a
+  language value goes into a C call with no conversion on either end.
+- **Three of them the target decides**, and they are *generated* into
+  `target.nest`: `C_LONG` / `C_ULONG` (LP64 against Windows' LLP64) and `C_CHAR`
+  (signed on x86 and on Apple/Microsoft ARM64, unsigned on the ARM and RISC-V
+  psABIs). They are generated rather than written in `c.nest` because **`c.nest`
+  declares `int`**, which shadows the family inside that file — so it cannot
+  spell `int.<C_LONG_BITS>` at all.
+- **`c.ptr.<T>` is its own type**: an address and nothing else, so the collector
+  never traces one and it crosses the ABI exactly as a pointer does. `to_ptr` /
+  `to_mut` **check the null** a `*T` promises its holder cannot see.
+- **The C string type is `cstr`, not `str`** — a file that declared `str` would
+  shadow the language's own inside itself, and `from_cstr` returns one.
+- **`c"..."`** lexes like any string (same escapes, same UTF-8), the **parser**
+  puts the NUL on, and desugaring turns it into one `#lang("cstr_of")` call
+  *before inference*. So a C string literal costs bytes in read-only data and
+  nothing at run time, and the compiler knows nothing about what it becomes.
+- **No varargs.** Decided, and unchanged.
+
+### Step 5 — the whole reflection system
+
+`packages/core/reflect.nest`. Everything in it is either a type the compiler
+fills in **positionally** (the way it already fills a `Location`) or a bodyless
+`#intrinsic`.
+
+- **`type_info.<T>()`** is a read-only global and the call is a copy of it: `T`
+  is concrete once monomorphization has run, so there is nothing left to compute.
+  `TypeInfo` carries the name, size, align, `Kind`, `TypeId`, `members` and the
+  attributes written on the type itself.
+- **`type_id.<T>()`** is a 128-bit FNV-1a of `ir::mono::type_key` — the same
+  whole-program string every symbol is mangled from, which is what makes it
+  stable across units. **The key keeps `distinct` and mutability where `Cx::strip`
+  erases both**, so `type_id.<usize>()` and `type_id.<u64>()` differ, and so do
+  `*i32` and `*mut i32`. That is exactly the answer a checked read wants.
+- **`member_ptr(v, m)`** is `Rvalue::Offset` with a stride of one — the same
+  instruction a slice index is. The difference from `p.y` is only that the
+  selector is a value.
+- **`member_read` / `member_write`** are ordinary Nest: a comparison against a
+  constant `TypeId`, a `panic`, and a `transmute`. Reading an `i32` member as an
+  `i64` traps.
+- **`Any`** is a trait with a blanket impl and `downcast` is the same comparison
+  over the `{ data, vtable }` pair that already existed. Nothing new was built
+  for it.
+- **`@attribute`** marks a struct a program may write on a declaration.
+  `@Json(rename: "user_id")` on a member is resolved, its literal arguments are
+  recorded on the def, and `type_info` emits each value as a global with the
+  `TypeId` that says how to read it beside the address. **No expansion pass, no
+  generated code, no second program representation** — `attr_of.<Json>(m.attrs)`
+  reads it the way `member_read` reads anything else.
+  - It is a plain `Attr`, **not** a `*dyn Any`: a vtable would buy dynamic
+    dispatch on a value nothing dispatches on. It would also have to be built
+    after monomorphization had finished deciding what to instantiate.
+
+### Step 4 — `#comptime for`
+
+**Unrolled in the parser**, and that is the whole design. An unrolled body has to
+be typed once per iteration, so each copy must be an *independent piece of
+program*; every stage after parsing has already resolved names and stamped defs
+onto the body's declarations, so copying a body there is copying its bindings.
+The parser has the tokens and an index into them, so a copy is a rewind.
+
+- The loop variable is bound `#comptime`, which the resolver introduces as a
+  **compile-time constant** the way it already introduces a `#static` region. So
+  the body may be *typed* with it: `[i]u8` is a different type each iteration,
+  which a run-time local could never be.
+- **The sequence is a range of integer literals.** A bound this stage cannot read
+  is an error **at the loop**, which is the point of the step.
+- `#comptime` on anything but a `for` says what it applies to.
+
+## Five bugs found on the way, all fixed
+
+1. **A `::` binding to a type was not an alias.** A `::`-RHS is parsed as an
+   *expression*, so `K :: P.<u8>` came back as a `GenericApply` and `C :: u8` as
+   a bare `Path`; collection filed both under `Const`, and a use of either in
+   type position was a **silent `Ty::Error`** — which unifies with everything, so
+   the program type-checked against nothing. `Inferer::const_alias_ty` expands a
+   `Const` whose RHS names a type, following a chain of them.
+2. **A method call on a trait object went to a blanket impl.** `impl <T> Trait
+   for T` matches `T = dyn Trait` as happily as anything else, and the impl
+   search ran *before* the trait-object one — so every call on a `*dyn Trait` was
+   a static call instantiated at the **erased** type and the vtable built beside
+   it went unused. The order is now dyn first.
+3. **A field read off a base whose type is not known yet answered `Ty::Error`.**
+   `ms[i].name` reads a field of `Index.Output`. The lookup is now an
+   `Obligation::Field` discharged when the base has a type, and the question
+   "what does `==` mean here" is an `Obligation::Comparison` for the same reason:
+   answering it early compared a `str` **as two machine words** instead of by its
+   bytes, silently.
+4. **A receiver decided which method is called before anything solved it.**
+   `Inferer::settle` runs the solver when a receiver is still a variable — the
+   same work, done when the answer is wanted rather than at the end of the body.
+5. **An empty slice constant held an integer where an address belongs.** A
+   backend builds a global's initializer with no builder to hand, so there is
+   nowhere to convert one. An empty attribute table is a `[0]Attr` global, as a
+   zero-length string is a `[0]u8` one.
+
+## Next: step 6 — the `std` floor
+
+`design/toolchain.md` has the text. Everything it sits on is now built: `core/c`
+gives it `open`/`read`/`write`, `core/fmt` gives it `Display`, and `core/reflect`
+is what `std/json` (step 7) will walk a type with.
 
 ## Still open, and yours to decide
 
 | Decision | Why it is open |
 |---|---|
 | **Whether `std` is versioned with the compiler** | Rust ships one per compiler; a package tool could resolve it like any dependency |
-| **What `.nlib` holds beside the code** | Whether metadata is duplicated inside it or lives only in the `.nmeta` |
-| **`Drop`** (`#lang("drop")`) | Waiting on a *decision*, not on work: with no moves, "this value was returned / stored / passed to a call, so do not drop it" has no settled answer, and a wrong one either double-releases or never releases |
+| **What `.nlib` holds beside the code** | Your note in `toolchain.md` now says an archive of pre-generated IR *and* metadata, with the `.nmeta` alongside |
+| **`Drop`** (`#lang("drop")`) | Waiting on a *decision*: with no moves, "this value was returned / stored / passed to a call, so do not drop it" has no settled answer |
+| **Floats in `f"..."`** | `Display` has no float impl. Ryū is a few hundred lines and a table; it belongs with the float work |
+| **A `#comptime for` over a non-range** | `.{ a, b, c }` and `type_info.<T>().members` are both sequences a program will want to unroll over. Neither is a range of literals; see below |
 
 ## Not Yet Done (compiler)
 
-- [ ] **`repeat` and `format` still owe the `$slice` treatment.** Both are more
-      than "one instruction or one runtime call", which §10 claims of an
-      intrinsic. `repeat` is a `make` and a loop; `format` needs a formatter and
-      an allocation. **Standing instruction: when something can be simplified in
-      LIR while building codegen, do it, and carry this instruction into the
-      next handoff.**
-- [ ] **A `void` member should be erased from a `TypeDef` too.** §9 erases
-      `void` from slots, parameters and arguments but not from a type's members.
-      The backend skips zero-byte members, which is correct on its own terms.
-      **Not done because `Projection::Field` indices are positional**, so
-      dropping a member shifts every index after it.
+- [ ] **`#comptime for` over anything but a literal range.** The parser rewinds
+      and re-parses, which works for a range because the *values* are known
+      there. A `.{ a, b, c }` would need each element's token range recorded and
+      re-parsed; `type_info.<T>().members` needs a sequence that is only constant
+      *after* monomorphization, which is a different feature (a compile-time
+      evaluator over the IR) and should be scheduled as one.
+- [ ] **A `#comptime` loop variable is substituted as a constant, not a value of
+      a type.** `[i]u8` works because an array length reads a constant. A tuple
+      index `t.i` does not, because the parser wants a literal there.
+- [ ] **A `void` member should be erased from a `TypeDef` too.** §9 erases `void`
+      from slots, parameters and arguments but not from a type's members. **Not
+      done because `Projection::Field` indices are positional.**
 - [ ] **`-C opt-level` and `-C target-cpu`.** The backend hardcodes
       `OptimizationLevel::None`, `RelocMode::PIC`, `CodeModel::Default`.
-- [ ] **Parallel code generation.** The units are independent and the merge is
-      in place; what is missing is a backend instance and an LLVM context per
-      thread.
-- [ ] **Blanket impls are broken.** `impl <T> Trait for T` type-checks and then
-      fails in codegen — `llvm: main: Void is not a type a value can have` — while
-      a concrete `impl Trait for P` on the same trait compiles and runs. **This
-      has to be fixed**: an `Any` (and so the checked reflective read) needs a
-      blanket impl to exist at all. Reproducer:
-      ```nest
-      Named :: trait { tag :: func (self: Self) -> i32 }
-      impl <T> Named for T { tag :: func (self: Self) -> i32 { return 7 } }
-      main :: func () -> i32 { return (5).tag() }
-      ```
+- [ ] **Parallel code generation.** What is missing is a backend instance and an
+      LLVM context per thread.
 - [ ] **A library format** (`.nlib` / `.nmeta`). A dependency is source today.
-- [ ] **Debug info.** Nothing emits DWARF, though every statement carries a span
-      and every `TypeDef` carries its origin and pre-flattening name.
-- [ ] **A `defer` captures at registration, and this one does not** (spec §8.4).
-      The position half is fixed; this half is not.
+- [ ] **Debug info.** Nothing emits DWARF. **Disableable by config** (your note).
+- [ ] **A `defer` captures at registration, and this one does not** (§8.4).
+- [ ] **`core.panic` prints nothing useful.** A trap says `nest: trap`. `std`
+      (step 6) is what fixes it.
+- [ ] **A trait must be imported by name for its impls to apply.** `r :: import
+      <core/reflect>` is not enough to write `*dyn r.Any`; `{ Any } :: import
+      <core/reflect>` is. Pre-existing, and it bit twice this session.
 - [ ] **Optimization across units**, per-function escape summaries, the
       object-start table, narrowing what counts as a root (§5/§6).
 
@@ -223,167 +193,164 @@ like any other — the way `cast`, `size_of` and `make` already work. `@` stays 
 
 Everything in the previous handoffs still stands. New this session:
 
-- **Putting the entry point in the C runtime.** It would have to encode the
-  mangling scheme, and encode it twice for `main`'s two legal return shapes.
-- **Calling the synthesized entry `main` as well.** Two functions with one name
-  in every dump, distinguishable only by a symbol comment.
-- **Finding the entry point by "parent is a namespace".** A file *is* a
-  namespace and so is `namespace app { }`, so that test finds `app.main` too.
-  The canonical name is what distinguishes them — `Linked::mains`.
-- **Letting `-o` name both an object and an executable.** The second write wins,
-  silently, and a build system links whichever it finds.
-- **One temp directory shared by two tests that assert nothing else is in it.**
-  The other test's artifacts read as leftovers.
-- **A temp directory that outlives the run.** The same source hashes to the same
-  name every time, so the *previous* run's executable was sitting in it and read
-  as a part left behind — a test that passed alone and failed in the suite. The
-  process id is in the path now.
-- **A `--emit` list that adds to the default** rather than replacing it. Asking
-  for the LIR is not also asking for a program.
-- **Making a missing C toolchain a build failure.** A `nestc` that cannot link
-  still compiles, dumps and emits objects.
+- **`cargo fmt`.** The repo is not rustfmt-clean: one run reformatted 37 files.
+  Format the lines you wrote, by hand.
+- **Naming a `core` declaration after a primitive and then using that
+  primitive in the same file.** `c.nest` declaring `int` means `int.<N>` in
+  `c.nest` resolves to `c.int`. The generated `target.nest` is where the
+  width-parameterized C types had to go.
+- **Answering a question about a receiver before the receiver has a type.**
+  Three separate bugs, all the same shape: the field lookup, the `==` decision,
+  and the method lookup. `Ty::Error` unifies with everything, so "not known" and
+  "not there" have to be different answers.
+- **Assuming a blanket impl does not match `dyn Trait`.** It does.
+- **Putting an integer in a slice constant's pointer half.** A global's
+  initializer is built with no builder.
+- **Copying a resolved AST to unroll a loop.** The copies share the defs stamped
+  on the original. Re-parsing is what makes them independent.
+- **A vtable built from the reflection lowering.** It runs after
+  monomorphization, which has finished deciding what to instantiate.
 
 ## Key Decisions
 
+Everything in the previous handoff still stands. New this session:
+
 | Decision | Rationale |
 |---|---|
-| The entry point is synthesized in LIR | It is two calls and a return; a backend would reinvent it per target, and C would have to encode the mangling |
-| It is named `entry` and symbolled `main` | `name` is a source name and this function has none |
-| `-C entry=auto` keys off a file-scope `main` | A library has none, so the default is already right for one |
-| One rule for "which `main`", in `Linked::mains` | Two copies could disagree and nothing would show |
-| Two root `main`s is an error | Picking one silently means a program never starts where its author wrote |
-| Linking is the driver's, not the trait's | The question is the same on every target |
-| `cc` is the linker driver | It is what knows `crt1.o`, the system libraries, and the loader's name |
-| The runtime is built by `build.rs` and linked automatically | Every program calls `nest_init`; it is not the program's to remember |
-| A missing C toolchain is a link-time message | The compiler is still a compiler without it |
-| `--emit` defaults to `link` | What `cc foo.c` does, now that a backend can produce a program |
-| One object, whatever the split | A codegen unit is a unit of work, not an artifact |
-| Several units merge with `ld -r` | The parts are independent, which is also what parallel codegen needs |
-| JSON diagnostics are JSON Lines | A tool reads stderr as a stream; an array parses only at exit |
-| The JSON carries `rendered` | So forwarding a message never means reimplementing the renderer |
-| Byte offsets travel beside line/column | An editor works in one and a person in the other, and neither can be derived without the file |
-| `--package` beats `-L`, `-L` beats the built-in `core` | A resolved path is a fact; a search is a guess; the compiled-in path points at this checkout |
-| C types will be aliases, not `distinct` | The point is that a language value goes in; §11.4's coercions become nothing |
-| C strings are explicit both ways | A `str` is `{ ptr, len }` and a C string is not; neither has what the other needs |
-| `std` sits on libc and also exposes it raw | One implementation across three platforms, and an unwrapped `ioctl` should not need re-declaring |
-| Reflection is data, attributes are data on it | A loop over descriptions is an ordinary loop; only typed access to a value must unroll |
-| Reflection is `#intrinsic` functions in `core`, not a sigil | `$name` was retired in phase 3; `@` is the attribute sigil |
-| A run-time field read is `member_ptr` plus a `TypeId`-checked read | The check is the bounds check's lowering, and the identity it compares is a hash of `mono::type_key`, which already exists whole-program |
+| A literal receiver settles on its default before the lookup | An open `comptime_int` is a type no impl is written for |
+| "No method on `isize`" carries a note about where `isize` came from | The type in the message is one inference chose |
+| The C scalar types are aliases | The point is that a language value goes in |
+| `C_LONG` / `C_CHAR` are generated into `target.nest` | The target decides them, and `c.nest` cannot spell them |
+| `c.ptr.<T>` is one `usize` in a struct | Untraced by construction, and a pointer over the ABI |
+| The C string type is `cstr` | A file declaring `str` shadows the language's own |
+| `c"..."` gets its NUL in the parser | Everything downstream sees an ordinary `str` |
+| The reflection structs are filled positionally, found by `#lang` | The same contract `Location` has |
+| `TypeId` is a hash of `type_key` | Already globally unique, already what symbols are mangled from |
+| `type_info` is a global, not an aggregate built at the call | It is a constant; a copy is the whole lowering |
+| An attribute is an `Attr`, not a `*dyn Any` | A vtable would buy dispatch nothing uses, after mono has finished |
+| An attribute's arguments are literals | A declaration is not a place an expression runs |
+| `@attribute` is required | A typo that silently means nothing is the alternative |
+| `#comptime for` unrolls in the parser | A copy of a body has to be an independent piece of program |
+| Its variable is a compile-time constant | Otherwise the body cannot be *typed* per iteration |
+| Its sequence is a range of integer literals | The error belongs at the loop, and that is what the parser can read |
+| A not-yet-known receiver defers rather than answering | `Ty::Error` unifies with everything and says nothing |
 
 ## Current State
 
-**Working**: everything. `cd nestc && cargo test` → **561**;
+**Working**: everything. `cd nestc && cargo test` → **581**;
 `LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 cargo test --features llvm` →
-**577**. All ten examples emit object files at every `-C codegen-units` setting,
-a program links and runs, and a four-unit build produces one object that links
-and runs.
+**597**. A program links and runs; it calls libc through `core/c`, walks its own
+types at run time, downcasts an `Any`, reads an attribute it declared, and
+unrolls a `#comptime for`.
 
-**Broken**: nothing. **Uncommitted changes**: none.
+**Broken**: nothing known.
 
-**Not implemented and blocking `std`**: `core/c`. A program cannot call a C
-function today for want of the types to declare one with — `c.ptr`, `c.char`,
-`c.int` do not resolve.
+**Uncommitted**: `design/toolchain.md` — your own two edits (the `.nlib` line and
+the debug-info note).
 
 ## Files to Know
 
 | File | Why it matters |
 |---|---|
-| `design/toolchain.md` | **The plan**: `core/c` → `std` → `twig` → the editor, and every open decision |
-| `design/lir.md` | The specification. §7e is the entry point, §10 the backend's brief, §11 the unit split |
-| `design/roadmap.md` | Phase 10 is this work |
-| `nestc/src/lir/entry.rs` | The synthesized entry point |
-| `nestc/src/codegen/link.rs` | `link` (a program) and `combine` (`ld -r`), and `LinkOptions` |
-| `nestc/build.rs` | Builds `libnest_runtime.a`; fails softly |
-| `nestc/src/main.rs` | The driver: flags, `write_object`, `write_units`, `link_program` |
-| `nestc/src/common/emitter.rs` | `render` and `render_json` |
-| `nestc/src/sema/session.rs` | `register_package`, `add_search_path`, and the precedence between them |
-| `nestc/src/ir/link.rs` | `Linked::mains` — what an entry point is |
-| `nestc/src/codegen/mod.rs` | The `Codegen` trait, `TargetInfo`, `OutputKind`, `backends()` |
-| `nestc/src/codegen/llvm/unit.rs` | **The translation.** Its four design notes are the module comment |
-| `runtime/nest_runtime.c` | Six functions, and why a shim exists |
+| `design/toolchain.md` | **The plan.** Step 2's description there is still the old, wrong one; the work done matches this handoff |
+| `design/lir.md` | The specification. §7d overflow, §10 the backend's brief, §11 the unit split |
+| `packages/core/c.nest` | **New.** The C boundary |
+| `packages/core/reflect.nest` | **New.** `TypeInfo`, `Member`, `Attr`, `Any`, and the checked read |
+| `nestc/src/lir/lower.rs` | `type_info_global`, `attrs_const`, `type_id_const`, `kind_name`, `fnv1a_128` |
+| `nestc/src/sema/infer.rs` | `pin_numeric`, `settle`, `const_alias_ty`, the `Field` / `Comparison` obligations |
+| `nestc/src/sema/resolve.rs` | `resolve_attribute`, `introduce_comptime` |
+| `nestc/src/parser/expr.rs` | `parse_comptime_for`, `const_range` |
+| `nestc/src/sema/session.rs` | The generated `target.nest`, `c_long_bits`, `c_char_signed` |
 
 ## Resume Instructions
 
-1. `cd nestc && cargo test` — expect **561 passed**.
+1. `cd nestc && cargo test` — expect **581 passed**.
 2. With the backend:
    ```
    export LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21
-   cargo test --features llvm          # expect 577
+   cargo test --features llvm          # expect 597
    cargo build --features llvm
    ```
-3. **See a program run** — no hand-written C driver any more:
+3. **See reflection run**:
    ```
-   cat > /tmp/prog.nest <<'EOF'
-   add :: func (a: i32, b: i32) -> i32 { return a + b }
-   main :: func () -> i32 { return add(2, 3) }
+   cat > /tmp/r.nest <<'EOF'
+   r :: import <core/reflect>
+   @attribute Json :: struct { rename: str, skip: bool }
+   P :: struct { @Json(rename: "user_id", skip: false) id: i32, n: i64 }
+   main :: func () -> i32 {
+     let p: P := P { id: 7, n: 11 }
+     let info: r.TypeInfo := r.type_info.<P>()
+     let m: r.Member := info.members[0]
+     let j: Json := r.attr_of.<Json>(m.attrs).!
+     if j.rename == "user_id" { return r.member_read.<P, i32>(&p, m) }
+     return 0
+   }
    EOF
-   ./target/debug/nestc -o /tmp/prog /tmp/prog.nest && /tmp/prog; echo $?   # 5
+   ./target/debug/nestc -o /tmp/r /tmp/r.nest && /tmp/r; echo $?   # 7
    ```
-4. See the LLVM IR: `nestc --emit backend-ir -o /tmp/x.ll file.nest`.
-   See the diagnostics a tool would read: `nestc --error-format=json file.nest`.
-5. **Next: `core/c`** (stage 1 in `design/toolchain.md`). Start with the types
-   and `extern("c")` declarations — which already work — and then the `c"..."`
-   literal. Ask about varargs before assuming either answer.
+4. **See a `#comptime for` unroll**: `./target/debug/nestc --emit lir` on a body
+   with `#comptime for i in 0..<4 { … }` — four copies, four `i_N` slots.
+5. **Then step 6**, the `std` floor.
 
 ## Edge Cases & Error Handling
 
-- **A `char`** is `u32` by this level, so `c == 'a'` is `eq.u32 c_0, 97`.
-- **A match on integer literals is a comparison chain** (§4), not a jump table.
-- **A zero-length string** is a `[0]u8` global; a backend may emit nothing for it
-  as long as the address is valid.
-- **A `defer` in an `if` block** belongs to that block's scope. Spec §8.4 says
-  "the current function scope"; nothing tests the difference.
-- **`Intrinsic::Unknown`** is the safety net for anything lowered away.
-- **A backend refuses an output kind it does not produce** rather than writing a
-  file of the wrong thing — a file that exists and holds the wrong content is
-  worse than no file, because a build system will link it.
-- **The `lir` backend cannot produce an object**, so a bare `nestc` against it
-  now fails at the link rather than silently doing nothing.
-- A slice a program reads from is never dropped, `check::dropped` does not
-  follow aliases, `transmute` reads its result type off the destination, and
-  `core.panic` and `bytes_eq` are in every program because there is no dead-code
-  elimination.
+Everything in the previous handoff still stands. New this session:
+
+- **A trait object's method is a vtable lookup, always** — the dyn lookup runs
+  before the impl search.
+- **An empty reflective table is a zero-length global**, not a null pointer.
+- **An attribute whose arguments resolution could not order is dropped** rather
+  than emitted half-written; resolution already reported it.
+- **`Kind::Other`** is the tail for a type the reflection vocabulary does not
+  name. It is not a panic on purpose.
+- **`core` now instantiates `impl Eq for TypeId` in every program**, beside the
+  `Display for usize` the previous handoff noted.
 
 ## Warnings
 
 - **`LLVM_SYS_211_PREFIX` must be set** for anything `--features llvm`.
 - **`build.rs` needs `cc` and `ar`** to produce the runtime. Without them the
-  compiler still builds and every test that does not link still passes — the two
   link tests return early rather than fail.
+- **Do not run `cargo fmt`.** See Failed Approaches.
 - **Do not reintroduce a filter in the renderer.** `pretty::unit_to_string`
   prints a unit exactly as it is.
-- **`Cx::strip` is load-bearing in three ways at once** — `distinct`,
-  mutability, and the key the type table is built on.
+- **`Cx::strip` is load-bearing in three ways at once** — `distinct`, mutability,
+  and the key the type table is built on. **`type_key` deliberately is not**:
+  reflection depends on it keeping what `strip` throws away.
 - **`-C codegen-units` is not tuning.** At `N > 1` optimization across the cut is
   gone; the default is 1 for that reason.
-- **Around 80 clippy warnings are expected**, all dead-code-shaped.
+- **48 build warnings are expected**, all dead-code-shaped.
+- **A trap prints `nest: trap`, not its message.** Reduce with `--emit lir`.
 
 ## User Notes (standing)
 
 - **Ask questions in batches.**
 - **If something can be simplified in LIR while building codegen, do it**, and
-  pass this instruction on in every future handoff. `$slice` and `$array` were
-  the first two; **`repeat` and `format` are next**.
-- **Casts should be explicit about which conversion they are.** Done —
-  `CastKind`.
-- **The GC is not the priority.** An existing collector behind a thin shim, so
-  it can be swapped cheaply. Done as the C shim + Boehm.
+  pass this instruction on in every future handoff. `$slice`, `$array`, `repeat`
+  and now the three reflection intrinsics all became an instruction or a
+  constant; **`embed_file` is the only one left on the list that is more than one
+  instruction or one runtime call.**
+- **Casts should be explicit about which conversion they are.** Done.
+- **The GC is not the priority.** An existing collector behind a thin shim.
 - **Codegen is a trait**, and it supplies the target info. Done.
 - **LLVM codegen uses inkwell and produces object files.** Done.
 - **Everything should be easily usable by the future CLI tool.**
-- **`nestc` before `twig`.** Done — see the flag list above.
+- **`nestc` before `twig`.** Done.
 - **`std` is not linked automatically**; that is `twig`'s job.
-- **`twig` is written in Nest**, so `std` needs fs, io and JSON serialization
-  first.
+- **`twig` is written in Nest**, so `std` needs fs, io and JSON serialization.
 - **`nestc` supports structured output as JSON.** Done.
 - **There should be `insta` snapshot tests over the generated LLVM**, with no
-  target-specific content (no triples), so they pass on every machine. *Not done
-  — the LLVM tests assert properties rather than snapshots.*
-- **Conditional compilation** is wanted for building `std`, since different
-  targets need different code. `#when` is not in the parser, the spec or the
-  grammar.
-- **One object file out of `nestc`, always.** Several units are for parallelism;
-  they are merged. Done.
-- **A runtime loop over a type's members is fine** — the members are data and a
-  member's kind is an enum. Only typed access to the value must unroll.
+  target-specific content. *Still not done.*
+- **Conditional compilation** is wanted for building `std`. `#when` is not in the
+  parser, the spec or the grammar.
+- **One object file out of `nestc`, always.** Done.
+- **A runtime loop over a type's members is fine** — done, and it is what step 5
+  delivered. Only typed access to the value must unroll.
+- **Debug info should be disableable by config.**
+- **Be compact in commit comments; do not edit existing comments.**
 - **If you are unsure or need further guidance, ask.**
+
+## User Notes
+- Steps 1–5 were asked for and **all five are done and committed**.
+- **Reflection was prioritized over `#comptime`** on your instruction, and both
+  landed.
