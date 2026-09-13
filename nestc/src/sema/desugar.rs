@@ -86,6 +86,7 @@ impl Desugar<'_> {
             } => self.lower_for(id, pattern, iter, body),
             NodeKind::Try { base, kind } => self.lower_try(id, base, kind),
             NodeKind::InterpolatedStr { parts } => self.lower_interpolation(id, parts),
+            NodeKind::CStr { bytes } => self.lower_cstr(id, bytes),
             // `a op= b` → `a = a op b`, so the resulting `op` lowers through the
             // operator trait like any other binary. `a` is shared between the
             // place and the operator's left operand (both already resolved).
@@ -308,6 +309,26 @@ impl Desugar<'_> {
                 tail: Some(finish),
             },
         );
+    }
+
+    // ===< c"..." >===
+
+    /// `c"hi"` → `cstr_of("hi\0")`.
+    ///
+    /// The literal is already a `str` whose bytes end in a NUL (the parser put
+    /// it there), so all that is left is the address of its first byte — which
+    /// is a library question, not a compiler one, and is answered by whatever
+    /// claims `#lang("cstr_of")`. A `c"..."` therefore costs exactly what a
+    /// `"..."` costs: bytes in read-only data and nothing at run time.
+    fn lower_cstr(&mut self, id: NodeId, bytes: NodeId) {
+        let Some(of) = self.lang.get("cstr_of").map(|d| self.defs.resolve_alias(d)) else {
+            self.report(id, "`c\"...\"` requires the `#lang(\"cstr_of\")` item");
+            return;
+        };
+        let span = self.ast.node(id).span;
+        let call = self.static_call(span, of, vec![bytes]);
+        let kind = self.ast.node(call).kind.clone();
+        self.replace(id, kind);
     }
 
     /// `&mut __fmt` — a fresh reference for each call, because a node is used

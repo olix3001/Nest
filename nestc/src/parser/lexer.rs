@@ -56,6 +56,16 @@ pub enum TokenKind {
     #[token("b\"", lex_byte_string)]
     Bytes(Vec<u8>),
 
+    /// `c"..."` — a **C** string: the bytes as written plus a trailing NUL,
+    /// which is the whole of what makes it one (§11). The NUL is added where
+    /// the literal is desugared, so what this holds is the text.
+    ///
+    /// It lexes exactly as a `"..."` does — same escapes, same UTF-8 — and is
+    /// kept apart from the identifier `c` by the two-character opener, as
+    /// `b"..."` and `f"..."` are.
+    #[token("c\"", lex_string)]
+    CStr(String),
+
     #[token("'", lex_char)]
     Char(char),
 

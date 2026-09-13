@@ -378,6 +378,16 @@ impl Parser {
                 self.bump();
                 self.alloc(span, NodeKind::Lit(Lit::Bytes(b)))
             }
+            // The NUL goes on here, in the one place that knows the literal is
+            // a C string: everything downstream sees an ordinary `str` whose
+            // last byte happens to be zero.
+            Some(TokenKind::CStr(s)) => {
+                let mut s = s.clone();
+                self.bump();
+                s.push('\0');
+                let bytes = self.alloc(span, NodeKind::Lit(Lit::Str(s)));
+                self.alloc(span, NodeKind::CStr { bytes })
+            }
             Some(TokenKind::InterpStart) => self.parse_interpolated_str(),
             Some(TokenKind::Char(c)) => {
                 let c = *c;

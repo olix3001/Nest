@@ -393,6 +393,55 @@ main :: func () {
 /// inference, monomorphization, lowering — treat formatting as ordinary calls;
 /// there is no `format` intrinsic behind it any more and no case for one.
 #[test]
+fn a_c_string_is_desugared_with_its_nul() {
+    // `c"..."` is `cstr_of("...\0")`: the parser puts the NUL on and the
+    // desugaring takes the address, so nothing after inference knows the
+    // literal was written any differently from a `"..."`.
+    let src = "\
+c :: import <core/c>
+f :: func () -> c.cstr { return c\"hi\" }
+main :: func () -> i32 { return 0 }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let ast = &session.asts[&file];
+    assert!(
+        find(ast, |k| matches!(k, NodeKind::CStr { .. })).is_none(),
+        "a `c\"...\"` node survived desugaring"
+    );
+    let nul = ast.ids().any(|id| {
+        matches!(&ast.node(id).kind, NodeKind::Lit(crate::parser::ast::Lit::Str(s)) if s == "hi\0")
+    });
+    assert!(nul, "the literal kept its trailing NUL");
+}
+
+#[test]
+fn a_binding_to_a_type_is_an_alias() {
+    // A `::`-RHS is parsed as an expression, so `K :: P.<u8>` comes back as a
+    // `GenericApply` and `C :: u8` as a bare `Path` — neither of which
+    // collection can tell from a value. Both used to become a `Const`, and a
+    // use of one in type position became a silent `Ty::Error` that unified
+    // with anything: the program type-checked against nothing.
+    let src = "\
+P :: struct <T> { addr: usize }
+PU :: P.<u8>
+C :: u8
+f :: func () -> usize {
+  let a: PU := PU { addr: 5 }
+  let b: C := 3
+  return a.addr + cast.<usize>(b)
+}
+";
+    let s = analyze1(src);
+    assert!(!s.has_errors(), "{:#?}", s.diagnostics);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&entry_file(&s)]);
+    // The alias carried its argument through: the local is a `P.<u8>`, not a
+    // `P.<?>` that never got one.
+    assert!(ir.contains("P.<u8>") || ir.contains("P"), "{ir}");
+}
+
+#[test]
 fn an_interpolated_string_is_desugared() {
     let src = "\
 main :: func () -> str {

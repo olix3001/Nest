@@ -37,6 +37,7 @@ prelude :: import "prelude.nest"
 @public fmt     :: import "fmt.nest"
 @public fail    :: import "fail.nest"
 @public gc      :: import "gc.nest"
+@public c       :: import "c.nest"
 
 // `str.nest` gets no namespace re-export: its one public member is `str`, which
 // the prelude already exports, and a `str` namespace sitting beside the `str`

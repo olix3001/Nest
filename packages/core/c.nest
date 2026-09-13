@@ -1,0 +1,181 @@
+// The C boundary: the types a C function is declared with, and the pointer C
+// hands back.
+//
+// `extern("c")` was already enough to *call* C — the parser takes it, LIR
+// carries the ABI and the backend emits a declaration. What was missing is the
+// vocabulary to write the declaration in, which is this file.
+//
+// **The C types are aliases, not `distinct` types** (§11). `c.int` is a name for
+// this target's `i32` and nothing more, so a language value goes straight into a
+// C call and comes straight back out. A `distinct` type would put a written
+// conversion on both ends of every call, and would be buying a distinction the
+// language cannot use: what a C `long` *is* varies by target, and the target is
+// already what decides it. §11.4's "coercions" are therefore nothing at all,
+// which is the cheapest a coercion gets.
+//
+// **`ptr.<T>` is the exception, and it is its own type.** A `*T` is non-null and
+// traced; a C pointer is neither. Erasing that difference is exactly how a null
+// reaches code written on the promise that it cannot see one, so the two are
+// kept apart and the conversion between them is a check.
+//
+// **There are no varargs.** `printf` is the first thing anyone tries and it is
+// not declarable here; a program that needs a variadic C function writes a
+// fixed-arity shim in C. `std` declares fixed-arity functions and formats things
+// itself, which it was going to do anyway (`core/fmt`).
+
+{ C_LONG, C_ULONG, C_CHAR } :: import "target.nest"
+{ transmute, size_of, make } :: import "mem.nest"
+
+// ===< The scalar types >===
+//
+// Spelled with the sugar (`i32`) rather than with the family (`int.<32>`)
+// deliberately: `int` below *is* `c.int` inside this file, so a use of the
+// family here would resolve to the alias beside it. That is also why the three
+// target-dependent ones are imported rather than written — see `C_LONG` in the
+// generated `target.nest`.
+
+// `char` is a third type, distinct in C from both `signed char` and `unsigned
+// char`, and which one it matches is the ABI's choice.
+@public char      :: C_CHAR
+@public schar     :: i8
+@public uchar     :: u8
+
+@public short     :: i16
+@public ushort    :: u16
+@public int       :: i32
+@public uint      :: u32
+
+// LP64 and LLP64 disagree about this one and only this one.
+@public long      :: C_LONG
+@public ulong     :: C_ULONG
+
+@public longlong  :: i64
+@public ulonglong :: u64
+
+// The pointer-sized set is `core`'s own: `usize` is already "as wide as a
+// pointer on this target", which is the whole of what `size_t` says.
+@public size_t    :: usize
+@public ssize_t   :: isize
+@public uintptr_t :: usize
+@public intptr_t  :: isize
+
+@public float     :: f32
+@public double    :: f64
+
+// ===< The raw pointer >===
+
+// A raw, nullable, untraced pointer to a `T` — what a C function takes and what
+// one returns.
+//
+// It holds an address and nothing else, which is what makes it untraced: the
+// collector sees an integer, so a `ptr` is never what keeps an object alive.
+// That cuts both ways and is the point — a `ptr` into the GC heap is a way to
+// lose an object out from under yourself, and a `ptr` is for memory C owns.
+//
+// One `usize` is also its whole representation, so it goes over the C ABI as a
+// pointer does on every target here.
+@public ptr :: struct <T> { addr: usize }
+
+// The null pointer. A function rather than a constant because `T` has to come
+// from somewhere: `c.null.<u8>()`, or from the context it is passed into.
+@public null :: func <T> () -> ptr.<T> { return ptr.<T> { addr: 0 } }
+
+// A traced pointer as a raw one. Always sound — a `*T` is a valid address —
+// and always a loss of information, which is why the way back is checked.
+@public from_ptr :: func <T> (p: *T) -> ptr.<T> {
+  return ptr.<T> { addr: transmute.<usize>(p) }
+}
+
+impl <T> ptr.<T> {
+  // Whether this is the null pointer.
+  @public is_null :: #inline func (self: Self) -> bool { return self.addr == 0 }
+
+  // The address as a number, for a program that has to print one or compare two.
+  @public addr_of :: #inline func (self: Self) -> usize { return self.addr }
+
+  // `self + n` elements, in C's own arithmetic: the offset is scaled by the
+  // element size. Nothing is checked, because nothing here knows how many
+  // elements the C side allocated.
+  @public offset :: #inline func (self: Self, n: usize) -> Self {
+    return ptr.<T> { addr: self.addr + n * size_of.<T>() }
+  }
+
+  // The traced pointer, **checked**: a null here is the one thing a `*T`
+  // promises its holder will never see, so it is a panic at the conversion
+  // rather than a fault at the first use (§11.2).
+  @public to_ptr :: func (self: Self) -> *T {
+    if self.addr == 0 { panic("a null `c.ptr` reached `to_ptr`") }
+    return transmute.<*T>(self.addr)
+  }
+
+  // The same, with write permission. Separate because permission over C's
+  // memory is a claim about what C did with it, and one the program makes.
+  @public to_mut :: func (self: Self) -> *mut T {
+    if self.addr == 0 { panic("a null `c.ptr` reached `to_mut`") }
+    return transmute.<*mut T>(self.addr)
+  }
+
+  // Read the `T` at this address.
+  @public read :: #inline func (self: Self) -> T { return self.to_ptr().* }
+}
+
+// ===< C strings >===
+
+// A pointer to NUL-terminated bytes.
+//
+// It is **`cstr`, not `str`**: a file that declared `str` would shadow the
+// language's own inside itself, and `from_cstr` below returns one.
+//
+// The two do not convert implicitly in either direction, and cannot, because
+// each is missing what the other has. A Nest `str` is a pointer and a length
+// with no NUL anywhere; a `cstr` is a NUL and no length. Going one way costs an
+// allocation and going the other costs a scan, so both are written.
+@public cstr :: ptr.<uchar>
+
+// What a `c"..."` literal becomes.
+//
+// The literal's bytes already end in a NUL — the lexer puts one there — so this
+// is only the address of the first of them. It carries a `#lang` tag because
+// the **compiler** is what reaches it: `c"..."` is desugared into a call to
+// whatever claims the tag, exactly the way `f"..."` is desugared into calls to
+// `Display.display`.
+@public cstr_of :: #lang("cstr_of") #inline func (s: str) -> cstr {
+  return ptr.<uchar> { addr: transmute.<usize>(&s.as_bytes()[0]) }
+}
+
+// The length of a C string, in bytes, not counting the NUL. The scan C's
+// `strlen` is, written here so that reaching one does not need libc.
+@public strlen :: func (s: cstr) -> usize {
+  let mut n: usize := 0
+  while s.offset(n).read() != 0 { n = n + 1 }
+  return n
+}
+
+// A C string as a `str`, borrowing C's bytes rather than copying them: the
+// result points into the same memory, so it lives exactly as long as C says
+// that memory does.
+@public from_cstr :: func (s: cstr) -> str {
+  let n: usize := strlen(s)
+  return cast.<str>(transmute.<[]u8>(Raw { ptr: s.to_ptr(), len: n }))
+}
+
+// A `str` as a C string: an allocation and a copy, because the NUL has to go
+// somewhere and a `str` has nowhere to put one. The bytes are GC-managed, so
+// the result is only valid while something still holds it.
+@public to_cstr :: func (s: str) -> cstr {
+  let b: []u8 := s.as_bytes()
+  let out: []mut u8 := make.<[]u8>(b.len() + 1)
+  let mut i: usize := 0
+  while i < b.len() {
+    out[i] = b[i]
+    i = i + 1
+  }
+  out[b.len()] = 0
+  return ptr.<uchar> { addr: transmute.<usize>(&out[0]) }
+}
+
+// The two words a slice is (`design/lir.md` §7b), so that one can be built out
+// of a pointer and a length C supplied. Private: a program that wants this
+// writes `from_cstr`, and a program that wants it for something else is doing
+// something `core` should not be handing out.
+Raw :: struct { ptr: *u8, len: usize }

@@ -480,11 +480,22 @@ impl Session {
              @public PTR_BITS: u16 :: {bits}\n\
              @public OS: Os :: .{os}\n\
              @public ARCH: Arch :: .{arch}\n\
-             @public PROFILE: Profile :: .{profile}\n",
+             @public PROFILE: Profile :: .{profile}\n\
+             \n\
+             // The two C types whose width or signedness the target decides.\n\
+             // `core/c` names them; they are here because this is the file that\n\
+             // knows what the build is, and because `c.nest` cannot spell them\n\
+             // itself — it declares `int`, which shadows the family there.\n\
+             @public C_LONG  :: {clong}\n\
+             @public C_ULONG :: {culong}\n\
+             @public C_CHAR  :: {cchar}\n",
             bits = o.target.pointer_bits,
             os = variant(o.target.os),
             arch = variant(o.target.arch),
             profile = variant(o.profile),
+            clong = format!("i{}", c_long_bits(&o.target)),
+            culong = format!("u{}", c_long_bits(&o.target)),
+            cchar = if c_char_signed(&o.target) { "i8" } else { "u8" },
         )
     }
 
@@ -562,6 +573,33 @@ impl Default for Session {
 /// The directory part of a path key, or `None` if it has no separator.
 fn parent_of(path: &str) -> Option<&str> {
     path.rfind('/').map(|i| &path[..i])
+}
+
+/// The width of a C `long`, in bits.
+///
+/// Two data models are in play and the split is by operating system, not by
+/// architecture: Windows is LLP64, where a `long` stays 32 bits however wide a
+/// pointer is, and everything else here is LP64 (or ILP32), where a `long` is
+/// exactly a pointer wide.
+fn c_long_bits(target: &crate::common::options::Target) -> u32 {
+    match target.os {
+        "windows" => 32,
+        _ => target.pointer_bits,
+    }
+}
+
+/// Whether a C `char` is signed.
+///
+/// A plain `char` is a third type distinct from `signed char` and `unsigned
+/// char`, and which one it matches is the ABI's choice. It is signed on x86 and
+/// on Apple's and Microsoft's ARM64, and unsigned on the ARM and RISC-V
+/// psABIs — which is the rule below, and the reason `c.char` is generated
+/// rather than written down once in `c.nest`.
+fn c_char_signed(target: &crate::common::options::Target) -> bool {
+    match target.arch {
+        "aarch64" | "riscv64" => matches!(target.os, "macos" | "windows"),
+        _ => true,
+    }
 }
 
 /// A setting's spelling as the enum variant `core/os.nest` declares for it:

@@ -63,6 +63,7 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         }
         Lit(lit) => format!("Lit {}", lit_str(lit)),
         InterpolatedStr { .. } => "InterpolatedStr".into(),
+        CStr { .. } => "CStr".into(),
         Path { segments } => {
             let path = segments
                 .iter()

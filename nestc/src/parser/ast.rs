@@ -341,6 +341,14 @@ pub enum NodeKind {
     /// `f"...{e}..."` — interpolated string; `parts` interleaves the embedded
     /// expression nodes (the literal chunks are recoverable from spans).
     InterpolatedStr { parts: Vec<NodeId> },
+    /// `c"..."` — a C string literal. `bytes` is the ordinary [`Lit::Str`] node
+    /// holding the text **with its trailing NUL already on it**, so the address
+    /// the desugaring takes is the address of a NUL-terminated run.
+    ///
+    /// It is a node of its own rather than a `Lit` because it is not a scalar:
+    /// like `f"..."` it is desugared into a call before inference, and nothing
+    /// after that point sees one.
+    CStr { bytes: NodeId },
     /// A dotted name: `a.b.c`. A bare identifier is a one-segment path.
     ///
     /// `self` and `Self` are **not** special AST nodes: `self` is the ordinary
@@ -667,6 +675,8 @@ impl NodeKind {
             }
             | InterpolatedStr { parts: elems }
             | Bounds { bounds: elems } => out.extend_from_slice(elems),
+
+            CStr { bytes } => out.push(*bytes),
 
             Attribute { args, .. } | Directive { args, .. } => out.extend_from_slice(args),
 

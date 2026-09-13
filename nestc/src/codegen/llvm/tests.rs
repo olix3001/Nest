@@ -471,6 +471,28 @@ fn a_program_links_and_runs() {
              main :: func () -> i32 { return (5).a() + (5).b() + (5).c() }\n",
             41,
         ),
+        // The C boundary: a libc call declared with `core/c`'s types, a
+        // `c.ptr` built from a traced one, and a `c"..."` literal whose
+        // trailing NUL is what `strlen` finds. 19 bytes written, and the
+        // literal's 12 back through `from_cstr`.
+        (
+            "c :: import <core/c>\n\
+             extern(\"c\") {\n\
+            \x20 write :: func (fd: c.int, buf: c.ptr.<c.uchar>, n: c.size_t) -> c.ssize_t\n\
+            \x20 strlen :: func (s: c.cstr) -> c.size_t\n\
+             }\n\
+             main :: func () -> i32 {\n\
+            \x20 let s: str := \"write through libc\\n\"\n\
+            \x20 let b: []u8 := s.as_bytes()\n\
+            \x20 let n: c.ssize_t := write(1, c.from_ptr.<u8>(&b[0]), b.len())\n\
+            \x20 let lit: c.cstr := c\"hello from C\"\n\
+            \x20 if c.null.<u8>().is_null() == false { return 1 }\n\
+            \x20 if c.from_cstr(lit) != \"hello from C\" { return 2 }\n\
+            \x20 if strlen(lit) != 12 { return 3 }\n\
+            \x20 return cast.<i32>(n)\n\
+             }\n",
+            19,
+        ),
     ] {
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
         let file = session.load_entry("main").expect("entry loads");

@@ -5295,6 +5295,14 @@ impl Inferer<'_> {
             // what turns `Self.Output` on a concrete type into the impl's chosen
             // type (§ associated-type projection).
             DefKind::TypeAlias => self.expand_alias(def),
+            // `K :: P.<u8>` is an alias too, and collection could not know it:
+            // a `::`-RHS is parsed as an *expression*, so an instantiation
+            // comes back as a `GenericApply` that is a type when its head
+            // names one and a value (`f.<i32>`) when it does not — a
+            // difference only resolution can see. Without this the binding is
+            // a `Const`, a use of it in type position is a silent `Ty::Error`,
+            // and the program type-checks against nothing at all.
+            DefKind::Const => self.const_alias_ty(def).unwrap_or(Ty::Error),
             // A generic type parameter is a rigid opaque type of its own def.
             DefKind::TypeParam => Ty::Nominal { def, args: vec![] },
             // `<const N: usize>` is a *value*; writing `N` where a type belongs
@@ -5327,6 +5335,50 @@ impl Inferer<'_> {
         for def in aliases {
             self.expand_alias(def);
         }
+    }
+
+    /// Expand a `::` binding whose right-hand side *parses* as an expression
+    /// but *names* a type — `K :: P.<u8>`, or a bare `K :: P`.
+    ///
+    /// `None` when the head does not name a type, which leaves a value used in
+    /// type position exactly as it was: a `Ty::Error` reported elsewhere.
+    fn const_alias_ty(&mut self, def: DefId) -> Option<Ty> {
+        if self.alias_stack.contains(&def) {
+            return None;
+        }
+        let d = self.defs.get(def);
+        let (file, node) = (d.file?, d.node?);
+        let NodeKind::ConstBind { rhs, .. } = self.asts[&file].node(node).kind.clone() else {
+            return None;
+        };
+        let (head, args) = match self.asts[&file].node(rhs).kind.clone() {
+            NodeKind::GenericApply { base, args } => (base, args),
+            NodeKind::Path { .. } => (rhs, Vec::new()),
+            _ => return None,
+        };
+        let head_def = self.resolved_def_in(file, head)?;
+        // Whatever names a type: a primitive (`C :: u8`), a nominal, another
+        // alias. A head that names a *value* is left alone — `N :: SIZE` is a
+        // constant, and nothing here should turn it into one.
+        if !matches!(
+            self.defs.get(head_def).kind,
+            DefKind::Primitive
+                | DefKind::Struct
+                | DefKind::Enum
+                | DefKind::Trait
+                | DefKind::TypeAlias
+                | DefKind::TypeParam
+                // A chain of these: `c.long :: C_LONG` over `C_LONG :: i64`.
+                // Following it is safe because a head that really is a value
+                // bottoms out at a literal, which is not a type either.
+                | DefKind::Const
+        ) {
+            return None;
+        }
+        self.alias_stack.push(def);
+        let ty = self.typepath_ty(file, head, &args);
+        self.alias_stack.pop();
+        Some(ty)
     }
 
     /// Expand a type-alias / associated-type binding to the type it names.
