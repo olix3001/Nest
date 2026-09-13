@@ -1,139 +1,155 @@
-# Handoff: step 6 is done — `std` exists, and five things under it were broken
+# Handoff: six bugs under `twig`, and `twig` itself not started
 
-**Generated**: 2026-09-13
-**Branch**: `main` (ahead 37)
-**Status**: **583 tests pass** without LLVM, **600** with it. `cargo build`
-reports 48 warnings, all dead-code-shaped — unchanged. **A Nest program reads a
-file, writes to stdout, spawns a process, and reads its arguments and
-environment.**
+**Generated**: 2026-09-14
+**Branch**: `main` (ahead 39)
+**Status**: **589 tests pass** without LLVM, **606** with it. `cargo build`
+reports 48 warnings (46 with `--features llvm`), all dead-code-shaped —
+unchanged. **Nothing is uncommitted.**
 
-**Read `design/toolchain.md`** — its ten-step order of work is the plan. **Steps
-1–6 are done and committed.** What is left is **`std/json`, the library format,
-`twig` and the editor** — steps 7 through 10, in that order. The rest of
-`#comptime` is still **deferred and unscheduled**; nothing below needs it.
+**Read `design/toolchain.md`** — its ten-step order of work is the plan, and it
+is **unchanged this session**: steps 1–6 are done, 7 through 10 are not. You
+asked for **step 9, `twig`**, out of order — skipping `std/json` (7) and the
+library format (8). **No `twig` code exists yet.** What this session produced is
+the two commits below, which are the language bugs that writing `twig`'s data
+model immediately hit.
 
 ## What happened this session
 
-One commit: step 6, and the five bugs found inside it. The library is the small
-part — most of the work was that `std` is the first program large enough to use
-the language rather than test it, and it found things.
+Two commits, six bugs, no feature. The probing was ordinary — an enum with
+payloads, a `Vec` of structs, a `[]str`, a qualified name — and five of the six
+were found in the first twenty minutes of it. **`std` was written almost
+entirely in unqualified, same-file style**, so the qualified-name paths below had
+never been exercised by anything.
 
-### `packages/std/` — seven namespaces over an internal `sys`
+### The failure mode five of them shared
 
-| File | What |
+`Ty::Error` unifies with everything. A path that *produces* one without
+reporting leaves a signature that type-checks against nothing, and the first
+thing to object is the **backend**:
+
+```
+nestc: llvm: main: Void is not a type a value can have
+```
+
+No span, no source line, and **named in the function that *called* the one with
+the mistake in it**. Every silent error type in this compiler surfaces exactly
+that way, which is why they were hard to find and why the backstop below exists.
+
+### Commit 1 (`8e9ab2c`) — a name in type position that is not a type
+
+An `import` binding is an ordinary name, so it **shadows**:
+
+```nest
+str :: import <std/str>
+show :: func (v: i32) -> str { … }   // `str` is the namespace, not the type
+```
+
+`typepath_ty`'s catch-all was `_ => Ty::Error`, silent. It now reports, once per
+written name (`TyPathReported`, the same dedup as `ConstSlotReported` — a type
+node is resolved once per *use*, so one written name would otherwise be as many
+diagnostics as the program has uses):
+
+```
+error: `str` is a namespace, not a type
+  = note: a binding of `str` shadows any type of that name — bind the import
+          under another name to write both
+```
+
+- The message quotes the path the **program wrote** (`written_path_in`), not the
+  def's own name — the latter printed `std`, a package the program never named.
+- `DefKind::External` stays silent: a member of a deliberately-unloaded package
+  is not something we know is not a type.
+
+### Commit 2 (`da00e40`) — five more, and the backstop
+
+| # | Bug | Why it happened |
+|---|---|---|
+| 1 | **`ns.P { … }` was a silent error type** | A composite literal's head is parsed as an **expression** — the tuple-struct form `Type(a, b)` is syntactically a `Call` — so a qualified type name arrives as a `FieldAccess`, not a `Path`. Resolution got it right; `ty_from_node_in` had no arm for it |
+| 2 | **A qualified trait in a bound resolved and then could not be called** | `func <T: cmp.Eq> … a.eq(b)` → "no method `eq` on `T`". Impl selection draws from the traits a **file** can name (`in_scope_traits`), and a bound names one without importing it |
+| 3 | **`f(x) n = 1` was rejected** | `scan_binding_kind` looks ahead to the end of the **line**, and a line holds several statements — so an `=` belonging to the *next* statement classified the first as an assignment, and `parse_assign` then reported "expected an assignment operator" at `n` |
+| 4 | **`f() = 3` was accepted** | `mutability.rs` asked whether the place was *writable* and never whether it was a place. The IR carried an `Assign` whose left side was a call, and the program compiled and ran |
+| 5 | **`defer` re-evaluated its body at every exit** | §8.4 says it captures where it is written. It did not, so a deferred call read whatever its operands held *then* — the opposite of what the construct is for, and silently wrong rather than an error |
+
+**Bug 2 is what the previous handoff recorded as "a trait must be imported by
+name for its impls to apply."** That diagnosis was wrong. `{ Eq } :: import
+<core/cmp>` did not fix the case it was written from — bug 1 did, because the
+*receiver* `(p.P { x: 1 })` was untyped and the trait had nothing to do with it.
+Both are now fixed and the item is off the list.
+
+**Where each fix lives:**
+
+- 1: `sema/infer.rs` — a `NodeKind::FieldAccess` arm in `ty_from_node_in`,
+  straight through `typepath_ty`, which reads only the resolved def.
+- 2: `sema/infer.rs` — `bound_traits`, walking the file's `NodeKind::Bounds` and
+  extending `in_scope_traits`. Per file, because selection is per file.
+- 3: `parser/item.rs` — `parse_assign` answers `(NodeId, bool)` and falls back to
+  the expression it already parsed when no operator follows.
+- 4: `ir/check/mutability.rs` — `is_place` in front of the permission question.
+- 5: `sema/desugar.rs` — `capture_defers`, on the **block**, not the `defer`.
+
+### `defer`, precisely
+
+```
+defer log(n)        →     __defer1 :: n
+                          defer log(__defer1)
+```
+
+Two things about it are deliberate and neither is a stopgap:
+
+- **The bindings land in the enclosing block, in front of the `defer`.** Wrapping
+  the `defer` in a block of its own would be a scope that ends immediately, which
+  runs the body there.
+- **The receiver is not captured.** Desugar runs **before inference**, so it
+  cannot see whether `x.close()` takes `self` by value or as a `*mut Self`, and
+  binding a mutating method's receiver to a copy would silently defer the
+  mutation to a temporary. Reading the place at exit is what a captured
+  *pointer* would have done anyway; the two differ only for a receiver
+  reassigned between the `defer` and the exit. Doing better means capturing in
+  **sema lowering**, where the types are known — and `Lowerer` holds `defs:
+  &DefTable`, immutable, so that is a plumbing job, not a rewrite.
+
+It changed one existing test's premise: `defer sink(p.*.x)` after `drop(p)` is
+no longer a use-after-drop, because the read happens at registration. The test
+now asserts **both** — the block form `defer { sink(p.*.x) }` is still refused,
+the call form is not — because the difference between them is the whole point.
+
+### The backstop: `ir/check/residue.rs`
+
+An error type that reaches code generation **with no diagnostic behind it** is
+now an `internal:` report with a span, at most once per function body:
+
+```
+error: internal: an error type reached code generation in `main`
+   | this expression has no type
+   = note: nothing was reported about it, so inference produced an error type
+           without a diagnostic — this is a compiler defect
+```
+
+- **It runs only when nothing else spoke.** After a real diagnostic the IR is
+  full of error types by design, so the condition in `sema/mod.rs` is what keeps
+  it quiet — the same discipline `Ty::mentions_error` exists for.
+- It points at the **innermost** erroneous expression: an error type propagates
+  outwards, so the outermost node carrying one is usually the whole statement.
+- Added **no** failures across 589 tests, which is the evidence that nothing else
+  currently leaks one.
+
+## `twig`: what was settled before stopping, and what blocks it
+
+None of this is written. It is the design the probing was for.
+
+| Question | Where it lands, and why |
 |---|---|
-| `libc.nest` | The raw C surface, declared with `core/c`'s types and **exposed on purpose** |
-| `sys.nest` | The backing. **Not re-exported**, so `<std/sys>` does not resolve |
-| `io.nest` | `Error`, `Write`, `Read`, `File`, `write_all`, `read_to_end`, `print`/`println` |
-| `fs.nest` | `open`, whole-file `read`/`write`/`append`, `exists`, `remove`, `rename`, `create_dir`, `size` |
-| `process.nest` | `args`, `env`/`set_env`/`env_vars`, `exit`, `spawn`/`run`/`wait`, `Status` |
-| `mem.nest` | `copy`, `fill`, `clone`, `equal`, `index_of`, `swap`, `reverse` |
-| `str.nest` | `from_utf8`, `find`, `split`, `lines`, `trim`, `join`, `parse_int`, `to_string` |
-| `collections.nest` | `Vec.<T>`, `HashMap.<K, V>`, and the `Hash` trait they need |
+| **Diagnostics** | `std/process` has **no pipes** — no way to capture a child's stderr, and no `dup2` in `sys`. So `twig` inherits stdio and uses `--error-format=human`. Forwarding `rendered` verbatim needs pipes **and** `std/json` (step 7). The plan sanctions either, but only one is writable today |
+| **Dependencies** | Step 8 is not done, so a dependency is **source**: resolve the graph transitively, dedupe, detect cycles, then **one** `nestc` invocation with every `--package name=path`. The graph work is real and survives `.nlib`; the per-package invocation does not exist yet |
+| **The manifest** | A **flattened** TOML document — `dependencies.bar.path` → value — rather than a recursive `Value` tree. No recursive enum to prove out, and the manifest's needs are narrow. `Value` is `string / integer / boolean / list([]str)`; inline tables flatten into dotted keys |
+| **Package root** | The repo's own convention: a package `foo` at path `P` has root `P/foo.nest`, which is what `-L` already means (`<foo/…>` is `<dir>/foo/foo.nest`). A manifest `root = "…"` overrides it |
+| **Commands** | `build`, `run`, `check`, `clean`, and `--release`. `twig run` is `build` plus `process.run` on what it produced |
 
-- **`std` ships with the compiler and is versioned with it** (your decision).
-  `Session::default_std_path` registers it as a *fallback* exactly as `core` is,
-  so `import <std/io>` resolves from a checkout with nothing registered, and
-  `-L` / `--package std=` replaces it. It is still **not linked automatically**:
-  nothing reaches it without an import naming it.
-- **`sys` is the swap point.** Nothing above it names `libc`. A target with no C
-  library is a second copy of that one file.
-- **`#when` is still not needed** (your decision: wait until blocking). It came
-  close once — the `open` flags differ between Linux and the BSDs, and
-  `std/libc` branches on `core/target`'s generated `OS` instead. The branch is
-  over a constant, so it folds.
+**What `std` is missing for it**, beyond the previous handoff's list:
 
-### Three things Nest cannot say, all one line of C
-
-`runtime/nest_runtime.c` grew from six functions to ten. Each is there because
-the alternative is not writable:
-
-- **`nest_errno`** — `errno` is a *macro*, expanding to `__error()` on macOS and
-  `__errno_location()` on Linux. There is no symbol to declare.
-- **`nest_open`** — C's `open` is **variadic**, and on arm64 a variadic argument
-  is passed on the stack while a fixed one goes in a register. A three-argument
-  declaration created files with whatever was on the stack for permissions; the
-  first `fs.write` returned `EACCES`. `core/c` already names the remedy: a
-  fixed-arity shim in C. **This is the only one.**
-- **`nest_envp`** — returns **`environ`**, not `main`'s third parameter. `envp`
-  is a snapshot and `setenv` replaces the table under it, so a program could not
-  see a variable it had just set.
-
-### The entry point now takes `argc` / `argv`
-
-`main` took none, so `argv` existed for exactly one frame and was gone —
-`std/process` had nothing to read. It now takes both and hands them to
-`nest_init`, which keeps them.
-
-**The parameters are pointer-sized integers, not `Ty::Ptr`.** `lir::safepoint`
-treats every `Ptr` local as a GC root, and `argv` addresses memory the startup
-owns; a moving collector would have relocated a pointer into C's stack. It is
-the same answer `core/c` gives — a `c.ptr.<T>` is one `usize` in a struct,
-untraced by construction.
-
-## Five bugs, all found by writing `std` rather than by a test
-
-1. **A `for` loop ran its body zero times.** `core`'s `Iterator` impls for
-   `Range` and `SliceIter` were **stubs returning `.none`**. Every `for` in
-   every program silently did nothing. Fixed with a `Step` trait — `step_cmp`
-   and `step_up` — and **one** `impl <T: Step> Iterator for Range.<T>`.
-   - It has to be one impl. A set per integer family would have to choose
-     between them before the body was read, so `for x in 0..<4` would settle the
-     literal on `isize` instead of inferring `i32` from its body.
-   - It cannot be `Ord` + `Add`: on a primitive those are *instructions*, not
-     calls, so an unbounded `T` has no way to ask and a bound naming them is one
-     the primitives do not satisfy.
-2. **`.?` propagated garbage.** `from_residual` is a static trait call: it
-   resolves to the **trait's** declaration and the solver then redirects it to
-   the impl member. The recorded `Instantiation` was the trait's — `FromResidual.<R>`
-   owns one parameter — while `impl <T, E> FromResidual.<E> for Result.<T, E>`
-   has two. `T` was left unbound, and building an `.err` of a type that does not
-   exist lowered to **`return undef`**. `sema::lower::carry_instantiation` now
-   drops the list when the callee was redirected, and mono re-derives it from
-   the signature.
-3. **A `never`-typed block expression got a value slot.** A `loop` with no
-   `break` produced `let _1: never` and a dead `return _1`. The `never`-returning
-   *call* path one function above already did this right; `lower_loop`, the `if`
-   and the `match` now do too, and seal the block they leave behind.
-4. **A sub-slice of a `[]mut T` was a `[]T`.** `mutable: false` was hardcoded, so
-   writing to part of a buffer was unsayable — which is what every reader filling
-   the tail of what it has read needs. A sub-slice now inherits the permission;
-   an **array**'s does not, because `[N]T` carries no mutability in its type.
-5. **`@link_name` did nothing.** Spec §9 documents it and `ir::mono::mangle`
-   looks for it in `d.directives` — and `sema::collect` only ever put `#name`
-   directives there, never `@` attributes. It is now recorded.
-
-## What `std` needs from `core`, and got
-
-- **`Eq` for the primitives** (`cmp.nest`). `a == b` on two integers stays an
-  instruction; these are for a generic function with an `Eq` bound, which has no
-  operand types to look at. Without them `T: Eq` is a bound no integer satisfies
-  and `HashMap.<usize, V>` cannot be written.
-- **`wrapping_mul`** (`num.nest`, plus the intrinsic table and one LIR case).
-  A hash function is a multiply that is *meant* to overflow; under
-  `-C overflow=trap` there was no way to write one.
-
-## What `std` does not have
-
-Each is a real thing to want, and each says what it waits on:
-
-| Missing | Why, and what it needs |
-|---|---|
-| **Metadata, directory listing** | `struct stat` / `struct dirent` layouts differ between Linux and macOS — `d_name` is 19 bytes in on one and 21 on the other — and a wrong layout reads the wrong bytes rather than failing to compile. Wants `#when`, or the declaration generated the way `C_LONG` is. `fs.size` asks a descriptor instead |
-| **Buffered I/O** | `io.File` writes straight through. The first thing `twig` will want that is not here |
-| **An owned `String`** | `core/fmt`'s `Buf` and `Vec.<u8>` are each already a growable byte buffer. A third is a third spelling of one thing, and the `#lang` tag `core` reserves for it is a language feature rather than a container |
-| **Iterator adapters** (§10.4) | `map`, `filter`, `enumerate`, `collect`. `for` works over ranges, slices and a `Vec` |
-| **Arrays are not `IntoIterator`** | `for x in some_array` has no impl. Slices do |
-| **Windows** | Everything here is POSIX. That is what `sys` being a layer is for |
-
-## Still open, and yours to decide
-
-| Decision | Why it is open |
-|---|---|
-| **What `.nlib` holds beside the code** | An archive of pre-generated IR *and* metadata, with the `.nmeta` alongside — your note in `toolchain.md` |
-| **`Drop`** (`#lang("drop")`) | Waiting on a *decision*: with no moves, "this value was returned / stored / passed to a call, so do not drop it" has no settled answer. **`io.File` is the first type that wants it** — a descriptor is not closed for you |
-| **Floats in `f"..."`** | `Display` has no float impl. Ryū is a few hundred lines and a table; it belongs with the float work |
-| **Two declarations of one `@link_name`** | They collide and the mangler uniquifies one to `strlen.1`, which then does not link. Only reachable by writing two aliases of one C function, so it is noted rather than fixed |
+- **Pipes** (`pipe`, `dup2`, and a `Child` that owns two descriptors). Needed
+  the moment `twig` wants to *read* what `nestc` said rather than let it through.
+- **Buffered I/O.** Still the first thing `twig` will want that is not there.
 
 ## Not Yet Done (compiler)
 
@@ -146,14 +162,18 @@ Each is a real thing to want, and each says what it waits on:
       LLVM context per thread.
 - [ ] **A library format** (`.nlib` / `.nmeta`). A dependency is source today.
 - [ ] **Debug info.** Nothing emits DWARF. **Disableable by config** (your note).
-- [ ] **A `defer` captures at registration, and this one does not** (§8.4).
 - [ ] **`core.panic` prints nothing useful.** A trap says `nest: trap`. **`std`
       exists now**, so the `#lang("panic_handler")` a program may replace could
       finally print one — but `core` may not import `std`, so this is a decision
       about where the default handler lives rather than a missing function.
-- [ ] **A trait must be imported by name for its impls to apply.** `{ Eq } ::
-      import <core/cmp>` is needed; `cmp :: import <core/cmp>` is not enough.
-      Pre-existing, and it bit again in `std/mem`.
+- [ ] **`str.to_string(7)` where `str` is the *type*** reports "type annotations
+      needed", twice. A bad message for a program that is genuinely wrong — not
+      wrong behaviour, so it was left.
+- [ ] **Two declarations of one `@link_name`.** Still noted, still not
+      reproduced: both declarations were eliminated as dead code before the
+      mangler saw them, so the collision needs a program that actually calls both.
+- [ ] **`defer` does not capture its receiver** — see above. It needs the capture
+      to move into sema lowering, which needs a mutable `DefTable` there.
 - [ ] **Optimization across units**, per-function escape summaries, the
       object-start table, narrowing what counts as a root (§5/§6).
 
@@ -161,28 +181,20 @@ Each is a real thing to want, and each says what it waits on:
 
 Everything in the previous handoffs still stands. New this session:
 
-- **Declaring a variadic C function with fixed arity.** On arm64 the arguments
-  go in different places. `open` created files with garbage permissions and no
-  error until the *next* run could not read them.
-- **Reading the environment from `main`'s `envp`.** It is a snapshot; `setenv`
-  replaces the table.
-- **A field and an inherent method with the same name.** `Vec.len` the field
-  hides `len()` the method, and the struct literal then reports "`Vec` has no
-  field `len`". The field is `count`.
-- **Naming several impls where one blanket impl would do**, when the type
-  argument is still open. The choice forces a literal onto its default before
-  the body has said what it is — which is what a `Step` bound avoids.
-- **Building a C `char **` before the strings it points at are held somewhere
-  traced.** The table holds addresses, which are integers, which the collector
-  does not follow.
-- **Letting a test's `Session` keep the default target.** `Options::default` is
-  a 64-bit **Linux**, and `core/target.nest` is generated from it — so a program
-  built by a test on macOS opened files with Linux's flag bits, where
-  `O_APPEND` *is* `O_TRUNC`. Ask the backend: `session.options.target =
-  backend.target_info(None)?.target()`.
-- **A snapshot test with `codegen-units` near the file count.** `partition`
-  merges the smallest groups until there are at most `n`, so the picture depended
-  on how many files `core` happened to have. Pinned to 64, where nothing merges.
+- **`cargo fmt`.** The committed source is **not** rustfmt-clean: one run
+  rewrote 34 unrelated files (`+732 / −401`) and the churn landed in a commit
+  meant to be two files. The repo's hand-wrapped `assert_eq!`s and the long
+  inline Nest source strings in `src/sema/tests.rs` are deliberate. **Format by
+  hand, matching the surrounding style.** If it has already run, restore with
+  `git checkout -- $(git diff --name-only | grep -v <your files>)` and re-apply
+  your edits to pristine copies — the churn reaches inside your files too.
+- **Trusting a previous handoff's *diagnosis*** where it did not name a fix. The
+  "trait must be imported by name" item was a real symptom attached to the wrong
+  cause, and following it would have been an afternoon in `in_scope_traits` for a
+  bug that lived in `ty_from_node_in`.
+- **Writing a probe with `str :: import <std/str>`.** It shadows the prelude's
+  `str`. Bind it as `text` — which is also why the diagnostic above carries a
+  note rather than just a message.
 
 ## Key Decisions
 
@@ -190,26 +202,22 @@ Everything in the previous handoff still stands. New this session:
 
 | Decision | Rationale |
 |---|---|
-| `std` ships with the compiler, versioned with it | Your decision. One `std` per `nestc`, so a program never resolves which |
-| It is a *fallback* path, not a link | `import <std/io>` resolves out of the box; `-L` replaces it; nothing reaches it unasked |
-| `sys` is not re-exported | The backing is `std`'s own business; `<std/libc>` is the exposed raw surface |
-| `#when` waits until it blocks | Your decision. The `open` flags branch on the generated `OS` instead |
-| The runtime grows only for what Nest cannot say | Three functions: a macro, a variadic call, a hidden symbol |
-| The entry point's `argv` is an integer, not a pointer | The collector must not trace C's stack |
-| One `Iterator` impl for `Range`, over a `Step` bound | Several would settle the element type before the body was read |
-| A sub-slice inherits the slice's permission | It is the same elements; anything else makes a partial write unsayable |
-| An array's sub-slice does not | `[N]T` carries no mutability, so permission belongs to whatever holds it |
-| `io.Error` carries the operation and the subject | `open "nest.toml": No such file or directory` without the caller assembling it |
-| A failed `print` is ignored | A `Result` would put a `.?` on every line of output in every program |
-| `spawn`'s `args` exclude `argv[0]` | The alternative is a list whose first element must be repeated |
-| `HashMap` is open-addressed with linear probing | No allocation per entry, and the bucket is a mask |
-| No owned `String` yet | `Buf` and `Vec.<u8>` are each already one |
+| A name in type position that is not a type is **reported**, not silently an error type | It is the only place that can say it, and nothing downstream can recover the span |
+| The message quotes the path the program **wrote** | The def's name is `std` for a `str :: import <std/str>`, which points at a package the program never named |
+| A trait named in a **bound** is in scope for it | Writing the bound is as clear a statement that the trait is wanted as importing its name |
+| …and the set is **per file**, not per generic list | Selection is per file already; a trait bounding one function is not a surprising candidate inside another beside it |
+| `parse_assign` **falls back** rather than reporting | The classifier's lookahead is a line, and a line is not a statement |
+| A non-place assignment is the **mutability** pass's job | It already owns the left side of an assignment, and "not writable" and "not a place" are the same question asked twice |
+| A `defer` captures its **arguments**, not its receiver | Desugar runs before inference; a receiver captured by value would defer a mutating method's effect to a copy |
+| The capture binds into the **enclosing** block | A block of its own is a scope that ends immediately |
+| An unreported error type at codegen is an **`internal:`** diagnostic | It is a defect in this compiler, and it should read like one instead of like an LLVM crash |
+| …and it runs **only when nothing else spoke** | After a real error the IR is full of error types by design |
 
 ## Current State
 
-**Working**: everything. `cd nestc && cargo test` → **583**;
+**Working**: everything. `cd nestc && cargo test` → **589**;
 `LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 cargo test --features llvm` →
-**600**.
+**606**.
 
 **Broken**: nothing known.
 
@@ -219,69 +227,74 @@ Everything in the previous handoff still stands. New this session:
 
 | File | Why it matters |
 |---|---|
-| `design/toolchain.md` | **The plan.** Step 6 now says what it turned out to be |
+| `design/toolchain.md` | **The plan.** Unchanged this session; step 9 is `twig` |
 | `design/lir.md` | The specification. §7d overflow, §10 the backend's brief, §11 the unit split |
-| `packages/std/sys.nest` | **The swap point.** The only file above `libc` that knows there is one |
-| `packages/std/libc.nest` | The raw surface, and the four `open` flags that branch on the target |
-| `runtime/nest_runtime.c` | Ten functions. `nest_open`, `nest_errno`, `nest_envp` are the new three |
-| `nestc/src/lir/entry.rs` | `argc` / `argv`, and why they are integers |
-| `nestc/src/sema/lower.rs` | `carry_instantiation` — the `.?` fix |
-| `nestc/src/sema/collect.rs` | `link_name` |
-| `nestc/src/sema/session.rs` | `default_std_path`, and the `std` registration beside `core`'s |
-| `packages/core/range.nest` | `Step`, and the one `Iterator` impl |
+| `nestc/src/sema/infer.rs` | `typepath_ty` (the `FieldAccess` arm, the report), `written_path_in`, `bound_traits` |
+| `nestc/src/sema/desugar.rs` | `capture_defers` — and the comment saying what it deliberately does not capture |
+| `nestc/src/ir/check/residue.rs` | **The backstop.** New file, and the one to read first when the backend crashes with no span |
+| `nestc/src/ir/check/mutability.rs` | `is_place`, in front of the permission question |
+| `nestc/src/parser/item.rs` | `scan_binding_kind` and `parse_assign` — the line-versus-statement seam |
+| `packages/std/` | Seven namespaces over `sys`. Written in same-file, unqualified style, which is why it never hit any of this |
 
 ## Resume Instructions
 
-1. `cd nestc && cargo test` — expect **583 passed**.
+1. `cd nestc && cargo test` — expect **589 passed**.
 2. With the backend:
    ```
    export LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21
-   cargo test --features llvm          # expect 600
+   cargo test --features llvm          # expect 606
    cargo build --features llvm
    ```
-3. **See the floor hold**:
+3. **See all six fixes hold at once** — this program uses a qualified literal, a
+   qualified bound, a call followed by an assignment on one line, and a `defer`
+   whose argument must be read at registration:
    ```
-   cat > /tmp/f.nest <<'EOF'
-   io :: import <std/io>
-   fs :: import <std/fs>
-   process :: import <std/process>
+   cat > /tmp/big.nest <<'EOF'
+   io   :: import <std/io>
+   text :: import <std/str>
+   col  :: import <std/collections>
+   cmp  :: import <core/cmp>
+   Kind :: enum { word(str), number(i64) }
+   Entry :: struct { key: str, value: Kind }
+   render :: func (v: Kind) -> str {
+     return v.match { .word(s) => s, .number(n) => text.to_string(n) }
+   }
+   same :: func <T: cmp.Eq> (a: T, b: T) -> bool { return a.eq(b) }
    main :: func () -> i32 {
-     fs.write("/tmp/f.txt", "alpha\n".as_bytes()).match { .ok(_) => (), .err(e) => { io.eprintln(e.describe())  return 1 } }
-     io.print(fs.read_to_string("/tmp/f.txt").match { .ok(t) => t, .err(_) => "" })
-     for a in process.args() { io.println(a) }
-     return cast.<i32>(process.args().len())
+     defer io.println("-- done")
+     let mut es: col.Vec.<Entry> := col.new.<Entry>()
+     es.push(Entry { key: "name", value: .word("twig") })
+     es.push(Entry { key: "count", value: .number(3) })
+     let mut i: usize := 0
+     for k in 0..<es.len() {
+       let e: Entry := es.get(k).match { .some(v) => v, .none => Entry { key: "", value: .number(0) } }
+       io.println(text.concat(text.concat(e.key, "="), render(e.value))) i = i + 1
+     }
+     io.println(same("a", "a").match { true => "eq", false => "ne" })
+     return cast.<i32>(i)
    }
    EOF
-   ./target/debug/nestc -o /tmp/f /tmp/f.nest && /tmp/f one two; echo $?   # 3
+   ./target/debug/nestc -o /tmp/big /tmp/big.nest && /tmp/big; echo $?   # 2, "-- done" last
    ```
-4. **Then step 7**, `std/json` — parse and serialize over any type through step
-   5's **run-time** walk, with `@json(...)` for renaming. Everything it needs is
-   built: `core/reflect` walks the type, `std/fs` reads the document,
-   `std/collections` holds the object, and `std/str` reads the numbers.
-   *Done when*: a struct round-trips, a renamed member honours its attribute,
-   and a malformed document is an error rather than a trap.
+4. **Then `twig`**, which is what was asked for and is not started. The design
+   above is settled; the first file to write is the TOML reader, because it is
+   the only part with nothing to copy from. *Done when*: `twig build` builds a
+   package with a dependency, and `twig run` runs it.
 
 ## Edge Cases & Error Handling
 
 Everything in the previous handoff still stands. New this session:
 
-- **A range with no start panics when iterated.** `for i in ..<5` has no first
-  element; answering `.none` would run the loop zero times and say nothing.
-- **An inclusive range does not compute `b + 1`.** `0..=255` over a `u8` would
-  trap on the iteration that is supposed to end the loop; reaching the end
-  replaces the range with an empty one.
-- **`sys` reads `errno` in the same statement that detects the failure.** Any
-  later call may overwrite it.
-- **A `Res` whose `n` is negative never has a zero `err`.** It would read as a
-  success with a nonsense count everywhere above.
-- **`fs.read_to_string` does not validate UTF-8**, on purpose — `str.from_utf8`
-  is the check, and validating every file read costs a pass over it.
-- **A `File` is not closed for you.** No destructors; the whole-file functions
-  close their own, on both exits.
-- **`process.run` answers 127 for a program that does not exist**, because the
-  child `_exit`s with it after a failed `exec` — it must not return.
-- **An empty `read`/`write` answers zero** rather than indexing `&s[0]` on a
-  zero-length slice.
+- **A `defer` with no arguments is left alone.** `defer f()` has nothing to
+  capture, and rewriting it would only add nodes.
+- **A `defer` whose body is a block is left alone too.** Only a `Call` is
+  rewritten, which is why the block form still catches a use-after-drop.
+- **The residue pass reports one expression per function**, not one per node: an
+  error type propagates to every parent, so a body would otherwise be a wall.
+- **A non-place assignment is not reported when the place's type already
+  mentions an error** — it would be the second sentence about one mistake.
+- **`written_path_in` walks a `FieldAccess` chain**, so a qualified name in a
+  message reads `ns.P` rather than its last segment.
 
 ## User Notes (standing)
 
@@ -299,7 +312,7 @@ Everything in the previous handoff still stands. New this session:
 - **`std` is not linked automatically**; that is `twig`'s job. Done — it is a
   resolvable package, not a linked one.
 - **`twig` is written in Nest**, so `std` needs fs, io and JSON serialization.
-  fs and io exist; JSON is step 7.
+  fs and io exist; JSON is step 7 and is still not written.
 - **`nestc` supports structured output as JSON.** Done.
 - **There should be `insta` snapshot tests over the generated LLVM**, with no
   target-specific content. *Still not done.*
@@ -313,8 +326,8 @@ Everything in the previous handoff still stands. New this session:
 - **If you are unsure or need further guidance, ask.**
 
 ## User Notes
-- **Step 6 was asked for and is done and committed.**
-- **`std` is versioned with the compiler** (your answer this session).
-- **`#when` waits until it blocks** (your answer this session). It has not yet.
-- The focus is now `std/json`, the library format, `twig` and the LSP — steps 7
-  through 10.
+- **You asked for `twig` (step 9), out of order**, then for the bugs to be fixed
+  first. The bugs are fixed and committed; **`twig` is not started.**
+- **`std/json` (7) and the library format (8) are still unwritten**, and `twig`
+  as designed above does not need either — but it cannot render a child's
+  diagnostics without both pipes and JSON.
