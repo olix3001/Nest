@@ -3269,9 +3269,16 @@ fn ir_snap_index_and_slice() {
 }
 
 #[test]
-fn ir_snap_range_forms_pick_variants() {
-    // Every surface range form keeps its bound count and its `..<` / `..=`
-    // distinction as a distinct `#lang("range")` enum variant.
+fn ir_snap_range_forms_become_two_bounds() {
+    // **Slicing never builds a `Range`.** The parser makes a `Slice` node only
+    // when the index is syntactically a range, so which of the six forms was
+    // written is known at lowering and does not have to be carried as a tag for
+    // something later to switch on. Each becomes the same two bounds, both
+    // present and both exclusive: a missing start is `0`, a missing end is
+    // `$len`, and `..=b` is `b + 1`.
+    //
+    // The `#lang("range")` enum still exists and is still what `for i in 1..<3`
+    // iterates — this is about the *slice* operation, which never needed it.
     insta::assert_snapshot!(ir_text(
         "rs :: func (a: []i32) {\n  let e := a[1..<3]\n  let i := a[1..=3]\n  let f := a[1..]\n  let t := a[..<3]\n  let ti := a[..=3]\n  let u := a[..]\n}\n"
     ));
@@ -4728,14 +4735,15 @@ fn the_len_intrinsic_rejects_a_type_with_no_length() {
 #[test]
 fn a_fixed_array_unsizes_to_a_read_only_slice() {
     // One `func (s: []T)` serves every length; the IR shows the full sub-slice
-    // the source left implicit — the same `slice` an explicit `a[..]` emits.
+    // the source left implicit — the same `slice`, with the same two bounds,
+    // that an explicit `a[..]` emits.
     let s = analyze_clean(
         "take :: func (s: []i32) -> usize { return s.len() }\nf :: func () -> usize {\n  const a := [_]i32 { 1, 2, 3 }\n  return take(a)\n}\n",
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(
-        ir.contains("$slice(a: [3]i32, .full: core.Range.<usize>): []i32"),
+        ir.contains("$slice(a: [3]i32, 0: usize, 3: usize): []i32"),
         "{ir}"
     );
 }

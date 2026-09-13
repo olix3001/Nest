@@ -1227,14 +1227,35 @@ the four names it used to have for "build a struct" were four names for one
 operation, and the type says which struct. `Offset` is a GEP in elements with the
 stride in bytes beside it.
 
-**Thirteen intrinsics** reach a backend, and each is one instruction or one
-runtime call: `new`, `make`, `trap`, `assert`, `transmute`, `slice`, `array`,
-`repeat`, `format`, `embed_file`, `gc_collect`, `gc_keep_alive`, `gc_pin`.
-Everything else a `#intrinsic` declares is *gone* by this point — `size_of`,
-`align_of` and `cast` are constants, `index` and `len` are projections,
-`wrapping_add` and `wrapping_sub` are opcodes, `drop` is a statement. A test
-asserts that mapping is total, so a row added to `sema::intrinsics` with no case
-here fails the build rather than arriving at a backend as a name.
+**Eleven intrinsics** reach a backend, and each is one instruction or one
+runtime call: `new`, `make`, `trap`, `assert`, `transmute`, `repeat`, `format`,
+`embed_file`, `gc_collect`, `gc_keep_alive`, `gc_pin`. Everything else a
+`#intrinsic` declares is *gone* by this point — `size_of`, `align_of` and `cast`
+are constants, `index` and `len` are projections, `wrapping_add` and
+`wrapping_sub` are opcodes, `drop` is a statement. A test asserts that mapping is
+total, so a row added to `sema::intrinsics` with no case here fails the build
+rather than arriving at a backend as a name.
+
+**`slice` and `array` were on that list and are not any more**, and why they left
+is the rule the list has to keep earning. `$slice` took a `Range` — the
+`#lang("range")` **enum**, six variants — so a backend would have had to switch
+on a tag and compute a start and an end. That is not one instruction, and it is
+not information a run-time value ever had to carry: the parser builds a slice
+node only when the index is *syntactically* a range, so `sema::lower` now emits
+the two bounds directly (both present, both exclusive: a missing start is `0`, a
+missing end is `$len`, and `..=b` is `b + 1`). With plain numbers arriving,
+`lir::lower` finishes the job — the pointer is an `Offset` and the length is a
+`sub`, which is an `Aggregate` over two operands and no intrinsic at all.
+
+`$array` on a slice type went the same way: its elements need storage, so it is a
+`make` and a store per element. **An intrinsic that needs a branch is not an
+intrinsic**, and one built out of instructions a backend already has belongs in
+the lowering, where every backend gets it once. `repeat` and `format` are the two
+that still owe this treatment.
+
+A test asserts the *absence*: `slice`, `array` and `index_mut` must have no
+`lir::Intrinsic` case, so emitting one again makes it an `Unknown` and fails
+`no_program_contains_an_unknown_intrinsic` rather than reaching a backend.
 
 `transmute` is the only one whose result type is read off `dest` rather than
 carried in the operation, because the operation *is* "reinterpret as whatever

@@ -748,20 +748,17 @@ impl Lowerer<'_> {
         // exactly what `a[..]` emits.
         if let Some(sc) = self.ast.meta::<SliceCoerce>(node) {
             let value = self.lower_expr_inner(node);
-            let full = self.expr(
-                node,
-                sc.range,
-                ExprKind::Variant {
-                    name: Symbol::new("full"),
-                    args: Vec::new(),
-                },
-            );
+            // `a[..]`, with its two bounds written out — see [`Self::lower_slice`]
+            // for why a slice never builds a `Range`.
+            let index = self.bound_ty(&sc.range);
+            let start = self.derived_expr(value.id, index.clone(), ExprKind::Lit(Lit::Int(0.into())));
+            let end = self.len_expr(value.clone(), index);
             return self.expr(
                 node,
                 sc.to,
                 ExprKind::Intrinsic {
                     name: Symbol::new("slice"),
-                    args: vec![value, full],
+                    args: vec![value, start, end],
                 },
             );
         }
@@ -988,17 +985,7 @@ impl Lowerer<'_> {
                 Some(res) => self.lower_index_call(node, res, base, index, ty),
                 None => self.expr(node, ty, ExprKind::Error),
             },
-            NodeKind::Slice { base, range } => {
-                let args = vec![self.lower_expr(base), self.lower_expr(range)];
-                self.expr(
-                    node,
-                    ty,
-                    ExprKind::Intrinsic {
-                        name: Symbol::new("slice"),
-                        args,
-                    },
-                )
-            }
+            NodeKind::Slice { base, range } => self.lower_slice(node, base, range, ty),
             // A range is not an intrinsic: it is a value of the `#lang("range")`
             // enum, one variant per surface form so the bound count and the
             // `..<` / `..=` distinction survive lowering.
@@ -2142,6 +2129,73 @@ impl Lowerer<'_> {
                 args: vec![base],
             },
         )
+    }
+
+    /// `a[i..<j]`, as the two bounds it names.
+    ///
+    /// **A slice never builds a `Range`.** The parser produces a `Slice` node
+    /// only when the index is *syntactically* a range
+    /// (`parse_index_or_slice`), so which of the six forms it is — `..`, `a..`,
+    /// `..<b`, `..=b`, `a..<b`, `a..=b` — is known right here. Constructing the
+    /// enum anyway would hand a backend a six-way branch on a tag, to recover a
+    /// fact this function already had; `design/lir.md` §10 says an intrinsic is
+    /// one instruction or one runtime call, and a range-taking `$slice` is
+    /// neither.
+    ///
+    /// Both bounds come out **exclusive and present**, so everything downstream
+    /// has one convention instead of a flag: a missing start is `0`, a missing
+    /// end is the sequence's length, and `..=b` is `b + 1`.
+    fn lower_slice(&mut self, node: NodeId, base: NodeId, range: NodeId, ty: Ty) -> Expr {
+        let value = self.lower_expr(base);
+        let NodeKind::Range { start, end, kind } = self.ast.node(range).kind else {
+            // The parser does not build a `Slice` over anything else, so this is
+            // a tree that was already wrong.
+            return self.expr(node, ty, ExprKind::Error);
+        };
+        let index = self.bound_ty(&self.ty(range));
+        let start = match start {
+            Some(s) => self.lower_expr(s),
+            None => self.derived_expr(value.id, index.clone(), ExprKind::Lit(Lit::Int(0.into()))),
+        };
+        let end = match end {
+            Some(e) => {
+                let e = self.lower_expr(e);
+                // `..=b` includes `b`, and every bound below this line is
+                // exclusive. One convention, settled here.
+                if kind == RangeKind::Closed {
+                    let one = self.derived_expr(e.id, index.clone(), ExprKind::Lit(Lit::Int(1.into())));
+                    self.derived_expr(
+                        e.id,
+                        index.clone(),
+                        ExprKind::Binary {
+                            op: BinOp::Add,
+                            lhs: Box::new(e),
+                            rhs: Box::new(one),
+                        },
+                    )
+                } else {
+                    e
+                }
+            }
+            None => self.len_expr(value.clone(), index),
+        };
+        self.expr(
+            node,
+            ty,
+            ExprKind::Intrinsic {
+                name: Symbol::new("slice"),
+                args: vec![value, start, end],
+            },
+        )
+    }
+
+    /// The type a range's bounds have: the `T` of the `Range.<T>` inference gave
+    /// it, which is the index type of the sequence being sliced.
+    fn bound_ty(&self, range: &Ty) -> Ty {
+        match range {
+            Ty::Nominal { args, .. } => args.first().cloned().unwrap_or(Ty::Error),
+            _ => Ty::Error,
+        }
     }
 
     /// Apply the receiver adjustment a method call implies, spelling out in the

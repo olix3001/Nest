@@ -3,6 +3,6 @@ source: src/sema/tests.rs
 expression: "ir_text(\"ix :: func (a: []i32) -> i32 {\\n  let b := a[1..<3]\\n  return a[0]\\n}\\n\")"
 ---
 func ix(a: []i32) -> i32 {
-  let b: []i32 = $slice(a: []i32, .exclusive($cast(1: comptime_int): usize, $cast(3: comptime_int): usize): core.Range.<usize>): []i32
+  let b: []i32 = $slice(a: []i32, $cast(1: comptime_int): usize, $cast(3: comptime_int): usize): []i32
   return ($index((&a: []i32): *[]i32, $cast(0: comptime_int): usize): *i32.*): i32
 }

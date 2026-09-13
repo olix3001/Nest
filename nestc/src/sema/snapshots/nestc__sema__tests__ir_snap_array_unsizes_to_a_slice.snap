@@ -7,5 +7,5 @@ func take(s: []i32) -> usize {
 }
 func f() -> usize {
   let a: [3]i32 = $array($cast(1: comptime_int): i32, $cast(2: comptime_int): i32, $cast(3: comptime_int): i32): [3]i32
-  return (take: func([]i32) -> usize)($slice(a: [3]i32, .full: core.Range.<usize>): []i32): usize
+  return (take: func([]i32) -> usize)($slice(a: [3]i32, 0: usize, 3: usize): []i32): usize
 }

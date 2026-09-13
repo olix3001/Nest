@@ -562,6 +562,16 @@ pub enum Callee {
     /// It is an **enum** rather than a symbol so that a backend's match is
     /// exhaustive: an intrinsic added upstream is then a compile error in every
     /// backend rather than a silent fall-through.
+    ///
+    /// Every member is one instruction or one runtime call, and that is a rule
+    /// this list has to keep earning. `slice` and `array` were once here and are
+    /// not any more: a slice is an `Offset` and an `Aggregate` over a pointer
+    /// and a length, and a slice literal is a `make` and a store per element.
+    /// Both were built out of instructions a backend already had, so both
+    /// belonged in the lowering — the `slice` one especially, since it used to
+    /// take a `Range`, which is a six-variant enum and would have made every
+    /// backend switch on a tag to recover what the syntax already knew. An
+    /// intrinsic that needs a branch is not an intrinsic.
     Intrinsic(Intrinsic),
 }
 
@@ -587,11 +597,6 @@ pub enum Intrinsic {
     /// type is not in the instruction: it is on the destination, because "become
     /// whatever this slot holds" is what the operation *is*.
     Transmute,
-    /// A slice literal — the elements, and storage for them.
-    Slice,
-    /// An array literal that is not a value of an array type (a slice literal's
-    /// backing, before §7b's storage question is answered).
-    Array,
     /// `n` copies of a value.
     Repeat,
     /// String formatting (§6.11).
@@ -622,8 +627,6 @@ impl Intrinsic {
             Intrinsic::Trap => "trap",
             Intrinsic::Assert => "assert",
             Intrinsic::Transmute => "transmute",
-            Intrinsic::Slice => "slice",
-            Intrinsic::Array => "array",
             Intrinsic::Repeat => "repeat",
             Intrinsic::Format => "format",
             Intrinsic::EmbedFile => "embed_file",
@@ -642,8 +645,6 @@ impl Intrinsic {
             "trap" => Intrinsic::Trap,
             "assert" => Intrinsic::Assert,
             "transmute" => Intrinsic::Transmute,
-            "slice" => Intrinsic::Slice,
-            "array" => Intrinsic::Array,
             "repeat" => Intrinsic::Repeat,
             "format" => Intrinsic::Format,
             "embed_file" => Intrinsic::EmbedFile,

@@ -70,6 +70,15 @@ fn unsupported(what: impl std::fmt::Display) -> CodegenError {
     CodegenError::Unsupported(what.to_string())
 }
 
+/// Say which function or global a failure was in.
+fn within(who: &str, e: CodegenError) -> CodegenError {
+    match e {
+        CodegenError::Unsupported(m) => CodegenError::Unsupported(format!("{who}: {m}")),
+        CodegenError::Failed(m) => CodegenError::Failed(format!("{who}: {m}")),
+        other => other,
+    }
+}
+
 /// A message about this backend or the lowering being wrong.
 fn failed(what: impl std::fmt::Display) -> CodegenError {
     CodegenError::Failed(what.to_string())
@@ -93,13 +102,16 @@ pub fn build<'ctx>(
         funcs: Vec::new(),
     };
 
+    // Each phase names what it was working on when it failed. A message that
+    // says only "`void` is not a type a value can have" is a message somebody
+    // has to bisect a program to act on.
     cx.declare_types();
     cx.declare_globals()?;
     cx.declare_funcs()?;
     cx.define_globals()?;
     for (i, f) in unit.funcs.iter().enumerate() {
         if !f.blocks.is_empty() {
-            cx.define_func(i, f)?;
+            cx.define_func(i, f).map_err(|e| within(&f.name, e))?;
         }
     }
     Ok(cx.module)
@@ -247,7 +259,7 @@ impl<'ctx> Cx<'ctx, '_> {
 impl<'ctx> Cx<'ctx, '_> {
     fn declare_globals(&mut self) -> Result<()> {
         for g in &self.unit.globals {
-            let ty = self.llty(&g.ty)?;
+            let ty = self.llty(&g.ty).map_err(|e| within(&g.name, e))?;
             let global = self
                 .module
                 .add_global(ty, Some(AddressSpace::default()), g.symbol.as_str());
@@ -275,10 +287,10 @@ impl<'ctx> Cx<'ctx, '_> {
                 continue;
             }
             let value = match &g.init {
-                Some(c) => self.constant(&g.ty, c)?,
+                Some(c) => self.constant(&g.ty, c).map_err(|e| within(&g.name, e))?,
                 // `init: None` means zeroed, and is the only spelling of it
                 // (§9): a second one would be an overlap.
-                None => self.zeroed(&g.ty)?,
+                None => self.zeroed(&g.ty).map_err(|e| within(&g.name, e))?,
             };
             self.globals[i].set_initializer(&value);
         }
@@ -304,7 +316,7 @@ impl<'ctx> Cx<'ctx, '_> {
 
     fn declare_funcs(&mut self) -> Result<()> {
         for f in &self.unit.funcs {
-            let sig = self.signature(f)?;
+            let sig = self.signature(f).map_err(|e| within(&f.name, e))?;
             // **Every definition is external.** LIR carries `attrs.public`, but
             // that is a statement about the *language's* visibility, and the
             // split (§11) is free to put a private function's one definition in
@@ -520,6 +532,11 @@ impl<'ctx> Cx<'ctx, '_> {
                 let mut values: Vec<BasicValueEnum<'ctx>> = Vec::new();
                 let mut at = 0u64;
                 for (m, c) in members.iter().zip(fields) {
+                    // A zero-byte member contributes no bytes, the same way it
+                    // takes no store above.
+                    if self.size_of(&m.ty) == 0 {
+                        continue;
+                    }
                     if m.offset > at {
                         values.push(self.zero_bytes(m.offset - at));
                     }
@@ -1236,6 +1253,17 @@ impl<'ctx> Cx<'ctx, '_> {
                     let m = def.members.get(i).ok_or_else(|| {
                         failed(format!("{}: `{}` has no member {i}", f.name, def.name))
                     })?;
+                    // **A member of no size is written by writing nothing.**
+                    // `void` is the one that turns up — `Option`'s `Residual`, a
+                    // `ControlFlow.<void, T>`'s `stop` payload — and §9 erases
+                    // `void` from slots, parameters and arguments but not yet
+                    // from a type's members, so the operand arrives as `undef`
+                    // against a type no register holds. This is not a special
+                    // case for `void`, though: a zero-byte member has nothing to
+                    // store whatever it is.
+                    if self.size_of(&m.ty) == 0 {
+                        continue;
+                    }
                     let v = self.operand(fx, f, value, &m.ty)?;
                     self.store(self.at(dest, m.offset)?, v, &m.ty)?;
                 }
@@ -1285,6 +1313,10 @@ impl<'ctx> Cx<'ctx, '_> {
                     let m = vdef.members.get(i).ok_or_else(|| {
                         failed(format!("{}: `{}` has no member {i}", f.name, vdef.name))
                     })?;
+                    // As above: nothing to store, so nothing is stored.
+                    if self.size_of(&m.ty) == 0 {
+                        continue;
+                    }
                     let v = self.operand(fx, f, value, &m.ty)?;
                     self.store(self.at(dest, payload.offset + m.offset)?, v, &m.ty)?;
                 }
@@ -1491,13 +1523,12 @@ impl<'ctx> Cx<'ctx, '_> {
                 let v = self.operand(fx, f, &args[0], &from)?;
                 self.store(ptr, v, &from)
             }
-            // The three sequence builders and the two compile-time ones. Each is
-            // more than "one instruction or one runtime call", which is what
-            // §10 claims of an intrinsic, and the honest answer is to say so
-            // rather than to invent a lowering here that the next backend would
-            // have to invent again differently. See `design/roadmap.md` §10.
-            Intrinsic::Slice | Intrinsic::Array | Intrinsic::Repeat | Intrinsic::Format
-            | Intrinsic::EmbedFile => Err(unsupported(format!(
+            // Three left that are more than "one instruction or one runtime
+            // call", which is what §10 claims of an intrinsic. `slice` and
+            // `array` used to be on this list and are now lowered in LIR —
+            // which is where these belong too, rather than being invented here
+            // and then invented differently by the next backend.
+            Intrinsic::Repeat | Intrinsic::Format | Intrinsic::EmbedFile => Err(unsupported(format!(
                 "{}: `${}` needs a lowering LIR does not yet give it",
                 f.name,
                 which.name()

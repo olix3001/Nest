@@ -1900,11 +1900,31 @@ fn every_declared_intrinsic_has_a_lir_case() {
         );
         assert_eq!(i.name(), row.tag, "`{}` round-trips", row.tag);
     }
-    // And the ones `sema::lower` synthesizes as it desugars.
-    for name in ["slice", "array", "repeat", "format", "index_mut"] {
+    // And the ones `sema::lower` synthesizes as it desugars. These still reach a
+    // backend, so they still need a case.
+    for name in ["repeat", "format"] {
         let i = Intrinsic::from_name(&Symbol::new(name));
-        let handled = !matches!(i, Intrinsic::Unknown(_)) || name == "index_mut";
-        assert!(handled, "`{name}` has no case in lir::Intrinsic");
+        assert!(
+            !matches!(i, Intrinsic::Unknown(_)),
+            "`{name}` has no case in lir::Intrinsic"
+        );
+    }
+    // And these are **lowered away**, so they must have no case at all.
+    //
+    // The direction of the assertion is the point. A slice is an `Offset` and
+    // an `Aggregate` over a pointer and a length; a slice literal is a `make`
+    // and a store per element; `index_mut` is a projection. All three are built
+    // from instructions a backend already has, so leaving a variant behind for
+    // them would be leaving something every backend must match and nothing can
+    // produce. If one is ever emitted again it becomes an `Unknown`, and
+    // `no_program_contains_an_unknown_intrinsic` fails rather than a backend
+    // quietly receiving a name.
+    for name in ["slice", "array", "index_mut"] {
+        let i = Intrinsic::from_name(&Symbol::new(name));
+        assert!(
+            matches!(i, Intrinsic::Unknown(_)),
+            "`{name}` is lowered away and should have no case in lir::Intrinsic"
+        );
     }
 }
 

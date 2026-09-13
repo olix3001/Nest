@@ -2629,6 +2629,143 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     _ => Some(Rvalue::Ref(base.then(Projection::Index(i)))),
                 }
             }
+            // A **slice** literal: storage, the elements written into it, and
+            // the header over them.
+            //
+            // The array case below is an aggregate because an array *is* its
+            // storage. A slice is not — its elements have to live somewhere —
+            // and where that is is an allocation question. So this is `make`
+            // and a store per element, which are instructions a backend already
+            // has, rather than a fourteenth intrinsic for it to implement.
+            "array" if matches!(ty, Ty::Slice { .. }) => {
+                let Ty::Slice { inner, .. } = &ty else {
+                    return None;
+                };
+                let elem = (**inner).clone();
+                let stride = self.cx.stride(&elem);
+                let vals: Vec<Operand> = args.iter().map(|a| self.eval(a)).collect();
+                let n = vals.len() as i128;
+
+                let slot = self.temp(ty.clone(), span);
+                self.push(
+                    LirStmtKind::Call {
+                        dest: Some(Place::local(slot)),
+                        callee: Callee::Intrinsic(Intrinsic::Make),
+                        args: vec![Operand::int(n)],
+                    },
+                    span,
+                );
+
+                let data = Place::local(slot).then(Projection::Field {
+                    index: 0,
+                    name: Symbol::new("ptr"),
+                });
+                for (i, v) in vals.into_iter().enumerate() {
+                    let at = self.temp(
+                        Ty::Ptr {
+                            mutable: true,
+                            inner: Box::new(elem.clone()),
+                        },
+                        span,
+                    );
+                    self.assign(
+                        Place::local(at),
+                        Rvalue::Offset {
+                            ptr: Operand::Copy(data.clone()),
+                            index: Operand::int(i as i128),
+                            stride,
+                        },
+                        span,
+                    );
+                    self.assign(
+                        Place::local(at).then(Projection::Deref),
+                        Rvalue::Use(v),
+                        span,
+                    );
+                }
+                Some(Rvalue::Use(Operand::Copy(Place::local(slot))))
+            }
+            // A sub-slice: an **address and a length**, and no intrinsic at
+            // all by the time a backend sees it.
+            //
+            // Three plain numbers arrive here — `sema::lower`'s `lower_slice`
+            // decomposed the range, because the syntax already knew which of
+            // the six forms was written. So there is nothing left to branch on:
+            // the pointer is the base advanced by `start` elements and the
+            // length is `end - start`, which is one `Offset` and one
+            // `Aggregate`. A `$slice` that took a `Range` would have made every
+            // backend switch on a tag to rediscover that.
+            "slice" if args.len() == 3 => {
+                let seq = match self.cx.ty_of(args[0].id) {
+                    Ty::Ptr { inner, .. } => *inner,
+                    other => other,
+                };
+                let base = self.place_of(&args[0])?;
+                let start = self.eval(&args[1]);
+                let end = self.eval(&args[2]);
+                let (elem, from) = match &seq {
+                    // A slice of a slice starts at the data pointer it already
+                    // holds.
+                    Ty::Slice { inner, .. } => (
+                        (**inner).clone(),
+                        Operand::Copy(base.then(Projection::Field {
+                            index: 0,
+                            name: Symbol::new("ptr"),
+                        })),
+                    ),
+                    // An array *is* its storage, so the address of it is where
+                    // the elements begin.
+                    Ty::Array { inner, .. } => {
+                        let addr = self.temp(
+                            Ty::Ptr {
+                                mutable: false,
+                                inner: inner.clone(),
+                            },
+                            span,
+                        );
+                        self.assign(Place::local(addr), Rvalue::Ref(base), span);
+                        ((**inner).clone(), Operand::local(addr))
+                    }
+                    // Anything else is a program that did not type-check.
+                    _ => return None,
+                };
+                let stride = self.cx.stride(&elem);
+                let usize_ty = self.cx.usize_ty();
+
+                let ptr = self.temp(
+                    Ty::Ptr {
+                        mutable: false,
+                        inner: Box::new(elem),
+                    },
+                    span,
+                );
+                self.assign(
+                    Place::local(ptr),
+                    Rvalue::Offset {
+                        ptr: from,
+                        index: start.clone(),
+                        stride,
+                    },
+                    span,
+                );
+                let len = self.temp(usize_ty.clone(), span);
+                let at = self.cx.lir(&usize_ty);
+                self.assign(
+                    Place::local(len),
+                    Rvalue::Op {
+                        op: Op::Sub,
+                        ty: at,
+                        args: vec![end, start],
+                    },
+                    span,
+                );
+                let lty = self.cx.lir(&ty);
+                let kind = self.struct_kind(&lty);
+                Some(Rvalue::Aggregate {
+                    kind,
+                    fields: vec![Operand::local(ptr), Operand::local(len)],
+                })
+            }
             // A sequence's length: a fixed array's is part of its type and a
             // slice keeps it in its second member, so neither needs code.
             "len" if args.len() == 1 => {

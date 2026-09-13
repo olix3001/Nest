@@ -44,7 +44,7 @@ fn ir(src: &str) -> String {
     backend.target_info(None).expect("the host resolves");
     let dir = std::env::temp_dir().join("nestc-llvm-tests");
     std::fs::create_dir_all(&dir).unwrap();
-    let out: PathBuf = dir.join(format!("{:x}.ll", hash(src)));
+    let out: PathBuf = dir.join(format!("{:x}.{}.ll", hash(src), unique()));
     backend
         .emit_unit(program.unit(), OutputKind::Ir, &out)
         .unwrap_or_else(|e| panic!("emitting:\n{e}"));
@@ -52,11 +52,22 @@ fn ir(src: &str) -> String {
 }
 
 /// A name for a temporary file that two tests running at once cannot share.
+///
+/// The hash alone is not enough: two tests may compile the *same* source to
+/// check two different things about it, and the test harness runs them on
+/// different threads — so they would write and read one file and one of them
+/// would see the other's truncation. The counter is what keeps them apart.
 fn hash(s: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+fn unique() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// **A function comes out, with its mangled symbol and its signature.**
@@ -304,14 +315,15 @@ fn a_triple_with_no_name_here_is_refused() {
     assert!(matches!(err, CodegenError::Unsupported(_)), "{err:?}");
 }
 
-/// **Every example emits.**
+/// **Every example emits an object file.**
 ///
 /// The failures worth catching are the ones a hand-written test does not
 /// contain — a type only `core`'s `Result` reaches, an intrinsic one example
-/// uses. Anything this backend does not yet lower is named here rather than
-/// silently skipped, so the list shrinks visibly as they land.
+/// uses, a `void` member of a `ControlFlow.<void, T>`. Every one of the four
+/// bugs this backend has found so far came from here rather than from the tests
+/// above it.
 #[test]
-fn every_example_emits_or_says_why() {
+fn every_example_emits_an_object() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
     let out_dir = std::env::temp_dir().join("nestc-llvm-examples");
     std::fs::create_dir_all(&out_dir).unwrap();
@@ -365,12 +377,11 @@ fn every_example_emits_or_says_why() {
     }
 
     assert!(emitted > 0, "no example emitted an object");
-    // The list is expected to be short and to shrink. It is asserted on so that
-    // an example that *starts* failing is a test failure rather than a quiet
-    // addition to it.
+    // **Empty.** Every example compiles, and an intrinsic that grows a hole
+    // again is a test failure rather than a quiet entry on a list.
     assert!(
-        pending.len() <= 2,
-        "more examples are unsupported than expected:\n{}",
+        pending.is_empty(),
+        "some examples no longer emit:\n{}",
         pending.join("\n")
     );
 }

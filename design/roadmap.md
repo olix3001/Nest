@@ -810,7 +810,7 @@ other two need `$slice`/`$array`, below); a linked program returns the right
 answer; and `overflow=trap` produces a real run-time trap (`nest: trap`,
 SIGABRT) rather than a wrapped number.
 
-### Next: `$slice` and `$array` want a lowering, not a backend case
+### Built: `$slice` and `$array` are lowered, not handed to a backend
 
 `$slice(a, r)` takes a `core.Range.<usize>` — an **enum with six variants** — so
 a backend would have to switch on the tag and compute a start and an end. That is
@@ -820,8 +820,26 @@ intrinsic, and it is abstraction LIR should not be carrying: the syntax
 before LIR ever sees them. `$array` and `$repeat` are the same shape — they need
 backing storage, which is an allocation and a fill.
 
-The fix is in the lowering, not in each backend: a slice becomes an `Offset` and
-an `Aggregate` over a pointer and a length, and every backend gets it for free.
+Both are fixed, in the lowering rather than in each backend.
+
+- **`sema::lower` decomposes the range.** All six forms become two bounds, both
+  present and both exclusive — a missing start is `0`, a missing end is `$len`,
+  `..=b` is `b + 1` — so one convention reaches everything downstream instead of
+  a tag plus a flag. The `#lang("range")` enum still exists and is still what
+  `for i in 1..<3` iterates; it was only ever ceremony for *slicing*.
+- **`lir::lower` finishes it.** With three plain numbers the pointer is an
+  `Offset` and the length is a `sub`, so a slice is an `Aggregate` over two
+  operands. `$array` on a slice type is a `make` and a store per element.
+- **The intrinsic list shrank from thirteen to eleven**, and `Intrinsic::Slice`
+  and `Intrinsic::Array` are gone from the enum — a variant nothing can produce
+  is a variant every backend still has to match. A test asserts their *absence*.
+
+**All ten files in `examples/` now emit object files.** Two more bugs fell out on
+the way: a `void` member of a `ControlFlow.<void, T>` reaching an aggregate as an
+`undef` operand (a zero-byte member is written by writing nothing), and a test
+helper that raced two emissions onto one temp file.
+
+`repeat` and `format` are the two intrinsics that still owe the same treatment.
 
 ### Done ahead of the backend: a conversion names its instruction
 

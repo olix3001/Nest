@@ -1,0 +1,12 @@
+---
+source: src/sema/tests.rs
+expression: "ir_text(\"rs :: func (a: []i32) {\\n  let e := a[1..<3]\\n  let i := a[1..=3]\\n  let f := a[1..]\\n  let t := a[..<3]\\n  let ti := a[..=3]\\n  let u := a[..]\\n}\\n\")"
+---
+func rs(a: []i32) -> void {
+  let e: []i32 = $slice(a: []i32, $cast(1: comptime_int): usize, $cast(3: comptime_int): usize): []i32
+  let i: []i32 = $slice(a: []i32, $cast(1: comptime_int): usize, ($cast(3: comptime_int): usize Add 1: usize): usize): []i32
+  let f: []i32 = $slice(a: []i32, $cast(1: comptime_int): usize, $len(a: []i32): usize): []i32
+  let t: []i32 = $slice(a: []i32, 0: usize, $cast(3: comptime_int): usize): []i32
+  let ti: []i32 = $slice(a: []i32, 0: usize, ($cast(3: comptime_int): usize Add 1: usize): usize): []i32
+  let u: []i32 = $slice(a: []i32, 0: usize, $len(a: []i32): usize): []i32
+}
