@@ -378,7 +378,7 @@ attribute, and a malformed document is an error rather than a trap.
 
 ### Step 8 — `.nlib` / `.nmeta`, and the rest of `nestc`'s debt to `twig`
 
-- The library format: `.nlib` (compiled code) and `.nmeta` (metadata alone), so
+- The library format: `.nlib` (archive format that combines pre-generated IR and metadata), and `.nmeta` (metadata alone), so
   a dependency stops being source recompiled into every program.
 - `-C opt-level`, running LLVM's pass manager.
 - `-C target-cpu`.
@@ -415,7 +415,7 @@ place, so what is left is a backend instance and an LLVM context per thread. It
 belongs wherever compile times start to hurt, which is probably during step 9.
 
 **Debug info** — DWARF, from the spans and origins LIR already carries. It
-belongs wherever debugging `twig` stops being possible by printing.
+belongs wherever debugging `twig` stops being possible by printing. Debug infos should be disable'able via config.
 
 ---
 
