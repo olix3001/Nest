@@ -64,10 +64,10 @@ unblocks everything else: without it a Nest program cannot call `open`, and
 
 ### Open questions for this stage
 
-- **Varargs** (`printf`). Not in the spec, not in the parser. A `printf` is the
-  first thing anyone tries; the alternative is that `std` only ever declares
-  fixed-arity C functions and does its own formatting, which it will do anyway.
-  Recorded as a decision, not assumed either way.
+- **Varargs are not supported.** Decided. `printf` is the first thing anyone
+  tries and it is not declarable — `std` declares fixed-arity C functions and
+  does its own formatting, which it was going to do anyway. A program that needs
+  a variadic C function writes a fixed-arity C shim.
 
 ---
 
@@ -96,7 +96,10 @@ backend is written now.
 
 ### What is in it
 
-The list is what `twig` needs, because `twig` is the first real program:
+**Only what `twig` and the language server need**, and nothing more. Decided:
+`std` is not a general-purpose library yet — it is the floor those two programs
+stand on, and what they turn out to want is what gets added. A library written
+speculatively is a library nobody has yet had to use.
 
 | Namespace | What for |
 |---|---|
@@ -183,8 +186,10 @@ unit, and already what every symbol is mangled from.
   `type_id.<u64>()` differ — which is the answer a checked read wants.
 - It also gives an **`Any`**, over machinery that is already there: `*dyn Trait`
   is `{ data, vtable }` and a vtable already exists per (trait, concrete type).
-  The open question when it lands is whether a blanket `impl <T> Any for T`
-  works.
+  **A blanket `impl <T> Any for T` does not work today**, and has to before
+  `Any` can exist: it type-checks and then fails in codegen
+  (`Void is not a type a value can have`) — a concrete `impl Named for P` on the
+  same trait runs correctly, so it is the blanket form specifically.
 
 **This does not compete with the compile-time path.** A selector known at compile
 time is the unrolled loop, statically typed, no check at all. A selector known
@@ -198,15 +203,17 @@ today. A precise or moving collector needs an interior address mapped back to
 the object it points into, which is exactly the **object-start table** already
 open in §5/§6 — the same item, reached from a second direction.
 
-**Decisions still open here** (see the bottom of this file): how the unrolling is
-spelled, and whether a `#unroll` directive on ordinary loops is the same feature.
+**Unrolling is spelled `#comptime`.** Decided — a **directive**, in the family
+`#inline` and `#intrinsic` already belong to, and deliberately not a statement
+keyword: `comptime for` was rejected, and this is not that. It says the loop is
+evaluated when the program is compiled, which is also what makes its body's
+per-member typing possible.
 
 ---
 
 ## Stage 3 — `twig`: the package tool, written in Nest
 
-The name is not settled (`hatch` is the other candidate). It is a build tool in
-the cargo sense: a manifest, a dependency graph, a target directory, and
+**The name is `twig`.** It is a build tool in the cargo sense: a manifest, a dependency graph, a target directory, and
 `nestc` invoked once per package.
 
 **It is written in Nest**, which is the point of stages 1 and 2: the first real
@@ -215,7 +222,7 @@ whatever is missing from `std` will be discovered by needing it.
 
 ### What it does
 
-1. Read a manifest (`twig.toml`? — see the open decisions) naming the package,
+1. Read `nest.toml` — the manifest, in TOML — naming the package,
    its version, its dependencies and its targets.
 2. Resolve dependencies to paths on disk.
 3. Compile each package with `nestc`, in dependency order:
@@ -234,13 +241,13 @@ whatever is missing from `std` will be discovered by needing it.
 - **`-C opt-level`**, and LLVM's pass manager run behind it. The backend
   currently hardcodes `OptimizationLevel::None`.
 - **`-C target-cpu`**.
-- **A library format** — the `rlib`/`rmeta` equivalent. Today a dependency is
-  *source*, recompiled into every program that uses it. The pieces are already
-  the right shape (a self-contained `Unit`, §11; a symbol scheme that does not
-  depend on the split), but nothing serializes them.
-  - `rmeta` — metadata alone — is the one that matters most, because it is what
-    makes checking a downstream package cheap, and it is what a language server
-    wants to read.
+- **A library format: `.nlib` and `.nmeta`.** Today a dependency is *source*,
+  recompiled into every program that uses it. The pieces are already the right
+  shape (a self-contained `Unit`, §11; a symbol scheme that does not depend on
+  the split), but nothing serializes them.
+  - `.nlib` is compiled code; `.nmeta` is metadata alone. The second matters
+    most: it is what makes checking a downstream package cheap, and it is what a
+    language server reads.
 - **Incremental compilation**, eventually. Not before the above.
 
 ---
@@ -278,10 +285,6 @@ Nothing below is assumed anywhere in this plan.
 
 | Decision | Why it is open |
 |---|---|
-| **C varargs** (`printf`) | Not in the spec or the parser. `std` can avoid needing them; a program calling C cannot always |
-| **How unrolling is spelled** | Iterating a struct's *values* by member must unroll to be typed. Is that implicit (a loop over a compile-time-known sequence unrolls when its body demands it), or written (`#unroll`)? |
-| **`#unroll` on ordinary loops** | A hint, like `#inline` — the same directive as above or a different feature with the same name? |
-| **The manifest's name and format** | `twig.toml` and TOML, or something the language can read with `std/json`? A tool written in Nest needs a parser for whatever this is |
-| **The tool's name** | `twig` or `hatch` |
 | **Whether `std` is versioned with the compiler** | Rust ships one std per compiler; a package tool could resolve it like any dependency |
-| **What an `rlib` contains** | Objects plus metadata in one file, or two files as Rust has them |
+| **What `.nlib` holds beside the code** | Whether the metadata is duplicated inside it or only in the `.nmeta` |
+| **Blanket impls** | `impl <T> Trait for T` type-checks and fails in codegen. Required before `Any` — see stage 2 |

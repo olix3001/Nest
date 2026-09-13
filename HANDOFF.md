@@ -157,17 +157,23 @@ like any other — the way `cast`, `size_of` and `make` already work. `@` stays 
   generated code, no second program representation. This is a **new** §9
   addition — today's attributes are a fixed set (`@public`, `@link_name`).
 
+### Decided this session
+
+| Question | Answer |
+|---|---|
+| C varargs | **Not supported.** `std` declares fixed-arity C functions and formats things itself; a variadic C function needs a fixed-arity shim |
+| How unrolling is spelled | **`#comptime`**, a *directive* like `#inline`/`#intrinsic` — not a statement keyword, since `comptime for` was rejected |
+| The manifest | **`nest.toml`**, TOML |
+| The tool's name | **`twig`** |
+| `std`'s scope | **Only what `twig` and the language server need.** Not a general-purpose library yet |
+| The library format | **`.nlib`** (compiled code) and **`.nmeta`** (metadata alone) |
+
 ## Still open, and yours to decide
 
 | Decision | Why it is open |
 |---|---|
-| **C varargs** (`printf`) | Not in the spec or the parser. `std` can do its own formatting; a program calling C cannot always |
-| **How unrolling is spelled** | Implicit (a loop whose body demands it unrolls), or written — `#unroll` |
-| **`#unroll` on ordinary loops** | A hint like `#inline` — the same feature as above, or a different one sharing a name |
-| **The manifest's name and format** | `twig.toml` and TOML, or something `std/json` can already read |
-| **The tool's name** | `twig` or `hatch` |
 | **Whether `std` is versioned with the compiler** | Rust ships one per compiler; a package tool could resolve it like any dependency |
-| **What an `rlib` contains** | Objects plus metadata in one file, or two as Rust has them |
+| **What `.nlib` holds beside the code** | Whether metadata is duplicated inside it or lives only in the `.nmeta` |
 | **`Drop`** (`#lang("drop")`) | Waiting on a *decision*, not on work: with no moves, "this value was returned / stored / passed to a call, so do not drop it" has no settled answer, and a wrong one either double-releases or never releases |
 
 ## Not Yet Done (compiler)
@@ -188,7 +194,17 @@ like any other — the way `cast`, `size_of` and `make` already work. `@` stays 
 - [ ] **Parallel code generation.** The units are independent and the merge is
       in place; what is missing is a backend instance and an LLVM context per
       thread.
-- [ ] **A library format** (`rlib`/`rmeta`). A dependency is source today.
+- [ ] **Blanket impls are broken.** `impl <T> Trait for T` type-checks and then
+      fails in codegen — `llvm: main: Void is not a type a value can have` — while
+      a concrete `impl Trait for P` on the same trait compiles and runs. **This
+      has to be fixed**: an `Any` (and so the checked reflective read) needs a
+      blanket impl to exist at all. Reproducer:
+      ```nest
+      Named :: trait { tag :: func (self: Self) -> i32 }
+      impl <T> Named for T { tag :: func (self: Self) -> i32 { return 7 } }
+      main :: func () -> i32 { return (5).tag() }
+      ```
+- [ ] **A library format** (`.nlib` / `.nmeta`). A dependency is source today.
 - [ ] **Debug info.** Nothing emits DWARF, though every statement carries a span
       and every `TypeDef` carries its origin and pre-flattening name.
 - [ ] **A `defer` captures at registration, and this one does not** (spec §8.4).
