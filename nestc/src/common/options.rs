@@ -19,10 +19,17 @@
 
 /// The properties of a compilation target that the front end must know.
 ///
-/// Today it is one number, because one number is all the front end can
-/// currently ask about. Endianness, alignment rules and the C ABI's parameter
-/// classification belong here too, once layout and code generation exist to
-/// need them.
+/// Small on purpose: every field is something a pass **earlier than codegen**
+/// reads — the layout engine asks how wide a pointer is, and `core`'s generated
+/// `target.nest` names the OS and the architecture so a program can branch on
+/// them. Facts only a backend needs (the ABI's register classification, an
+/// alignment rule) are not here, because the backend has them already and a
+/// copy in the middle is a copy that can be wrong.
+///
+/// The values come from the **backend** ([`crate::codegen::Codegen::target_info`]),
+/// which resolves them from a target triple before analysis starts. The `-C`
+/// keys below still override what it reported: a person saying
+/// `-C pointer-width=16` knows something the triple does not say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target {
     /// The width in bits of `isize` / `usize` and of a pointer.
@@ -51,7 +58,14 @@ pub const ARCHES: &[&str] = &["x86_64", "aarch64", "riscv64", "wasm32"];
 pub const PROFILES: &[&str] = &["debug", "release"];
 
 impl Target {
-    /// A 64-bit target — the only one the bootstrap compiles for.
+    /// A 64-bit target, used when nothing resolved a real one.
+    ///
+    /// It is a **fallback**, not the answer: `nestc` asks the selected backend
+    /// what machine it is generating for and writes that in
+    /// ([`crate::codegen::TargetInfo`]), so a real compilation sees the host or
+    /// the `--target` triple rather than this. What still reaches it is a test
+    /// that builds an [`Options`] directly and does not care, which is most of
+    /// them.
     ///
     /// 64 is also the *permissive* direction for the range check on a
     /// pointer-sized constant: a constant accepted here that would not fit a

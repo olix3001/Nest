@@ -727,6 +727,45 @@ The first executable. Also where `nestc`'s scaffold CLI is replaced: `-C` stays
 the interface for build settings (`nestc/src/common/options.rs`), because a build
 tool translating a profile should keep talking to the compiler the same way.
 
+### Built: the backend interface, and the driver that drives one
+
+`nestc/src/codegen/` — a **trait**, so that a second code generator is a file
+and not a refactor:
+
+```rust
+pub trait Codegen {
+    fn name(&self) -> &'static str;
+    fn target_info(&self, triple: Option<&str>) -> Result<TargetInfo, CodegenError>;
+    fn emit_unit(&mut self, unit: &Unit, kind: OutputKind, out: &Path) -> Result<(), CodegenError>;
+    fn extension(&self, kind: OutputKind) -> &'static str { … }
+}
+```
+
+- **The backend is asked what machine this is, first.** The layout engine and
+  `core`'s generated `target.nest` both read the target and both run long before
+  code is generated, so the driver resolves `--target` (or the host) through the
+  backend and writes the answer into `Options` *before* analysis. `-C
+  pointer-width` / `os` / `arch` stay, as **overrides** applied on top. The old
+  behaviour — every build laid out for a hardcoded `x86_64-linux` — is gone.
+- **A unit at a time** (§11), with the path the driver's: which units exist and
+  what each file is called never becomes something a backend has an opinion
+  about, which is what leaves parallel emission a scheduling question.
+- **A second backend exists**, `lir`, which writes the LIR dump. Not because
+  anyone wants a `.lir` file: a trait with one implementation is a trait shaped
+  like that implementation, and this is what a build with no system LLVM has —
+  it still resolves a target, lays every type out for it and runs every pass,
+  and says plainly that it cannot produce an object.
+- **The driver takes `-o`, `--target` and `--emit`** (`ast`, `ir`, `mono`, `lir`
+  to stdout; `obj`, `asm`, `backend-ir` to files), plus `-C backend=`. `--emit`
+  defaults to the four dumps — today's behaviour — and the line to change when
+  an object is producible is in `Emit::default`.
+
+Eight tests state the contract over *whatever* `backends()` holds, so a backend
+added later is covered without being named: names are unique and select, an
+unknown name and an unknown triple are errors rather than fallbacks, a 32-bit
+triple gives a 32-bit machine, and an output kind a backend does not produce is
+refused rather than written as something else.
+
 ### Done ahead of the backend: a conversion names its instruction
 
 `Rvalue::Cast` carries a **`CastKind`** — `trunc`, `zext`, `sext`, `fptrunc`,
