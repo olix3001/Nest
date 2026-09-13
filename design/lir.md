@@ -985,6 +985,7 @@ first file is read and reaches LIR unchanged. Two of them change what gets
 | `overflow=wrap` | `add` is a single instruction, no extra edge |
 | `pointer-width` | the width of `usize`/`isize`, and therefore every layout |
 | `codegen-units=N` | how many units the program is cut into (§11) |
+| `entry=auto` | a function named `entry`, symbol `main`, is added (§7e) |
 | debug level | how much of §7c survives to the object file |
 
 The overflow choice belongs at **LIR lowering**, not codegen, because the trap
@@ -1032,6 +1033,50 @@ Two things this setting does **not** change:
   whether a *check* is emitted around it, not what the instruction means. That is
   the whole point of the intrinsic: the program said which behaviour it wanted,
   and a setting that overrode it would make it useless.
+
+## 7e. The entry point
+
+A program starts at `main :: func ()` (spec §5.6). A **linker** starts it at the
+symbol `main`, and those are not the same thing: the program's `main` is mangled
+like every other function in it. So LIR adds a second function — named `entry`,
+symbol `main`, returning C's `int` — whose whole body is:
+
+```
+func entry() -> i32                          // main
+bb0:                                         // entry point
+  call nest_init()
+  call main()
+  return 0
+```
+
+It is built **here**, in `lir::entry`, and the two places it could have gone
+instead are the reasons why:
+
+- **Not in a backend.** It is two calls and a return, which is language LIR
+  already has. A backend that built it would build it again for the next target,
+  differently, and a debugger would find a frame no dump had ever printed.
+- **Not in the C runtime.** A `main` in `nest_runtime.c` would have to name the
+  program's entry symbol — encoding this compiler's mangling scheme in C — and
+  would have to encode it twice over, because `main` may return nothing or a
+  status. The shim stays six functions that know no names.
+
+The three legal shapes of `main` differ only in what happens after the call:
+`void` returns zero (a program that says nothing about its status has not
+failed), an integer returns it — converted by a `CastKind` (§10) when it is not
+C's `int`, rather than by a backend deciding what to do with the width — and
+`never` ends the block in `unreachable`.
+
+`nest_init` arrives as an ordinary declaration: a `Function` with no blocks and
+an `extern("c")` ABI, which is what LIR already calls a function defined
+elsewhere. A program that declares it itself gets the one it declared.
+
+**`-C entry=none` suppresses it**, which is what a build producing a *library*
+out of a program that has a `main` is compiled with. `auto` — the default — adds
+one when there is a file-scope `main` to call, so an ordinary library needs no
+setting at all: it has none, and nothing is added. Which function counts as that
+`main` is one rule in one place (`Linked::mains`), shared with the check that
+says a `main` may not take parameters — two copies of it could disagree, and
+nothing would show.
 
 ## 8. What LIR still carries
 

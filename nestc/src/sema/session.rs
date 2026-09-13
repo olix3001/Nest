@@ -167,6 +167,18 @@ impl FileLoader for MemLoader {
 pub struct Package {
     pub name: String,
     pub root_path: String,
+    /// Whether something *said* where this package is, as opposed to the
+    /// compiled-in default for `core`.
+    ///
+    /// It is the difference between a fact and a fallback. A `-L` directory
+    /// holding a `core/` is a person pointing at the `core` they mean, and it
+    /// has to beat the path this binary was built with — otherwise a compiler
+    /// built from a checkout would keep compiling against that checkout
+    /// wherever it was run. An **explicit** registration is the opposite: a
+    /// build tool that resolved a package to a path has already done the
+    /// searching, and a directory on the command line must not silently
+    /// substitute a different copy.
+    pub explicit: bool,
 }
 
 /// Per-file analysis bookkeeping, created when a file is collected. The parsed
@@ -232,6 +244,13 @@ pub struct Session {
     pub prelude_globs: Vec<DefId>,
     /// Registered packages, by name.
     packages: HashMap<String, Package>,
+    /// Directories searched for a package that nothing registered (`-L`).
+    ///
+    /// A package `foo` is `<dir>/foo/foo.nest` — the layout `packages/` in this
+    /// repository already has, and the one a package tool would unpack into.
+    /// Searched in the order given, so the first `-L` wins, which is what a
+    /// person overriding one library with a local build expects.
+    search_paths: Vec<String>,
     /// Which loaded files are package roots, and under what package name — used
     /// to give a package's members a `pkg.member` canonical path.
     pub pkg_of: HashMap<FileId, String>,
@@ -304,11 +323,22 @@ impl Session {
             builtins,
             prelude_globs: vec![builtins],
             packages: HashMap::new(),
+            search_paths: Vec::new(),
             pkg_of: HashMap::new(),
             cache: HashMap::new(),
             loader,
         };
-        session.register_package("core", core_path);
+        // `core` starts on the compiled-in path, as a **fallback**: a `-L`
+        // directory with a `core/` in it replaces this, and an explicit
+        // registration always does.
+        session.packages.insert(
+            "core".to_string(),
+            Package {
+                name: "core".to_string(),
+                root_path: core_path.to_string(),
+                explicit: false,
+            },
+        );
         session
     }
 
@@ -321,8 +351,47 @@ impl Session {
             Package {
                 name: name.to_string(),
                 root_path: root_path.to_string(),
+                explicit: true,
             },
         );
+    }
+
+    /// Add a directory to search for packages nothing registered (`-L`).
+    ///
+    /// Call before analysis: a package is found the first time it is imported,
+    /// and a path added afterwards is a path that arrives too late to matter.
+    pub fn add_search_path(&mut self, dir: &str) {
+        self.search_paths.push(dir.to_string());
+    }
+
+    /// Where `name`'s root file is, by the rules a `-L` directory sets up.
+    ///
+    /// A package is a **directory named after itself** holding a root file of
+    /// the same name: `foo` is `<dir>/foo/foo.nest`. One convention, checked on
+    /// the filesystem rather than guessed at, so that "unknown package" means
+    /// the directories were searched and it was not in any of them.
+    fn search_for_package(&self, name: &str) -> Option<String> {
+        use std::path::Path;
+        self.search_paths.iter().find_map(|dir| {
+            let root = Path::new(dir).join(name).join(format!("{name}.nest"));
+            root.exists().then(|| root.to_string_lossy().into_owned())
+        })
+    }
+
+    /// The package `name` resolves to: an explicit registration, then the search
+    /// paths, then a non-explicit default.
+    fn package(&self, name: &str) -> Option<Package> {
+        match self.packages.get(name) {
+            Some(p) if p.explicit => Some(p.clone()),
+            registered => self
+                .search_for_package(name)
+                .map(|root_path| Package {
+                    name: name.to_string(),
+                    root_path,
+                    explicit: false,
+                })
+                .or_else(|| registered.cloned()),
+        }
     }
 
     // ===< Parse-once loading >===
@@ -356,7 +425,7 @@ impl Session {
         if let Some(&id) = self.cache.get(&key) {
             return Some(id);
         }
-        let pkg = self.packages.get(name)?.clone();
+        let pkg = self.package(name)?;
         // The root is loaded through the loader so that the *file name* it is
         // parsed under is its real path: that name is what a relative
         // `import "sibling.nest"` inside the package resolves against.
@@ -378,7 +447,9 @@ impl Session {
     /// it is *the* generated one rather than some other package's file of the
     /// same name.
     fn is_core_sibling(&self, from: &str) -> bool {
-        let Some(core) = self.packages.get("core") else {
+        // Through `package`, not the map: a `-L` core has a different parent
+        // directory from the compiled-in one, and it is the one being read.
+        let Some(core) = self.package("core") else {
             return false;
         };
         match (parent_of(&core.root_path), parent_of(from)) {

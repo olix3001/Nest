@@ -385,3 +385,67 @@ fn every_example_emits_an_object() {
         pending.join("\n")
     );
 }
+
+/// **A program compiles, links and runs.**
+///
+/// Everything above this reads what the compiler produced; this runs it. The
+/// whole path is here — the synthesized entry point (`lir::entry`) calling
+/// `nest_init` and then the program's `main`, an object from this backend, the
+/// C runtime, and the platform's linker — and the only thing asserted is what a
+/// person at a shell would see: the process's exit status.
+///
+/// It is **skipped** when no runtime was built beside the compiler, which is the
+/// one thing here that needs a C toolchain at build time.
+#[test]
+fn a_program_links_and_runs() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    // A status `main`, so the answer travels out through the process's exit
+    // code; and a `void` one, which is a program that exits successfully.
+    for (src, status) in [
+        ("add :: func (a: i32, b: i32) -> i32 { return a + b }\nmain :: func () -> i32 { return add(2, 3) }\n", 5),
+        ("main :: func () { let mut n := 0\n  while n < 3 { n = n + 1 } }\n", 0),
+    ] {
+        let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
+        let file = session.load_entry("main").expect("entry loads");
+        analyze(&mut session, file);
+        assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+        let layouts = crate::ir::layout::Layouts::new(
+            &session.defs,
+            &session.ir_meta,
+            &session.linked,
+            session.options.target,
+        );
+        let program = crate::lir::lower(
+            &session.defs,
+            &session.ir_meta,
+            &session.linked,
+            &layouts,
+            &session.options,
+            &session.lang_items,
+            &session.sources,
+        );
+
+        let dir = std::env::temp_dir().join("nestc-link-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stem = format!("{:x}.{}", hash(src), unique());
+        let object = dir.join(format!("{stem}.o"));
+        let exe = dir.join(&stem);
+
+        let mut backend = LlvmBackend::default();
+        backend.target_info(None).expect("the host resolves");
+        backend
+            .emit_unit(program.unit(), OutputKind::Object, &object)
+            .unwrap_or_else(|e| panic!("emitting:\n{e}"));
+        crate::codegen::link::link(
+            &[object],
+            &exe,
+            &crate::codegen::link::LinkOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("linking:\n{e}"));
+
+        let ran = std::process::Command::new(&exe).status().expect("it runs");
+        assert_eq!(ran.code(), Some(status), "{src:?} exited {ran}");
+    }
+}

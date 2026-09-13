@@ -37,6 +37,7 @@ use std::path::Path;
 use crate::common::options::Target;
 use crate::lir::Unit;
 
+pub mod link;
 #[cfg(feature = "llvm")]
 pub mod llvm;
 pub mod text;

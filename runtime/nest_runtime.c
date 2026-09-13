@@ -37,6 +37,12 @@
  *
  *   nestc --emit obj -o prog.o prog.nest
  *   cc prog.o nest_runtime.o -o prog            # add -lgc for the Boehm build
+ *
+ * `nestc` does this itself for an ordinary build: `nestc/build.rs` compiles this
+ * file into `libnest_runtime.a` beside the compiler and `nestc prog.nest` links
+ * against it, so the two commands above are what a *different* runtime is
+ * substituted with — built how you like, and passed as `-C runtime=<path>`
+ * (`-C link-arg=-lgc` for the Boehm build's dependency).
  */
 
 #include <stdio.h>

@@ -21,6 +21,14 @@ unit mem:main {
     return
 
   declare func scale(p_0: Point, k_1: i32) -> Point @public  // _NC5scale
+
+  declare extern("c") func nest_init() -> void @public  // nest_init
+
+  extern("c") func entry() -> i32 @public  // main
+  bb0:                    // entry point
+    call nest_init()
+    call main()
+    return 0
 }
 
 unit mem:shapes {

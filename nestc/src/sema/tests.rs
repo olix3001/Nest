@@ -7579,3 +7579,113 @@ main :: func () {}
     assert_eq!(msgs.len(), 1, "{msgs:#?}");
     assert!(msgs[0].contains("cannot resolve name"), "{msgs:#?}");
 }
+
+/// Two files that each define a file-scope `main` are two entry points, and the
+/// program can only start at one. Reported rather than resolved by picking.
+#[test]
+fn a_program_has_one_main() {
+    let session = analyze_mem(
+        &[
+            ("main", "{ run } :: import \"other.nest\"\nmain :: func () { run() }\n"),
+            ("other", "@public main :: func () { }\n@public run :: func () { }\n"),
+        ],
+        "main",
+    );
+    let errors: Vec<&String> = session
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::common::diagnostic::Severity::Error)
+        .map(|d| &d.message)
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors[0].contains("a program has one `main`"), "{}", errors[0]);
+}
+
+// ===< Package search paths (`-L`) >===
+
+/// A directory with a package in it, and a file importing that package.
+fn search_path_fixture(name: &str, package: &str, entry: &str) -> (std::path::PathBuf, String) {
+    let root = std::env::temp_dir().join(format!(
+        "nestc-search-{}-{name}",
+        std::process::id()
+    ));
+    let dir = root.join("libs").join("greet");
+    std::fs::create_dir_all(&dir).expect("a temp package directory");
+    std::fs::write(dir.join("greet.nest"), package).expect("the package's root file");
+    let main = root.join("main.nest");
+    std::fs::write(&main, entry).expect("the entry file");
+    (root.join("libs"), main.to_string_lossy().into_owned())
+}
+
+/// `-L` is how a package nothing registered is found: a directory named after
+/// the package, holding a root file of the same name.
+#[test]
+fn a_search_path_finds_a_package() {
+    let (libs, main) = search_path_fixture(
+        "found",
+        "@public twice :: func (n: i32) -> i32 { return n + n }\n",
+        "greet :: import <greet>\nmain :: func () -> i32 { return greet.twice(4) }\n",
+    );
+
+    // Without it, the import is simply unknown — the compiler has nowhere to
+    // look, and says so rather than searching the filesystem on its own.
+    let mut bare = Session::new();
+    let file = bare.load_entry(&main).expect("entry loads");
+    analyze(&mut bare, file);
+    assert!(
+        bare.diagnostics
+            .iter()
+            .any(|d| d.message.contains("unknown package `greet`")),
+        "{:#?}",
+        bare.diagnostics
+    );
+
+    let mut session = Session::new();
+    session.add_search_path(&libs.to_string_lossy());
+    let file = session.load_entry(&main).expect("entry loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+/// An **explicit** registration is a path something already resolved, so a
+/// directory on the command line does not silently substitute another copy.
+/// The fallback `core` starts on is the opposite, and a `-L` replaces it.
+#[test]
+fn an_explicit_registration_beats_a_search_path() {
+    let (libs, _) = search_path_fixture(
+        "explicit",
+        "@public twice :: func (n: i32) -> i32 { return 0 }\n",
+        "",
+    );
+    let elsewhere = libs.parent().expect("a root").join("pinned.nest");
+    std::fs::write(
+        &elsewhere,
+        "@public twice :: func (n: i32) -> i32 { return n + n }\n",
+    )
+    .expect("the pinned root");
+
+    let src = "greet :: import <greet>\nmain :: func () -> i32 { return greet.twice(4) }\n";
+    let main = libs.parent().expect("a root").join("pinned-main.nest");
+    std::fs::write(&main, src).expect("the entry file");
+
+    let mut session = Session::new();
+    session.add_search_path(&libs.to_string_lossy());
+    session.register_package("greet", &elsewhere.to_string_lossy());
+    let file = session
+        .load_entry(&main.to_string_lossy())
+        .expect("entry loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+
+    // The pinned copy is the one that was read, and the one in the search path
+    // was not: they differ only in what `twice` does.
+    let read: Vec<&str> = session.sources.files().map(|f| f.name.as_str()).collect();
+    assert!(
+        read.iter().any(|n| n.ends_with("pinned.nest")),
+        "the pinned root was not read: {read:#?}"
+    );
+    assert!(
+        !read.iter().any(|n| n.ends_with("greet.nest")),
+        "the search path's copy was read anyway: {read:#?}"
+    );
+}

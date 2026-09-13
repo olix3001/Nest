@@ -330,17 +330,23 @@ fn report_type(meta: &Meta, t: &TypeDef, message: String, out: &mut Vec<Diagnost
 /// driver decides.
 fn entry_point(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagnostic>) {
     // Only a `main` at file scope, and only outside `core` — a function called
-    // `main` inside some namespace is an ordinary function.
-    let mains: Vec<_> = linked
-        .funcs()
-        .filter(|f| f.name.as_str() == "main")
-        .filter(|f| {
-            let d = defs.get(f.def);
-            d.parent
-                .map(|p| defs.get(p).kind == crate::sema::def::DefKind::Namespace)
-                .unwrap_or(false)
-        })
-        .collect();
+    // `main` inside some namespace is an ordinary function. The rule is
+    // `Linked::mains`, shared with the pass that synthesizes the entry point,
+    // so the function checked here is the function that is called there.
+    let mains: Vec<_> = linked.mains(defs).collect();
+
+    // Two of them is two entry points, and picking one is not this compiler's
+    // decision to make silently: whichever is reported second is a `main` the
+    // program will never start at.
+    for f in mains.iter().skip(1) {
+        report_main(
+            meta,
+            f.id,
+            "a program has one `main`",
+            "another file in this compilation already defines one at file scope",
+            out,
+        );
+    }
 
     for f in mains {
         if !f.params.is_empty() {

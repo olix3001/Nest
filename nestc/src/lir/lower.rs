@@ -152,6 +152,16 @@ pub fn lower(
         cx.funcs[id.0 as usize] = func;
     }
 
+    // Which function the entry point calls. The rule for what counts as one
+    // lives in `Linked::mains`, because `ir::check::declarations` asks the same
+    // question and two copies of it could answer differently. More than one is
+    // that pass's diagnostic; here the first is taken, so a program that is
+    // already an error still lowers.
+    let main = linked
+        .mains(defs)
+        .next()
+        .and_then(|f| cx.func_of.get(&f.def).copied());
+
     // Safepoints after everything, and they have to be: what is live at a call
     // is a property of the finished graph, and which types hold references is a
     // question for the table that was only just built (§6).
@@ -161,6 +171,15 @@ pub fn lower(
         globals: cx.globals,
         funcs: cx.funcs,
     };
+    // The entry point, if this build is producing a program (§5.6). It is added
+    // before the safepoints and before the split, because it is an ordinary
+    // function from here on: its calls are safepoints like any others, and the
+    // unit it lands in is decided by the same rule as every other function's.
+    if options.entry == crate::common::options::EntryMode::Auto
+        && let Some(id) = main
+    {
+        super::entry::synthesize(&mut unit, id);
+    }
     super::safepoint::annotate(&mut unit);
     super::unit::split(unit, options.codegen_units, sources)
 }

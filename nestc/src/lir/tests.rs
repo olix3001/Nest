@@ -3070,3 +3070,115 @@ fn a_distinct_scalar_is_the_scalar_and_not_a_wrapper() {
     assert!(!lir.contains("type core.str"), "{lir}");
 }
 
+
+// ===< The entry point (§5.6) >===
+
+/// The entry function of a unit, if it has one.
+fn entry_of(unit: &Unit) -> Option<&crate::lir::Function> {
+    unit.funcs.iter().find(|f| f.symbol.as_str() == "main")
+}
+
+/// A program with a root `main` gets a C `main` that initializes the runtime and
+/// then calls it.
+///
+/// The two are separate functions on purpose: the program's `main` is mangled
+/// like every other Nest function, and the symbol the linker wants is not a name
+/// this compiler is free to give a source function.
+#[test]
+fn a_program_gets_an_entry_point_that_calls_main() {
+    let unit = lir_unit("main :: func () { }\n");
+    let entry = entry_of(&unit).expect("an entry point");
+    assert_eq!(entry.name, "entry");
+    assert_eq!(entry.ret, crate::lir::Ty::Int { bits: 32, signed: true });
+    assert!(entry.attrs.public, "the linker has to see it");
+
+    let called: Vec<&str> = entry.blocks[0]
+        .stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            crate::lir::StmtKind::Call { callee: crate::lir::Callee::Static(id), .. } => {
+                Some(unit.funcs[id.0 as usize].symbol.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(called, vec!["nest_init", "_NC4main"], "in this order");
+}
+
+/// A `main` that returns nothing is a program that exited successfully, so the
+/// entry point returns zero rather than whatever was in the register.
+#[test]
+fn a_void_main_exits_zero() {
+    let unit = lir_unit("main :: func () { }\n");
+    let entry = entry_of(&unit).expect("an entry point");
+    assert!(
+        matches!(
+            &entry.blocks[0].term.kind,
+            crate::lir::TermKind::Return(Some(crate::lir::Operand::Const(
+                crate::lir::Constant::Int(n)
+            ))) if *n == num_bigint::BigInt::from(0)
+        ),
+        "{:?}",
+        entry.blocks[0].term.kind
+    );
+}
+
+/// A `main` that returns a status returns it to the operating system — and one
+/// whose integer is not C's `int` is converted by a cast that names itself,
+/// rather than by a backend deciding what to do with the width.
+#[test]
+fn a_status_main_returns_its_status() {
+    let unit = lir_unit("main :: func () -> i32 { return 3 }\n");
+    let entry = entry_of(&unit).expect("an entry point");
+    assert!(
+        entry.blocks[0]
+            .stmts
+            .iter()
+            .any(|s| matches!(&s.kind, crate::lir::StmtKind::Call { dest: Some(_), .. })),
+        "the status is kept"
+    );
+
+    let unit = lir_unit("main :: func () -> i64 { return 3 }\n");
+    let entry = entry_of(&unit).expect("an entry point");
+    let kinds: Vec<crate::lir::CastKind> = entry.blocks[0]
+        .stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            crate::lir::StmtKind::Assign { value: crate::lir::Rvalue::Cast { kind, .. }, .. } => {
+                Some(*kind)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, vec![crate::lir::CastKind::Truncate], "i64 -> i32");
+}
+
+/// A library has no entry point, and nothing had to be told so: a program
+/// without a root `main` is what a library is.
+#[test]
+fn a_program_without_main_gets_no_entry_point() {
+    let unit = lir_unit("add :: func (a: i32, b: i32) -> i32 { return a + b }\n");
+    assert!(entry_of(&unit).is_none());
+}
+
+/// A `main` inside a namespace is an ordinary function — the same rule
+/// `ir::check::declarations` applies when it decides whose signature to check.
+#[test]
+fn a_namespaced_main_is_not_the_entry_point() {
+    let unit = lir_unit("app :: namespace { main :: func () { } }\nrun :: func () { app.main() }\n");
+    assert!(entry_of(&unit).is_none());
+}
+
+/// `-C entry=none` is how a build that is producing a **library** out of a
+/// program that has a `main` — a test harness, say — says so.
+#[test]
+fn entry_none_suppresses_it() {
+    let options = crate::common::options::Options {
+        entry: crate::common::options::EntryMode::None,
+        ..Default::default()
+    };
+    let program = lir_whole_program_with("main :: func () { }\n", options);
+    for unit in &program.units {
+        assert!(entry_of(unit).is_none(), "{}", unit.name);
+    }
+}

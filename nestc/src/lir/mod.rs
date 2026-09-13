@@ -76,6 +76,7 @@ use crate::common::source::FileSpan;
 use crate::common::symbol::Symbol;
 use crate::ir::layout::Layout;
 
+pub mod entry;
 pub mod escape;
 pub mod lower;
 pub mod pretty;

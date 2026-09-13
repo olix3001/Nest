@@ -156,6 +156,11 @@ impl SourceMap {
     pub fn file(&self, id: FileId) -> Option<&SourceFile> {
         self.files.get(id.0 as usize)
     }
+
+    /// Every file loaded, in the order they were added.
+    pub fn files(&self) -> impl Iterator<Item = &SourceFile> {
+        self.files.iter()
+    }
 }
 
 #[cfg(test)]

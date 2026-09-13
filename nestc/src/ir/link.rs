@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 
 use crate::common::source::FileId;
-use crate::sema::def::DefId;
+use crate::sema::def::{DefId, DefTable};
 
 use super::{Function, Global, Program, TypeDef};
 
@@ -171,6 +171,23 @@ impl Linked {
     /// Every function, in definition order (see [`Linked::order`]).
     pub fn funcs(&self) -> impl Iterator<Item = &Function> {
         self.order.iter().map(|d| &self.funcs[d])
+    }
+
+    /// Every root-scope `main` — the program's entry point (§5.6), in
+    /// definition order.
+    ///
+    /// **One rule, in one place**, because two passes ask the question and a
+    /// disagreement between them is invisible: `ir::check::declarations` decides
+    /// whose signature is not the author's to choose, and `lir::entry` decides
+    /// what the synthesized C `main` calls. A function named `main` inside a
+    /// namespace — or inside `core` — is an ordinary function, which is what
+    /// the canonical name is checked for: `app.main` is not this.
+    ///
+    /// More than one is a program with two entry points, and the diagnostic for
+    /// that is `declarations`'.
+    pub fn mains<'a>(&'a self, defs: &'a DefTable) -> impl Iterator<Item = &'a Function> {
+        self.funcs()
+            .filter(move |f| f.name.as_str() == "main" && defs.canonical_string(f.def) == "main")
     }
 
     /// Every function's [`DefId`], in definition order. Useful to a pass that

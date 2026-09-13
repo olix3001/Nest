@@ -122,6 +122,43 @@ impl OverflowMode {
     }
 }
 
+/// Whether the compiler synthesizes a C `main` (`crate::lir::entry`).
+///
+/// A program needs one — nothing else calls `nest_init` or the program's own
+/// `main`, and a linker looking for `main` would not find the mangled symbol. A
+/// **library** must not have one, and the difference between the two is not
+/// something the compiler can see from the source: it is what the build is
+/// producing. So it is a setting, and its default answers the common case by
+/// looking at the program rather than by guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EntryMode {
+    /// Synthesize one when the program has a root `main` (§5.6), and not
+    /// otherwise. A library has no `main`, so this is already right for one.
+    #[default]
+    Auto,
+    /// Never synthesize one. What a library that *does* define a root `main` —
+    /// a test harness, say — is built with.
+    None,
+}
+
+impl EntryMode {
+    fn parse(value: &str) -> Option<EntryMode> {
+        match value {
+            "auto" => Some(EntryMode::Auto),
+            "none" => Some(EntryMode::None),
+            _ => None,
+        }
+    }
+
+    /// The spelling `-C entry=` accepts.
+    pub fn name(self) -> &'static str {
+        match self {
+            EntryMode::Auto => "auto",
+            EntryMode::None => "none",
+        }
+    }
+}
+
 /// Everything a build decides for the compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
@@ -137,6 +174,8 @@ pub struct Options {
     /// unit for every definition in another; the split is per source file, and
     /// the smallest units are merged until there are no more than this many.
     pub codegen_units: usize,
+    /// Whether a C `main` is synthesized; see [`EntryMode`].
+    pub entry: EntryMode,
 }
 
 impl Default for Options {
@@ -146,6 +185,7 @@ impl Default for Options {
             overflow: OverflowMode::default(),
             profile: "debug",
             codegen_units: 1,
+            entry: EntryMode::default(),
         }
     }
 }
@@ -190,6 +230,10 @@ impl Options {
                 }
                 self.codegen_units = n;
             }
+            "entry" => {
+                self.entry = EntryMode::parse(value)
+                    .ok_or_else(|| format!("`entry` must be `auto` or `none`, not `{value}`"))?;
+            }
             other => return Err(format!("unknown setting `{other}`")),
         }
         Ok(())
@@ -199,9 +243,10 @@ impl Options {
     /// prints, so a build tool can check what its profile actually resolved to.
     pub fn render(&self) -> String {
         format!(
-            "arch={}\ncodegen-units={}\noverflow={}\nos={}\npointer-width={}\nprofile={}\n",
+            "arch={}\ncodegen-units={}\nentry={}\noverflow={}\nos={}\npointer-width={}\nprofile={}\n",
             self.target.arch,
             self.codegen_units,
+            self.entry.name(),
             self.overflow.name(),
             self.target.os,
             self.target.pointer_bits,

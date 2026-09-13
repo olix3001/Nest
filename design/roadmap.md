@@ -755,10 +755,11 @@ pub trait Codegen {
   like that implementation, and this is what a build with no system LLVM has —
   it still resolves a target, lays every type out for it and runs every pass,
   and says plainly that it cannot produce an object.
-- **The driver takes `-o`, `--target` and `--emit`** (`ast`, `ir`, `mono`, `lir`
-  to stdout; `obj`, `asm`, `backend-ir` to files), plus `-C backend=`. `--emit`
-  defaults to the four dumps — today's behaviour — and the line to change when
-  an object is producible is in `Emit::default`.
+- **The driver takes `-o`, `--target` and `--emit`** (`link` for a program;
+  `ast`, `ir`, `mono`, `lir` to stdout; `obj`, `asm`, `backend-ir` to files),
+  plus `-C backend=`. `--emit` defaults to **`link`** — see the entry point and
+  linker below; it defaulted to the four dumps for as long as no backend could
+  produce a program.
 
 Eight tests state the contract over *whatever* `backends()` holds, so a backend
 added later is covered without being named: names are unique and select, an
@@ -809,6 +810,86 @@ against the runtime and runs.**
 other two need `$slice`/`$array`, below); a linked program returns the right
 answer; and `overflow=trap` produces a real run-time trap (`nest: trap`,
 SIGABRT) rather than a wrapped number.
+
+### Built: an entry point, and a linker
+
+**`nestc prog.nest` produces `prog`, and running it runs the program.** Three
+pieces, and the first is the one that is not obvious.
+
+- **The entry point is synthesized in LIR** (`nestc/src/lir/entry.rs`), not in a
+  backend and not in the C runtime. A linker looks for `main`; the program's
+  `main :: func ()` (§5.6) has a mangled symbol like every other function, so
+  something has to stand between them. That something is two calls and a return
+  — `nest_init()`, then the program's `main`, then its status — which is
+  language LIR already speaks. A backend that invented it would invent it again
+  for the next target, and a `main` in `nest_runtime.c` would have to encode
+  this compiler's mangling *and* both of `main`'s legal return shapes.
+  - It is named `entry` and *symbolled* `main`: the `name` on a `Function` is a
+    source name, and this function has none. Two `main`s in one dump, one
+    calling the other, is a reader's problem for no gain.
+  - `-> void` exits zero, `-> i32` returns its status, an integer that is not
+    C's `int` is converted by a `CastKind` rather than by a backend deciding,
+    and `-> never` ends in `unreachable`.
+  - **`-C entry=auto|none`.** `auto` synthesizes one when the program has a
+    file-scope `main`, which means a library — having none — already gets the
+    right answer without being told what it is.
+  - The rule for *which* `main` that is now lives in `Linked::mains`, shared
+    with the pass that checks its signature: two copies of "what is an entry
+    point" could disagree, and the disagreement would be invisible. Two of them
+    in one compilation is now an error (`a program has one main`) rather than a
+    silent choice between them.
+- **Linking is the driver's, not a backend's** (`nestc/src/codegen/link.rs`).
+  What to do with several objects is the same question on every target, and the
+  answer is a tool this compiler does not ship — so `nestc` invokes the
+  platform's C compiler as the linker driver, which is what knows where `crt1.o`
+  is. `-C linker=`, `-C link-arg=` (repeatable, in order) and `-C runtime=` are
+  driver settings for the same reason `-C backend=` is: no pass reads them.
+- **The runtime is built beside the compiler** (`nestc/build.rs`) into
+  `libnest_runtime.a` and linked in automatically, because every program calls
+  `nest_init` and `nest_alloc` and that is not the program's to remember. A
+  failure to build it is **not** a build failure — the C toolchain is needed to
+  link a program, not to compile one — and the driver names `-C runtime=` at the
+  point a link is actually attempted. The **standard library** is deliberately
+  the opposite: a package a build tool resolves, and nothing here knows its name.
+
+**`--emit` now defaults to `link`**, which is what `cc foo.c` does and what a
+person typing `nestc foo.nest` means. The dumps are one flag away and unchanged;
+what changed is that a bare invocation produces a program, now that there is a
+backend that can produce one. A list names only what it names.
+
+A program with no `main` is told so in the program's own terms rather than by a
+linker failing on a symbol nobody wrote. And when a link is one of the things
+asked for, `-o` names **it**: `--emit link,obj -o prog` writes the program to
+`prog` and the object beside it as `prog.o`, rather than writing both to one
+path and letting the second win.
+
+### Built: the two things a build tool needs from a compiler
+
+`twig` is not built and was not started (below). These are the parts of it that
+belong on *this* side of the line — a tool that drives `nestc` has to be able to
+read what it says and to tell it where things are.
+
+- **`--error-format=json`.** One JSON object per line on stderr — JSON Lines,
+  because a build tool reads stderr as a stream and a top-level array could not
+  be parsed until the compiler exited. The shape mirrors `Diagnostic` rather than
+  inventing a wire format, and adds the two things only the `SourceMap` can
+  answer: the file's name, and the line and column of every span, **beside** the
+  byte offsets rather than instead of them. It also carries `rendered`, the
+  human text exactly as `--error-format=human` would have printed it, so a tool
+  forwarding a message never reimplements the terminal renderer to stay readable.
+  The compiler's own failures go out the same way, because a tool that asked for
+  JSON asked for everything in JSON: a `nestc:` line in the middle of the stream
+  is a parse error, arriving exactly when something has already gone wrong.
+- **`-L <dir>`.** A directory searched for a package nothing registered. One
+  convention, checked on the filesystem: a package `foo` is `<dir>/foo/foo.nest`,
+  which is the layout `packages/` already has. Searched in the order given, so
+  the first `-L` wins.
+  - **An explicit registration beats a search path**, and the fallback `core`
+    starts on does not. That is the difference between a fact and a default: a
+    build tool that resolved a package to a path has already searched, and a
+    `-L` must not substitute another copy — while the `core` path compiled into
+    this binary points at *this checkout*, and a compiler run anywhere else
+    should use the `core` it was pointed at.
 
 ### Built: `$slice` and `$array` are lowered, not handed to a backend
 
