@@ -417,6 +417,45 @@ main :: func () -> i32 { return 0 }
 }
 
 #[test]
+fn a_comptime_for_unrolls() {
+    // The loop is gone: four copies of the body, each with its own binding of
+    // the loop variable. Unrolling happens in the *parser* because a copy of a
+    // body has to be an independent piece of program — a body copied after
+    // resolution would share its declarations with the original.
+    let src = "\
+f :: func () -> i32 {
+  let mut total: i32 := 0
+  #comptime for i in 0..<4 { total = total + i }
+  return total
+}
+";
+    let s = analyze1(src);
+    assert!(!s.has_errors(), "{:#?}", s.diagnostics);
+    let ast = &s.asts[&entry_file(&s)];
+    assert!(
+        find(ast, |k| matches!(k, NodeKind::For { .. })).is_none(),
+        "a `#comptime for` survived as a loop"
+    );
+}
+
+#[test]
+fn a_comptime_for_needs_a_constant_sequence() {
+    // The error is at the loop, not at whatever the body did with a variable
+    // that never settled — which is the whole reason this is its own step.
+    let src = "\
+N :: 4
+f :: func () -> i32 {
+  #comptime for i in 0..<N { }
+  return 0
+}
+";
+    let s = analyze1(src);
+    assert!(s.has_errors());
+    let d = format!("{:#?}", s.diagnostics);
+    assert!(d.contains("range of integer literals"), "{d}");
+}
+
+#[test]
 fn an_attribute_must_be_declared_as_one() {
     // Today's attributes are a fixed set the compiler reads. A program may add
     // its own, and `@attribute` is what says so — writing a struct that is not

@@ -190,6 +190,18 @@ impl Parser {
         let directives = self.parse_directives();
         let decorated = !attrs.is_empty() || !directives.is_empty();
 
+        // `#comptime` is taken first, whatever follows it: the directive says
+        // the statement is evaluated when the program is compiled, and the one
+        // statement that means for is a `for` (§9's directive family).
+        if self.has_directive(&directives, "comptime") {
+            if matches!(self.peek(), Some(TokenKind::ForKw)) {
+                return (self.parse_comptime_for(start), false);
+            }
+            self.error(
+                start,
+                "`#comptime` applies to a `for` loop: `#comptime for i in 0..<4 { … }`",
+            );
+        }
         match self.peek() {
             Some(TokenKind::LetKw | TokenKind::ConstKw) => {
                 self.reject_static_let(&directives, start);

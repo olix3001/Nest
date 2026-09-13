@@ -48,6 +48,7 @@ pub fn resolve_file(
         self_ty: Vec::new(),
         dyn_ok: HashSet::new(),
         decl_static: false,
+        decl_comptime: false,
     };
     if let Some(root) = ast.root() {
         r.resolve_node(root);
@@ -79,6 +80,10 @@ struct Resolver<'a> {
     /// the only `::` form that is assignable (§2.6), and the binding is
     /// introduced one level below where the directive is written.
     decl_static: bool,
+    /// Whether the binding being resolved was written `#comptime` — the
+    /// variable an unrolled `#comptime for` binds, which names a compile-time
+    /// value rather than a slot.
+    decl_comptime: bool,
 }
 
 impl Resolver<'_> {
@@ -285,6 +290,12 @@ impl Resolver<'_> {
                     self.introduce_static(pattern, id);
                     return;
                 }
+                // Same shape, immutable: a name bound to a compile-time value
+                // rather than to a slot.
+                if self.decl_comptime {
+                    self.introduce_comptime(pattern, id);
+                    return;
+                }
                 self.bind_pattern(pattern, false);
             }
             // A decorated item. The directives are carried by collection, but
@@ -296,9 +307,19 @@ impl Resolver<'_> {
                 // Attributes and directives are compiler vocabulary, never
                 // program names, so neither is walked (see below).
                 let is_static = directives.iter().any(|&d| self.is_static_directive(d));
+                // `#comptime` on the binding an unrolled loop emits for its
+                // variable. It has to be a *constant* and not a local, because
+                // the point of unrolling is that the body may be typed with it
+                // — `[i]u8` is a different type each iteration, and an array
+                // length is a compile-time value or nothing.
+                let is_comptime = directives
+                    .iter()
+                    .any(|&d| self.is_directive(d, "comptime"));
                 let outer = std::mem::replace(&mut self.decl_static, is_static);
+                let outer_ct = std::mem::replace(&mut self.decl_comptime, is_comptime);
                 self.resolve_node(item);
                 self.decl_static = outer;
+                self.decl_comptime = outer_ct;
             }
             // A `@Name(args)` a program wrote. The compiler's own attributes
             // (`@public`, `@link_name`) are vocabulary and resolve to nothing;
@@ -854,6 +875,21 @@ impl Resolver<'_> {
         }
     }
 
+    /// A block-local `::` that names a **compile-time value** — the variable an
+    /// unrolled `#comptime for` binds. It is a [`DefKind::Const`] for the same
+    /// reason `#static` is one: what the name denotes is not a slot in the
+    /// frame, and every stage that asks "is this a constant?" asks the def.
+    fn introduce_comptime(&mut self, pattern: NodeId, bind: NodeId) {
+        let NodeKind::BindingPat { name, .. } = self.ast.node(pattern).kind.clone() else {
+            self.bind_pattern(pattern, false);
+            return;
+        };
+        self.introduce_binding(name, DefKind::Const, pattern, false);
+        if let Some(def) = self.def_of(pattern) {
+            self.defs.get_mut(def).node = Some(bind);
+        }
+    }
+
     fn introduce_binding(&mut self, name: Symbol, kind: DefKind, node: NodeId, mutable: bool) {
         let scope = self.current_ns();
         let span = self.ast.node(node).span;
@@ -881,8 +917,12 @@ impl Resolver<'_> {
     }
 
     fn is_static_directive(&self, node: NodeId) -> bool {
+        self.is_directive(node, "static")
+    }
+
+    fn is_directive(&self, node: NodeId, want: &str) -> bool {
         matches!(&self.ast.node(node).kind,
-            NodeKind::Directive { name, .. } if name.as_str() == "static")
+            NodeKind::Directive { name, .. } if name.as_str() == want)
     }
 
     /// The def a type expression's head names, resolved through the current

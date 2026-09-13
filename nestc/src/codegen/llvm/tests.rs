@@ -562,6 +562,24 @@ fn a_program_links_and_runs() {
              }\n",
             7,
         ),
+        // `#comptime for`, unrolled: four copies of the body, each typed on its
+        // own, and the loop variable a compile-time constant — which is what
+        // lets `[i]u8` be a different type in each. 0+1+2+3, then 1+1+2+2+3+3.
+        (
+            "{ size_of } :: import <core/mem>\n\
+             main :: func () -> i32 {\n\
+            \x20 let mut total: i32 := 0\n\
+            \x20 #comptime for i in 0..<4 { total = total + i }\n\
+            \x20 let mut n: usize := 0\n\
+            \x20 #comptime for k in 1..=3 {\n\
+            \x20   let a: [k]u8 := .{ 0; k }\n\
+            \x20   n = n + a.len() + size_of.<[k]u8>()\n\
+            \x20 }\n\
+            \x20 #comptime for z in 5..<5 { n = n + 1000 }\n\
+            \x20 return total + cast.<i32>(n)\n\
+             }\n",
+            18,
+        ),
     ] {
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
         let file = session.load_entry("main").expect("entry loads");

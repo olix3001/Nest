@@ -34,7 +34,11 @@ pub struct Parser {
     /// Tokens after newline filtering (see [`filter_newlines`]).
     tokens: Vec<Token>,
     /// Index of the next unconsumed token.
-    pos: usize,
+    ///
+    /// Readable and writable within the parser because one construct rewinds
+    /// it: `#comptime for` parses its body once per iteration, and a copy of a
+    /// body is the same tokens read again (see `parse_comptime_for`).
+    pub(crate) pos: usize,
     /// The arena under construction.
     ast: Ast,
     /// File every node is tagged with.
@@ -98,6 +102,13 @@ impl Parser {
     }
 
     /// The span of an already-allocated node.
+    /// The kind of a node already built. Used by the one construct that has to
+    /// *read back* what it just parsed: `#comptime for` asks whether its
+    /// iterable is a range of literals.
+    pub(crate) fn node_kind(&self, id: NodeId) -> NodeKind {
+        self.ast.node(id).kind.clone()
+    }
+
     pub(crate) fn node_span(&self, id: NodeId) -> Span {
         self.ast.node(id).span
     }

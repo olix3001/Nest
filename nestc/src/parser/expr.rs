@@ -9,6 +9,7 @@
 //! a second comparison rather than fold it.
 
 use crate::common::span::Span;
+use crate::common::symbol::Symbol;
 
 use super::ast::{
     BinOp, CompositeBody, Lit, NodeId, NodeKind, RangeKind, TryKind, UnOp, VariantArgs,
@@ -977,6 +978,136 @@ impl Parser {
                 body,
             },
         )
+    }
+
+    /// `#comptime for pattern in a..<b block` — the loop, unrolled **here**.
+    ///
+    /// It is a parser rewrite rather than a later one, and the reason is what
+    /// the directive is *for*: an unrolled body has to be typed once per
+    /// iteration, and every stage after this one has already resolved names and
+    /// stamped defs onto the body's declarations. Copying a resolved body is
+    /// copying its bindings; re-**parsing** it is what makes each copy an
+    /// independent piece of program, which is the whole point of unrolling.
+    ///
+    /// The parser has the tokens and an index into them, so a copy is a rewind:
+    /// the body is parsed once per value, each inside a block that binds the
+    /// loop variable to that value as a `::` constant.
+    ///
+    /// The sequence is a range of **integer literals**. A bound this stage
+    /// cannot read is an error at the loop — which is the point of the step: a
+    /// loop that does not unroll should say so where it is written, rather than
+    /// at whatever the body did with a variable that never settled.
+    pub(crate) fn parse_comptime_for(&mut self, start: Span) -> NodeId {
+        self.bump(); // `for`
+        let pat_start = self.pos;
+        let pattern = self.parse_pattern();
+        if !self.eat_contextual("in") {
+            let span = self.cur_span();
+            self.error(span, "expected `in` in a `for` loop");
+        }
+        let iter = self.suppressing_struct_lit(Parser::parse_expr);
+        let body_start = self.pos;
+        let Some(values) = self.const_range(iter) else {
+            self.error(
+                self.node_span(iter),
+                "a `#comptime for` iterates a range of integer literals, as in `0..<4`",
+            );
+            let body = self.parse_block();
+            return self.alloc(
+                start.to(self.node_span(body)),
+                NodeKind::For {
+                    pattern,
+                    iter,
+                    body,
+                },
+            );
+        };
+        let mut stmts = Vec::new();
+        for (i, v) in values.iter().enumerate() {
+            // The last copy leaves the cursor after the body; the others rewind
+            // to parse it again.
+            self.pos = pat_start;
+            let pat = self.parse_pattern();
+            self.pos = body_start;
+            let body = self.parse_block();
+            let span = self.node_span(body);
+            let value = self.alloc(span, NodeKind::Lit(Lit::Int(v.clone())));
+            let bind = self.alloc(
+                span,
+                NodeKind::ConstBind {
+                    pattern: pat,
+                    rhs: value,
+                },
+            );
+            // `#comptime` on the binding, so the resolver introduces a
+            // compile-time constant rather than a local: the body may be typed
+            // with the loop variable, and `[i]u8` is a type only a constant can
+            // name.
+            let directive = self.alloc(
+                span,
+                NodeKind::Directive {
+                    name: Symbol::new("comptime"),
+                    args: Vec::new(),
+                },
+            );
+            let bind = self.alloc(
+                span,
+                NodeKind::Decl {
+                    attrs: Vec::new(),
+                    directives: vec![directive],
+                    item: bind,
+                },
+            );
+            stmts.push(self.alloc(
+                span,
+                NodeKind::Block {
+                    stmts: vec![bind, body],
+                    tail: None,
+                },
+            ));
+            let _ = i;
+        }
+        // No iterations: the body is still parsed once, so the cursor ends up
+        // past it and the tokens are not read as statements of the enclosing
+        // block.
+        if stmts.is_empty() {
+            self.pos = body_start;
+            let _ = self.parse_block();
+        }
+        self.alloc(start.to(self.cur_span()), NodeKind::Block { stmts, tail: None })
+    }
+
+    /// The values an `a..<b` / `a..=b` of integer literals stands for.
+    fn const_range(&self, iter: NodeId) -> Option<Vec<num_bigint::BigInt>> {
+        let NodeKind::Range { start, end, kind } = self.node_kind(iter) else {
+            return None;
+        };
+        let (Some(start), Some(end)) = (start, end) else {
+            return None;
+        };
+        let lo = self.int_literal(start)?;
+        let hi = self.int_literal(end)?;
+        let hi = match kind {
+            RangeKind::HalfOpen => hi,
+            RangeKind::Closed => hi + 1,
+            RangeKind::Open => return None,
+        };
+        let mut out = Vec::new();
+        let mut n = lo;
+        // A bound that runs backwards is an empty sequence, as a `for` over it
+        // would be — not an error.
+        while n < hi {
+            out.push(n.clone());
+            n += 1;
+        }
+        Some(out)
+    }
+
+    fn int_literal(&self, node: NodeId) -> Option<num_bigint::BigInt> {
+        match self.node_kind(node) {
+            NodeKind::Lit(Lit::Int(n)) => Some(n),
+            _ => None,
+        }
     }
 
     // ===< Small node helpers >===
