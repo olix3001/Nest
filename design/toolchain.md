@@ -289,7 +289,12 @@ leaves a half-built feature behind for the next one to finish.
 The numbering is a dependency order, not a wish list: every step needs the one
 before it, except where it says otherwise.
 
-### Step 1 — `repeat` and `format`, lowered
+**Steps 1–5 are done.** What is left is `std`, `twig` and the editor — steps 6
+through 10, in that order, and they are the whole of the focus now. Each step
+below that is finished says so and says what it actually turned out to be;
+`HANDOFF.md` carries the detail.
+
+### Step 1 — `repeat` and `format`, lowered — **done**
 
 The standing instruction: when something can be simplified in LIR, do it.
 `$slice` and `$array` were the first two, these are the last two intrinsics that
@@ -302,18 +307,16 @@ outstanding debt, and because `format` is what `std/io`'s `print` will want.
 *Done when*: the intrinsic list is nine, the two variants are gone from the enum,
 and the coverage test asserts their absence. **Commit. Stop.**
 
-### Step 2 — blanket impls
+### Step 2 — a method call on a literal receiver — **done**
 
-`impl <T> Trait for T` type-checks and then fails in codegen
-(`Void is not a type a value can have`). A concrete impl of the same trait runs,
-so it is the blanket form specifically. **`Any` cannot exist without this**, and
-neither can the checked reflective read.
+Written here as "blanket impls", which it was not: blanket impls worked. The
+reproducer had two variables in it, and the one that mattered was the
+**receiver** — `(5).tag()` left it an open `comptime_int`, a type no impl is
+written for, so every lookup missed and the call lowered to `call (undef)()`
+with no diagnostic. A literal receiver now settles on its default before the
+lookup, and a lookup that finds nothing is an error.
 
-*Done when*: the reproducer in the handoff runs and returns 7, and a blanket impl
-is exercised over a struct, an integer and a generic type.
-**Commit. Stop.**
-
-### Step 3 — `core/c`
+### Step 3 — `core/c` — **done**
 
 The C boundary as described above: the type aliases, `c.ptr.<T>`, `c.null`, and
 the `c"..."` literal with its trailing NUL. **No varargs.** `extern("c")`
@@ -322,7 +325,7 @@ already works; this is the vocabulary to use it with.
 *Done when*: a Nest program calls `write(1, ...)` through libc and the output
 appears. **Commit. Stop.**
 
-### Step 4 — `#comptime` loops
+### Step 4 — `#comptime` loops — **done**
 
 The directive that makes a loop evaluate at compile time, which is what lets its
 body be typed per iteration. Needed by reflection's typed path and by nothing
@@ -337,7 +340,7 @@ unrolled form.
 
 **Commit. Stop.**
 
-### Step 5 — the whole reflection system
+### Step 5 — the whole reflection system — **done**
 
 One step, because the parts are useless apart:
 
@@ -409,6 +412,17 @@ diagnostics for an open buffer.
 **Commit. Stop.**
 
 ### Not scheduled
+
+**The rest of `#comptime`** — step 4 unrolls a range of integer literals, which
+is what the parser can read where it rewinds. Two sequences a program will want
+are still out of reach, and they are not the same size:
+
+  - `.{ a, b, c }` needs each element's token range recorded and re-parsed. It
+    is the small one, and it belongs wherever a program first wants it.
+  - `type_info.<T>().members` needs a sequence that is only constant **after**
+    monomorphization, which is a compile-time evaluator over the IR and a
+    feature of its own. Nothing below needs it: the *run-time* walk is what
+    `std/json` uses, and it works today.
 
 **Parallel code generation** — the units are independent and the merge is in
 place, so what is left is a backend instance and an LLVM context per thread. It

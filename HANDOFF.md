@@ -8,7 +8,9 @@ run time, reads each member through a checked read, and reads back an
 `@attribute` a program declared itself.**
 
 **Read `design/toolchain.md`** — its ten-step order of work is the plan. **Steps
-1–5 are done and committed.** Step 6 (`std`'s floor) is next and is not started.
+1–5 are done and committed.** What is left is **`std`, `twig` and the editor** —
+steps 6 through 10, in that order, and they are the whole of the focus now. The
+rest of `#comptime` is **deferred and unscheduled**; nothing below needs it.
 
 ## What happened this session
 
@@ -144,11 +146,24 @@ The parser has the tokens and an index into them, so a copy is a rewind.
    nowhere to convert one. An empty attribute table is a `[0]Attr` global, as a
    zero-length string is a `[0]u8` one.
 
-## Next: step 6 — the `std` floor
+## Next: `std`, then `twig`, then the editor
 
-`design/toolchain.md` has the text. Everything it sits on is now built: `core/c`
-gives it `open`/`read`/`write`, `core/fmt` gives it `Display`, and `core/reflect`
-is what `std/json` (step 7) will walk a type with.
+Steps 6 through 10, in that order, and **that is the whole of the focus now**.
+Everything they sit on is built: `core/c` gives `std` its `open`/`read`/`write`,
+`core/fmt` gives it `Display`, and `core/reflect` is what `std/json` walks a type
+with.
+
+| Step | What |
+|---|---|
+| 6 | **The `std` floor** — `io`, `fs`, `process`, `mem`, `str`, `collections`, over an internal `sys` namespace that keeps the backing swappable. *Done when* a program reads a file, writes to stdout, spawns a process and reads its arguments and environment |
+| 7 | **`std/json`** — parse and serialize over any type, through step 5's **run-time** walk, with `@json(...)` for renaming. The step that proves reflection was worth building |
+| 8 | **`.nlib` / `.nmeta`**, plus `-C opt-level` and `-C target-cpu` |
+| 9 | **`twig`** — the package tool, written in Nest. The first real program in the language |
+| 10 | **The editor** — syntax first, then the language server on the manifest |
+
+**The rest of `#comptime` is deferred and unscheduled**, on your instruction —
+see "Deferred" below. Nothing in steps 6–10 needs it: `std/json` walks a type at
+run time, which is the path that works today.
 
 ## Still open, and yours to decide
 
@@ -158,19 +173,27 @@ is what `std/json` (step 7) will walk a type with.
 | **What `.nlib` holds beside the code** | Your note in `toolchain.md` now says an archive of pre-generated IR *and* metadata, with the `.nmeta` alongside |
 | **`Drop`** (`#lang("drop")`) | Waiting on a *decision*: with no moves, "this value was returned / stored / passed to a call, so do not drop it" has no settled answer |
 | **Floats in `f"..."`** | `Display` has no float impl. Ryū is a few hundred lines and a table; it belongs with the float work |
-| **A `#comptime for` over a non-range** | `.{ a, b, c }` and `type_info.<T>().members` are both sequences a program will want to unroll over. Neither is a range of literals; see below |
+
+## Deferred — the rest of `#comptime`
+
+**Not scheduled, and nothing in steps 6–10 waits on it.** Step 4 unrolls a range
+of integer literals, which is what the parser can read at the point it rewinds.
+Two sequences a program will eventually want are still out of reach, and they are
+not the same size:
+
+- **`.{ a, b, c }`** needs each element's token range recorded and re-parsed.
+  Small; it belongs wherever a program first wants it.
+- **`type_info.<T>().members`** needs a sequence that is only constant *after*
+  monomorphization — a compile-time evaluator over the IR, which is a feature of
+  its own and should be scheduled as one. The **run-time** walk is what
+  `std/json` uses and it works today, so this buys the typed path and nothing
+  else yet.
+- **A `#comptime` loop variable is a constant, not a literal.** `[i]u8` works
+  because an array length reads a constant; a tuple index `t.i` does not, because
+  the parser wants a literal there.
 
 ## Not Yet Done (compiler)
 
-- [ ] **`#comptime for` over anything but a literal range.** The parser rewinds
-      and re-parses, which works for a range because the *values* are known
-      there. A `.{ a, b, c }` would need each element's token range recorded and
-      re-parsed; `type_info.<T>().members` needs a sequence that is only constant
-      *after* monomorphization, which is a different feature (a compile-time
-      evaluator over the IR) and should be scheduled as one.
-- [ ] **A `#comptime` loop variable is substituted as a constant, not a value of
-      a type.** `[i]u8` works because an array length reads a constant. A tuple
-      index `t.i` does not, because the parser wants a literal there.
 - [ ] **A `void` member should be erased from a `TypeDef` too.** §9 erases `void`
       from slots, parameters and arguments but not from a type's members. **Not
       done because `Projection::Field` indices are positional.**
@@ -290,7 +313,8 @@ the debug-info note).
    ```
 4. **See a `#comptime for` unroll**: `./target/debug/nestc --emit lir` on a body
    with `#comptime for i in 0..<4 { … }` — four copies, four `i_N` slots.
-5. **Then step 6**, the `std` floor.
+5. **Then step 6**, the `std` floor — and on through `twig` and the editor. The
+   rest of `#comptime` is deferred; do not pick it up on the way.
 
 ## Edge Cases & Error Handling
 
@@ -354,3 +378,5 @@ Everything in the previous handoff still stands. New this session:
 - Steps 1–5 were asked for and **all five are done and committed**.
 - **Reflection was prioritized over `#comptime`** on your instruction, and both
   landed.
+- **The rest of `#comptime` is deferred.** The focus is `std`, `twig` and the
+  LSP — steps 6 through 10 — and nothing in them needs it.
