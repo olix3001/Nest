@@ -1277,8 +1277,22 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 }
                 self.goto(b, span);
             }
-            None => self.terminate(Terminator::new(TermKind::Return(value), span)),
+            None => {
+                let value = self.returned(value);
+                self.terminate(Terminator::new(TermKind::Return(value), span))
+            }
         }
+    }
+
+    /// What a `return` actually carries.
+    ///
+    /// A `void` function returns **nothing**, not an `undef` of a type no
+    /// machine has. That is the same erasure §9 applies to every slot, every
+    /// parameter and every argument, and the terminator was the one place it had
+    /// not reached: `return undef` out of a `-> void` function reads harmlessly
+    /// in a dump and is a type error the moment a backend looks at it.
+    fn returned(&self, value: Option<Operand>) -> Option<Operand> {
+        if is_void(&self.ret) { None } else { value }
     }
 
     // ===< Blocks and locals >===
@@ -1621,6 +1635,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     }
                     self.goto(target, span);
                 } else {
+                    let value = self.returned(value);
                     self.terminate(Terminator::new(TermKind::Return(value), span));
                 }
             }
@@ -2106,13 +2121,28 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             });
         }
 
-        let vals = self.passed(args);
+        let mut vals = self.passed(args);
         let callee = match dispatch {
             // Which function a vtable slot holds is a property of the vtable,
             // not of the call. Reaching it is two ordinary projections and an
             // indirect call — the trait has disappeared by this level (§9).
             Dispatch::Virtual { trait_def, method } => {
-                self.vtable_slot(*trait_def, *method, vals.first(), span)?
+                let callee = self.vtable_slot(*trait_def, *method, vals.first(), span)?;
+                // **The receiver passed is the data pointer, not the fat
+                // pointer.** A `*dyn Trait` is `{ data, vtable }` (§7b) and the
+                // slot's type says `func(*void, …)` — `Cx::slot_ty` erases the
+                // receiver precisely because every implementation takes the
+                // address of the value, not the pair. Passing the pair here
+                // would be a call whose argument is two words wide against a
+                // parameter that is one, which no target can do and which only a
+                // backend would ever have noticed.
+                if let Some(Operand::Copy(p)) = vals.first().cloned() {
+                    vals[0] = Operand::Copy(p.then(Projection::Field {
+                        index: 0,
+                        name: Symbol::new("data"),
+                    }));
+                }
+                callee
             }
             // A `Generic` call that survived monomorphization is a defect there,
             // already reported. Treating the callee as a value keeps the graph

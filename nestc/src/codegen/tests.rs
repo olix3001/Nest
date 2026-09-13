@@ -50,7 +50,7 @@ fn an_unknown_backend_is_refused() {
 /// produce a `core` that does not compile.
 #[test]
 fn every_backend_resolves_the_host_to_facts_the_front_end_accepts() {
-    for b in backends() {
+    for mut b in backends() {
         let info = b
             .target_info(None)
             .unwrap_or_else(|e| panic!("{}: cannot resolve the host: {e}", b.name()));
@@ -84,7 +84,7 @@ fn every_backend_resolves_the_host_to_facts_the_front_end_accepts() {
 /// looks fine until it is loaded.
 #[test]
 fn an_unknown_triple_is_refused_rather_than_resolved_to_the_host() {
-    for b in backends() {
+    for mut b in backends() {
         let err = b
             .target_info(Some("pdp11-dec-unix"))
             .expect_err("a backend should not invent a target");
@@ -102,7 +102,7 @@ fn an_unknown_triple_is_refused_rather_than_resolved_to_the_host() {
 /// ignored it and reported the host's 64 bits would pass every other test here.
 #[test]
 fn a_thirty_two_bit_triple_gives_a_thirty_two_bit_machine() {
-    for b in backends() {
+    for mut b in backends() {
         let info = b
             .target_info(Some("wasm32-unknown-none"))
             .unwrap_or_else(|e| panic!("{}: {e}", b.name()));

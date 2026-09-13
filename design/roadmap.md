@@ -766,6 +766,63 @@ unknown name and an unknown triple are errors rather than fallbacks, a 32-bit
 triple gives a 32-bit machine, and an output kind a backend does not produce is
 refused rather than written as something else.
 
+### Built: the LLVM backend, and the first running program
+
+`nestc/src/codegen/llvm/`, behind `--features llvm` (LLVM 21, inkwell 0.10,
+`LLVM_SYS_211_PREFIX`). **A Nest program compiles to a native object, links
+against the runtime and runs.**
+
+- **LLVM decides the machine.** `target_info` resolves a triple through LLVM's
+  own registry and reports its data layout's pointer width and byte order; a
+  triple this compiler has no `Arch`/`Os` *name* for is refused rather than
+  guessed at, because those names reach source through `core`'s `target.nest`.
+- **A `bool` is an `i8` everywhere.** An `i1` is a register type whose in-memory
+  size is a byte, and a member that is sometimes one bit and sometimes one byte
+  produces a wrong offset rather than an error.
+- **Every access is a byte offset.** LIR decided the layout, so a projection is a
+  `getelementptr i8` and aggregates are packed structs with their padding
+  written out. Two layout engines that have to agree is the failure this avoids.
+- **No aggregate is ever an LLVM value.** A struct, an array, a variant and a
+  checked result are each written member by member to their offsets.
+- **`module.verify()` runs on every emission**, so a module LLVM would reject is
+  a build failure with LLVM's own message rather than a bad object file.
+- **The runtime is six C functions** (`runtime/nest_runtime.c`): `nest_alloc`,
+  `nest_free`, `nest_gc_collect`, `nest_init`, `nest_trap`, `nest_assert`. Boehm
+  with `-DNEST_GC_BOEHM`, `calloc` without it. The shim exists so that swapping
+  the collector is a **link-time** choice — the same object files either way.
+- **No GC roots are emitted**, and that is a consequence of the collector rather
+  than an omission: Boehm is conservative and scans the stack itself. §6's
+  precise live sets are what a precise or moving collector would need, and the
+  shim is what makes that swap cheap.
+
+**Two LIR bugs only a backend could have found**, both fixed:
+
+- **A dynamic dispatch passed the whole fat pointer.** A `*dyn Trait` is
+  `{ data, vtable }` and the slot's type is `func(*void, …)` — `slot_ty` erases
+  the receiver precisely because every implementation takes the data pointer —
+  but the call passed the pair. Two words against a one-word parameter, which
+  reads fine in a dump and which LLVM's verifier rejected immediately.
+- **A `-> void` function returned `undef`.** §9 erases `void` from every slot,
+  parameter and argument; the terminator was the one place it had not reached.
+
+**Verified end to end**: 8 of the 10 files in `examples/` emit object files (the
+other two need `$slice`/`$array`, below); a linked program returns the right
+answer; and `overflow=trap` produces a real run-time trap (`nest: trap`,
+SIGABRT) rather than a wrapped number.
+
+### Next: `$slice` and `$array` want a lowering, not a backend case
+
+`$slice(a, r)` takes a `core.Range.<usize>` — an **enum with six variants** — so
+a backend would have to switch on the tag and compute a start and an end. That is
+not "one instruction or one runtime call", which is what §10 claims of an
+intrinsic, and it is abstraction LIR should not be carrying: the syntax
+`a[1..<3]` already knows which form it is, so the bounds should be decomposed
+before LIR ever sees them. `$array` and `$repeat` are the same shape — they need
+backing storage, which is an allocation and a fill.
+
+The fix is in the lowering, not in each backend: a slice becomes an `Offset` and
+an `Aggregate` over a pointer and a length, and every backend gets it for free.
+
 ### Done ahead of the backend: a conversion names its instruction
 
 `Rvalue::Cast` carries a **`CastKind`** — `trunc`, `zext`, `sext`, `fptrunc`,

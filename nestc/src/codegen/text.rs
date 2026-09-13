@@ -32,7 +32,7 @@ impl Codegen for TextBackend {
         "lir"
     }
 
-    fn target_info(&self, triple: Option<&str>) -> Result<TargetInfo, CodegenError> {
+    fn target_info(&mut self, triple: Option<&str>) -> Result<TargetInfo, CodegenError> {
         let triple = match triple {
             Some(t) => t.to_string(),
             None => host_triple(),

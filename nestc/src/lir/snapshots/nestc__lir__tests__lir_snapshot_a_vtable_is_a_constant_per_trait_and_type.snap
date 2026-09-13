@@ -87,7 +87,7 @@ unit mem:main {
     _13 := _12
     d_14 := _13
     _15 := a_5.vtable.*.area
-    _16 := call (_15)(a_5)
+    _16 := call (_15)(a_5.data)
       @safepoint { live: [a_5, b_8, c_11, d_14]
         a_5 := reloc a_5
         b_8 := reloc b_8
@@ -95,7 +95,7 @@ unit mem:main {
         d_14 := reloc d_14
       }
     _17 := b_8.vtable.*.perimeter
-    _18 := call (_17)(b_8)
+    _18 := call (_17)(b_8.data)
       @safepoint { live: [b_8, c_11, d_14]
         b_8 := reloc b_8
         c_11 := reloc c_11
@@ -115,7 +115,7 @@ unit mem:main {
     unreachable
   bb2:
     _23 := c_11.vtable.*.sides
-    _24 := call (_23)(c_11)
+    _24 := call (_23)(c_11.data)
       @safepoint { live: [c_11, d_14]
         c_11 := reloc c_11
         d_14 := reloc d_14
@@ -134,7 +134,7 @@ unit mem:main {
     unreachable
   bb4:
     _29 := d_14.vtable.*.sides
-    _30 := call (_29)(d_14)
+    _30 := call (_29)(d_14.data)
       @safepoint { live: [d_14]
         d_14 := reloc d_14
       }

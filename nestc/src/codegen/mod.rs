@@ -37,6 +37,8 @@ use std::path::Path;
 use crate::common::options::Target;
 use crate::lir::Unit;
 
+#[cfg(feature = "llvm")]
+pub mod llvm;
 pub mod text;
 
 /// The facts about a machine that the compiler needs before it can lay out a
@@ -188,7 +190,11 @@ pub trait Codegen {
     /// resolve the triple says [`CodegenError::Unsupported`] and the driver
     /// stops: continuing would mean laying types out for a machine that is not
     /// the one being compiled for.
-    fn target_info(&self, triple: Option<&str>) -> Result<TargetInfo, CodegenError>;
+    /// It takes `&mut self` because resolving a target **configures** the
+    /// backend: the triple decided here is the one every later `emit_unit` has
+    /// to generate for, and a backend that could not remember it would quietly
+    /// emit for the host whenever a `--target` was given.
+    fn target_info(&mut self, triple: Option<&str>) -> Result<TargetInfo, CodegenError>;
 
     /// Write one unit out as `kind`, to `out`.
     ///
@@ -212,7 +218,13 @@ pub trait Codegen {
 /// itself into: a compiler should not have a set of backends that depends on
 /// link order, and a person reading this file should be able to see all of them.
 pub fn backends() -> Vec<Box<dyn Codegen>> {
-    vec![Box::new(text::TextBackend)]
+    let mut all: Vec<Box<dyn Codegen>> = Vec::new();
+    // LLVM first, so it is the default wherever it is compiled in: a compiler
+    // that can produce an object file should, without being asked.
+    #[cfg(feature = "llvm")]
+    all.push(Box::new(llvm::LlvmBackend::default()));
+    all.push(Box::new(text::TextBackend));
+    all
 }
 
 /// The backend named, or the default one.

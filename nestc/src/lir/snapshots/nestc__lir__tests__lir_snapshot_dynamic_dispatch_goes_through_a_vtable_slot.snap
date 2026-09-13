@@ -26,7 +26,7 @@ unit mem:main {
     _2 := _1
     s_3 := _2
     _4 := s_3.vtable.*.say
-    _5 := call (_4)(s_3)
+    _5 := call (_4)(s_3.data)
       @safepoint { live: [s_3]
         s_3 := reloc s_3
       }

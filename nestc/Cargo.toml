@@ -10,7 +10,17 @@ opt-level = 3
 codegen-units = 1
 lto = "thin"
 
+[features]
+# Code generation through LLVM. **Off by default**, deliberately: a compiler
+# whose test suite cannot run without a system LLVM is a compiler most people
+# cannot build. With it off, `nestc` still resolves a target, lays every type
+# out for it and runs every pass — it just cannot produce an object.
+#
+# Needs LLVM 21 and `LLVM_SYS_211_PREFIX` pointing at it.
+llvm = ["dep:inkwell"]
+
 [dependencies]
+inkwell = { version = "0.10.0", features = ["llvm21-1"], optional = true }
 logos = "0.16.1"
 num-bigint = { version = "0.4", features = ["serde"] }
 num-traits = "0.2"
