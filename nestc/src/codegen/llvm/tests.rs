@@ -493,6 +493,54 @@ fn a_program_links_and_runs() {
              }\n",
             19,
         ),
+        // Reflection, at run time: a walk over a struct's members, each read
+        // back through the checked read, and a `TypeId` that tells `usize`
+        // from `u64` because the key it hashes keeps `distinct` where LIR
+        // erases it. 7 + 11 + 100.
+        (
+            "r :: import <core/reflect>\n\
+             P :: struct { x: i32, y: i64, tag: bool }\n\
+             main :: func () -> i32 {\n\
+            \x20 let p: P := P { x: 7, y: 11, tag: true }\n\
+            \x20 let info: r.TypeInfo := r.type_info.<P>()\n\
+            \x20 if info.members.len() != 3 { return 1 }\n\
+            \x20 if info.size != 24 { return 2 }\n\
+            \x20 if r.type_id.<usize>() == r.type_id.<u64>() { return 3 }\n\
+            \x20 if r.type_id.<i32>() != r.type_id.<i32>() { return 4 }\n\
+            \x20 let mut total: i32 := 0\n\
+            \x20 let mut i: usize := 0\n\
+            \x20 while i < info.members.len() {\n\
+            \x20   let m: r.Member := info.members[i]\n\
+            \x20   if m.name == \"x\" { total = total + r.member_read.<P, i32>(&p, m) }\n\
+            \x20   if m.name == \"y\" { total = total + cast.<i32>(r.member_read.<P, i64>(&p, m)) }\n\
+            \x20   if m.name == \"tag\" {\n\
+            \x20     if r.member_read.<P, bool>(&p, m) { total = total + 100 }\n\
+            \x20   }\n\
+            \x20   i = i + 1\n\
+            \x20 }\n\
+            \x20 return total\n\
+             }\n",
+            118,
+        ),
+        // `Any`, over the `{ data, vtable }` pair that already existed: a
+        // blanket impl answers `type_id_of` through the vtable the compiler
+        // built for the trait object, and a downcast is that answer compared
+        // against a constant. 12 + 5.
+        (
+            "r :: import <core/reflect>\n\
+             { Any } :: import <core/reflect>\n\
+             P :: struct { n: i32 }\n\
+             main :: func () -> i32 {\n\
+            \x20 let p: P := P { n: 12 }\n\
+            \x20 let x: i32 := 5\n\
+            \x20 let d: *dyn Any := &p\n\
+            \x20 let e: *dyn Any := &x\n\
+            \x20 if d.type_id_of() != r.type_id.<P>() { return 1 }\n\
+            \x20 if r.downcast.<i32>(d).match { .some(_) => true, .none => false } { return 2 }\n\
+            \x20 return r.downcast.<P>(d).!.*.n + r.downcast.<i32>(e).!.*\n\
+             }\n",
+            17,
+        ),
     ] {
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
         let file = session.load_entry("main").expect("entry loads");

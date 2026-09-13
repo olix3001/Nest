@@ -1068,6 +1068,117 @@ impl Cx<'_> {
     }
 
     /// A variant's tag and its payload element types.
+    // ===< Reflection (§9) >===
+
+    /// The nominal type `core` tagged `#lang(tag)`.
+    fn lang_nominal(&self, tag: &str) -> Option<Ty> {
+        let def = self.defs.resolve_alias(self.lang.get(tag)?);
+        Some(Ty::Nominal {
+            def,
+            args: Vec::new(),
+        })
+    }
+
+    /// The identity of `ty`, as `core`'s `TypeId`.
+    ///
+    /// A hash of [`crate::ir::mono::type_key`] — the same whole-program string
+    /// every symbol in the binary is mangled from, which is what makes this
+    /// stable across units: two of them agree because they agree on the
+    /// mangling. The key keeps `distinct` and mutability where [`Cx::strip`]
+    /// erases both, so `usize` and `u64` have different identities, which is
+    /// the answer a checked read wants.
+    fn type_id_const(&self, ty: &Ty) -> Constant {
+        let key = crate::ir::mono::type_key(self.defs, ty);
+        let h = fnv1a_128(key.as_bytes());
+        Constant::Aggregate(vec![
+            Constant::Int(((h as u64) as i128).into()),
+            Constant::Int((((h >> 64) as u64) as i128).into()),
+        ])
+    }
+
+    /// Which variant of `core`'s `Kind` enum `ty` is.
+    fn kind_const(&self, ty: &Ty) -> Constant {
+        let name = Symbol::new(kind_name(self, ty));
+        let Some(kind_ty) = self.lang_nominal("reflect_kind") else {
+            return Constant::Undef;
+        };
+        let (tag, _) = self.variant_info(&kind_ty, &name);
+        Constant::Variant {
+            tag,
+            name,
+            payload: Vec::new(),
+        }
+    }
+
+    /// The global holding the description of `ty`, built once per type.
+    ///
+    /// It is read-only data and the call to `type_info.<T>()` is a copy of it:
+    /// `T` is concrete after monomorphization, so there is nothing left to
+    /// compute at run time.
+    fn type_info_global(&mut self, ty: &Ty) -> Option<GlobalId> {
+        let key = crate::ir::mono::type_key(self.defs, ty);
+        let info_ty = self.lang_nominal("reflect_info")?;
+        let member_ty = self.lang_nominal("reflect_member")?;
+        let text = Ty::Slice {
+            mutable: false,
+            inner: Box::new(Ty::u8()),
+        };
+
+        // One `Member` per member, in declaration order — the order every
+        // `Projection::Field` index is already counted in.
+        let members = self.layouts.member_types(ty).unwrap_or_default();
+        let offsets = match self.layouts.fields(ty) {
+            Some(Ok(f)) => f.offsets,
+            _ => Vec::new(),
+        };
+        let mut parts: Vec<Constant> = Vec::new();
+        for (i, (name, mty)) in members.iter().enumerate() {
+            let size = self.layouts.of(mty).map(|l| l.size).unwrap_or(0);
+            let name_const = self.text_data(name.as_str().as_bytes(), &text);
+            parts.push(Constant::Aggregate(vec![
+                name_const,
+                Constant::Int((*offsets.get(i).unwrap_or(&0) as i128).into()),
+                Constant::Int((size as i128).into()),
+                self.kind_const(mty),
+                self.type_id_const(mty),
+            ]));
+        }
+        let count = parts.len() as u64;
+        let member_lty = self.lir(&member_ty);
+        let array = LirTy::Array {
+            len: count,
+            elem: Box::new(member_lty),
+        };
+        let table = self.data_global(
+            "members",
+            array,
+            Constant::Aggregate(parts),
+            format!("reflect.members:{key}"),
+        );
+
+        let layout = self.layouts.of(ty).unwrap_or(crate::ir::layout::Layout::ZERO);
+        let name_const = self.text_data(ty.display(self.defs).as_bytes(), &text);
+        let info = Constant::Aggregate(vec![
+            name_const,
+            Constant::Int((layout.size as i128).into()),
+            Constant::Int((layout.align as i128).into()),
+            self.kind_const(ty),
+            self.type_id_const(ty),
+            // A slice is `{ ptr, len }` (§7b), and the pointer is the table.
+            Constant::Aggregate(vec![
+                Constant::Global(table),
+                Constant::Int((count as i128).into()),
+            ]),
+        ]);
+        let info_lty = self.lir(&info_ty);
+        Some(self.data_global(
+            "type_info",
+            info_lty,
+            info,
+            format!("reflect.info:{key}"),
+        ))
+    }
+
     fn variant_info(&self, ty: &Ty, name: &Symbol) -> (i128, Vec<Ty>) {
         let Ty::Nominal { def, .. } = ty else {
             return (0, Vec::new());
@@ -2732,6 +2843,37 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     to,
                 })
             }
+            // ===< Reflection (§9) >===
+            //
+            // All three are what §10 asks an intrinsic to be. Two are constants
+            // — the description and the identity are known once `T` is
+            // concrete, which it is by the time this runs — and the third is the
+            // byte offset a static field access already computes.
+            "type_id" => {
+                let t = self.type_argument(e.id)?;
+                Some(Rvalue::Use(Operand::Const(self.cx.type_id_const(&t))))
+            }
+            "type_info" => {
+                let t = self.type_argument(e.id)?;
+                let g = self.cx.type_info_global(&t)?;
+                Some(Rvalue::Use(Operand::Copy(Place::global(g))))
+            }
+            // `base + m.offset`, in bytes. The offset is read out of the
+            // descriptor the caller passed, which is the whole difference
+            // between this and `p.y`: the selector is a value.
+            "member_ptr" if args.len() == 2 => {
+                let base = self.eval(&args[0]);
+                let m = self.place_of(&args[1])?;
+                let offset = Operand::Copy(m.then(Projection::Field {
+                    index: 1,
+                    name: Symbol::new("offset"),
+                }));
+                Some(Rvalue::Offset {
+                    ptr: base,
+                    index: offset,
+                    stride: 1,
+                })
+            }
             // An explicit release (§6.9). It is the *same* instruction escape
             // analysis emits on its own (§5) — a pointer and a free — so there
             // is one thing for a backend to implement rather than two, and the
@@ -4157,6 +4299,54 @@ fn unique(taken: &mut std::collections::HashSet<Symbol>, symbol: Symbol) -> Symb
 /// and it is not a type a *machine* has: there is no register, no slot and no
 /// argument for it. So it is erased wherever a value would be held, which is
 /// what keeps `let _7: void` out of a frame.
+/// FNV-1a over 128 bits.
+///
+/// A hash and not a cryptographic one: the input is a type key the compiler
+/// generated, not anything an attacker chose, and what is wanted is that two
+/// different types differ — which 128 bits of any decent mixing gives with a
+/// margin nobody has to argue about. The constants are the published ones.
+fn fnv1a_128(bytes: &[u8]) -> u128 {
+    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013b;
+    let mut h = OFFSET;
+    for &b in bytes {
+        h ^= b as u128;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
+/// Which `core` `Kind` variant a type is.
+///
+/// The names are `reflect.nest`'s, in the one place the compiler has to know
+/// them — a variant is chosen by name here exactly as a `Location`'s members
+/// are filled positionally there. `Other` is the tail rather than a panic: a
+/// type this vocabulary does not name should be described as unknown, not
+/// described wrongly.
+fn kind_name(cx: &Cx<'_>, ty: &Ty) -> &'static str {
+    match cx.strip(ty) {
+        Ty::Void => "Void",
+        Ty::Never => "Never",
+        Ty::Bool => "Bool",
+        Ty::Char => "Char",
+        Ty::Int { signed: true, .. } => "Int",
+        Ty::Int { signed: false, .. } => "Uint",
+        Ty::Float(_) => "Float",
+        Ty::Ptr { .. } => "Ptr",
+        Ty::Slice { .. } => "Slice",
+        Ty::Array { .. } => "Array",
+        Ty::Tuple(_) => "Tuple",
+        Ty::Func { .. } => "Func",
+        Ty::Dyn { .. } => "Dyn",
+        Ty::Nominal { def, .. } => match cx.linked.ty(def).map(|t| &t.kind) {
+            Some(TypeDefKind::Enum { .. }) => "Enum",
+            Some(_) => "Struct",
+            None => "Other",
+        },
+        _ => "Other",
+    }
+}
+
 fn is_void(ty: &Ty) -> bool {
     matches!(ty, Ty::Void)
 }

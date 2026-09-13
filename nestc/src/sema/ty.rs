@@ -544,6 +544,32 @@ pub enum Obligation {
         /// The literal's body node, re-read when the obligation is discharged.
         origin: NodeId,
     },
+    /// A comparison whose operand type was still a variable when the operator
+    /// was typed — `ms[i].name == s`, where the left side is `Index.Output`
+    /// until the impl is selected.
+    ///
+    /// Whether `==` is a machine instruction or a call to `Eq.eq` is decided by
+    /// what the operand *is*, so asking before it is known gets the wrong
+    /// answer silently: a `str` compared as a machine word rather than by its
+    /// bytes. This defers the question to when the type has one.
+    Comparison {
+        self_ty: Ty,
+        op: crate::parser::ast::BinOp,
+        origin: NodeId,
+    },
+    /// `recv.name` where `recv`'s type is not known **yet** — `ms[i].name`,
+    /// whose base is `Index.Output` until the impl is selected.
+    ///
+    /// Asking eagerly answers `Ty::Error`, which unifies with everything and so
+    /// says nothing; the field's type then reaches the rest of inference as an
+    /// error that was never reported. This defers the lookup to when the base
+    /// has a type, and `out` is what the access was given in the meantime.
+    Field {
+        recv: Ty,
+        name: Symbol,
+        out: Ty,
+        origin: NodeId,
+    },
 }
 
 /// A restorable checkpoint of the union-find, so the solver can trial-unify a

@@ -1948,6 +1948,12 @@ fn every_declared_intrinsic_has_a_lir_case() {
         "len",
         "wrapping_add",
         "wrapping_sub",
+        // Reflection: two constants and a byte offset (§9's addition). The
+        // description and the identity are read-only data by the time this
+        // runs, and `member_ptr` is the `Offset` a slice index already is.
+        "type_info",
+        "type_id",
+        "member_ptr",
     ];
     for row in crate::sema::intrinsics::INTRINSICS {
         if lowered.contains(&row.tag) {

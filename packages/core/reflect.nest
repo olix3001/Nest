@@ -1,0 +1,189 @@
+// Reflection: what a type is, as ordinary data.
+//
+// Every declaration here is either a **type the compiler fills in** or a
+// **bodyless `#intrinsic`** (§6.4, §9). There is no `comptime` keyword and no
+// sigil: `type_info.<T>()` is a call like `size_of.<T>()` is a call, and `@`
+// stays what it is, the attribute sigil.
+//
+// **The description is data, so reading it is an ordinary loop.** A `TypeInfo`
+// is a value, its `members` are a slice, and a member's `kind` is an enum — so
+// `for m in type_info.<T>().members` runs at run time like any other loop, and
+// nothing about *reading the description* needs unrolling. What needs unrolling
+// is typed access to the value, because an accessor that yields a differently
+// typed value per member can only be typed if the loop around it is gone; that
+// is `#comptime`'s job and not this file's.
+//
+// **The structs below are filled in positionally.** The compiler builds these
+// values member by member in declaration order, the way it already builds a
+// `Location` for `#caller_location`, and finds each type by its `#lang` tag
+// rather than by name — so reordering a member here is a change, and renaming
+// one is not.
+
+{ Eq } :: import "cmp.nest"
+{ transmute } :: import "mem.nest"
+
+// ===< Identity >===
+
+// A globally unique identity for a monomorphized type.
+//
+// It is a 128-bit hash of the same whole-program key every symbol in the binary
+// is mangled from (`ir::mono::type_key`), which is what makes it *stable*: two
+// separately compiled units agree on it because they agree on the mangling, and
+// the collision argument is the one Rust's `TypeId` makes — 128 bits is enough
+// that nobody has to have the conversation.
+//
+// **`distinct` survives it.** The key keeps `distinct` and mutability even
+// though LIR erases both (§9), so `type_id.<usize>()` and `type_id.<u64>()`
+// differ. That is exactly the answer a checked read wants: the two have the same
+// representation and are not the same type, and a program that stored one must
+// not read the other.
+@public TypeId :: #lang("reflect_type_id") struct { lo: u64, hi: u64 }
+
+impl Eq for TypeId {
+  eq :: func (self: Self, rhs: Self) -> bool {
+    return self.lo == rhs.lo && self.hi == rhs.hi
+  }
+}
+
+// ===< The description >===
+
+// What a type *is*, coarsely — enough to decide how to treat a value without
+// knowing which type it is.
+//
+// An enum rather than a string because the whole point of asking is to branch,
+// and a `match` on this is exhaustively checked. `Other` is the honest tail: a
+// type the compiler has that this vocabulary does not name is reported as one
+// rather than as a lie.
+@public Kind :: #lang("reflect_kind") enum {
+  Void,
+  Never,
+  Bool,
+  Char,
+  Int,
+  Uint,
+  Float,
+  Ptr,
+  Slice,
+  Array,
+  Tuple,
+  Struct,
+  Enum,
+  Func,
+  Dyn,
+  Other,
+}
+
+// One member of a struct: where it sits, how big it is, and what it is.
+//
+// `offset` is what makes a run-time field read possible at all — `member_ptr`
+// is `base + offset` — and `id` is what makes it *safe*, by giving the read
+// something to compare against.
+@public Member :: #lang("reflect_member") struct {
+  name: str,
+  offset: usize,
+  size: usize,
+  kind: Kind,
+  id: TypeId,
+}
+
+// A type, described.
+//
+// Constant-folded: `T` is concrete after monomorphization, so this is a value
+// in read-only data and the call is a copy of it.
+@public TypeInfo :: #lang("reflect_info") struct {
+  name: str,
+  size: usize,
+  align: usize,
+  kind: Kind,
+  id: TypeId,
+  // Empty for everything that is not a struct. A tuple's positional members are
+  // real members named `0`, `1`, … (§3.3), so they are here too.
+  members: []Member,
+}
+
+// ===< The intrinsics >===
+
+// The description of `T`.
+@public type_info :: #intrinsic("type_info") func <T> () -> TypeInfo
+
+// The identity of `T`, alone — the whole of `type_info.<T>().id` without the
+// rest of the description, for the common case of comparing two types.
+@public type_id :: #intrinsic("type_id") func <T> () -> TypeId
+
+// The address of `v`'s member `m`.
+//
+// One instruction: the address is `base + m.offset`, which LIR already computes
+// for every static field access. What it hands back has no type, because the
+// type is what `m` says it is — the caller reads it with `member_read` below,
+// or takes the address on its own responsibility.
+//
+// The result is an **interior** pointer. That is not new here: `&mut p.y` is one
+// too, so the language has had them since `&` did, and the collector traces
+// them.
+@public member_ptr :: #intrinsic("member_ptr") func <T> (v: *T, m: Member) -> *mut void
+
+// ===< The checked read >===
+
+// Member `m` of `v`, as an `R` — **checked**.
+//
+// The check is the one a bounds check is: a comparison, an edge, and a panic
+// block. What makes it possible is `TypeId`, and what makes it necessary is
+// that a selector known only at run time cannot be checked statically by
+// definition. A selector known at compile time does not come through here at
+// all: that is the unrolled loop, statically typed, with no check.
+@public member_read :: func <T, R> (v: *T, m: Member) -> R {
+  if m.id != type_id.<R>() {
+    panic("a reflective read asked for the wrong type")
+  }
+  return transmute.<*R>(member_ptr.<T>(v, m)).*
+}
+
+// Write `value` into member `m` of `v` — the same check, the other direction.
+@public member_write :: func <T, R> (v: *mut T, m: Member, value: R) -> void {
+  if m.id != type_id.<R>() {
+    panic("a reflective write asked for the wrong type")
+  }
+  transmute.<*mut R>(member_ptr.<T>(v, m)).* = value
+}
+
+// ===< `Any` >===
+
+// The one thing every type can answer: which type it is.
+//
+// A trait with a blanket impl, over the `{ data, vtable }` machinery a `*dyn
+// Trait` already is (§7b) — nothing new is built here. `self` is a pointer
+// because that is what a trait object can promise: erasing the type erases its
+// size, so the receiver cannot be laid out by value.
+@public Any :: trait {
+  type_id_of :: func (self: *Self) -> TypeId
+}
+
+impl <T> Any for T {
+  type_id_of :: func (self: *Self) -> TypeId { return type_id.<T>() }
+}
+
+// `v` as an `*R`, when that is what it holds.
+//
+// The check is the same comparison `member_read` makes and the recovery is the
+// data half of the pair — which is why `Any` needed nothing but a blanket impl:
+// the vtable that answers `type_id_of` is the one the compiler already built
+// for the trait object.
+@public downcast :: func <R> (v: *dyn Any) -> Option.<*R> {
+  if v.type_id_of() != type_id.<R>() { return .none }
+  return .some(transmute.<*R>(transmute.<Dyn>(v).data))
+}
+
+// The two words a trait object is (§7b). Private, for the same reason `Raw` is
+// private in `core/c`: a program that wants the value back writes `downcast`.
+Dyn :: struct { data: *mut void, vtable: *mut void }
+
+// The member of `T` called `name`, or nothing.
+@public member_of :: func <T> (name: str) -> Option.<Member> {
+  let info: TypeInfo := type_info.<T>()
+  let mut i: usize := 0
+  while i < info.members.len() {
+    if info.members[i].name == name { return .some(info.members[i]) }
+    i = i + 1
+  }
+  return .none
+}

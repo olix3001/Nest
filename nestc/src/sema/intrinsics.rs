@@ -120,6 +120,13 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // no widening — because `Self` is the family member being implemented.
     plain("wrapping_add"),
     plain("wrapping_sub"),
+    // Reflection (§9's addition). All three are constants or one instruction:
+    // `type_info` and `type_id` are read-only data the compiler already has by
+    // the time it mangles a symbol, and `member_ptr` is the byte offset every
+    // static field access already computes.
+    plain("type_info"),
+    plain("type_id"),
+    plain("member_ptr"),
     // The collector (§6.4.1). All three yield `void`.
     plain("gc_collect"),
     plain("gc_keep_alive"),

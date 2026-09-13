@@ -417,6 +417,29 @@ main :: func () -> i32 { return 0 }
 }
 
 #[test]
+fn a_field_read_off_an_unsolved_base_is_deferred() {
+    // `ms[i].name` reads a field of `Index.Output`, which is a variable until
+    // the impl is selected. The lookup used to be answered right there, with
+    // `Ty::Error` — a type that unifies with everything and says nothing — so
+    // `==` on a `str` field saw no nominal type and compared two machine words
+    // instead of the bytes. Deferring the lookup is what puts the `Eq` impl
+    // back in the call.
+    let src = "\
+M :: struct { name: str }
+f :: func (ms: []M, name: str) -> bool {
+  return ms[0].name == name
+}
+";
+    let s = analyze1(src);
+    assert!(!s.has_errors(), "{:#?}", s.diagnostics);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&entry_file(&s)]);
+    assert!(ir.contains("eq"), "{ir}");
+    // The call, not a primitive compare: `str` is `distinct []u8` and its `==`
+    // is `bytes_eq`, whatever the base's type had to be solved through.
+    assert!(!ir.contains("Binary"), "{ir}");
+}
+
+#[test]
 fn a_binding_to_a_type_is_an_alias() {
     // A `::`-RHS is parsed as an expression, so `K :: P.<u8>` comes back as a
     // `GenericApply` and `C :: u8` as a bare `Path` — neither of which

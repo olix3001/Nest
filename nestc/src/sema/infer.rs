@@ -1183,6 +1183,20 @@ impl Inferer<'_> {
                 if let Some(ft) = self.field_ty(&bty, name.as_str()) {
                     return ft;
                 }
+                // Not *absent* — **not yet known**. A base that is still a
+                // variable is a projection nothing has solved, and answering
+                // now answers `Ty::Error`, which unifies with everything and
+                // tells the rest of inference nothing at all.
+                if is_var(&self.cx.shallow(&bty)) {
+                    let out = self.cx.fresh();
+                    self.cx.register(Obligation::Field {
+                        recv: bty,
+                        name,
+                        out: out.clone(),
+                        origin: node,
+                    });
+                    return out;
+                }
                 self.no_such_field(node, &bty, name.as_str())
             }
             NodeKind::TupleIndex { base, index } => {
@@ -1749,6 +1763,18 @@ impl Inferer<'_> {
     /// three-way `cmp` the machine would only have to undo.
     fn check_cmp_bound(&mut self, node: NodeId, op: BinOp, lty: &Ty) {
         let shallow = self.cx.shallow(lty);
+        // Not *unknown* — **not yet known**. An operand that is still a
+        // variable is a projection nothing has solved: `ms[i].name` is
+        // `Index.Output` until the impl is selected, and answering now means
+        // answering "not nominal", which compares a `str` as a machine word.
+        if is_var(&shallow) {
+            self.cx.register(Obligation::Comparison {
+                self_ty: lty.clone(),
+                op,
+                origin: node,
+            });
+            return;
+        }
         if !matches!(shallow, Ty::Nominal { .. }) {
             return;
         }
@@ -2010,6 +2036,37 @@ impl Inferer<'_> {
                 }
                 let (origin, target) = (*origin, target);
                 self.check_composite_body(origin, &target);
+                Outcome::Solved
+            }
+            Obligation::Field {
+                recv,
+                name,
+                out,
+                origin,
+            } => {
+                let target = self.cx.shallow(recv);
+                if is_var(&target) {
+                    return Outcome::Deferred;
+                }
+                let (name, out, origin) = (name.clone(), out.clone(), *origin);
+                match self.field_ty(&target, name.as_str()) {
+                    Some(t) => self.expect(origin, &t, &out),
+                    None => {
+                        self.no_such_field(origin, &target, name.as_str());
+                    }
+                }
+                Outcome::Solved
+            }
+            Obligation::Comparison {
+                self_ty,
+                op,
+                origin,
+            } => {
+                if is_var(&self.cx.shallow(self_ty)) {
+                    return Outcome::Deferred;
+                }
+                let (self_ty, op, origin) = (self_ty.clone(), *op, *origin);
+                self.check_cmp_bound(origin, op, &self_ty);
                 Outcome::Solved
             }
         }
@@ -2539,7 +2596,14 @@ impl Inferer<'_> {
             // A variant or composite literal whose type was never determined:
             // the result variable itself surfaces as "type annotations needed"
             // in finalize, so there is nothing extra to say here.
-            Obligation::VariantPayload { .. } | Obligation::CompositeBody { .. } => return,
+            Obligation::VariantPayload { .. }
+            | Obligation::CompositeBody { .. }
+            // A comparison still waiting on its operand's type is waiting on a
+            // variable nothing solved, which is already reported as one.
+            | Obligation::Comparison { .. }
+            // A field access still waiting on its base is waiting on a
+            // variable nothing solved, which is already reported as one.
+            | Obligation::Field { .. } => return,
         };
         let s = self.cx.shallow(&self_ty);
         if !is_var(&s) {
@@ -2627,22 +2691,6 @@ impl Inferer<'_> {
                         &targs,
                     );
                 }
-                // Otherwise search every impl whose self type unifies with the
-                // receiver — the only way to reach a method on a structural
-                // receiver (`[]T`, `[N]T`, a range), whose impl parks its
-                // members outside any nominal namespace.
-                if let Some(m) = self.impl_method_def(&recv, name.as_str()) {
-                    // The impl was selected right here, so this is a direct
-                    // call even though the method came from a trait.
-                    return self.infer_method_call(
-                        callee,
-                        &recv,
-                        m,
-                        MethodDispatch::Static,
-                        args,
-                        &targs,
-                    );
-                }
                 // A method on a bounded type parameter resolves in the bound:
                 // `<I: Summing>` makes `it.total()` mean `Summing.total`, with
                 // the concrete impl picked once `I` is instantiated.
@@ -2663,9 +2711,33 @@ impl Inferer<'_> {
                 }
                 // A method on a trait object resolves in the trait itself; which
                 // impl runs is a vtable lookup a later stage performs.
+                //
+                // **Before the impl search**, and that order is the whole of
+                // it: a blanket `impl <T> Trait for T` matches `T = dyn Trait`
+                // as happily as it matches anything else, so searching impls
+                // first turned every call on a trait object into a static call
+                // to the blanket impl instantiated at the erased type — the
+                // vtable built beside it went unused, and the answer was about
+                // `dyn Trait` rather than about what was in it.
                 if let Some(m) = self.dyn_method_def(&recv, name.as_str()) {
                     let d = self.method_dispatch(m, MethodDispatch::Virtual);
                     return self.infer_method_call(callee, &recv, m, d, args, &targs);
+                }
+                // Otherwise search every impl whose self type unifies with the
+                // receiver — the only way to reach a method on a structural
+                // receiver (`[]T`, `[N]T`, a range), whose impl parks its
+                // members outside any nominal namespace.
+                if let Some(m) = self.impl_method_def(&recv, name.as_str()) {
+                    // The impl was selected right here, so this is a direct
+                    // call even though the method came from a trait.
+                    return self.infer_method_call(
+                        callee,
+                        &recv,
+                        m,
+                        MethodDispatch::Static,
+                        args,
+                        &targs,
+                    );
                 }
                 // Last, the one ergonomic exception `@using` grants (§3.10): a
                 // method the outer struct does not have resolves on the upcast
