@@ -106,6 +106,13 @@ usage: nestc [options] <file.nest>
 
 ## Next: the plan
 
+**`design/toolchain.md` ends with a ten-step order of work.** Each step is a
+whole feature, each ends in a commit, and **work stops after each commit** for
+review: `repeat`/`format` → blanket impls → `core/c` → `#comptime` → the whole
+reflection system → the `std` floor → `std/json` → `.nlib`/`.nmeta` and
+`-C opt-level` → `twig` → the editor.
+
+
 **`design/toolchain.md` is the whole thing.** In order, with the reason each
 arrow is real:
 

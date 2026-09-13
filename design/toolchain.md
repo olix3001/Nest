@@ -279,6 +279,146 @@ Two pieces, and only the second one waits:
 
 ---
 
+## The order of work
+
+Ten steps. **Each one is a whole feature**, each ends in a commit, and **work
+stops after each commit** so the step can be reviewed before the next begins. A
+step is done when its own tests pass and the full suite still does — no step
+leaves a half-built feature behind for the next one to finish.
+
+The numbering is a dependency order, not a wish list: every step needs the one
+before it, except where it says otherwise.
+
+### Step 1 — `repeat` and `format`, lowered
+
+The standing instruction: when something can be simplified in LIR, do it.
+`$slice` and `$array` were the first two, these are the last two intrinsics that
+are more than "one instruction or one runtime call" (§10). `repeat` is a `make`
+and a loop; `format` needs a formatter and an allocation.
+
+**Independent of everything below** — it is here first because it is the
+outstanding debt, and because `format` is what `std/io`'s `print` will want.
+
+*Done when*: the intrinsic list is nine, the two variants are gone from the enum,
+and the coverage test asserts their absence. **Commit. Stop.**
+
+### Step 2 — blanket impls
+
+`impl <T> Trait for T` type-checks and then fails in codegen
+(`Void is not a type a value can have`). A concrete impl of the same trait runs,
+so it is the blanket form specifically. **`Any` cannot exist without this**, and
+neither can the checked reflective read.
+
+*Done when*: the reproducer in the handoff runs and returns 7, and a blanket impl
+is exercised over a struct, an integer and a generic type.
+**Commit. Stop.**
+
+### Step 3 — `core/c`
+
+The C boundary as described above: the type aliases, `c.ptr.<T>`, `c.null`, and
+the `c"..."` literal with its trailing NUL. **No varargs.** `extern("c")`
+already works; this is the vocabulary to use it with.
+
+*Done when*: a Nest program calls `write(1, ...)` through libc and the output
+appears. **Commit. Stop.**
+
+### Step 4 — `#comptime` loops
+
+The directive that makes a loop evaluate at compile time, which is what lets its
+body be typed per iteration. Needed by reflection's typed path and by nothing
+else yet, which is why it is its own step rather than part of the next one: a
+loop that unrolls is a language feature with its own failure modes (a bound that
+is not constant, a body that cannot be typed at some iteration) and deserves its
+own diagnostics.
+
+*Done when*: `#comptime for` over a constant sequence unrolls, a non-constant
+bound is an error at the loop rather than a mystery later, and the LIR shows the
+unrolled form.
+
+**Commit. Stop.**
+
+### Step 5 — the whole reflection system
+
+One step, because the parts are useless apart:
+
+- `core/reflect.nest`: `TypeInfo`, `Member`, the `kind` enum.
+- `type_info.<T>()` — the description as a constant-folded value.
+- `type_id.<T>()` — a 128-bit hash of `ir::mono::type_key`.
+- `member_ptr(v, m)` — `base + m.offset`, one instruction.
+- The checked read: a constant `TypeId` against a loaded one, the bounds check's
+  lowering.
+- `Any`, over the `{ data, vtable }` machinery that exists (needs step 2).
+- **User-defined `@attribute` declarations**, and their values on `Member.attrs`.
+  This is the §9 change: today's attributes are a fixed set.
+
+*Done when*: a test walks a struct's members at run time, reads each one through
+a checked read, and a wrong type traps; and an `@attribute` written on a member
+is readable from its descriptor.
+
+**Commit. Stop.**
+
+### Step 6 — the `std` floor
+
+Only what `twig` and the language server need: `io`, `fs`, `process`, `mem`,
+`str`, `collections`, and `libc` raw beneath them, over the internal `sys`
+namespace that makes the backing swappable.
+
+*Done when*: a Nest program reads a file, writes to stdout, spawns a process and
+reads its arguments and environment. **Commit. Stop.**
+
+### Step 7 — `std/json`
+
+Parse and serialize, generic over any type, using step 5 — and the `@json(...)`
+attribute for renaming. This is the step that proves reflection was worth
+building.
+
+*Done when*: a struct round-trips through JSON, a renamed member honours its
+attribute, and a malformed document is an error rather than a trap.
+**Commit. Stop.**
+
+### Step 8 — `.nlib` / `.nmeta`, and the rest of `nestc`'s debt to `twig`
+
+- The library format: `.nlib` (compiled code) and `.nmeta` (metadata alone), so
+  a dependency stops being source recompiled into every program.
+- `-C opt-level`, running LLVM's pass manager.
+- `-C target-cpu`.
+
+*Done when*: a package compiles to a `.nlib`, a second package compiles against
+its `.nmeta` without reading its source, and the two link into a program.
+**Commit. Stop.**
+
+### Step 9 — `twig`
+
+The package tool, **written in Nest**: `nest.toml`, dependency resolution, the
+target directory, and `nestc` invoked per package with `--package`, `-C` and
+`--error-format=json`. The first real program in the language.
+
+*Done when*: `twig build` builds a package with a dependency, and `twig run`
+runs it.
+
+**Commit. Stop.**
+
+### Step 10 — the editor
+
+Syntax highlighting first (it needs nothing), then the language server on top of
+the manifest. Possibly written in Nest.
+
+*Done when*: a `.nest` file is highlighted in VS Code, and the server reports
+diagnostics for an open buffer.
+
+**Commit. Stop.**
+
+### Not scheduled
+
+**Parallel code generation** — the units are independent and the merge is in
+place, so what is left is a backend instance and an LLVM context per thread. It
+belongs wherever compile times start to hurt, which is probably during step 9.
+
+**Debug info** — DWARF, from the spans and origins LIR already carries. It
+belongs wherever debugging `twig` stops being possible by printing.
+
+---
+
 ## Open decisions
 
 Nothing below is assumed anywhere in this plan.
