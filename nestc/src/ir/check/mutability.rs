@@ -82,8 +82,26 @@ impl Walk<'_> {
     fn stmt(&mut self, s: &Stmt) {
         match &s.kind {
             StmtKind::Assign { place, value } => {
-                if let Some(why) = self.denial(place) {
-                    self.report(place.id, &why, Use::Assign);
+                // A place first, and only then the question of permission: `f()
+                // = 3` is not a read-only binding, it is not a binding at all.
+                // Without this it lowered — the IR happily holds an `Assign`
+                // whose left side is a call — and the program was accepted.
+                if is_place(place) {
+                    if let Some(why) = self.denial(place) {
+                        self.report(place.id, &why, Use::Assign);
+                    }
+                } else if !self.meta.ty_or_error(place.id).mentions_error() {
+                    let mut d = Diagnostic::error(
+                        "cannot assign to this expression: it is not a place".to_string(),
+                    );
+                    if let Some(span) = self.meta.span(place.id) {
+                        d = d.with_primary(span, "this computes a value, it does not name one");
+                    }
+                    self.out.push(d.with_note(
+                        "the left side of an assignment has to be a binding, a field, a \
+                         tuple element, an index or a dereference"
+                            .to_string(),
+                    ));
                 }
                 // The place's own sub-expressions still hold writes of their
                 // own: `a[f(&mut b)] = 1` has one inside the index.
@@ -289,4 +307,21 @@ fn sequence_index(e: &Expr) -> Option<&Expr> {
         }
         _ => None,
     }
+}
+
+/// Whether `e` **names** storage rather than computing a value.
+///
+/// The five forms are the ones [`Checker::denial`] knows how to ask a
+/// permission question about, and that is not a coincidence: a place is exactly
+/// what has an address to write through. `a[i]` is absent because it is already
+/// `index(&a, i).*` by this point (§6.13) — a [`ExprKind::Deref`].
+fn is_place(e: &Expr) -> bool {
+    matches!(
+        e.kind,
+        ExprKind::Local(_)
+            | ExprKind::Global(_)
+            | ExprKind::Field { .. }
+            | ExprKind::TupleIndex { .. }
+            | ExprKind::Deref { .. }
+    )
 }

@@ -476,7 +476,15 @@ pub fn infer_file(
     let ast = &asts[&file];
     // The set of trait defs a use site in this file may select impls of: only
     // in-scope traits are candidates (§ trait selection, Rust-style).
-    let in_scope_traits = in_scope_traits(defs, prelude_globs, file_ns);
+    let mut in_scope_traits = in_scope_traits(defs, prelude_globs, file_ns);
+    // A trait **named in a bound** is in scope for the parameter it bounds,
+    // however it was written. Without this, `func <T: cmp.Eq>` type-checks the
+    // bound and then cannot call `a.eq(b)`: the qualified path resolves to
+    // `core.Eq` perfectly well, but the *file* only imported the `cmp`
+    // namespace, so `Eq` was never a candidate for selection. Writing the bound
+    // is as clear a statement that the trait is wanted here as importing its
+    // name is.
+    in_scope_traits.extend(bound_traits(defs, ast));
     // A `#lang`-tagged trait is always selectable, imported or not (§4.6). The
     // operator traits are the reason: `a + b` reaches `Add` **by its tag**, so
     // the compiler is the one that named it, and gating that on the program
@@ -851,6 +859,40 @@ pub(crate) fn in_scope_traits(
             add_public(&mut set, g);
         }
         cur = defs.get(n).parent;
+    }
+    set
+}
+
+/// Every trait named by a bound anywhere in `ast`.
+///
+/// A bound is the one place a trait is named without being *used* as a value or
+/// a type, so an import of its name is easy to leave out — and the program that
+/// left it out is exactly the one that meant the trait. The walk is over the
+/// whole file rather than per generic list because selection is per file
+/// ([`in_scope_traits`]), and a trait bounding one function is not a surprising
+/// candidate inside another in the same file.
+fn bound_traits(defs: &DefTable, ast: &Ast) -> HashSet<DefId> {
+    let mut set = HashSet::new();
+    for node in ast.ids() {
+        let NodeKind::Bounds { bounds } = ast.node(node).kind.clone() else {
+            continue;
+        };
+        for b in bounds {
+            // The head of `Trait.<Args>` is what names the trait; a bare path is
+            // its own head.
+            let head = match ast.node(b).kind {
+                NodeKind::TypePath { path, .. } => path,
+                NodeKind::GenericApply { base, .. } => base,
+                _ => b,
+            };
+            let Some(Resolution::Def(d)) = ast.meta::<Resolution>(head) else {
+                continue;
+            };
+            let d = defs.resolve_alias(d);
+            if defs.get(d).kind == DefKind::Trait {
+                set.insert(d);
+            }
+        }
     }
     set
 }
@@ -5287,6 +5329,13 @@ impl Inferer<'_> {
             // whose head is the base.
             NodeKind::GenericApply { base, args } => self.typepath_ty(file, base, &args),
             NodeKind::Path { .. } => self.typepath_ty(file, node, &[]),
+            // `ns.P { ... }` — a composite literal's head is parsed as an
+            // **expression** (§ the tuple-struct form is a `Call`), so a
+            // qualified type name reaches here as a member access rather than a
+            // `Path`. Name resolution has already stamped the type's def on the
+            // node, which is all `typepath_ty` reads, so the two spellings end
+            // at the same type instead of one of them being a silent error.
+            NodeKind::FieldAccess { .. } => self.typepath_ty(file, node, &[]),
             _ => Ty::Error,
         }
     }
@@ -5494,6 +5543,12 @@ impl Inferer<'_> {
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>()
                 .join("."),
+            // A qualified name written in expression position — a composite
+            // literal's head. Walk back down the chain so the message quotes
+            // `ns.P` and not the last segment alone.
+            NodeKind::FieldAccess { base, name } => {
+                format!("{}.{name}", self.written_path_in(file, *base, def))
+            }
             // Not a path at all — nothing was written to quote, so the def's
             // own name is the best there is.
             _ => self.defs.get(def).name.to_string(),

@@ -6264,6 +6264,112 @@ fn a_constant_arithmetic_result_must_fit_its_type() {
     assert!(ir.contains("// = 144"), "{ir}");
 }
 
+/// A `defer`'s arguments are evaluated **where it is written** (§8.4), not on
+/// the way out.
+///
+/// The body used to be re-evaluated at each exit, so a deferred call read
+/// whatever its operands held *then* — which is the opposite of what the
+/// construct is for, and silently wrong rather than an error.
+#[test]
+fn a_defer_captures_its_arguments_where_it_is_registered() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "sink :: func (n: i32) {}\n\
+             f :: func () { let mut x: i32 := 1  defer sink(x)  x = 2 }\n",
+        )],
+        "main",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    // The capture is a binding in front of the `defer`, in the same scope: one
+    // of its own would end immediately and run the body there.
+    let ir = ir_text("sink :: func (n: i32) {}\nf :: func () { let mut x: i32 := 1  defer sink(x)  x = 2 }\n");
+    assert!(ir.contains("__defer"), "{ir}");
+}
+
+/// A **qualified** type name is a type wherever it is written, including as the
+/// head of a composite literal.
+///
+/// A literal's head is parsed as an *expression* — the tuple-struct form
+/// `Type(a, b)` is syntactically a call — so `ns.P { ... }` arrives as a member
+/// access rather than a `Path`. Resolution gets it right; reading the type off
+/// it did not, and the result was a silent error type that unified with
+/// everything and blew up in the backend.
+#[test]
+fn a_qualified_name_heads_a_composite_literal() {
+    analyze_clean(
+        "ns :: namespace { @public P :: struct { x: i32 } }\n\
+         f :: func () -> i32 { let q: ns.P := ns.P { x: 7 }  return q.x }\n",
+    );
+    // Across files, which is the shape a package dependency has.
+    let session = analyze_mem(
+        &[
+            (
+                "main",
+                "p :: import \"other\"\n\
+                 f :: func () -> i32 { return (p.P { x: 7 }).x }\n",
+            ),
+            ("other", "@public P :: struct { x: i32 }\n"),
+        ],
+        "main",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+/// A trait named in a **bound** is in scope for the parameter it bounds,
+/// however the bound spelled it.
+///
+/// Impl selection draws from the traits a file can name, and a qualified bound
+/// names one without importing it: `func <T: cmp.Eq>` resolved the bound
+/// perfectly well and then could not call `a.eq(b)`, because the file had
+/// imported the `cmp` namespace and never `Eq`.
+#[test]
+fn a_trait_named_in_a_bound_is_in_scope_for_it() {
+    let session = analyze_mem(
+        &[
+            (
+                "main",
+                "cmp :: import <core/cmp>\n\
+                 same :: func <T: cmp.Eq> (a: T, b: T) -> bool { return a.eq(b) }\n\
+                 f :: func () -> bool { return same(1, 1) }\n",
+            ),
+        ],
+        "main",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+/// The left side of an assignment has to **name** storage.
+///
+/// `f() = 3` is not a read-only binding — it is not a binding at all — and the
+/// permission check had nothing to say about it, so the IR carried an `Assign`
+/// whose left side was a call and the program was accepted.
+#[test]
+fn assigning_to_something_that_is_not_a_place_is_refused() {
+    for src in [
+        "f :: func () -> i32 { return 1 }\nmain :: func () { f() = 3 }\n",
+        "main :: func () { 1 + 2 = 3 }\n",
+    ] {
+        assert!(
+            messages(src)
+                .iter()
+                .any(|m| m.contains("it is not a place")),
+            "{:#?}",
+            messages(src)
+        );
+    }
+    // A real place is still accepted, and a read-only one still fails the
+    // *permission* check rather than this one.
+    analyze_clean("main :: func () { let x: i32 := 1  x = 2 }\n");
+    assert!(
+        messages("main :: func () { const x: i32 := 1  x = 2 }\n")
+            .iter()
+            .any(|m| m.contains("not a mutable binding")),
+        "{:#?}",
+        messages("main :: func () { const x: i32 := 1  x = 2 }\n")
+    );
+}
+
 /// A name in **type position** that does not name a type has to be reported
 /// where it was written.
 ///

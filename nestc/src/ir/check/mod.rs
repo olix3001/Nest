@@ -34,6 +34,7 @@ pub mod layouts;
 pub mod mutability;
 pub mod object_safety;
 pub mod reachability;
+pub mod residue;
 
 /// Run every IR validation pass over `linked`, in order, collecting what they
 /// report.

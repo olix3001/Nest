@@ -413,3 +413,18 @@ fn an_interpolation_holds_an_ordinary_expression() {
          go :: func () -> str { return f\"{ P { x: 1 }.x } { f(\"}\") } { f\"{1}\" }\" }\n"
     ));
 }
+
+/// Several statements may share a line, and the classifier that decides what a
+/// statement *is* looks ahead to the end of that line.
+///
+/// So `f(x) n = 1` is two statements whose scan finds an assignment operator
+/// belonging to the second one. Taking that as evidence about the first parsed
+/// `f(x)` as an assignment's place and then reported "expected an assignment
+/// operator" at `n` — for a program that is written correctly.
+#[test]
+fn a_call_may_be_followed_by_an_assignment_on_one_line() {
+    assert_snapshot!(tree(
+        "f :: func (n: i32) {}\n\
+         go :: func () -> i32 { let mut n: i32 := 0  f(n) n = n + 1  return n }\n"
+    ))
+}

@@ -337,6 +337,23 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     };
     session.diagnostics.extend(diags);
 
+    // The backstop, and it runs **only when nothing else spoke**: an error type
+    // that reached here with no diagnostic behind it is a defect in this
+    // compiler, not in the program, and saying so with a span beats the backend
+    // refusing a `void` slot three functions away (see
+    // [`crate::ir::check::residue`]). After a real diagnostic the IR is full of
+    // error types by design, so the condition is what keeps this quiet.
+    if !session.has_errors() {
+        let mut diags = Vec::new();
+        crate::ir::check::residue::check(
+            &session.defs,
+            &session.ir_meta,
+            &session.linked,
+            &mut diags,
+        );
+        session.diagnostics.extend(diags);
+    }
+
     // Monomorphization. It runs **after** the checks and not before, because
     // every one of them wants to report against the program as it was written:
     // a mistake inside `func <T>` is one mistake, and an instantiation of that

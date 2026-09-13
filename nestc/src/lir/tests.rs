@@ -2987,11 +2987,33 @@ f :: func (c: bool) -> i32 {
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
 }
 
-/// A `defer` body runs on the way out, which is *after* everything above it —
-/// including a drop.
+/// A `defer` **block** runs on the way out, which is *after* everything above
+/// it — including a drop.
+///
+/// A deferred **call** does not read `p` on the way out: its arguments are
+/// evaluated where the `defer` is written (§8.4), above the `drop`, so the
+/// same-looking program is fine. Both are here because the difference between
+/// them is the whole point of capturing at registration.
 #[test]
 fn a_defer_that_reads_a_dropped_value_is_refused() {
     let src = "\
+{ new, drop } :: import <core/mem>
+Node :: struct { x: i32 }
+sink :: func (n: i32) {}
+f :: func () {
+  let p := new.<Node>()
+  defer { sink(p.*.x) }
+  drop(p)
+}
+";
+    assert!(
+        messages(src)
+            .iter()
+            .any(|m| m.contains("used after it was dropped")),
+        "{:#?}",
+        messages(src)
+    );
+    let captured = "\
 { new, drop } :: import <core/mem>
 Node :: struct { x: i32 }
 sink :: func (n: i32) {}
@@ -3002,11 +3024,9 @@ f :: func () {
 }
 ";
     assert!(
-        messages(src)
-            .iter()
-            .any(|m| m.contains("used after it was dropped")),
+        messages(captured).is_empty(),
         "{:#?}",
-        messages(src)
+        messages(captured)
     );
 }
 

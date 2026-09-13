@@ -93,6 +93,12 @@ impl Desugar<'_> {
             NodeKind::Assign { op, place, value } if op != AssignOp::Assign => {
                 self.lower_compound_assign(id, op, place, value)
             }
+            // A `defer`'s operands are evaluated **where it is written** (§8.4),
+            // which is a fact about the block holding it rather than about the
+            // `defer` node: the bindings have to land in front of it, in the
+            // same scope, or they would be a scope of their own that ends
+            // immediately.
+            NodeKind::Block { stmts, tail } => self.capture_defers(id, stmts, tail),
             // A spread already bound to a temporary is this pass's own output;
             // only a written one needs binding.
             NodeKind::CompositeLit {
@@ -157,6 +163,77 @@ impl Desugar<'_> {
                 tail: Some(lit),
             },
         );
+    }
+
+    // ===< `defer` argument capture >===
+
+    /// Bind each deferred call's arguments **at the `defer`**, so the body that
+    /// runs on the way out sees the values the program had when it registered
+    /// it (§8.4: "capturing the current values it references").
+    ///
+    /// ```text
+    /// defer log(n)        →     __defer1 :: n
+    ///                           defer log(__defer1)
+    /// ```
+    ///
+    /// Without it the body is simply re-evaluated at every exit, so a `defer`
+    /// reads whatever its operands hold *then* — `n` after the loop rather than
+    /// `n` when the line ran, which is the opposite of what the construct is
+    /// for.
+    ///
+    /// **The receiver is not captured**, and that is deliberate rather than
+    /// missing: this pass runs before inference, so it cannot see whether
+    /// `x.close()` takes `self` by value or as a `*mut Self`, and binding a
+    /// mutating method's receiver to a copy would silently defer the mutation
+    /// to a temporary. Reading the place at exit is what a captured *pointer*
+    /// would have done anyway, and it differs only for a receiver that is
+    /// reassigned between the `defer` and the exit.
+    fn capture_defers(&mut self, id: NodeId, stmts: Vec<NodeId>, tail: Option<NodeId>) {
+        let mut out: Vec<NodeId> = Vec::with_capacity(stmts.len());
+        let mut changed = false;
+        for stmt in stmts {
+            let NodeKind::Defer { body } = self.ast.node(stmt).kind else {
+                out.push(stmt);
+                continue;
+            };
+            let NodeKind::Call { callee, args } = self.ast.node(body).kind.clone() else {
+                out.push(stmt);
+                continue;
+            };
+            if args.is_empty() {
+                out.push(stmt);
+                continue;
+            }
+            let captured = args
+                .into_iter()
+                .map(|arg| {
+                    let span = self.ast.node(arg).span;
+                    let name = self.fresh("defer");
+                    let (pat, local) = self.binding_pat(span, &name, false);
+                    let bind = self.alloc(
+                        span,
+                        NodeKind::ConstBind {
+                            pattern: pat,
+                            rhs: arg,
+                        },
+                    );
+                    out.push(bind);
+                    self.local_ref(span, &name, local)
+                })
+                .collect();
+            self.replace(
+                body,
+                NodeKind::Call {
+                    callee,
+                    args: captured,
+                },
+            );
+            out.push(stmt);
+            changed = true;
+        }
+        if changed {
+            self.replace(id, NodeKind::Block { stmts: out, tail });
+        }
     }
 
     // ===< compound assignment >===

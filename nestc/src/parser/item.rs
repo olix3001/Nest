@@ -226,7 +226,7 @@ impl Parser {
             }
             _ => match self.scan_binding_kind() {
                 BindingKind::Const => (self.parse_const_bind(false), false),
-                BindingKind::Assign => (self.parse_assign(), false),
+                BindingKind::Assign => self.parse_assign(),
                 BindingKind::Expr => (self.parse_expr(), true),
             },
         }
@@ -299,8 +299,19 @@ impl Parser {
         )
     }
 
-    /// `place assign_op expr`.
-    fn parse_assign(&mut self) -> NodeId {
+    /// `place assign_op expr`, and what to do when it is not one after all.
+    ///
+    /// Answers the pair [`Parser::parse_stmt`] answers: the node, and whether it
+    /// is an **expression** (a block's tail value) rather than a statement.
+    ///
+    /// [`Parser::scan_binding_kind`] classifies by looking ahead to the end of
+    /// the **line**, and a line may hold several statements — `f(x) n = 1` is
+    /// two. So an assignment operator it found is not necessarily in the
+    /// statement at the cursor, and when it is not, what was parsed here is a
+    /// complete expression statement and the assignment belongs to the next turn
+    /// of the caller's loop. Reporting "expected an assignment operator" instead
+    /// rejects a program that is written correctly.
+    fn parse_assign(&mut self) -> (NodeId, bool) {
         let start = self.cur_span();
         let place = self.parse_expr();
         let op = match self.peek() {
@@ -310,15 +321,15 @@ impl Parser {
             Some(TokenKind::StarEq) => AssignOp::Mul,
             Some(TokenKind::SlashEq) => AssignOp::Div,
             Some(TokenKind::PercentEq) => AssignOp::Rem,
-            _ => {
-                let span = self.cur_span();
-                return self.error_node(span, "expected an assignment operator");
-            }
+            _ => return (place, true),
         };
         self.bump();
         let value = self.parse_expr();
         let span = start.to(self.node_span(value));
-        self.alloc(span, NodeKind::Assign { op, place, value })
+        (
+            self.alloc(span, NodeKind::Assign { op, place, value }),
+            false,
+        )
     }
 
     /// `defer ( expr | block )`.

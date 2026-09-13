@@ -1,0 +1,35 @@
+---
+source: src/parser/tests.rs
+assertion_line: 426
+expression: "tree(\"f :: func (n: i32) {}\\n\\\n         go :: func () -> i32 { let mut n: i32 := 0  f(n) n = n + 1  return n }\\n\")"
+---
+File
+  ConstBind ::
+    BindingPat f
+    FuncExpr
+      Param n:
+        TypePath
+          Path `i32`
+      Block
+  ConstBind ::
+    BindingPat go
+    FuncExpr
+      TypePath
+        Path `i32`
+      Block
+        LocalDecl let
+          BindingPat mut n
+          TypePath
+            Path `i32`
+          Lit Int(0)
+        Call
+          Path `f`
+          Arg
+            Path `n`
+        Assign Assign
+          Path `n`
+          Binary Add
+            Path `n`
+            Lit Int(1)
+        Return
+          Path `n`
