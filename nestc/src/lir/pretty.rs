@@ -391,8 +391,16 @@ impl Printer<'_> {
                 let args: Vec<String> = args.iter().map(|a| self.operand(f, a)).collect();
                 format!("{}.{} {}", op.name(), self.ty(ty), args.join(", "))
             }
-            Rvalue::Cast { value, from, to } => format!(
-                "cast {} : {} -> {}",
+            // The conversion names itself, the way an operation does: a reader
+            // should not have to compare two widths to see that this one loses.
+            Rvalue::Cast {
+                value,
+                kind,
+                from,
+                to,
+            } => format!(
+                "cast.{} {} : {} -> {}",
+                kind.name(),
                 self.operand(f, value),
                 self.ty(from),
                 self.ty(to)

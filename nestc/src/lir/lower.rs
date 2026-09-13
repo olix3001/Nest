@@ -70,7 +70,8 @@ use crate::sema::def::{DefId, DefTable, Directive, DirectiveArg, LangItems};
 use crate::sema::ty::Ty;
 
 use super::{
-    Aggregate, Base, Block, BlockId, Callee, Constant, FuncId, Function, FunctionAttrs, Global,
+    Aggregate, Base, Block, BlockId, Callee, CastKind, Constant, FuncId, Function, FunctionAttrs,
+    Global,
     GlobalId, Inline, Intrinsic, Local, LocalId, Op, Operand, Origin, Place, Program, Projection,
     Rvalue, Stmt, StmtKind as LirStmtKind, TermKind, Terminator, Ty as LirTy, TypeDef, TypeId,
     TypeMember, VariantDef,
@@ -2535,8 +2536,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 }
                 let from = self.cx.lir(&from);
                 let to = self.cx.lir(&ty);
+                // Which conversion this is, decided once, here. A backend reads
+                // the answer; it does not re-derive it from the pair.
+                let kind = CastKind::of(&from, &to);
                 Some(Rvalue::Cast {
                     value: v,
+                    kind,
                     from,
                     to,
                 })

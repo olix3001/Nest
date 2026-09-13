@@ -824,12 +824,20 @@ pub enum Rvalue {
         ty: Ty,
         args: Vec<Operand>,
     },
-    /// A conversion between primitives. `from` is kept beside `to` because what
-    /// the conversion *is* — a truncation, a sign extension, a float rounding —
-    /// depends on both, and recovering `from` from the operand would mean codegen
-    /// re-deriving a type this stage already had.
+    /// A conversion between primitives, and `kind` says **which** conversion.
+    ///
+    /// The two types travel beside it and are not redundant with it: `kind` is
+    /// the instruction, and `from`/`to` are the widths it runs at, which a
+    /// backend needs anyway to name the LLVM or C type. What the pair is *not*
+    /// is a derivation — deciding that `i32 -> i64` sign-extends while
+    /// `u32 -> i64` zero-extends is a rule about the source's signedness, and a
+    /// backend that re-derived it would be a second copy of that rule, able to
+    /// disagree with this one. There are many conversions between two numbers
+    /// and the instruction is not recoverable from the destination alone, so it
+    /// is written down.
     Cast {
         value: Operand,
+        kind: CastKind,
         from: Ty,
         to: Ty,
     },
@@ -857,6 +865,123 @@ pub enum Rvalue {
         /// answer this compiler has already computed.
         stride: u64,
     },
+}
+
+/// **Which** conversion a [`Rvalue::Cast`] performs.
+///
+/// One case per machine instruction, decided here rather than in a backend. The
+/// same argument [`Op`] makes: a backend that matches one enum once cannot
+/// forget a case, and the alternative — every backend re-deriving the
+/// conversion from the type pair — is the same rule written as many times as
+/// there are backends, each able to get a corner wrong. The corners are real:
+/// an integer widening sign-extends or zero-extends by the **source's**
+/// signedness, a float-to-integer rounds toward zero by the **destination's**,
+/// and a same-width integer change is no instruction at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastKind {
+    /// Integer to a **narrower** integer: keep the low bits (spec §6.5 — a
+    /// written `cast` is allowed to lose).
+    Truncate,
+    /// Integer to a **wider** integer, source unsigned: fill with zeroes. Also
+    /// what a `bool` widens by, since a `bool` is one unsigned bit.
+    ZeroExtend,
+    /// Integer to a **wider** integer, source signed: fill with the sign bit.
+    SignExtend,
+    /// Float to a narrower float: round to nearest. `3.5e40` to `f32` is `inf`,
+    /// which is a value and not a trap.
+    FloatTruncate,
+    /// Float to a wider float: exact, always.
+    FloatExtend,
+    /// Float to integer, rounding **toward zero**. `signed` is the
+    /// destination's, because that is what decides the instruction.
+    FloatToInt { signed: bool },
+    /// Integer to float, rounding to nearest. `signed` is the **source's**, for
+    /// the same reason.
+    IntToFloat { signed: bool },
+    /// Two types of the same width, reinterpreted: `i32` to `u32`, `u64` to
+    /// `f64`. No instruction on any target — a register is a register — but it
+    /// is a case rather than an absence so that a backend handles it
+    /// deliberately instead of falling through to one that shifts bits.
+    Reinterpret,
+    /// A pointer to an integer of pointer width.
+    PtrToInt,
+    /// An integer of pointer width to a pointer.
+    IntToPtr,
+    /// A pointer to a pointer. Mutability is erased by this level (§9) and an
+    /// address is an address, so this is always an identity a backend folds.
+    PtrCast,
+    /// A pair this stage has no case for.
+    ///
+    /// It exists for the same reason [`Intrinsic::Unknown`] does: a conversion
+    /// that reaches a backend as "figure it out" is worse than one that fails a
+    /// test here. `no_program_contains_an_unknown_cast` says no program holds
+    /// one, so this is a bug report and not a fallback.
+    Unknown,
+}
+
+impl CastKind {
+    /// How the dump names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            CastKind::Truncate => "trunc",
+            CastKind::ZeroExtend => "zext",
+            CastKind::SignExtend => "sext",
+            CastKind::FloatTruncate => "fptrunc",
+            CastKind::FloatExtend => "fpext",
+            CastKind::FloatToInt { signed: true } => "fptosi",
+            CastKind::FloatToInt { signed: false } => "fptoui",
+            CastKind::IntToFloat { signed: true } => "sitofp",
+            CastKind::IntToFloat { signed: false } => "uitofp",
+            CastKind::Reinterpret => "reinterpret",
+            CastKind::PtrToInt => "ptrtoint",
+            CastKind::IntToPtr => "inttoptr",
+            CastKind::PtrCast => "ptrcast",
+            CastKind::Unknown => "<unknown cast>",
+        }
+    }
+
+    /// Which conversion takes `from` to `to`.
+    ///
+    /// The one place the rule lives. It runs at lowering, and the answer is
+    /// recorded in the instruction; nothing downstream asks again.
+    pub fn of(from: &Ty, to: &Ty) -> CastKind {
+        // A `bool` is an unsigned one-bit integer here, which makes
+        // `bool -> u8` an ordinary zero-extension rather than its own case.
+        let int = |t: &Ty| match t {
+            Ty::Int { bits, signed } => Some((*bits, *signed)),
+            Ty::Bool => Some((1, false)),
+            _ => None,
+        };
+        match (int(from), int(to)) {
+            (Some((fb, fs)), Some((tb, _))) => {
+                return match fb.cmp(&tb) {
+                    std::cmp::Ordering::Greater => CastKind::Truncate,
+                    std::cmp::Ordering::Equal => CastKind::Reinterpret,
+                    std::cmp::Ordering::Less if fs => CastKind::SignExtend,
+                    std::cmp::Ordering::Less => CastKind::ZeroExtend,
+                };
+            }
+            (Some((_, fs)), None) if matches!(to, Ty::Float { .. }) => {
+                return CastKind::IntToFloat { signed: fs };
+            }
+            (None, Some((_, ts))) if matches!(from, Ty::Float { .. }) => {
+                return CastKind::FloatToInt { signed: ts };
+            }
+            _ => {}
+        }
+        match (from, to) {
+            (Ty::Float { bits: f }, Ty::Float { bits: t }) => match f.cmp(t) {
+                std::cmp::Ordering::Greater => CastKind::FloatTruncate,
+                std::cmp::Ordering::Less => CastKind::FloatExtend,
+                std::cmp::Ordering::Equal => CastKind::Reinterpret,
+            },
+            // A function pointer is an address too, so it casts like one.
+            (Ty::Ptr(_) | Ty::Func { .. }, Ty::Ptr(_) | Ty::Func { .. }) => CastKind::PtrCast,
+            (Ty::Ptr(_) | Ty::Func { .. }, Ty::Int { .. }) => CastKind::PtrToInt,
+            (Ty::Int { .. }, Ty::Ptr(_) | Ty::Func { .. }) => CastKind::IntToPtr,
+            _ => CastKind::Unknown,
+        }
+    }
 }
 
 /// A primitive operation (§6.13).

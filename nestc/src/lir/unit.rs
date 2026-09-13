@@ -340,7 +340,9 @@ fn collect_stmt(whole: &Unit, s: &Stmt, refs: &mut Refs) {
                         collect_operand(whole, a, refs);
                     }
                 }
-                Rvalue::Cast { value, from, to } => {
+                Rvalue::Cast {
+                    value, from, to, ..
+                } => {
                     collect_operand(whole, value, refs);
                     collect_ty(whole, from, refs);
                     collect_ty(whole, to, refs);
@@ -541,7 +543,9 @@ fn remap_stmt(s: &mut Stmt, m: &Maps) {
                         remap_operand(a, m);
                     }
                 }
-                Rvalue::Cast { value, from, to } => {
+                Rvalue::Cast {
+                    value, from, to, ..
+                } => {
                     remap_operand(value, m);
                     *from = remap_ty(from, m);
                     *to = remap_ty(to, m);

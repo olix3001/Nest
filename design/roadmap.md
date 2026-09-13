@@ -727,6 +727,18 @@ The first executable. Also where `nestc`'s scaffold CLI is replaced: `-C` stays
 the interface for build settings (`nestc/src/common/options.rs`), because a build
 tool translating a profile should keep talking to the compiler the same way.
 
+### Done ahead of the backend: a conversion names its instruction
+
+`Rvalue::Cast` carries a **`CastKind`** — `trunc`, `zext`, `sext`, `fptrunc`,
+`fpext`, `fptosi`/`fptoui`, `sitofp`/`uitofp`, `reinterpret`, `ptrtoint`,
+`inttoptr`, `ptrcast` — decided by `CastKind::of` at lowering and by nothing
+else. The two types stay beside it because a backend needs the widths to name a
+type, but they are no longer what the *instruction* is derived from: a widening
+reads the source's signedness and a float-to-integer reads the destination's,
+and a backend re-deriving that is a second copy of the rule, free to disagree
+with this one. `CastKind::Unknown` is a pair with no case, and two tests say no
+program contains one and that every recorded kind is the one the rule gives.
+
 **`design/lir.md` §10 is the brief.** It lists the whole instruction set a
 backend answers for — three statements, three callees, four terminators, six
 rvalues, twenty-four opcodes and thirteen intrinsics — and the four things a

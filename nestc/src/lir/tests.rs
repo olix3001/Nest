@@ -493,14 +493,24 @@ raw :: #unsafe func (s: []i32, k: usize, d: i32) -> i32 { return s[k] / d }
 /// the same bits; and a cast whose **source is a literal** is neither — it is
 /// folded, because `cast.<u16>(7)` names a constant and a comptime type is not
 /// something a machine holds.
+///
+/// Each conversion names **which** instruction it is, and the point of the
+/// snapshot is that the names differ where the rule says they do: `i32 -> i64`
+/// sign-extends and `u32 -> i64` zero-extends from the same width to the same
+/// width, `f64 -> i32` and `u32 -> f64` read their signedness off opposite
+/// sides, and `i32 -> u32` is a change of name with no instruction under it.
 #[test]
 fn lir_snapshot_a_cast_of_a_literal_is_the_literal() {
     let src = "\
 { transmute } :: import <core/mem>
-conv :: func (n: i32, f: f64) -> u8 {
+conv :: func (n: i32, u: u32, f: f64) -> u8 {
   let wide := cast.<i64>(n)
+  let wide_unsigned := cast.<i64>(u)
   let narrow := cast.<u8>(wide)
   let single := cast.<f32>(f)
+  let same_width := cast.<u32>(n)
+  let rounded := cast.<i32>(f)
+  let widened := cast.<f64>(u)
   let bits := transmute.<u32>(n)
   let folded := cast.<u16>(7)
   return narrow
@@ -1923,6 +1933,92 @@ fn no_program_contains_an_unknown_intrinsic() {
 }
 
 
+/// **Every conversion names its instruction.**
+///
+/// The rule that decides which one lives in [`CastKind::of`] and nowhere else,
+/// and this says two things about that: no program reaches a backend with a
+/// conversion this stage had no case for, and the kind each instruction carries
+/// is the one the rule gives for its own two types. The second half is what
+/// stops a hand-built `Rvalue::Cast` somewhere in the lowering from recording a
+/// sign extension on an unsigned source.
+#[test]
+fn no_program_contains_an_unknown_cast() {
+    let unit = lir_unit(BROAD);
+    for f in &unit.funcs {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                if let crate::lir::StmtKind::Assign {
+                    value: crate::lir::Rvalue::Cast { kind, from, to, .. },
+                    ..
+                } = &s.kind
+                {
+                    assert_ne!(
+                        *kind,
+                        crate::lir::CastKind::Unknown,
+                        "{}: no case for {from:?} -> {to:?}",
+                        f.name
+                    );
+                    assert_eq!(*kind, crate::lir::CastKind::of(from, to), "{}", f.name);
+                }
+            }
+        }
+    }
+}
+
+/// **The corners of the rule, stated as cases.**
+///
+/// Each line is one a backend would otherwise have had to get right on its own,
+/// and three of them are the ones that are easy to get wrong: a widening reads
+/// the **source's** signedness, a float-to-integer reads the **destination's**,
+/// and a same-width change of signedness is no instruction at all.
+#[test]
+fn a_conversion_is_named_by_the_pair_it_runs_between() {
+    use crate::lir::CastKind as K;
+    let int = |bits: u16, signed: bool| Ty::Int { bits, signed };
+    let float = |bits: u16| Ty::Float { bits };
+
+    assert_eq!(K::of(&int(64, true), &int(32, true)), K::Truncate);
+    assert_eq!(K::of(&int(32, true), &int(64, true)), K::SignExtend);
+    assert_eq!(K::of(&int(32, false), &int(64, true)), K::ZeroExtend);
+    // Same width, different name for it: a register is a register.
+    assert_eq!(K::of(&int(32, true), &int(32, false)), K::Reinterpret);
+    // A `bool` is an unsigned one-bit integer, so it widens like one.
+    assert_eq!(K::of(&Ty::Bool, &int(8, false)), K::ZeroExtend);
+    assert_eq!(K::of(&int(8, false), &Ty::Bool), K::Truncate);
+
+    assert_eq!(K::of(&float(64), &float(32)), K::FloatTruncate);
+    assert_eq!(K::of(&float(32), &float(64)), K::FloatExtend);
+
+    // The signedness in each of these belongs to a *different* side.
+    assert_eq!(K::of(&int(32, true), &float(64)), K::IntToFloat { signed: true });
+    assert_eq!(K::of(&int(32, false), &float(64)), K::IntToFloat { signed: false });
+    assert_eq!(K::of(&float(64), &int(32, true)), K::FloatToInt { signed: true });
+    assert_eq!(K::of(&float(64), &int(32, false)), K::FloatToInt { signed: false });
+
+    let ptr = Ty::ptr(int(8, false));
+    assert_eq!(K::of(&ptr, &Ty::ptr(int(32, true))), K::PtrCast);
+    assert_eq!(K::of(&ptr, &int(64, false)), K::PtrToInt);
+    assert_eq!(K::of(&int(64, false), &ptr), K::IntToPtr);
+    // A function pointer is an address too.
+    let func = Ty::Func {
+        params: Vec::new(),
+        ret: Box::new(Ty::Void),
+    };
+    assert_eq!(K::of(&func, &ptr), K::PtrCast);
+
+    // And a pair with no instruction behind it says so rather than guessing.
+    assert_eq!(
+        K::of(
+            &Ty::Array {
+                len: 4,
+                elem: Box::new(int(8, false))
+            },
+            &int(32, false)
+        ),
+        K::Unknown
+    );
+}
+
 /// **A call passes what its callee takes.**
 ///
 /// This is the invariant the `void` erasure has to earn: a parameter that holds
@@ -2260,6 +2356,26 @@ fn check_unit_is_emittable(u: &Unit, what: &str) {
                         assert!(
                             !matches!(ty, Ty::Named(_) | Ty::Array { .. } | Ty::Void | Ty::Never),
                             "{what}: {}: {op:?} runs at {ty:?}",
+                            f.name
+                        );
+                    }
+                    // A conversion this stage had no case for would reach a
+                    // backend as "figure it out from the two types", which is
+                    // the derivation `CastKind` exists to remove.
+                    crate::lir::StmtKind::Assign {
+                        value: crate::lir::Rvalue::Cast { kind, from, to, .. },
+                        ..
+                    } => {
+                        assert_ne!(
+                            *kind,
+                            crate::lir::CastKind::Unknown,
+                            "{what}: {}: no case for {from:?} -> {to:?}",
+                            f.name
+                        );
+                        assert_eq!(
+                            *kind,
+                            crate::lir::CastKind::of(from, to),
+                            "{what}: {}: the kind recorded for {from:?} -> {to:?} is not the one the rule gives",
                             f.name
                         );
                     }

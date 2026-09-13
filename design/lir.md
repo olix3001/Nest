@@ -1199,8 +1199,29 @@ prevent. An operation's operands are **scalars** —
 nothing structural ever reaches one, which is why text equality is a call to
 `core` (§6.13) rather than an `==` on a `{ ptr, len }`.
 
-`Cast` carries both types, so what the conversion *is* — a truncation, a sign
-extension, a rounding, an int-to-float — is a lookup rather than a derivation.
+`Cast` **names its instruction**, and carries both types beside it. The name is
+the point: there are many conversions between two numbers, and which one applies
+is a rule about the operands' signedness rather than something the destination
+type can answer. So the rule runs once, here, and the instruction is written
+down:
+
+| Kind | From → to | What it does |
+|---|---|---|
+| `trunc` | integer → narrower integer | keep the low bits |
+| `zext` / `sext` | integer → wider integer | fill with zeroes / with the sign bit, by the **source's** signedness |
+| `fptrunc` / `fpext` | float → narrower / wider float | round to nearest / exact |
+| `fptosi` / `fptoui` | float → integer | round toward zero, by the **destination's** signedness |
+| `sitofp` / `uitofp` | integer → float | round to nearest, by the **source's** signedness |
+| `reinterpret` | same width, different type | nothing — a register is a register |
+| `ptrtoint` / `inttoptr` / `ptrcast` | addresses | nothing, on every target this reaches |
+
+The two signedness rows read opposite sides on purpose, and that is exactly the
+corner a backend deriving this for itself gets wrong. `reinterpret` is a case
+rather than an absence for the same reason `Intrinsic::Unknown` is a case: a
+backend should handle it deliberately, not by falling through to one that shifts
+bits. And `CastKind::Unknown` is what a pair with no instruction behind it
+becomes — a test failure here rather than a guess there.
+
 `Aggregate` builds a value of a struct type, an array, or one variant of an enum;
 the four names it used to have for "build a struct" were four names for one
 operation, and the type says which struct. `Offset` is a GEP in elements with the
