@@ -144,9 +144,11 @@ like any other — the way `cast`, `size_of` and `make` already work. `@` stays 
   different type per member is what forces it — the loop's body, not the data.
 - **A field chosen at run time is read with `member_ptr` and an ordinary
   `cast`** — the address is `base + m.offset`, which LIR already computes. A
-  *checked* read was dropped: the branch is easy (the bounds check's lowering),
-  but what it would compare against — a stable run-time type identity across
-  codegen units — does not exist, and that is a feature of its own. The GC
+  *checked* read is **`TypeId`**: `ir::mono::type_key` is already a globally
+  unique string per monomorphized type, so `type_id.<T>()` is one bodyless
+  `#intrinsic` folding a 128-bit hash of it, a `Member` carries one, and the
+  check is the bounds check's lowering. It keeps `distinct` (unlike `Cx::strip`),
+  and it is what an `Any` would sit on. The GC
   hazard is pre-existing: `&mut p.y` is already an interior pointer, Boehm
   traces them, and a precise collector wants the **object-start table** that is
   already open in §5/§6.
@@ -243,7 +245,7 @@ Everything in the previous handoffs still stands. New this session:
 | `std` sits on libc and also exposes it raw | One implementation across three platforms, and an unwrapped `ioctl` should not need re-declaring |
 | Reflection is data, attributes are data on it | A loop over descriptions is an ordinary loop; only typed access to a value must unroll |
 | Reflection is `#intrinsic` functions in `core`, not a sigil | `$name` was retired in phase 3; `@` is the attribute sigil |
-| A run-time field read is `member_ptr` + `cast`, unchecked | The check is cheap; the stable run-time type id it would need is not |
+| A run-time field read is `member_ptr` plus a `TypeId`-checked read | The check is the bounds check's lowering, and the identity it compares is a hash of `mono::type_key`, which already exists whole-program |
 
 ## Current State
 

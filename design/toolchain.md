@@ -161,15 +161,35 @@ field access, so the intrinsic is one instruction. The caller casts it to what
 the descriptor said the member is, and `size_of` / `align_of` are already there
 for anything that needs them.
 
-**A *checked* read was considered and dropped, and the reason is not the check.**
-The branch is easy — it is the same lowering as the bounds check `a[i]` already
-gets (§3.2): a comparison, an edge, and a panic block. What is hard is what it
-would compare *against*: a member's `kind` enum does not distinguish two
-structs, so a real check needs a **stable run-time type identity across codegen
-units**, and there is none. LIR's `TypeId` is an index into one unit's table and
-`mono::type_key` is a compile-time string. That is a feature of its own, and a
-checked `member_read` can be added over `member_ptr` later without changing
-anything, if it ever arrives.
+**And the read is checked, through a `TypeId`.** The check itself was never the
+hard part — it is the bounds check's lowering (§3.2): a comparison, an edge, and
+a panic block. What was missing was a stable thing to compare *against*, and the
+compiler already has one it does not expose: `ir::mono::type_key` is a globally
+unique string per monomorphized type, computed whole-program rather than per
+unit, and already what every symbol is mangled from.
+
+```nest
+@public type_id :: #intrinsic("type_id") func <T> () -> TypeId
+```
+
+- A `TypeId` is a **hash of that key**, folded to a constant at compile time.
+  128 bits, as Rust's is, so a collision is not a correctness argument anyone
+  has to have.
+- A `Member` carries one, so `member_read.<R>(v, m)` is a constant compared
+  against a loaded field and a branch — implementable today, over a function
+  that already exists.
+- **`distinct` survives it.** `type_key` keeps `distinct` and mutability even
+  though LIR's `Cx::strip` erases both (§9), so `type_id.<usize>()` and
+  `type_id.<u64>()` differ — which is the answer a checked read wants.
+- It also gives an **`Any`**, over machinery that is already there: `*dyn Trait`
+  is `{ data, vtable }` and a vtable already exists per (trait, concrete type).
+  The open question when it lands is whether a blanket `impl <T> Any for T`
+  works.
+
+**This does not compete with the compile-time path.** A selector known at compile
+time is the unrolled loop, statically typed, no check at all. A selector known
+only at run time cannot be checked statically by definition — `TypeId` is what
+makes *that* case safe rather than a bare `cast`.
 
 **The GC hazard is pre-existing, not introduced here.** A member pointer is an
 *interior* pointer — and `&mut p.y` is one too, so the language has had them
