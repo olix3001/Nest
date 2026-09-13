@@ -227,6 +227,7 @@ postfix_op   = '.' identifier
              | '.match' match_block          // sugar for `match_expr`
 
 primary = literal
+        | interpolated_string                   // f"...{ expr }..."; see 1.5, 6.11
         | qualified_name
         | 'self' | 'Self'
         | 'true' | 'false'
@@ -240,6 +241,12 @@ primary = literal
         | block
         | import_expr                           // '<pkg>' or "file"; see 13.2
 
+
+// A lexical production: the pieces alternate, `{{` / `}}` stand for one brace,
+// and a lone `}` is an error. The braces around an embedded expression are
+// matched by lexing it, so it may contain a string holding a brace or a nested
+// interpolation, but it may not contain a newline.
+interpolated_string = 'f"' { string_segment | '{' expr '}' } '"'
 
 composite_literal =
     type '{' composite_body '}'                      // typed record OR array (by type)

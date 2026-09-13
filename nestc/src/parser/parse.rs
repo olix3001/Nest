@@ -364,7 +364,7 @@ impl Parser {
     }
 
     /// A short human description of the next token, for diagnostics.
-    fn describe_next(&self) -> String {
+    pub(crate) fn describe_next(&self) -> String {
         match self.peek() {
             None => "end of input".into(),
             Some(kind) => format!("{kind:?}"),

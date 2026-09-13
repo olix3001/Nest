@@ -11,6 +11,8 @@
 //!   success value and, on failure, `return`s the residual rebuilt as the
 //!   enclosing function's type via a static `FromResidual.from_residual` call.
 //! - `base.!` (abort) → `Try.unwrap(base)`.
+//! - `f"...{e}..."` → a `core` format buffer, a `Display.display` call per
+//!   piece, and the bytes that came out.
 //!
 //! Operators (`+`, `<`, `a[i]`, `a += b`, …) are **not** touched here: they stay
 //! as their parsed [`Binary`](NodeKind::Binary) / [`Index`](NodeKind::Index) /
@@ -28,7 +30,8 @@ use crate::common::source::{FileId, FileSpan};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{
-    AssignOp, Ast, BinOp, CompositeBody, NodeId, NodeKind, TryKind, VariantArgs, VariantPatArgs,
+    AssignOp, Ast, BinOp, CompositeBody, NodeId, NodeKind, TryKind, UnOp, VariantArgs,
+    VariantPatArgs,
 };
 
 use super::def::{DefId, DefKind, DefTable, LangItems, Visibility};
@@ -82,6 +85,7 @@ impl Desugar<'_> {
                 body,
             } => self.lower_for(id, pattern, iter, body),
             NodeKind::Try { base, kind } => self.lower_try(id, base, kind),
+            NodeKind::InterpolatedStr { parts } => self.lower_interpolation(id, parts),
             // `a op= b` → `a = a op b`, so the resulting `op` lowers through the
             // operator trait like any other binary. `a` is shared between the
             // place and the operator's left operand (both already resolved).
@@ -230,6 +234,93 @@ impl Desugar<'_> {
                 tail: Some(loop_node),
             },
         );
+    }
+
+    // ===< f"..." >===
+
+    /// `f"a{x}b"` → a buffer, a `display` call per piece, and the bytes that
+    /// came out (§1.5, §6.11):
+    ///
+    /// ```text
+    /// {
+    ///   let mut __fmt1 := format.start()
+    ///   "a".display(&mut __fmt1)
+    ///   x.display(&mut __fmt1)
+    ///   "b".display(&mut __fmt1)
+    ///   format.end(&mut __fmt1)
+    /// }
+    /// ```
+    ///
+    /// **A literal segment goes through the same call an embedded expression
+    /// does.** The parser left them interleaved as ordinary `Lit::Str` nodes,
+    /// `str` implements `Display` in `core`, and so there is one kind of call
+    /// here instead of two — nothing in the compiler knows that some of these
+    /// pieces were typed as text.
+    ///
+    /// Which is also why there is no `format` intrinsic any more. What a value
+    /// looks like is the most library-ish question there is; a compiler that
+    /// answered it would have left a user's own type with nowhere to.
+    fn lower_interpolation(&mut self, id: NodeId, parts: Vec<NodeId>) {
+        let (Some(start), Some(end)) = (
+            self.lang.get("format_start").map(|d| self.defs.resolve_alias(d)),
+            self.lang.get("format_end").map(|d| self.defs.resolve_alias(d)),
+        ) else {
+            self.report(
+                id,
+                "`f\"...\"` requires the `#lang(\"format_start\")` and `#lang(\"format_end\")` items",
+            );
+            return;
+        };
+        if self.lang.get("display").is_none() {
+            self.report(id, "`f\"...\"` requires the `#lang(\"display\")` item");
+            return;
+        }
+        let span = self.ast.node(id).span;
+        let name = self.fresh("fmt");
+
+        // let mut __fmt := format.start()
+        let (buf_pat, buf_local) = self.binding_pat(span, &name, true);
+        let make = self.static_call(span, start, vec![]);
+        let bind = self.alloc(
+            span,
+            NodeKind::ConstBind {
+                pattern: buf_pat,
+                rhs: make,
+            },
+        );
+
+        // One `piece.display(&mut __fmt)` per piece, at the piece's own span, so
+        // "no impl of `Display`" points at the `{x}` that has none rather than
+        // at the whole string.
+        let mut stmts = vec![bind];
+        for piece in parts {
+            let at = self.ast.node(piece).span;
+            let out = self.buf_ref(at, &name, buf_local);
+            stmts.push(self.method_call(at, piece, "display", vec![out]));
+        }
+
+        let out = self.buf_ref(span, &name, buf_local);
+        let finish = self.static_call(span, end, vec![out]);
+        self.replace(
+            id,
+            NodeKind::Block {
+                stmts,
+                tail: Some(finish),
+            },
+        );
+    }
+
+    /// `&mut __fmt` — a fresh reference for each call, because a node is used
+    /// once.
+    fn buf_ref(&mut self, span: Span, name: &Symbol, def: DefId) -> NodeId {
+        let base = self.local_ref(span, name, def);
+        self.alloc(
+            span,
+            NodeKind::Unary {
+                op: UnOp::RefMut,
+                operand: base,
+            },
+        )
     }
 
     // ===< .? / .! >===

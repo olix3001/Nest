@@ -452,17 +452,40 @@ intrinsic (see [08-error-handling-and-defer.md](08-error-handling-and-defer.md))
 
 ## 6.11 Interpolated strings
 
-`f"...{expr}..."` desugars to a call to the standard formatting routine that
-concatenates the literal segments with each `expr`'s display output. It is an
-ordinary expression of type `str`:
+`f"...{expr}..."` is sugar for a **format buffer, one `display` call per piece,
+and the bytes that came out**. It is an ordinary expression of type `str`:
 
 ```
 f"Invalid dimensions: {w}x{h}"
-// ==> string.format("Invalid dimensions: {}x{}", w, h)   (illustrative)
+// ==>
+// {
+//   let mut __fmt := format.start()
+//   "Invalid dimensions: ".display(&mut __fmt)
+//   w.display(&mut __fmt)
+//   "x".display(&mut __fmt)
+//   h.display(&mut __fmt)
+//   format.end(&mut __fmt)
+// }
 ```
 
-Every interpolated value must satisfy the formatting/display contract for its
-type.
+The contract is the `#lang("display")` trait in `core` — one method,
+`display(self, out: *mut Buf)`, which writes into the buffer rather than
+returning a string, so a struct of ten members costs ten appends and one
+allocation. **Every interpolated value must implement it**, and a value that does
+not is "no impl of `Display`" reported at the `{expr}` that has none.
+
+A literal segment goes through the same call an embedded expression does: `str`
+implements `Display` like any other type, so nothing in the desugaring treats
+the pieces that were typed as text specially.
+
+Reaching `core` happens by `#lang` tag — `format_start`, `format_end`, `display`
+— never by name or path, so a replacement `core` supplies its own formatting
+without a compiler change. There is no formatting *intrinsic*: what a value looks
+like is a library question, and a compiler that answered it would leave a user's
+own type with nowhere to.
+
+Width, alignment and precision (`{x:>8.2}`) are **not** in the syntax: `{ }`
+holds an expression and nothing else (§1.5).
 
 ## 6.12 Ranges
 

@@ -2129,8 +2129,19 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // check takes, for the same reason — a comparison, an edge, and a
             // block that does not come back.
             self.zero_check(op, &vals, &ty, span);
+            self.range_check(op, &vals, &ty, span);
             if self.traps(op, &ty) {
                 return Some(self.checked_op(op, vals, &ty, span));
+            }
+            // `-x` has no checked opcode and needs none: it *is* `0 - x`, and
+            // the one value that overflows — the minimum, whose negation is not
+            // in the type — is exactly the one `sub_checked` reports. Writing it
+            // as a subtraction reuses the whole mechanism instead of inventing
+            // a `neg_checked` that every backend would then have to implement.
+            if matches!(op, BuiltinOp::Neg) && self.negation_traps(&ty) {
+                let mut args = vec![Operand::int(0)];
+                args.extend(vals);
+                return Some(self.checked_op(BuiltinOp::Sub, args, &ty, span));
             }
             let at = self.cx.lir(&ty);
             return Some(Rvalue::Op {
@@ -2455,24 +2466,150 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         self.at = go_on;
     }
 
-    /// Whether this operation traps on overflow in this build.
+    /// Whether this operation traps on overflow through a **checked opcode** in
+    /// this build.
     ///
-    /// Only the integer operations that *can* leave their width, and only under
-    /// `overflow=trap`. A float has no overflow to trap on — it has infinities —
-    /// and a bitwise operation cannot leave its width at all.
+    /// Exactly the three §7d names: `add_checked`, `sub_checked`, `mul_checked`.
+    /// The list is short because the shape is one instruction that yields a
+    /// value *and* a flag, and only these three have one on the machines this
+    /// compiles for.
+    ///
+    /// The other integer operations that can leave their width do **not** belong
+    /// here, and listing them was a real bug: `op_of_builtin(Div, true)` is a
+    /// plain `div`, so the pair slot `checked_op` allocated had its flag member
+    /// left unwritten and the branch that read it read whatever the stack held.
+    /// Each of them is handled where its own shape is: a signed `/` or `%` by
+    /// [`Self::range_check`], a shift by the same, and `-x` by the `sub_checked`
+    /// it already is.
+    ///
+    /// A float has no overflow to trap on — it has infinities — and a bitwise
+    /// operation cannot leave its width at all.
     fn traps(&self, op: BuiltinOp, ty: &Ty) -> bool {
         self.cx.options.overflow == OverflowMode::Trap
             && ty.is_int()
-            && matches!(
-                op,
-                BuiltinOp::Add
-                    | BuiltinOp::Sub
-                    | BuiltinOp::Mul
-                    | BuiltinOp::Div
-                    | BuiltinOp::Rem
-                    | BuiltinOp::Neg
-                    | BuiltinOp::Shl
-            )
+            && matches!(op, BuiltinOp::Add | BuiltinOp::Sub | BuiltinOp::Mul)
+    }
+
+    /// Whether `-x` at this type needs the checked form.
+    ///
+    /// Only a signed integer has a value whose negation it cannot hold. On an
+    /// unsigned one every negation but `-0` is out of range, which is a thing
+    /// the type checker refuses rather than something to branch on.
+    fn negation_traps(&self, ty: &Ty) -> bool {
+        self.cx.options.overflow == OverflowMode::Trap
+            && matches!(self.cx.strip(ty).int_parts(), Some((true, _)))
+    }
+
+    /// The overflow checks that are a **comparison** rather than an opcode.
+    ///
+    /// Two operations leave their width without a machine flag to say so, and
+    /// both are the shape §3.2's bounds check is — a comparison, an edge, and a
+    /// block that does not come back:
+    ///
+    /// - **A signed `/` or `%`** by `-1`, applied to the minimum. There is no
+    ///   `sdiv.with.overflow` on any target this emits for, and on x86 the
+    ///   instruction faults, so the guard is the comparison the hardware does
+    ///   not do. The unsigned families need none: no unsigned quotient leaves
+    ///   the width.
+    /// - **A shift** by an amount at least as wide as the type. `x << 32` on a
+    ///   `u32` has no answer the machine agrees on — LLVM calls it undefined and
+    ///   the two common architectures disagree about it in practice — so the
+    ///   check is on the *amount*, not on the bits that fall off the end. Bits
+    ///   leaving the top of a `<<` are what a shift is for.
+    ///
+    /// Neither is removed by `#unsafe`, for the reason the checked opcodes are
+    /// not: `overflow=` is a build-wide decision about what leaving the width
+    /// *means*, not a check on a program that might be wrong. `overflow=wrap` is
+    /// what removes these. Both are skipped when the operand the check is about
+    /// is a constant that already answers it.
+    fn range_check(&mut self, op: BuiltinOp, args: &[Operand], ty: &Ty, span: Option<FileSpan>) {
+        if self.cx.options.overflow != OverflowMode::Trap {
+            return;
+        }
+        let Some((signed, bits)) = self.cx.strip(ty).int_parts() else {
+            return;
+        };
+        let at = self.cx.lir(ty);
+        match op {
+            BuiltinOp::Div | BuiltinOp::Rem if signed => {
+                let (Some(lhs), Some(rhs)) = (args.first(), args.get(1)) else {
+                    return;
+                };
+                // A divisor that is not `-1` cannot produce the case, and the
+                // constant says so without a branch.
+                if let Operand::Const(Constant::Int(n)) = rhs
+                    && *n != num_bigint::BigInt::from(-1)
+                {
+                    return;
+                }
+                let min = -(num_bigint::BigInt::from(1) << (bits - 1));
+                let is_min = self.into_temp(
+                    Rvalue::Op {
+                        op: Op::Eq,
+                        ty: at.clone(),
+                        args: vec![lhs.clone(), Operand::Const(Constant::Int(min))],
+                    },
+                    Ty::Bool,
+                    span,
+                );
+                let is_minus_one = self.into_temp(
+                    Rvalue::Op {
+                        op: Op::Eq,
+                        ty: at,
+                        args: vec![rhs.clone(), Operand::int(-1)],
+                    },
+                    Ty::Bool,
+                    span,
+                );
+                let bad = self.into_temp(
+                    Rvalue::Op {
+                        op: Op::BitAnd,
+                        ty: LirTy::Bool,
+                        args: vec![is_min, is_minus_one],
+                    },
+                    Ty::Bool,
+                    span,
+                );
+                self.trap_when(bad, "integer overflow", span);
+            }
+            BuiltinOp::Shl | BuiltinOp::Shr => {
+                let Some(rhs) = args.get(1) else { return };
+                if let Operand::Const(Constant::Int(n)) = rhs
+                    && *n < num_bigint::BigInt::from(bits)
+                {
+                    return;
+                }
+                let too_far = self.into_temp(
+                    Rvalue::Op {
+                        op: Op::Ge,
+                        ty: at,
+                        args: vec![rhs.clone(), Operand::int(bits as i128)],
+                    },
+                    Ty::Bool,
+                    span,
+                );
+                self.trap_when(too_far, "shift amount is wider than the type", span);
+            }
+            _ => {}
+        }
+    }
+
+    /// Panic with `message` when `bad` is true, and carry on where it is not.
+    fn trap_when(&mut self, bad: Operand, message: &str, span: Option<FileSpan>) {
+        let trap = self.new_block(Some(message.to_string()));
+        let go_on = self.new_block(None);
+        self.terminate(Terminator::new(
+            TermKind::Switch {
+                value: bad,
+                ty: LirTy::Bool,
+                arms: vec![(1, trap)],
+                otherwise: go_on,
+            },
+            span,
+        ));
+        self.at = trap;
+        self.panic_at(message, span);
+        self.at = go_on;
     }
 
     /// A checked operation: the value, a flag, and an edge to a block that does
@@ -2831,10 +2968,144 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     fields,
                 })
             }
+            // `value ; count` — one element, written `count` times.
+            //
+            // Two shapes, for the same reason the literal above has two. An
+            // **array** is its own storage and its length is part of its type,
+            // so the list is known right here: this is the aggregate above with
+            // one operand repeated. The value is evaluated **once** because the
+            // source wrote it once — `.{ f(); 3 }` calls `f` one time and stores
+            // the answer three times.
+            //
+            // A **slice** has no storage of its own and its count is an ordinary
+            // run-time value, so it is the `make` above with a counter instead
+            // of a fixed list. That loop is why this was never an intrinsic: a
+            // backend would have had to build a comparison, an edge and a block
+            // that comes back, and §10 says an intrinsic is one instruction or
+            // one call.
+            "repeat" if args.len() == 2 => self.lower_repeat(&args[0], &args[1], &ty, span),
             _ => {
                 let vals = self.passed(args);
                 self.emit_intrinsic(name.clone(), vals, ty, span)
             }
+        }
+    }
+
+    /// `value ; count` — see the `"repeat"` arm above.
+    fn lower_repeat(
+        &mut self,
+        value: &Expr,
+        count: &Expr,
+        ty: &Ty,
+        span: Option<FileSpan>,
+    ) -> Option<Rvalue> {
+        match ty {
+            // The count *is* the array's length (`infer::check_composite_body`
+            // holds the two together), so the count expression has nothing left
+            // to say and is not evaluated. A length monomorphization did not
+            // substitute leaves no number to repeat and no program to run.
+            Ty::Array { len, .. } => {
+                let n = len.value()?;
+                let v = self.eval(value);
+                Some(Rvalue::Aggregate {
+                    kind: Aggregate::Array,
+                    fields: vec![v; n as usize],
+                })
+            }
+            Ty::Slice { inner, .. } => {
+                let elem = (**inner).clone();
+                let stride = self.cx.stride(&elem);
+                let usize_ty = self.cx.usize_ty();
+                let usize_lir = self.cx.lir(&usize_ty);
+
+                let v = self.eval(value);
+                let n = self.eval(count);
+
+                let slot = self.temp(ty.clone(), span);
+                self.push(
+                    LirStmtKind::Call {
+                        dest: Some(Place::local(slot)),
+                        callee: Callee::Intrinsic(Intrinsic::Make),
+                        args: vec![n.clone()],
+                    },
+                    span,
+                );
+                let data = Place::local(slot).then(Projection::Field {
+                    index: 0,
+                    name: Symbol::new("ptr"),
+                });
+
+                // `i := 0; while i < n { data[i] = v; i = i + 1 }`, written out
+                // as the three blocks a `while` is by this point.
+                let i = self.temp(usize_ty, span);
+                self.assign(Place::local(i), Rvalue::Use(Operand::int(0)), span);
+                let head = self.new_block(Some("repeat".to_string()));
+                let body = self.new_block(None);
+                let done = self.new_block(None);
+                self.terminate(Terminator::new(TermKind::Goto(head), span));
+
+                self.at = head;
+                let more = self.into_temp(
+                    Rvalue::Op {
+                        op: Op::Lt,
+                        ty: usize_lir.clone(),
+                        args: vec![Operand::local(i), n],
+                    },
+                    Ty::Bool,
+                    span,
+                );
+                self.terminate(Terminator::new(
+                    TermKind::Switch {
+                        value: more,
+                        ty: LirTy::Bool,
+                        arms: vec![(1, body)],
+                        otherwise: done,
+                    },
+                    span,
+                ));
+
+                self.at = body;
+                let at = self.temp(
+                    Ty::Ptr {
+                        mutable: true,
+                        inner: Box::new(elem),
+                    },
+                    span,
+                );
+                self.assign(
+                    Place::local(at),
+                    Rvalue::Offset {
+                        ptr: Operand::Copy(data),
+                        index: Operand::local(i),
+                        stride,
+                    },
+                    span,
+                );
+                self.assign(
+                    Place::local(at).then(Projection::Deref),
+                    Rvalue::Use(v),
+                    span,
+                );
+                // The counter is a length, so it cannot overflow before the
+                // allocation it is walking would have: an unchecked `add` here
+                // is the same instruction the bounds-checked form would leave
+                // behind, without the branch that can never be taken.
+                self.assign(
+                    Place::local(i),
+                    Rvalue::Op {
+                        op: Op::Add,
+                        ty: usize_lir,
+                        args: vec![Operand::local(i), Operand::int(1)],
+                    },
+                    span,
+                );
+                self.terminate(Terminator::new(TermKind::Goto(head), span));
+
+                self.at = done;
+                Some(Rvalue::Use(Operand::Copy(Place::local(slot))))
+            }
+            // Anything else is a program that did not type-check.
+            _ => None,
         }
     }
 

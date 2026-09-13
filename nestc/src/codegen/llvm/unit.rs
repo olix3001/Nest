@@ -1523,12 +1523,12 @@ impl<'ctx> Cx<'ctx, '_> {
                 let v = self.operand(fx, f, &args[0], &from)?;
                 self.store(ptr, v, &from)
             }
-            // Three left that are more than "one instruction or one runtime
-            // call", which is what §10 claims of an intrinsic. `slice` and
-            // `array` used to be on this list and are now lowered in LIR —
-            // which is where these belong too, rather than being invented here
-            // and then invented differently by the next backend.
-            Intrinsic::Repeat | Intrinsic::Format | Intrinsic::EmbedFile => Err(unsupported(format!(
+            // One left that is more than "one instruction or one runtime call",
+            // which is what §10 claims of an intrinsic. `slice`, `array` and
+            // `repeat` used to be on this list and are now lowered in LIR —
+            // which is where this one belongs too, rather than being invented
+            // here and then invented differently by the next backend.
+            Intrinsic::EmbedFile => Err(unsupported(format!(
                 "{}: `${}` needs a lowering LIR does not yet give it",
                 f.name,
                 which.name()

@@ -200,8 +200,18 @@ The literal's own characters must be ASCII for the same reason; write anything
 else as `\xNN`.
 
 **Interpolated strings** are prefixed with `f`. Inside them, `{ expr }` splices
-the result of `expr` (which must satisfy the display/format contract). Braces are
+the result of `expr` (which must implement `core`'s `Display`; see
+[06-expressions-and-operators.md](06-expressions-and-operators.md)). Braces are
 escaped by doubling: `{{` and `}}`.
+
+A **lone** `}` is an error rather than a literal brace. Accepting it would mean a
+program that gains a `{` earlier in the same literal silently changes what the
+`}` means.
+
+The braces are matched by lexing what is between them, not by scanning for the
+next `}`, so the expression may contain a string holding a brace, a struct
+literal, or another interpolated string. It may **not** contain a newline: the
+literal is one line, and so is everything spliced into it.
 
 ```
 f"{w}x{h}"

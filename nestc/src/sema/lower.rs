@@ -839,17 +839,6 @@ impl Lowerer<'_> {
                 self.expr(node, ty, ExprKind::Block(b))
             }
             NodeKind::Lit(lit) => self.expr(node, ty, ExprKind::Lit(lit)),
-            NodeKind::InterpolatedStr { parts } => {
-                let args = parts.iter().map(|&p| self.lower_expr(p)).collect();
-                self.expr(
-                    node,
-                    ty,
-                    ExprKind::Intrinsic {
-                        name: Symbol::new("format"),
-                        args,
-                    },
-                )
-            }
             NodeKind::Path { .. } => self.lower_name(node, ty),
             NodeKind::FieldAccess { base, name } => {
                 // A resolved namespace member is a global reference; a resolved
@@ -944,6 +933,35 @@ impl Lowerer<'_> {
                             place: Box::new(place),
                         },
                     )
+                }
+                // `-128` is **one** literal, not a negation of `128` (§1.5).
+                //
+                // Inference already reads it that way: `infer_unary` negates the
+                // recorded value before the range check, which is the only
+                // reason the minimum of a signed type is writable at all. This
+                // is the same reading, carried through to what runs. Without it
+                // `-2147483648` type-checks as an `i32` and then *traps* under
+                // `overflow=trap` (§7d), because the negation it lowered to is a
+                // `sub_checked` whose operand is the one value the type cannot
+                // hold — the compiler rejecting the literal it just accepted, at
+                // run time.
+                //
+                // Only for a primitive result. A `distinct` type or a user type
+                // with its own `Neg` impl has a function on the other end, and
+                // folding the sign into the literal would skip it.
+                UnOp::Neg
+                    if (ty.is_int() || ty.is_float())
+                        && matches!(
+                            self.ast.node(operand).kind,
+                            NodeKind::Lit(Lit::Int(_) | Lit::Float(_))
+                        ) =>
+                {
+                    let lit = match self.ast.node(operand).kind.clone() {
+                        NodeKind::Lit(Lit::Int(n)) => Lit::Int(-n),
+                        NodeKind::Lit(Lit::Float(f)) => Lit::Float(-f),
+                        _ => unreachable!("guarded by the match arm above"),
+                    };
+                    self.expr(node, ty, ExprKind::Lit(lit))
                 }
                 _ => match self.ast.meta::<OpResolution>(node) {
                     Some(res) => {

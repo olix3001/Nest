@@ -59,6 +59,29 @@ pub enum TokenKind {
     #[token("'", lex_char)]
     Char(char),
 
+    /// `f"...{e}..."` — an interpolated string, whole (§1.5, §6.11).
+    ///
+    /// **Never reaches the parser.** [`LogosLexer::new`] expands one of these
+    /// into the five tokens below, because a `logos` callback yields one token
+    /// and an interpolated string is a *sequence*: an opener, alternating
+    /// literal segments and embedded expressions, and a closer. The parser then
+    /// reads the embedded expressions with the ordinary expression parser
+    /// rather than with a second one written for the inside of a string.
+    ///
+    /// The two-character opener is what keeps this apart from the identifier
+    /// `f` followed by a string, exactly as `b"..."` is kept apart.
+    #[token("f\"", lex_interp_string)]
+    InterpStr(Vec<InterpPiece>),
+
+    /// The `f"` that opens an interpolated string. Synthesized.
+    InterpStart,
+    /// The `{` that opens an embedded expression. Synthesized.
+    InterpOpen,
+    /// The `}` that closes one. Synthesized.
+    InterpClose,
+    /// The `"` that closes an interpolated string. Synthesized.
+    InterpEnd,
+
     // ===< Keywords >===
     #[token("func")]      FuncKw,
     #[token("extern")]    ExternKw,
@@ -165,6 +188,70 @@ pub enum TokenKind {
     #[token(";")] Semicolon,
 }
 
+/// Append `entry`, unfolding an [`TokenKind::InterpStr`] into the sequence the
+/// parser reads.
+///
+/// The literal segments come through as ordinary [`TokenKind::Str`] tokens —
+/// a segment *is* a string literal, and giving it a kind of its own would be a
+/// second spelling of one thing. The four markers around them are what the
+/// parser matches on, and they are distinct from `{` and `}` on purpose:
+/// reusing the real braces would make the end of an interpolation and the end of
+/// a struct literal the same token, so recovering from a malformed one would
+/// have to guess.
+///
+/// Recursive, because a nested `f"..."` inside an embedded expression arrives as
+/// another `InterpStr`.
+fn push_expanded(tokens: &mut Vec<LexResult<Token>>, entry: LexResult<Token>) {
+    let Ok(Token {
+        kind: TokenKind::InterpStr(pieces),
+        span,
+    }) = entry
+    else {
+        tokens.push(entry);
+        return;
+    };
+    tokens.push(Ok(Token::new(
+        TokenKind::InterpStart,
+        Span::new(span.start, span.start + 2),
+    )));
+    for piece in pieces {
+        match piece {
+            InterpPiece::Lit(text, at) => tokens.push(Ok(Token::new(TokenKind::Str(text), at))),
+            InterpPiece::Expr(sub, at) => {
+                tokens.push(Ok(Token::new(
+                    TokenKind::InterpOpen,
+                    Span::new(at.start, at.start + 1),
+                )));
+                for token in sub {
+                    push_expanded(tokens, token);
+                }
+                tokens.push(Ok(Token::new(
+                    TokenKind::InterpClose,
+                    Span::new(at.end - 1, at.end),
+                )));
+            }
+        }
+    }
+    tokens.push(Ok(Token::new(
+        TokenKind::InterpEnd,
+        Span::new(span.end - 1, span.end),
+    )));
+}
+
+/// One piece of an `f"..."` literal, as the lexer found it.
+///
+/// A literal chunk arrives decoded — escapes resolved, `{{` and `}}` reduced to
+/// one brace — so nothing downstream decodes a string twice. An embedded
+/// expression arrives as **tokens**, lexed with the enclosing file's own
+/// offsets, so every span inside `f"{a + b}"` points where a reader would point.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpPiece {
+    /// A run of literal text, and the source it came from.
+    Lit(String, Span),
+    /// The tokens of one `{ expr }`, and the span of the braces around them.
+    Expr(Vec<LexResult<Token>>, Span),
+}
+
 /// A lexed token: a [`TokenKind`] paired with its source [`Span`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
@@ -206,6 +293,10 @@ pub enum LexErrorKind {
     InvalidByteEscape,
     #[error("invalid numeric literal")]
     InvalidNumber,
+    #[error("`{{}}` interpolates nothing; write `{{{{}}}}` for a literal pair of braces")]
+    EmptyInterpolation,
+    #[error("an unmatched `}}` in an interpolated string; write `}}}}` for a literal one")]
+    UnmatchedInterpolation,
 }
 
 /// Lexing error with [`Span`] included.
@@ -282,10 +373,13 @@ impl LogosLexer {
         while let Some(result) = lexer.next() {
             let range = lexer.span();
             let span = Span::new(range.start, range.end);
-            tokens.push(match result {
-                Ok(kind) => Ok(Token::new(kind, span)),
-                Err(kind) => Err(LexError { kind, span }),
-            });
+            push_expanded(
+                &mut tokens,
+                match result {
+                    Ok(kind) => Ok(Token::new(kind, span)),
+                    Err(kind) => Err(LexError { kind, span }),
+                },
+            );
         }
 
         Self { tokens, pos: 0 }
@@ -455,6 +549,137 @@ fn lex_string(lex: &mut logos::Lexer<TokenKind>) -> Result<String, LexErrorKind>
     }
 
     Err(LexErrorKind::UnterminatedString)
+}
+
+/// Decode the body of an `f"..."` interpolated string (§1.5, §6.11). Called with
+/// the cursor just past the opening `f"`.
+///
+/// Outside the braces this is `lex_string` with two more cases: `{{` and `}}`
+/// stand for one brace each, and a lone `{` opens an embedded expression. A lone
+/// `}` is an error rather than a literal brace, because a program that meant one
+/// and typed one would otherwise get it — and the same program with a `{` added
+/// later would change meaning silently.
+///
+/// **Inside** the braces the lexer calls itself rather than scanning for the
+/// matching `}`. Scanning would have to know that the `}` in `f"{ g("}") }"` is
+/// inside a string and that the `{` in `f"{ P { x: 1 } }"` opens a struct
+/// literal — which is to say it would have to be a lexer, so it may as well be
+/// this one. Depth counting over real tokens gets both right for free, and a
+/// nested `f"..."` comes back as an [`TokenKind::InterpStr`] that the expansion
+/// below unfolds like any other.
+fn lex_interp_string(lex: &mut logos::Lexer<TokenKind>) -> Result<Vec<InterpPiece>, LexErrorKind> {
+    // Where `rest` sits in the file, so every span below is the file's own.
+    let base = lex.span().end;
+    let rest = lex.remainder().to_string();
+    let mut pieces = Vec::new();
+    let mut lit = String::new();
+    let mut lit_start = 0usize;
+    let mut i = 0usize;
+
+    // A literal run becomes a piece only when it is non-empty: `f"{a}{b}"` has
+    // no text in it, and a segment holding none would be a store of nothing.
+    macro_rules! flush {
+        ($end:expr) => {
+            if !lit.is_empty() {
+                pieces.push(InterpPiece::Lit(
+                    std::mem::take(&mut lit),
+                    Span::new(base + lit_start, base + $end),
+                ));
+            }
+        };
+    }
+
+    while i < rest.len() {
+        let c = rest[i..].chars().next().expect("in bounds and on a boundary");
+        match c {
+            '"' => {
+                flush!(i);
+                lex.bump(i + 1);
+                return Ok(pieces);
+            }
+            '\n' => return Err(LexErrorKind::UnterminatedString),
+            '\\' => {
+                let mut chars = rest[i + 1..].char_indices();
+                lit.push(unescape(&mut chars)?);
+                i = rest.len() - chars.as_str().len();
+            }
+            '{' if rest[i..].starts_with("{{") => {
+                lit.push('{');
+                i += 2;
+            }
+            '}' if rest[i..].starts_with("}}") => {
+                lit.push('}');
+                i += 2;
+            }
+            '}' => return Err(LexErrorKind::UnmatchedInterpolation),
+            '{' => {
+                flush!(i);
+                let (tokens, end) = lex_interp_expr(&rest, i + 1, base)?;
+                pieces.push(InterpPiece::Expr(
+                    tokens,
+                    Span::new(base + i, base + end + 1),
+                ));
+                i = end + 1;
+                lit_start = i;
+            }
+            _ => {
+                lit.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+
+    Err(LexErrorKind::UnterminatedString)
+}
+
+/// The tokens of one `{ expr }`, starting at `start` (just past the `{`), and
+/// the offset of the `}` that closed it.
+///
+/// `base` is where `rest` sits in the file; every span handed back is absolute.
+fn lex_interp_expr(
+    rest: &str,
+    start: usize,
+    base: usize,
+) -> Result<(Vec<LexResult<Token>>, usize), LexErrorKind> {
+    let mut sub = TokenKind::lexer(&rest[start..]);
+    let mut tokens: Vec<LexResult<Token>> = Vec::new();
+    let mut depth = 0usize;
+
+    loop {
+        let Some(result) = sub.next() else {
+            return Err(LexErrorKind::UnterminatedString);
+        };
+        let at = sub.span();
+        let span = Span::new(base + start + at.start, base + start + at.end);
+        match result {
+            // The one that ends it, and the ones that do not: a `}` closing a
+            // struct literal or a block inside the expression is the expression's
+            // own, and only the one at depth zero is the interpolation's.
+            Ok(TokenKind::RBrace) if depth == 0 => {
+                if tokens.is_empty() {
+                    return Err(LexErrorKind::EmptyInterpolation);
+                }
+                return Ok((tokens, start + at.start));
+            }
+            Ok(TokenKind::RBrace) => {
+                depth -= 1;
+                tokens.push(Ok(Token::new(TokenKind::RBrace, span)));
+            }
+            Ok(TokenKind::LBrace) => {
+                depth += 1;
+                tokens.push(Ok(Token::new(TokenKind::LBrace, span)));
+            }
+            // A string literal is one line, and so is what is spliced into it.
+            // Stopping here names the mistake where it is; letting the newline
+            // through would report an unterminated string at the end of the
+            // file.
+            Ok(TokenKind::Newline) => return Err(LexErrorKind::UnterminatedString),
+            Ok(kind) => tokens.push(Ok(Token::new(kind, span))),
+            // A bad token inside the braces travels as a bad token, so the
+            // parser reports it at its own span rather than the whole literal's.
+            Err(kind) => tokens.push(Err(LexError { kind, span })),
+        }
+    }
 }
 
 /// Decode the body of a `b"..."` byte string. Called with the cursor just past
@@ -696,6 +921,134 @@ mod tests {
                 TokenKind::Str("hi".into()),
             ]
         );
+    }
+
+    #[test]
+    fn interpolated_strings_expand_to_a_sequence() {
+        use TokenKind::*;
+        assert_eq!(
+            kinds(r#"f"dim: {w}x{h}""#),
+            vec![
+                InterpStart,
+                Str("dim: ".into()),
+                InterpOpen,
+                Ident(Symbol::new("w")),
+                InterpClose,
+                Str("x".into()),
+                InterpOpen,
+                Ident(Symbol::new("h")),
+                InterpClose,
+                InterpEnd,
+            ]
+        );
+        // A doubled brace is one literal brace, and escapes work as they do in
+        // any other string. Adjacent interpolations leave no segment between
+        // them, because there is no text there to store.
+        assert_eq!(
+            kinds(r#"f"{{a}}\n{x}{y}""#),
+            vec![
+                InterpStart,
+                Str("{a}\n".into()),
+                InterpOpen,
+                Ident(Symbol::new("x")),
+                InterpClose,
+                InterpOpen,
+                Ident(Symbol::new("y")),
+                InterpClose,
+                InterpEnd,
+            ]
+        );
+        // `f` on its own is still an identifier; only `f"` opens one.
+        assert_eq!(
+            kinds(r#"f "hi""#),
+            vec![Ident(Symbol::new("f")), Str("hi".into())]
+        );
+    }
+
+    /// The braces are matched by **lexing**, not by scanning for a `}`. A
+    /// closing brace inside a nested string, and one closing a struct literal,
+    /// are both the expression's own.
+    #[test]
+    fn an_interpolation_ends_at_its_own_brace() {
+        use TokenKind::*;
+        assert_eq!(
+            kinds(r#"f"{ g("}") }""#),
+            vec![
+                InterpStart,
+                InterpOpen,
+                Ident(Symbol::new("g")),
+                LParen,
+                Str("}".into()),
+                RParen,
+                InterpClose,
+                InterpEnd,
+            ]
+        );
+        assert_eq!(
+            kinds(r#"f"{ P { x } }""#),
+            vec![
+                InterpStart,
+                InterpOpen,
+                Ident(Symbol::new("P")),
+                LBrace,
+                Ident(Symbol::new("x")),
+                RBrace,
+                InterpClose,
+                InterpEnd,
+            ]
+        );
+        // And a nested one unfolds like any other.
+        assert_eq!(
+            kinds(r#"f"{ f"{x}" }""#),
+            vec![
+                InterpStart,
+                InterpOpen,
+                InterpStart,
+                InterpOpen,
+                Ident(Symbol::new("x")),
+                InterpClose,
+                InterpEnd,
+                InterpClose,
+                InterpEnd,
+            ]
+        );
+    }
+
+    #[test]
+    fn interpolated_strings_reject_what_has_no_meaning() {
+        let err = |src: &str| {
+            LogosLexer::new(src).as_slice()[0]
+                .as_ref()
+                .expect_err("should not lex")
+                .kind
+                .clone()
+        };
+        // A lone `}` would otherwise be a literal brace that changes meaning the
+        // day someone adds a `{` before it.
+        assert_eq!(err(r#"f"a}b""#), LexErrorKind::UnmatchedInterpolation);
+        assert_eq!(err(r#"f"{}""#), LexErrorKind::EmptyInterpolation);
+        assert_eq!(err("f\"a\nb\""), LexErrorKind::UnterminatedString);
+        // A string literal is one line, and so is what is spliced into it.
+        assert_eq!(err("f\"{ a +\n b }\""), LexErrorKind::UnterminatedString);
+        assert_eq!(err(r#"f"{ x ""#), LexErrorKind::UnterminatedString);
+    }
+
+    /// Every span an interpolation produces is the **file's**, so a diagnostic
+    /// about `{h}` points at the `h` a reader can see.
+    #[test]
+    fn interpolation_spans_are_the_file_s_own() {
+        let src = r#"f"a{bc}""#;
+        let tokens = LogosLexer::new(src);
+        let at = |n: usize| {
+            let t = tokens.as_slice()[n].as_ref().expect("lexes");
+            &src[t.span.start..t.span.end]
+        };
+        assert_eq!(at(0), "f\"");
+        assert_eq!(at(1), "a");
+        assert_eq!(at(2), "{");
+        assert_eq!(at(3), "bc");
+        assert_eq!(at(4), "}");
+        assert_eq!(at(5), "\"");
     }
 
     #[test]

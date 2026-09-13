@@ -386,6 +386,39 @@ main :: func () {
     );
 }
 
+/// An `f"..."` is gone by the time inference runs: it is a buffer, a `display`
+/// call per piece, and the bytes that came out (§6.11).
+///
+/// Both halves matter. The node not surviving is what lets every later pass —
+/// inference, monomorphization, lowering — treat formatting as ordinary calls;
+/// there is no `format` intrinsic behind it any more and no case for one.
+#[test]
+fn an_interpolated_string_is_desugared() {
+    let src = "\
+main :: func () -> str {
+  const w := 3
+  return f\"dim: {w}\"
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    let file = entry_file(&session);
+    let ast = &session.asts[&file];
+    assert!(
+        find(ast, |k| matches!(k, NodeKind::InterpolatedStr { .. })).is_none(),
+        "an `f\"...\"` node survived desugaring"
+    );
+    // One `display` per piece — the literal segment goes through the same call
+    // the embedded expression does.
+    let calls = ast
+        .ids()
+        .filter(|&id| {
+            matches!(&ast.node(id).kind, NodeKind::FieldAccess { name, .. }
+                if name.as_str() == "display")
+        })
+        .count();
+    assert_eq!(calls, 2, "one `display` call per piece");
+}
+
 #[test]
 fn try_operator_is_desugared() {
     let src = "\
@@ -6650,8 +6683,18 @@ fn every_function_has_a_symbol() {
         // A concrete function is its own only instance, and says so uniformly
         // so that a consumer can read this on every function without asking
         // first whether there is one.
-        assert_eq!(i.origin, f.def);
-        assert!(i.args.is_empty());
+        //
+        // A **monomorphized** one is the other case and is not an exception to
+        // anything: its `origin` is the generic it came from, which is the whole
+        // point of recording one. `core` has such a function in every program —
+        // `impl Display for usize` forwards to the `uint.<N>` family — so the
+        // two cases are told apart by whether there were arguments to
+        // substitute, not by whether the program looked generic.
+        if i.args.is_empty() {
+            assert_eq!(i.origin, f.def, "`{}` is concrete but not its own origin", f.name);
+        } else {
+            assert_ne!(i.origin, f.def, "`{}` is an instance of nothing", f.name);
+        }
     }
     assert!(instances(&session).contains(&"unused".to_string()));
 }

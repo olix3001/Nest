@@ -473,6 +473,67 @@ by_constant :: func (a: i32) -> i32 { return a % 2 }
     insta::assert_snapshot!(lir_text(src));
 }
 
+/// The overflow checks that are a **comparison** rather than an opcode (§7d).
+///
+/// There is no `sdiv.with.overflow` on any target this emits for, so the one
+/// signed division that leaves its width — the minimum over `-1` — is a
+/// comparison against both operands. The unsigned families get none, because no
+/// unsigned quotient leaves the width. A shift is checked on its *amount*: bits
+/// leaving the top of a `<<` are what a shift is for, and an amount as wide as
+/// the type is the case the machine has no agreed answer for.
+///
+/// This is a regression test as much as a description. Both of these used to be
+/// listed as *checked opcodes*, which they have never been: the pair slot was
+/// allocated, a plain `div` wrote only its value half, and the branch read the
+/// flag out of whatever the stack happened to hold.
+#[test]
+fn lir_snapshot_the_overflow_checks_that_are_comparisons() {
+    let src = "\
+signed :: func (a: i32, b: i32) -> i32 { return a / b }
+unsigned :: func (a: u32, b: u32) -> u32 { return a / b }
+shifted :: func (a: u32, b: u32) -> u32 { return a << b }
+by_constant :: func (a: u32) -> u32 { return a << 3 }
+negated :: func (a: i32) -> i32 { return -a }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// No plain opcode ever writes into a pair slot.
+///
+/// The bug this pins was exactly that shape: an operation the build wanted
+/// checked, whose `Op` had no checked form, assigned into a `(T, bool)` local
+/// whose flag member nothing then wrote. It reads as an ordinary overflow branch
+/// in a dump and traps at random when it runs, so a test that looks at the dump
+/// would not have caught it. This one looks at the **types**.
+#[test]
+fn only_a_checked_op_writes_a_pair() {
+    let unit = lir_unit(BROAD);
+    for f in &unit.funcs {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                let crate::lir::StmtKind::Assign { place, value } = &s.kind else {
+                    continue;
+                };
+                let crate::lir::Rvalue::Op { op, .. } = value else {
+                    continue;
+                };
+                if op.is_checked() || !place.projection.is_empty() {
+                    continue;
+                }
+                let crate::lir::Base::Local(id) = place.base else {
+                    continue;
+                };
+                assert!(
+                    !matches!(f.locals[id.0 as usize].ty, crate::lir::Ty::Named(_)),
+                    "{}: `{}` is not a checked op but writes an aggregate slot",
+                    f.name,
+                    op.name()
+                );
+            }
+        }
+    }
+}
+
 /// `#unsafe` (§9) removes the checks the *program* is responsible for — the
 /// bounds comparison and the zero comparison are both gone here.
 ///
@@ -1900,26 +1961,23 @@ fn every_declared_intrinsic_has_a_lir_case() {
         );
         assert_eq!(i.name(), row.tag, "`{}` round-trips", row.tag);
     }
-    // And the ones `sema::lower` synthesizes as it desugars. These still reach a
-    // backend, so they still need a case.
-    for name in ["repeat", "format"] {
-        let i = Intrinsic::from_name(&Symbol::new(name));
-        assert!(
-            !matches!(i, Intrinsic::Unknown(_)),
-            "`{name}` has no case in lir::Intrinsic"
-        );
-    }
     // And these are **lowered away**, so they must have no case at all.
     //
     // The direction of the assertion is the point. A slice is an `Offset` and
     // an `Aggregate` over a pointer and a length; a slice literal is a `make`
-    // and a store per element; `index_mut` is a projection. All three are built
-    // from instructions a backend already has, so leaving a variant behind for
-    // them would be leaving something every backend must match and nothing can
-    // produce. If one is ever emitted again it becomes an `Unknown`, and
-    // `no_program_contains_an_unknown_intrinsic` fails rather than a backend
-    // quietly receiving a name.
-    for name in ["slice", "array", "index_mut"] {
+    // and a store per element; `index_mut` is a projection; a `repeat` is that
+    // same `make` with a counter, or an aggregate when the length is in the
+    // type. All are built from instructions a backend already has, so leaving a
+    // variant behind for them would be leaving something every backend must
+    // match and nothing can produce. If one is ever emitted again it becomes an
+    // `Unknown`, and `no_program_contains_an_unknown_intrinsic` fails rather
+    // than a backend quietly receiving a name.
+    //
+    // `format` is here for a different reason: there is no such intrinsic any
+    // more at all. An `f"..."` is desugared to `core`'s formatter before
+    // inference ever sees it (`sema::desugar`), so nothing downstream has a
+    // name to lower.
+    for name in ["slice", "array", "index_mut", "repeat", "format"] {
         let i = Intrinsic::from_name(&Symbol::new(name));
         assert!(
             matches!(i, Intrinsic::Unknown(_)),
@@ -3181,4 +3239,50 @@ fn entry_none_suppresses_it() {
     for unit in &program.units {
         assert!(entry_of(unit).is_none(), "{}", unit.name);
     }
+}
+
+/// `value ; count` in both its shapes (§6.11's neighbour, spec §3.2).
+///
+/// An **array** is its own storage and its length is part of its type, so the
+/// list is known at compile time and the whole thing is one aggregate — the
+/// same instruction `.{ 7, 7, 7, 7 }` is.
+///
+/// A **slice** has neither: its elements have to be allocated and its count is
+/// an ordinary run-time value, so it is a `make` and a loop. That loop is why
+/// `repeat` is not an intrinsic — §10 says an intrinsic is one instruction or
+/// one runtime call, and a comparison, a back edge and a join are none of those.
+#[test]
+fn lir_snapshot_repeat_is_an_aggregate_or_a_loop() {
+    let src = "\
+fixed :: func () -> [4]i32 { return .{ 7; 4 } }
+grown :: func (n: usize) -> []i32 { return .{ 5; n } }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
+/// The repeated value is evaluated **once**, because the source wrote it once.
+///
+/// `.{ f(); 3 }` calls `f` one time and stores the answer three times. The
+/// aggregate holds one operand three times over, not three calls.
+#[test]
+fn a_repeat_evaluates_its_value_once() {
+    let unit = lir_unit(
+        "\
+next :: func () -> i32 { return 1 }
+build :: func () -> [3]i32 { return .{ next(); 3 } }
+main :: func () -> i32 { return build()[0] }
+",
+    );
+    let build = unit
+        .funcs
+        .iter()
+        .find(|f| f.name.as_str() == "build")
+        .expect("`build` is in the program");
+    let calls = build
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter(|s| matches!(s.kind, crate::lir::StmtKind::Call { .. }))
+        .count();
+    assert_eq!(calls, 1, "`.{{ next(); 3 }}` called `next` {calls} times");
 }

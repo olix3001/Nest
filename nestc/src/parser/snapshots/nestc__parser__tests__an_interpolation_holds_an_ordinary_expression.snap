@@ -1,0 +1,43 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"P :: struct { x: i32 }\\n\\\n         f :: func (s: str) -> str { return s }\\n\\\n         go :: func () -> str { return f\\\"{ P { x: 1 }.x } { f(\\\"}\\\") } { f\\\"{1}\\\" }\\\" }\\n\")"
+---
+File
+  ConstBind ::
+    BindingPat P
+    StructType (record)
+      Field x:
+        TypePath
+          Path `i32`
+  ConstBind ::
+    BindingPat f
+    FuncExpr
+      Param s:
+        TypePath
+          Path `str`
+      TypePath
+        Path `str`
+      Block
+        Return
+          Path `s`
+  ConstBind ::
+    BindingPat go
+    FuncExpr
+      TypePath
+        Path `str`
+      Block
+        Return
+          InterpolatedStr
+            FieldAccess .x
+              CompositeLit (typed, named)
+                Path `P`
+                FieldInit x:
+                  Lit Int(1)
+            Lit Str(" ")
+            Call
+              Path `f`
+              Arg
+                Lit Str("}")
+            Lit Str(" ")
+            InterpolatedStr
+              Lit Int(1)

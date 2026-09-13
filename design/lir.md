@@ -1016,6 +1016,34 @@ evaluator already worked out to be in range, whose comparison has a known answer
 — the out-of-range case having been reported by `check::bounds` rather than
 compiled.
 
+**Only three operations have a checked opcode**: `add_checked`, `sub_checked`,
+`mul_checked` — the ones every machine computes with a flag beside the result.
+The other integer operations that can leave their width are checked by a
+*comparison*, which is the same shape as the bounds check above:
+
+- **A signed `/` or `%` of the minimum by `-1`.** There is no
+  `sdiv.with.overflow` anywhere, and on x86 the instruction faults, so the guard
+  is the comparison the hardware does not do. The unsigned families need none.
+- **A shift by an amount at least as wide as the type.** `x << 32` on a `u32` is
+  undefined in LLVM and disagreed about between architectures, so the check is on
+  the *amount*. Bits leaving the top of a `<<` are what a shift is for and are not
+  overflow.
+- **`-x`** is not its own case: it *is* `0 - x`, so it lowers to `sub_checked`,
+  whose one overflowing input — the minimum — is exactly the value that has no
+  negation. A `neg_checked` would have been a second name for this.
+
+Listing the first two as *checked opcodes* was a real bug and is worth recording:
+`op_of_builtin(Div, true)` was a plain `div`, so the `(T, bool)` slot the checked
+path allocated had its flag member left unwritten, and the branch that read it
+read whatever the stack held. Every division in every program was a coin flip
+between working and trapping. The invariant that would have caught it is now a
+test: **no plain opcode writes into an aggregate slot.**
+
+A **negated literal is one literal**, not a negation applied to a positive one
+(§1.5). `sema::lower` folds the sign in, which is what makes `-2147483648`
+writable as an `i32`: inference already range-checks it that way, and a lowering
+that disagreed would accept the literal and then trap on it at run time.
+
 **Dividing by zero is not overflow**, and is not this setting's to turn off.
 `overflow=wrap` says what `i32::MAX + 1` *means*; there is no wrapped answer for
 `x / 0` to have. So an integer `/` or `%` gets a comparison, an edge, and a block
@@ -1272,9 +1300,9 @@ the four names it used to have for "build a struct" were four names for one
 operation, and the type says which struct. `Offset` is a GEP in elements with the
 stride in bytes beside it.
 
-**Eleven intrinsics** reach a backend, and each is one instruction or one
-runtime call: `new`, `make`, `trap`, `assert`, `transmute`, `repeat`, `format`,
-`embed_file`, `gc_collect`, `gc_keep_alive`, `gc_pin`. Everything else a
+**Nine intrinsics** reach a backend, and each is one instruction or one
+runtime call: `new`, `make`, `trap`, `assert`, `transmute`, `embed_file`,
+`gc_collect`, `gc_keep_alive`, `gc_pin`. Everything else a
 `#intrinsic` declares is *gone* by this point — `size_of`, `align_of` and `cast`
 are constants, `index` and `len` are projections, `wrapping_add` and
 `wrapping_sub` are opcodes, `drop` is a statement. A test asserts that mapping is
@@ -1295,12 +1323,26 @@ missing end is `$len`, and `..=b` is `b + 1`). With plain numbers arriving,
 `$array` on a slice type went the same way: its elements need storage, so it is a
 `make` and a store per element. **An intrinsic that needs a branch is not an
 intrinsic**, and one built out of instructions a backend already has belongs in
-the lowering, where every backend gets it once. `repeat` and `format` are the two
-that still owe this treatment.
+the lowering, where every backend gets it once.
 
-A test asserts the *absence*: `slice`, `array` and `index_mut` must have no
-`lir::Intrinsic` case, so emitting one again makes it an `Unknown` and fails
-`no_program_contains_an_unknown_intrinsic` rather than reaching a backend.
+**`repeat` followed them, and `format` stopped existing.** A `value ; count` over
+an *array* is an `Aggregate` — the length is in the type, so the list is known
+here — and over a *slice* it is the same `make` the slice literal makes, with a
+counter, a comparison and a back edge instead of a fixed list. The loop is the
+argument: three blocks is not one instruction.
+
+`format` is not a lowering at all any more. An `f"..."` is **desugared before
+inference** (`sema::desugar`) into a `core` format buffer, one
+`Display.display` call per piece, and the bytes that came out — so there is no
+intrinsic left for a backend to be handed, and a user's own type answers "what
+does this look like" by writing an impl rather than by waiting for a compiler
+release. A literal segment goes through the same call an embedded expression
+does, because `str` implements `Display` like anything else.
+
+A test asserts the *absence*: `slice`, `array`, `index_mut`, `repeat` and
+`format` must have no `lir::Intrinsic` case, so emitting one again makes it an
+`Unknown` and fails `no_program_contains_an_unknown_intrinsic` rather than
+reaching a backend.
 
 `transmute` is the only one whose result type is read off `dest` rather than
 carried in the operation, because the operation *is* "reinterpret as whatever

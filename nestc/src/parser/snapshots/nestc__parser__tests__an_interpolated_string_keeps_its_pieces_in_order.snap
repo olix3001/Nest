@@ -1,0 +1,26 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"greet :: func (n: str, k: i32) -> str { return f\\\"hi {n}, {k + 1}!\\\" }\\n\")"
+---
+File
+  ConstBind ::
+    BindingPat greet
+    FuncExpr
+      Param n:
+        TypePath
+          Path `str`
+      Param k:
+        TypePath
+          Path `i32`
+      TypePath
+        Path `str`
+      Block
+        Return
+          InterpolatedStr
+            Lit Str("hi ")
+            Path `n`
+            Lit Str(", ")
+            Binary Add
+              Path `k`
+              Lit Int(1)
+            Lit Str("!")

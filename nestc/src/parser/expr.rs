@@ -304,6 +304,48 @@ impl Parser {
 
     // ===< Primaries >===
 
+    /// `f"...{e}..."` (§1.5, §6.11) — the pieces the lexer already separated.
+    ///
+    /// The parts are kept **interleaved in source order**, literal segments and
+    /// embedded expressions together, because the order is the whole content of
+    /// the literal: `f"{a}b"` and `f"b{a}"` differ in nothing else. A segment is
+    /// an ordinary `Lit::Str` node, so it types and lowers as the string it is
+    /// and desugaring needs no third case.
+    fn parse_interpolated_str(&mut self) -> NodeId {
+        let open = self.cur_span();
+        self.bump();
+        let mut parts = Vec::new();
+        loop {
+            match self.peek() {
+                Some(TokenKind::InterpEnd) | None => break,
+                Some(TokenKind::Str(s)) => {
+                    let s = s.clone();
+                    let at = self.cur_span();
+                    self.bump();
+                    parts.push(self.alloc(at, NodeKind::Lit(Lit::Str(s))));
+                }
+                Some(TokenKind::InterpOpen) => {
+                    self.bump();
+                    parts.push(self.parse_expr());
+                    // The lexer matched these braces by depth, so a failure here
+                    // is the expression parser having stopped early — the error
+                    // belongs at the token it stopped on, and the loop carries
+                    // on to the closer rather than abandoning the literal.
+                    self.expect(&TokenKind::InterpClose);
+                }
+                _ => {
+                    let at = self.cur_span();
+                    let found = self.describe_next();
+                    self.error(at, format!("expected the rest of the string, found {found}"));
+                    self.bump();
+                }
+            }
+        }
+        let end = self.cur_span();
+        self.expect(&TokenKind::InterpEnd);
+        self.alloc(open.to(end), NodeKind::InterpolatedStr { parts })
+    }
+
     /// `primary` (§13.7): literals, names, `$`-intrinsics, `self`/`Self`,
     /// grouping/tuple, composite literals, closures, `if`, blocks, loops, and
     /// `import`.
@@ -336,6 +378,7 @@ impl Parser {
                 self.bump();
                 self.alloc(span, NodeKind::Lit(Lit::Bytes(b)))
             }
+            Some(TokenKind::InterpStart) => self.parse_interpolated_str(),
             Some(TokenKind::Char(c)) => {
                 let c = *c;
                 self.bump();

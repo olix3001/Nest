@@ -34,6 +34,7 @@ prelude :: import "prelude.nest"
 @public target  :: import "target.nest"
 @public loc     :: import "loc.nest"
 @public mem     :: import "mem.nest"
+@public fmt     :: import "fmt.nest"
 @public fail    :: import "fail.nest"
 @public gc      :: import "gc.nest"
 

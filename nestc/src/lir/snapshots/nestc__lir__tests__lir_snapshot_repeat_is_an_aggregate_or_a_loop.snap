@@ -1,0 +1,40 @@
+---
+source: src/lir/tests.rs
+expression: lir_text(src)
+---
+unit mem:main {
+  type []i32 = struct {           // was a slice; size 16, align 8
+    ptr: *i32                    // +0
+    len: u64                    // +8
+  }
+
+  func fixed() -> [4]i32  // _NC5fixed
+    let _0: [4]i32
+  bb0:                    // entry
+    _0 := array(7, 7, 7, 7)
+    return _0
+
+  func grown(n_0: u64) -> []i32  // _NC5grown
+    let _1: []i32
+    let _2: u64
+    let _3: bool
+    let _4: *i32
+  bb0:                    // entry
+    _1 := $make(n_0)
+      @safepoint { live: [] }
+    _2 := 0
+    goto bb1
+  bb1:                    // repeat
+    _3 := lt.u64 _2, n_0
+    switch.bool _3 { 1 => bb2, _ => bb3 }
+  bb2:
+    _4 := _1.ptr + _2 * 4
+    _4.* = 5
+    _2 := add.u64 _2, 1
+    goto bb1
+      @safepoint { live: [_1]
+        _1 := reloc _1
+      }
+  bb3:
+    return _1
+}

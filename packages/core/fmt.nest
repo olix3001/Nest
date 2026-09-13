@@ -1,0 +1,276 @@
+// Formatting — what an `f"..."` is made of (§1.5, §6.11).
+//
+// An interpolated string is **sugar**, and this file is what it is sugar for. A
+// `f"dim: {w}x{h}"` becomes a buffer, a `display` call per piece, and the bytes
+// that came out:
+//
+//     {
+//       let mut __fmt := format.start()
+//       "dim: ".display(&mut __fmt)
+//       w.display(&mut __fmt)
+//       "x".display(&mut __fmt)
+//       h.display(&mut __fmt)
+//       format.end(&mut __fmt)
+//     }
+//
+// `sema::desugar` builds exactly that, and reaches these three names by their
+// `#lang` tags, never by path — so a `core` that spells them differently, or
+// formats into something other than a `Buf`, still works.
+//
+// ### Why a trait, and not a compiler intrinsic
+//
+// The alternative was a `format` intrinsic: one name the compiler knows, with
+// a case per type inside the compiler. That makes "what does a value look like"
+// a compiler decision, which it is not — it is the most library-ish question
+// there is, and the first user type to be interpolated would have had nowhere to
+// answer it. A trait puts the answer where the type is, and the dispatch is the
+// ordinary one: `display` is selected by the receiver's type at the call site,
+// monomorphized like any other method, with no vtable and no run-time lookup.
+//
+// It also means **a literal segment goes through the same path a value does**.
+// `"dim: "` is a `str`, `str` implements `Display`, and desugaring emits one
+// kind of call rather than two. Nothing here is special-cased for the pieces the
+// program typed as text.
+//
+// ### What is not here
+//
+// **Floats.** Printing one correctly is Ryū or Grisu, which is a few hundred
+// lines and a table, and it belongs beside the rest of the float work rather
+// than in the file that defines what interpolation *is*. Until it exists,
+// `f"{x}"` on an `f64` is "no impl of `Display`" at the call, which is a
+// readable thing to be told.
+//
+// **Width, alignment and precision** — `{x:>8.2}`. The syntax has no place to
+// put them (§1.5 is `{ expr }` and nothing else), so adding them is a language
+// change rather than a library one.
+//
+// **An owned string type.** `Buf` is the formatter's scratch space, not a
+// `String`: it grows, it is written into once, and `end` hands back a `str` view
+// of what was written. The growable, owned string belongs to `std` and will
+// carry its own `#lang` tag, exactly as `str.nest` says.
+
+{ make } :: import "mem.nest"
+{ PTR_BITS } :: import "target.nest"
+
+// ===< The buffer >===
+
+// Somewhere to put bytes while a value is being written out.
+//
+// It is a plain struct rather than a hidden compiler type because everything it
+// does is ordinary: a slice, a length, and a growth rule. An `impl Display` for
+// a user's own type needs to be able to write into one, so it has to be a type
+// a program can name.
+@public Buf :: struct {
+  // Room, not content. `len` is how much of it has been written.
+  data: []mut u8,
+  len: usize,
+}
+
+impl Buf {
+  // Make room for `extra` more bytes.
+  //
+  // Doubling, with a floor, which is the growth rule that makes a sequence of
+  // `n` appends cost `O(n)` rather than `O(n²)`. The floor exists because
+  // doubling from zero never leaves zero.
+  @public reserve :: func (self: *mut Buf, extra: usize) -> void {
+    let need: usize := self.len + extra
+    if need <= self.data.len() { return }
+    let mut cap: usize := self.data.len() * 2
+    if cap < 16 { cap = 16 }
+    while cap < need { cap = cap * 2 }
+    // `make` zeroes, which is more than is needed — the bytes past `len` are
+    // never read — but it is the allocation the language has and the collector
+    // knows about.
+    let fresh: []mut u8 := make.<[]u8>(cap)
+    let mut i: usize := 0
+    while i < self.len {
+      fresh[i] = self.data[i]
+      i = i + 1
+    }
+    self.data = fresh
+  }
+
+  // One byte.
+  @public byte :: func (self: *mut Buf, b: u8) -> void {
+    self.reserve(1)
+    self.data[self.len] = b
+    self.len = self.len + 1
+  }
+
+  // A run of bytes.
+  @public bytes :: func (self: *mut Buf, src: []u8) -> void {
+    self.reserve(src.len())
+    let mut i: usize := 0
+    while i < src.len() {
+      self.data[self.len + i] = src[i]
+      i = i + 1
+    }
+    self.len = self.len + src.len()
+  }
+}
+
+// ===< What desugaring calls >===
+
+// A buffer to write one interpolated string into.
+@public start :: #lang("format_start") func () -> Buf {
+  return Buf { data: make.<[]u8>(0), len: 0 }
+}
+
+// The bytes that were written, as text.
+//
+// The result borrows the buffer's storage rather than copying it: the buffer is
+// a temporary of the block desugaring built, nothing else can reach it, and the
+// bytes are UTF-8 because every `display` above wrote UTF-8 into it.
+@public end :: #lang("format_end") func (out: *mut Buf) -> str {
+  return cast.<str>(out.data[0..<out.len])
+}
+
+// ===< The contract >===
+
+// How a value writes itself out.
+//
+// One method, taking the buffer rather than returning a string, so that
+// formatting a struct of ten members is ten appends and one allocation instead
+// of ten allocations and a concatenation.
+@public Display :: #lang("display") trait {
+  display :: func (self: Self, out: *mut Buf) -> void
+}
+
+// Text is its own bytes. This is the impl a literal segment goes through.
+impl Display for str {
+  display :: func (self: Self, out: *mut Buf) -> void {
+    out.bytes(self.as_bytes())
+  }
+}
+
+impl Display for bool {
+  display :: func (self: Self, out: *mut Buf) -> void {
+    if self {
+      out.bytes("true".as_bytes())
+    } else {
+      out.bytes("false".as_bytes())
+    }
+  }
+}
+
+// Decimal, most significant digit first, for **every** unsigned width at once —
+// the same trick `num.nest`'s `wrapping_add` plays, and the reason the integer
+// families exist (§3.1).
+//
+// There is no scratch array. The obvious way round — push digits into a buffer
+// least-significant first and walk it backwards — needs a buffer whose size
+// depends on the width, and `u4096` is a legal type, so there is no array length
+// to write down. Finding the largest power of ten that fits first costs one more
+// division per digit and needs no storage at all.
+impl <const N: u16> Display for uint.<N> {
+  display :: func (self: Self, out: *mut Buf) -> void {
+    if self == 0 {
+      out.byte(ZERO)
+      return
+    }
+    let mut place: Self := 1
+    let mut rest: Self := self
+    // `place` never overflows: it is multiplied only while `rest` still has a
+    // digit above it, so it stays no larger than `self`.
+    while rest >= 10 {
+      place = place * 10
+      rest = rest / 10
+    }
+    while place > 0 {
+      out.byte(cast.<u8>((self / place) % 10) + ZERO)
+      place = place / 10
+    }
+  }
+}
+
+// The same, with the sign written first and the digits taken from the
+// **negative** side.
+//
+// Negating first would be the obvious shape and is wrong for exactly one value:
+// the minimum has no positive counterpart, so `-self` on it overflows and traps.
+// Dividing the negative number and negating each digit — which is always one of
+// `0 ..= 9` after the sign flip — has no such value.
+impl <const N: u16> Display for int.<N> {
+  display :: func (self: Self, out: *mut Buf) -> void {
+    if self == 0 {
+      out.byte(ZERO)
+      return
+    }
+    if self < 0 {
+      out.byte(MINUS)
+      let mut place: Self := 1
+      let mut rest: Self := self
+      while rest <= -10 {
+        place = place * 10
+        rest = rest / 10
+      }
+      while place > 0 {
+        out.byte(cast.<u8>(0 - ((self / place) % 10)) + ZERO)
+        place = place / 10
+      }
+      return
+    }
+    let mut place: Self := 1
+    let mut rest: Self := self
+    while rest >= 10 {
+      place = place * 10
+      rest = rest / 10
+    }
+    while place > 0 {
+      out.byte(cast.<u8>((self / place) % 10) + ZERO)
+      place = place / 10
+    }
+  }
+}
+
+// `usize` and `isize` are `distinct` (§2.4, `num.nest`), and a `distinct` type
+// inherits inherent methods but not trait impls — that is the point of it, since
+// a count of bytes and a number of them should be allowed to print differently
+// if anyone ever wants them to. These two do not, so each forwards to the family
+// member underneath.
+impl Display for usize {
+  display :: func (self: Self, out: *mut Buf) -> void {
+    cast.<uint.<PTR_BITS>>(self).display(out)
+  }
+}
+
+impl Display for isize {
+  display :: func (self: Self, out: *mut Buf) -> void {
+    cast.<int.<PTR_BITS>>(self).display(out)
+  }
+}
+
+// A character is a code point, and text is UTF-8 (§1.5), so writing one out is
+// the encoding. Four cases, one per length, and the arithmetic is written with
+// `/` and `%` rather than shifts and masks because the two say the same thing
+// here and this way says which powers of two are meant.
+impl Display for char {
+  display :: func (self: Self, out: *mut Buf) -> void {
+    let c: u32 := cast.<u32>(self)
+    if c < 128 {
+      out.byte(cast.<u8>(c))
+      return
+    }
+    if c < 2048 {
+      out.byte(cast.<u8>(192 + (c / 64)))
+      out.byte(cast.<u8>(128 + (c % 64)))
+      return
+    }
+    if c < 65536 {
+      out.byte(cast.<u8>(224 + (c / 4096)))
+      out.byte(cast.<u8>(128 + ((c / 64) % 64)))
+      out.byte(cast.<u8>(128 + (c % 64)))
+      return
+    }
+    out.byte(cast.<u8>(240 + (c / 262144)))
+    out.byte(cast.<u8>(128 + ((c / 4096) % 64)))
+    out.byte(cast.<u8>(128 + ((c / 64) % 64)))
+    out.byte(cast.<u8>(128 + (c % 64)))
+  }
+}
+
+// The two bytes the digit loops above need by name. `48` and `45` are ASCII `0`
+// and `-`; a character literal would be clearer still, but a `char` is a code
+// point and these are being appended as bytes.
+ZERO: u8 :: 48
+MINUS: u8 :: 45

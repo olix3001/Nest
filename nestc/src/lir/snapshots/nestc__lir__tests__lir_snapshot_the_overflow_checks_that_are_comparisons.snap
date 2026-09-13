@@ -1,0 +1,142 @@
+---
+source: src/lir/tests.rs
+expression: lir_text(src)
+---
+unit mem:main {
+  type []u8 = struct {           // was a slice; size 16, align 8
+    ptr: *u8                    // +0
+    len: u64                    // +8
+  }
+  type core.Location = struct {           // was a struct; size 24, align 8
+    file: []u8                    // +0
+    line: u32                    // +16
+    column: u32                    // +20
+  }
+  type (i32, bool) = struct {           // was a tuple; size 8, align 4
+    0: i32                    // +0
+    1: bool                    // +4
+  }
+  private const const.str.0: [16]u8 = b"division by zero"  // _NK0
+  private const const.str.1: [8]u8 = b"mem:main"  // _NK1
+  private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
+  private const const.str.3: [35]u8 = b"shift amount is wider than the type"  // _NK3
+
+  func signed(a_0: i32, b_1: i32) -> i32  // _NC6signed
+    let _2: bool
+    let _3: []u8
+    let _4: []u8
+    let _5: core.Location
+    let _6: bool
+    let _7: bool
+    let _8: bool
+    let _9: []u8
+    let _10: []u8
+    let _11: core.Location
+    let _12: i32
+  bb0:                    // entry
+    _2 := ne.i32 b_1, 0
+    switch.bool _2 { 1 => bb2, _ => bb1 }
+  bb1:                    // division by zero
+    _3 := []u8(&const.str.0, 16)
+    _4 := []u8(&const.str.1, 8)
+    _5 := core.Location(_4, 1, 49)
+    call core.panic(_3, _5)
+      @safepoint { live: [_3, _5]
+        _3 := reloc _3
+        _5 := reloc _5
+      }
+    unreachable
+  bb2:
+    _6 := eq.i32 a_0, -2147483648
+    _7 := eq.i32 b_1, -1
+    _8 := bit_and.bool _6, _7
+    switch.bool _8 { 1 => bb3, _ => bb4 }
+  bb3:                    // integer overflow
+    _9 := []u8(&const.str.2, 16)
+    _10 := []u8(&const.str.1, 8)
+    _11 := core.Location(_10, 1, 49)
+    call core.panic(_9, _11)
+      @safepoint { live: [_9, _11]
+        _9 := reloc _9
+        _11 := reloc _11
+      }
+    unreachable
+  bb4:
+    _12 := div.i32 a_0, b_1
+    return _12
+
+  func unsigned(a_0: u32, b_1: u32) -> u32  // _NC8unsigned
+    let _2: bool
+    let _3: []u8
+    let _4: []u8
+    let _5: core.Location
+    let _6: u32
+  bb0:                    // entry
+    _2 := ne.u32 b_1, 0
+    switch.bool _2 { 1 => bb2, _ => bb1 }
+  bb1:                    // division by zero
+    _3 := []u8(&const.str.0, 16)
+    _4 := []u8(&const.str.1, 8)
+    _5 := core.Location(_4, 2, 51)
+    call core.panic(_3, _5)
+      @safepoint { live: [_3, _5]
+        _3 := reloc _3
+        _5 := reloc _5
+      }
+    unreachable
+  bb2:
+    _6 := div.u32 a_0, b_1
+    return _6
+
+  func shifted(a_0: u32, b_1: u32) -> u32  // _NC7shifted
+    let _2: bool
+    let _3: []u8
+    let _4: []u8
+    let _5: core.Location
+    let _6: u32
+  bb0:                    // entry
+    _2 := ge.u32 b_1, 32
+    switch.bool _2 { 1 => bb1, _ => bb2 }
+  bb1:                    // shift amount is wider than the type
+    _3 := []u8(&const.str.3, 35)
+    _4 := []u8(&const.str.1, 8)
+    _5 := core.Location(_4, 3, 50)
+    call core.panic(_3, _5)
+      @safepoint { live: [_3, _5]
+        _3 := reloc _3
+        _5 := reloc _5
+      }
+    unreachable
+  bb2:
+    _6 := shl.u32 a_0, b_1
+    return _6
+
+  func by_constant(a_0: u32) -> u32  // _NC11by_constant
+    let _1: u32
+  bb0:                    // entry
+    _1 := shl.u32 a_0, 3
+    return _1
+
+  func negated(a_0: i32) -> i32  // _NC7negated
+    let _1: (i32, bool)
+    let _2: []u8
+    let _3: []u8
+    let _4: core.Location
+  bb0:                    // entry
+    _1 := sub_checked.i32 0, a_0
+    switch.bool _1.1 { 1 => bb1, _ => bb2 }
+  bb1:                    // overflow
+    _2 := []u8(&const.str.2, 16)
+    _3 := []u8(&const.str.1, 8)
+    _4 := core.Location(_3, 5, 42)
+    call core.panic(_2, _4)
+      @safepoint { live: [_2, _4]
+        _2 := reloc _2
+        _4 := reloc _4
+      }
+    unreachable
+  bb2:
+    return _1.0
+
+  declare func core.panic(msg_0: []u8, loc_1: core.Location) -> never @public  // _NC4core5panic
+}

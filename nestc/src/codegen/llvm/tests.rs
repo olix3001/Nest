@@ -406,6 +406,57 @@ fn a_program_links_and_runs() {
     for (src, status) in [
         ("add :: func (a: i32, b: i32) -> i32 { return a + b }\nmain :: func () -> i32 { return add(2, 3) }\n", 5),
         ("main :: func () { let mut n := 0\n  while n < 3 { n = n + 1 } }\n", 0),
+        // `value ; count` in both shapes: an aggregate over an array whose
+        // length is in its type, and a `make` plus a loop over a slice whose
+        // count is a run-time value. 7 + 5 + 3.
+        (
+            "main :: func () -> i32 {\n\
+            \x20 let a: [4]i32 := .{ 7; 4 }\n\
+            \x20 let n: usize := 3\n\
+            \x20 let s: []i32 := .{ 5; n }\n\
+            \x20 return a[2] + s[1] + cast.<i32>(s.len())\n\
+             }\n",
+            15,
+        ),
+        // An interpolated string, end to end: the lexer splitting it, the
+        // parser keeping the pieces in order, desugaring turning each into a
+        // `Display.display` call, and `core/fmt` writing the bytes.
+        (
+            "main :: func () -> i32 {\n\
+            \x20 let w: i32 := 3\n\
+            \x20 let h: i32 := 40\n\
+            \x20 let s: str := f\"dim: {w}x{h + 2} {{ok}}\"\n\
+            \x20 if s == \"dim: 3x42 {ok}\" { return 9 }\n\
+            \x20 return 0\n\
+             }\n",
+            9,
+        ),
+        // Every `Display` impl `core` ships, including the two values that are
+        // their own edge case: the signed minimum, whose magnitude the type
+        // cannot hold, and zero.
+        (
+            "{ Display, start, end } :: import <core/fmt>\n\
+             show :: func <T: Display> (v: T) -> str {\n\
+            \x20 let mut b := start()\n\
+            \x20 v.display(&mut b)\n\
+            \x20 return end(&mut b)\n\
+             }\n\
+             main :: func () -> i32 {\n\
+            \x20 let a: i32 := -2147483648\n\
+            \x20 let b: u8 := 255\n\
+            \x20 let c: usize := 0\n\
+            \x20 let d: bool := false\n\
+            \x20 let e: char := 'Z'\n\
+            \x20 let mut ok: i32 := 0\n\
+            \x20 if show(a) == \"-2147483648\" { ok = ok + 1 }\n\
+            \x20 if show(b) == \"255\" { ok = ok + 2 }\n\
+            \x20 if show(c) == \"0\" { ok = ok + 4 }\n\
+            \x20 if show(d) == \"false\" { ok = ok + 8 }\n\
+            \x20 if show(e) == \"Z\" { ok = ok + 16 }\n\
+            \x20 return ok\n\
+             }\n",
+            31,
+        ),
     ] {
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
         let file = session.load_entry("main").expect("entry loads");

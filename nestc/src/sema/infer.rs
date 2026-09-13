@@ -1147,12 +1147,6 @@ impl Inferer<'_> {
                 }
                 self.lit_ty(&lit)
             }
-            NodeKind::InterpolatedStr { parts } => {
-                for p in parts {
-                    self.infer_expr(p);
-                }
-                self.str_ty()
-            }
             NodeKind::Path { .. } => {
                 let ty = self.path_ty(node);
                 // A use of a `comptime_int` / `comptime_float` constant carries

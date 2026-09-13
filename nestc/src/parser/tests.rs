@@ -391,3 +391,25 @@ mk :: func (c: Cfg := .{ a: 1 }, n: i32 := cast.<i32>(2)) {
 "
     ))
 }
+
+/// `f"..."` parses to its pieces in source order — literal segments and embedded
+/// expressions together, because the order is the whole content of the literal.
+#[test]
+fn an_interpolated_string_keeps_its_pieces_in_order() {
+    assert_snapshot!(tree(
+        "greet :: func (n: str, k: i32) -> str { return f\"hi {n}, {k + 1}!\" }\n"
+    ));
+}
+
+/// The expression inside the braces is parsed by the **ordinary** expression
+/// parser, so everything it can parse works here: a struct literal with braces
+/// of its own, a call with a string argument containing a brace, a nested
+/// interpolation.
+#[test]
+fn an_interpolation_holds_an_ordinary_expression() {
+    assert_snapshot!(tree(
+        "P :: struct { x: i32 }\n\
+         f :: func (s: str) -> str { return s }\n\
+         go :: func () -> str { return f\"{ P { x: 1 }.x } { f(\"}\") } { f\"{1}\" }\" }\n"
+    ));
+}

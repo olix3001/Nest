@@ -598,10 +598,6 @@ pub enum Intrinsic {
     /// type is not in the instruction: it is on the destination, because "become
     /// whatever this slot holds" is what the operation *is*.
     Transmute,
-    /// `n` copies of a value.
-    Repeat,
-    /// String formatting (§6.11).
-    Format,
     /// The file's bytes, at compile time.
     EmbedFile,
     /// Run a collection now (§6.4.1).
@@ -628,8 +624,6 @@ impl Intrinsic {
             Intrinsic::Trap => "trap",
             Intrinsic::Assert => "assert",
             Intrinsic::Transmute => "transmute",
-            Intrinsic::Repeat => "repeat",
-            Intrinsic::Format => "format",
             Intrinsic::EmbedFile => "embed_file",
             Intrinsic::GcCollect => "gc_collect",
             Intrinsic::GcKeepAlive => "gc_keep_alive",
@@ -646,8 +640,6 @@ impl Intrinsic {
             "trap" => Intrinsic::Trap,
             "assert" => Intrinsic::Assert,
             "transmute" => Intrinsic::Transmute,
-            "repeat" => Intrinsic::Repeat,
-            "format" => Intrinsic::Format,
             "embed_file" => Intrinsic::EmbedFile,
             "gc_collect" => Intrinsic::GcCollect,
             "gc_keep_alive" => Intrinsic::GcKeepAlive,
