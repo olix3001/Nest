@@ -2,7 +2,7 @@
  * The Nest runtime, in one file.
  *
  * Every symbol a generated object file refers to that is not a Nest function is
- * here, and there are six of them. That is the point: the language's runtime
+ * here, and there are eleven of them. That is the point: the language's runtime
  * surface is small enough to read, and swapping the collector is editing this
  * file and relinking rather than changing the compiler.
  *
@@ -45,6 +45,8 @@
  * (`-C link-arg=-lgc` for the Boehm build's dependency).
  */
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -95,16 +97,100 @@ void nest_gc_collect(void) {
 #endif
 }
 
-/* Prepare the collector. A program calls this before anything else.
+/* The arguments the process was started with, kept.
+ *
+ * They are stored rather than fetched on demand because there is nowhere to
+ * fetch them from: nothing in C or POSIX hands a running program its own
+ * `argv` back. The one moment it exists is the call to `main`, so that is where
+ * these are taken from.
+ *
+ * The pointers are the startup's own and are not copied: they outlive every
+ * Nest value that borrows them, which is what makes a `str` cut out of `argv`
+ * safe to hold. */
+static int nest_stored_argc = 0;
+static char **nest_stored_argv = 0;
+
+/* Prepare the collector, and keep what the process was started with.
  *
  * Boehm wants `GC_INIT()` on the main thread before the first allocation on
- * some platforms, and it is harmless everywhere else. Nothing calls this yet:
- * the compiler does not generate a C `main` wrapper, which is the piece the CLI
- * phase adds. */
-void nest_init(void) {
+ * some platforms, and it is harmless everywhere else. The synthesized entry
+ * point (`nestc/src/lir/entry.rs`) calls this first, before the program's own
+ * `main`, and passes on the two arguments it was given. */
+void nest_init(int argc, char **argv) {
+    nest_stored_argc = argc;
+    nest_stored_argv = argv;
 #ifdef NEST_GC_BOEHM
     GC_INIT();
 #endif
+}
+
+/* How many arguments the process was started with, `argv[0]` included. */
+int nest_argc(void) {
+    return nest_stored_argc;
+}
+
+/* The arguments, as the NULL-terminated `char **` the startup built.
+ *
+ * The walk over it is in Nest (`std/process`) rather than here: it is an index
+ * and a NUL scan, and doing it there is what keeps this file three accessors
+ * instead of a string library. */
+char **nest_argv(void) {
+    return nest_stored_argv;
+}
+
+/* The environment, `NAME=value` per entry and NULL-terminated.
+ *
+ * **`environ`, not `main`'s third parameter.** `main` does receive one, and it
+ * is a snapshot: `setenv` may replace the table outright, and a program that
+ * read the snapshot would then not see a variable it had just set — which is
+ * how this came to be written this way rather than the other. `environ` is the
+ * live table, and it is what `getenv` itself reads.
+ *
+ * POSIX declares it in `<unistd.h>`; it is declared here instead because macOS
+ * hides that declaration behind a feature macro while still exporting the
+ * symbol to an executable. A Nest program built as a **shared library** on
+ * macOS would not find it, which is the one case this does not cover and the
+ * one `std` does not claim to support yet.
+ *
+ * It may be NULL, which reads as an empty environment. */
+extern char **environ;
+
+char **nest_envp(void) {
+    return environ;
+}
+
+/* `open`, with a fixed arity.
+ *
+ * C's `open` is **variadic** — `int open(const char *, int, ...)`, with `mode`
+ * read only when the flags ask to create — and Nest has no varargs (`core/c`).
+ * Calling it through a three-argument declaration is not a small lie: on arm64
+ * a variadic argument is passed on the stack and a fixed one in a register, so
+ * `open` reads a `mode` that was never written there. It creates files with
+ * whatever was on the stack for permissions, which is how this shim came to be
+ * written — the first `fs.write` returned `EACCES`.
+ *
+ * `core/c` already names the remedy: a program needing a variadic C function
+ * writes a fixed-arity shim in C. This is that shim, and it is the only one.
+ * The flags are the caller's, unexamined — `std/libc` is what decides which
+ * bits this target spells them with. */
+int nest_open(const char *path, int flags, unsigned int mode) {
+    return open(path, flags, (mode_t)mode);
+}
+
+/* The last error a libc call reported.
+ *
+ * `errno` is **a macro**, not a symbol — C says so, and on a threaded platform
+ * it expands to a call returning a per-thread location (`__error()` on macOS,
+ * `__errno_location()` on Linux). So there is nothing for `extern("c")` to
+ * declare: a Nest declaration of `errno` would name a symbol that does not
+ * exist on either platform, and naming one of the two expansions would be
+ * naming the wrong one on the other.
+ *
+ * Reading it through C, where the macro is what it is, is the only portable
+ * answer. `std/sys` calls this immediately after a failed call, which is what
+ * `errno` requires of anyone reading it. */
+int nest_errno(void) {
+    return errno;
 }
 
 /* The last instruction: `trap()` in source, and where a panic ends up.

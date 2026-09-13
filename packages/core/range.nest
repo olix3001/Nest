@@ -1,5 +1,7 @@
-// Range types.
+// Range types, and what walking one does.
 
+{ usize, isize } :: import "num.nest"
+{ Ordering } :: import "cmp.nest"
 * :: import "option.nest"
 * :: import "iter.nest"
 
@@ -26,7 +28,114 @@ impl <T> IntoIterator for Range.<T> {
   into_iter :: func (self: Range.<T>) -> Range.<T> { return self }
 }
 
-impl <T> Iterator for Range.<T> {
+// ===< Stepping a range >===
+//
+// Walking a range needs two things of its element type — whether one bound has
+// reached another, and what the next value up is — and **neither is available
+// on a bare `T`**. On a primitive, `<` and `+ 1` are instructions rather than
+// calls to `Ord` and `Add` (`cmp.nest`), so an unbounded `T` has no way to ask,
+// and a bound naming those traits is one the primitives do not satisfy.
+//
+// So the two questions get a trait of their own, and the iterator is written
+// **once** against it. That one impl is also what keeps inference working:
+// `for x in 0..<4` starts with an element type nothing has decided, and a
+// single blanket impl matches it while it is still open — where a set of impls
+// per integer family would have to choose between them, which forces the
+// literal onto its default before the body has said what it is.
+//
+// It is deliberately not `Ord` + `Add`. Those are what a *user* type
+// implements to join in with `<` and `+`, and giving every integer an `Ord`
+// impl would put a second answer beside the instruction the compiler already
+// emits for `a < b`. `Step` is asked only by the loop below.
+
+@public Step :: trait {
+  // How `self` stands to `rhs`. One method rather than `lt` and `eq` because
+  // the loop wants both of them about the same pair, and `Ordering` is the
+  // answer `cmp.nest` already spells.
+  step_cmp :: func (self: Self, rhs: Self) -> Ordering
+  // The next value up. Only ever called when a larger one exists — the loop
+  // checks first — so there is no overflow here to report.
+  step_up :: func (self: Self) -> Self
+}
+
+impl <const N: u16> Step for uint.<N> {
+  step_cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self < rhs { return .less }
+    if self == rhs { return .equal }
+    return .greater
+  }
+  step_up :: func (self: Self) -> Self { return self + 1 }
+}
+
+impl <const N: u16> Step for int.<N> {
+  step_cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self < rhs { return .less }
+    if self == rhs { return .equal }
+    return .greater
+  }
+  step_up :: func (self: Self) -> Self { return self + 1 }
+}
+
+// `usize` and `isize` are `distinct` (§2.4), so the family impls above do not
+// reach them: a `distinct` inherits inherent methods and not trait impls. Their
+// bodies are the same two lines, which is what `Display for usize` does one
+// file over.
+impl Step for usize {
+  step_cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self < rhs { return .less }
+    if self == rhs { return .equal }
+    return .greater
+  }
+  step_up :: func (self: Self) -> Self { return self + 1 }
+}
+
+impl Step for isize {
+  step_cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self < rhs { return .less }
+    if self == rhs { return .equal }
+    return .greater
+  }
+  step_up :: func (self: Self) -> Self { return self + 1 }
+}
+
+// A range with no start — `..`, `..<b`, `..=b` — has no first element to hand
+// out, so it **panics** rather than reporting exhaustion. `for i in ..<5` is a
+// program with a bound missing, and answering `.none` would run the loop zero
+// times and say nothing about why.
+//
+// The inclusive range's last step does **not** compute `b + 1`: on `0..=255`
+// over a `u8` that would trap on the one iteration that is supposed to end the
+// loop. Reaching the end replaces the range with an empty one instead, which is
+// a state the enum can already say.
+impl <T: Step> Iterator for Range.<T> {
   Item :: T
-  next :: func (self: *mut Range.<T>) -> Option.<T> { return .none }
+  next :: func (self: *mut Range.<T>) -> Option.<T> {
+    return self.*.match {
+      .exclusive(a, b) => {
+        if a.step_cmp(b).match { .less => false, _ => true } { return .none }
+        self.* = .exclusive(a.step_up(), b)
+        return .some(a)
+      },
+      .inclusive(a, b) => {
+        return a.step_cmp(b).match {
+          .greater => .none,
+          .equal   => {
+            self.* = .exclusive(a, a)
+            return .some(a)
+          },
+          .less => {
+            self.* = .inclusive(a.step_up(), b)
+            return .some(a)
+          },
+        }
+      },
+      .from(a) => {
+        self.* = .from(a.step_up())
+        return .some(a)
+      },
+      .full            => panic("a `..` has no first element to iterate from"),
+      .to(b)           => panic("a `..<b` has no first element to iterate from"),
+      .to_inclusive(b) => panic("a `..=b` has no first element to iterate from"),
+    }
+  }
 }

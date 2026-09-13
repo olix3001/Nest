@@ -1587,9 +1587,36 @@ impl Lowerer<'_> {
     /// each one it finds has to answer "which instantiation of the callee is
     /// this?" without a second lookup.
     fn carry_instantiation(&self, head: NodeId, call: &Expr) {
+        // **Not when the callee was redirected.** A static trait call
+        // (`FromResidual.from_residual(r)`) resolves by name to the *trait's*
+        // bodyless declaration, and the solver then stamps the impl member that
+        // won — which `lower_name` is what points the call at. The arguments
+        // recorded here are the ones that declaration has: `FromResidual.<R>`
+        // owns one parameter, and `impl <T, E> FromResidual.<E> for
+        // Result.<T, E>` has two.
+        //
+        // Handing the shorter list to monomorphization left `T` bound to
+        // nothing: the emitted `from_residual` returned `Result.<T, E>` with a
+        // parameter still in it, and building an `.err` of a type that does not
+        // exist lowered to `return undef` — so every `.?` propagating an error
+        // returned garbage. Dropping the list makes mono re-derive it from the
+        // signature, which is the narrow case `args_from_signature` is sound
+        // for: both signatures are concrete and every parameter appears in them.
+        if self.redirected_to_impl(head) {
+            return;
+        }
         if let Some(inst) = self.ast.meta::<Instantiation>(head) {
             self.meta.set(call.id, inst);
         }
+    }
+
+    /// Whether the solver pointed this callee at an impl member other than the
+    /// declaration its name resolved to.
+    fn redirected_to_impl(&self, head: NodeId) -> bool {
+        let Some(res) = self.ast.meta::<OpResolution>(head) else {
+            return false;
+        };
+        self.resolved_def(head) != Some(res.method)
     }
 
     /// Lower an operator to a uniform call to its resolved method. The callee is

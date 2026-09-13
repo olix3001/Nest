@@ -1258,10 +1258,23 @@ impl Inferer<'_> {
                         self.expect(range, &elem, &want);
                     }
                 }
-                // A sub-slice of anything sliceable is a read-only slice of its
-                // element type.
+                // A sub-slice of a slice is the **same elements**, so it
+                // carries the same permission over them: `b[2..<6]` on a
+                // `[]mut u8` is a `[]mut u8`. Answering `[]u8` here instead
+                // made writing to part of a buffer unsayable — every reader
+                // filling the tail of what it has already read, and every
+                // container copying into the free half of its storage, needs
+                // exactly this.
+                //
+                // An **array** is the one that does not inherit: `[N]T` has no
+                // mutability in its type, because the permission over an
+                // array's elements belongs to whatever holds the array
+                // (`core/slice.nest`). A sub-slice of one is read-only, which
+                // is the conservative half of that rule and the only one this
+                // expression can decide on its own.
                 match self.autoderef(&bty) {
-                    Ty::Slice { inner, .. } | Ty::Array { inner, .. } => Ty::Slice {
+                    Ty::Slice { inner, mutable } => Ty::Slice { mutable, inner },
+                    Ty::Array { inner, .. } => Ty::Slice {
                         mutable: false,
                         inner,
                     },

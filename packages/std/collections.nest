@@ -1,0 +1,405 @@
+// The two containers a program cannot get far without.
+//
+// `Vec.<T>` is a slice that grows; `HashMap.<K, V>` is a table keyed by
+// anything that can be hashed and compared. Both are ordinary Nest — a `make`,
+// a loop, and a growth rule — which is the point: they are what `core`'s
+// primitives are *for*, rather than something the compiler had to provide.
+//
+// ### Why `Hash` is declared here
+//
+// It is `std`'s trait, not `core`'s, because nothing in `core` hashes anything.
+// That also settles coherence: the impls below are for `core`'s types
+// (`str`, the integer families), and an impl may be written where **either**
+// the trait or the type belongs (§4.9) — the trait is this package's, so they
+// are allowed here and a third package's would not be.
+//
+// ### What the table does not do
+//
+// It does not shrink, it does not keep insertion order, and it has no iterator
+// yielding pairs — `keys()` answers a list. Each of those is a real thing to
+// want and none is needed by what `std` exists for yet
+// (`design/toolchain.md`: the floor `twig` and the language server stand on).
+
+{ make } :: import <core/mem>
+{ Eq } :: import <core/cmp>
+{ Iterator, IntoIterator, SliceIter } :: import <core/iter>
+
+// ===< Vec >===
+
+// A sequence that grows.
+//
+// `data` is **room**, and `len` is how much of it holds anything — the same
+// split `core/fmt`'s `Buf` makes, for the same reason: the elements past `len`
+// are allocated and meaningless.
+@public Vec :: struct <T> {
+  data: []mut T,
+  // How many of `data`'s slots hold an element.
+  //
+  // Named `count` and not `len` because the method below is `len()`, and a
+  // field and an inherent method may not share a name (§4): `v.len` would have
+  // to mean one of the two. The method is what keeps its name, because
+  // `.len()` is what every other sequence in the language answers to.
+  count: usize,
+}
+
+// An empty one. A function rather than a `Default` impl because `Vec.<T>` needs
+// its `T` from somewhere, and a call site can say `new.<i32>()`.
+@public new :: func <T> () -> Vec.<T> {
+  return Vec.<T> { data: make.<[]T>(0), count: 0 }
+}
+
+// An empty one with room for `n` already allocated, for a caller that knows how
+// many are coming.
+@public with_capacity :: func <T> (n: usize) -> Vec.<T> {
+  return Vec.<T> { data: make.<[]T>(n), count: 0 }
+}
+
+// A `Vec` holding a copy of `xs`.
+@public from_slice :: func <T> (xs: []T) -> Vec.<T> {
+  let out: []mut T := make.<[]T>(xs.len())
+  for i in 0..<xs.len() { out[i] = xs[i] }
+  return Vec.<T> { data: out, count: xs.len() }
+}
+
+impl <T> Vec.<T> {
+  @public len :: #inline func (self: *Self) -> usize { return self.count }
+  @public is_empty :: #inline func (self: *Self) -> bool { return self.count == 0 }
+  @public capacity :: #inline func (self: *Self) -> usize { return self.data.len() }
+
+  // The elements, as a slice. A **view**: it stops being valid the moment a
+  // `push` grows the storage out from under it, which is the one rule a
+  // borrowed view of a growable container has in every language that has both.
+  @public as_slice :: #inline func (self: *Self) -> []T {
+    return cast.<[]T>(self.data[0..<self.count])
+  }
+
+  // The writable view, for a caller filling elements in place.
+  @public as_mut_slice :: #inline func (self: *mut Self) -> []mut T {
+    return self.data[0..<self.count]
+  }
+
+  // Make room for `extra` more.
+  //
+  // Doubling with a floor, which is what makes `n` pushes cost `O(n)` rather
+  // than `O(n²)`. The floor is there because doubling from zero never leaves
+  // zero.
+  @public reserve :: func (self: *mut Self, extra: usize) -> void {
+    let need: usize := self.count + extra
+    if need <= self.data.len() { return }
+    let mut cap: usize := self.data.len() * 2
+    if cap < 8 { cap = 8 }
+    while cap < need { cap = cap * 2 }
+    let fresh: []mut T := make.<[]T>(cap)
+    for i in 0..<self.count { fresh[i] = self.data[i] }
+    self.data = fresh
+  }
+
+  // Add one to the end.
+  @public push :: func (self: *mut Self, value: T) -> void {
+    self.reserve(1)
+    self.data[self.count] = value
+    self.count = self.count + 1
+  }
+
+  // Take the last one off, or `.none` when there is none.
+  //
+  // The slot is **not** cleared. Nothing can read it — `len` is what says which
+  // slots hold anything — and under a collector an uncleared slot keeps one
+  // object alive until the next `push` overwrites it, which is a bounded amount
+  // of garbage and not a leak.
+  @public pop :: func (self: *mut Self) -> Option.<T> {
+    if self.count == 0 { return .none }
+    self.count = self.count - 1
+    return .some(self.data[self.count])
+  }
+
+  // Element `i`, or `.none` when there is no such element. The checked read;
+  // `v[i]` through `Index` is the unchecked one and panics.
+  @public get :: func (self: *Self, i: usize) -> Option.<T> {
+    if i >= self.count { return .none }
+    return .some(self.data[i])
+  }
+
+  // Overwrite element `i`.
+  @public set :: func (self: *mut Self, i: usize, value: T) -> void {
+    if i >= self.count { panic("a `Vec` index past the end") }
+    self.data[i] = value
+  }
+
+  // Add every element of `xs`.
+  @public extend :: func (self: *mut Self, xs: []T) -> void {
+    self.reserve(xs.len())
+    for i in 0..<xs.len() { self.data[self.count + i] = xs[i] }
+    self.count = self.count + xs.len()
+  }
+
+  // Forget every element. The storage is kept, which is the whole difference
+  // between this and assigning a fresh `Vec`.
+  @public clear :: func (self: *mut Self) -> void { self.count = 0 }
+
+  // Remove element `i`, moving the last one into its place.
+  //
+  // **Order is not preserved**, and the name says so. It is `O(1)`, where
+  // removing in order is `O(n)` — a `Vec` used as a set or a work list wants
+  // this one, and one used as a sequence wants the other, which is not written
+  // until something needs it.
+  @public swap_remove :: func (self: *mut Self, i: usize) -> Option.<T> {
+    if i >= self.count { return .none }
+    let held: T := self.data[i]
+    self.count = self.count - 1
+    self.data[i] = self.data[self.count]
+    return .some(held)
+  }
+}
+
+// `for x in v` — over a **copy of the view**, so the loop walks the elements
+// the `Vec` held when it started. Pushing during the loop grows fresh storage
+// and the loop does not see it.
+impl <T> IntoIterator for Vec.<T> {
+  Iter :: SliceIter.<T>
+  into_iter :: func (self: Vec.<T>) -> SliceIter.<T> {
+    return SliceIter.<T> { data: cast.<[]T>(self.data[0..<self.count]), pos: 0 }
+  }
+}
+
+// ===< Hashing >===
+
+// A value that can be a key.
+//
+// One method answering 64 bits. Not "write yourself into a hasher", which is
+// the design that lets one algorithm serve every type — that needs a hasher
+// trait and a second type parameter on every container, and this library has
+// one algorithm.
+@public Hash :: trait {
+  hash :: func (self: Self) -> u64
+}
+
+// FNV-1a, 64-bit: the offset basis, then a multiply and an exclusive-or per
+// byte. It is chosen for being **four lines**, which is what a hash function
+// for map keys should be when the map probes linearly and the keys are short.
+@public FNV_OFFSET: u64 :: 14695981039346656037
+@public FNV_PRIME:  u64 :: 1099511628211
+
+// The hash of a run of bytes. What every impl below comes down to.
+@public hash_bytes :: func (bytes: []u8) -> u64 {
+  let mut h: u64 := FNV_OFFSET
+  for i in 0..<bytes.len() {
+    h = wrap_mul(h ^ cast.<u64>(bytes[i]), FNV_PRIME)
+  }
+  return h
+}
+
+// FNV's multiply **wraps**, which is the whole of how it mixes: `-C
+// overflow=trap` would otherwise stop the program on the second byte.
+wrap_mul :: #inline func (a: u64, b: u64) -> u64 { return a.wrapping_mul(b) }
+
+impl Hash for str {
+  hash :: func (self: Self) -> u64 { return hash_bytes(self.as_bytes()) }
+}
+
+// An integer hashes as its own bits, mixed.
+//
+// Not the identity: a table with a power-of-two capacity takes the *low* bits
+// of a hash, so keys that differ only above that range would all land in one
+// bucket. One FNV round over the value spreads them.
+@public hash_u64 :: func (v: u64) -> u64 {
+  return wrap_mul(FNV_OFFSET ^ v, FNV_PRIME)
+}
+
+impl <const N: u16> Hash for uint.<N> {
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(self)) }
+}
+
+impl <const N: u16> Hash for int.<N> {
+  // Through `u64` by **reinterpreting** rather than converting: a negative
+  // number's bits are what is being hashed, and a conversion of `-1` to `u64`
+  // is a different question with a different answer per width.
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(cast.<uint.<N>>(self))) }
+}
+
+impl Hash for usize {
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(self)) }
+}
+
+impl Hash for isize {
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(cast.<usize>(self))) }
+}
+
+impl Hash for bool {
+  hash :: func (self: Self) -> u64 { return if self { hash_u64(1) } else { hash_u64(0) } }
+}
+
+impl Hash for char {
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(cast.<u32>(self))) }
+}
+
+// ===< HashMap >===
+
+// A slot's state. A byte per slot rather than a sentinel key, because there is
+// no value of an arbitrary `K` this table is entitled to reserve.
+EMPTY:    u8 :: 0
+OCCUPIED: u8 :: 1
+// A slot whose entry was removed. It is not `EMPTY`, because a probe that
+// stopped here would miss every key that had to walk past this slot on the way
+// in.
+DELETED:  u8 :: 2
+
+// A table keyed by `K`.
+//
+// **Open addressing with linear probing**: the entries live in the table rather
+// than in a chain off each bucket, so a lookup is one cache line most of the
+// time and there is no allocation per entry. The capacity is a power of two, so
+// the bucket is a mask rather than a division.
+@public HashMap :: struct <K, V> {
+  keys: []mut K,
+  values: []mut V,
+  state: []mut u8,
+  // How many slots hold an entry. `count` rather than `len` for the reason
+  // `Vec`'s is.
+  count: usize,
+  // How many are not `EMPTY` — entries plus tombstones. This is what the load
+  // factor is measured against, because a probe walks past both.
+  used: usize,
+}
+
+// An empty table, with no storage until the first insert.
+@public map :: func <K, V> () -> HashMap.<K, V> {
+  return HashMap.<K, V> {
+    keys: make.<[]K>(0),
+    values: make.<[]V>(0),
+    state: make.<[]u8>(0),
+    count: 0,
+    used: 0,
+  }
+}
+
+impl <K: Hash + Eq, V> HashMap.<K, V> {
+  @public len :: #inline func (self: *Self) -> usize { return self.count }
+  @public is_empty :: #inline func (self: *Self) -> bool { return self.count == 0 }
+
+  // Where `key` is, or where it would go.
+  //
+  // It answers the **first tombstone** it walked past when the key is absent,
+  // so that re-inserting a removed key reuses its slot rather than lengthening
+  // the probe. `found` is what says which of the two answers this is.
+  probe :: func (self: *Self, key: K) -> Probe {
+    let mask: usize := self.state.len() - 1
+    let mut at: usize := cast.<usize>(key.hash()) & mask
+    let mut first_free: usize := self.state.len()
+    loop {
+      let s: u8 := self.state[at]
+      if s == EMPTY {
+        if first_free < self.state.len() { return Probe { at: first_free, found: false } }
+        return Probe { at: at, found: false }
+      }
+      if s == DELETED {
+        if first_free == self.state.len() { first_free = at }
+      } else {
+        if self.keys[at].eq(key) { return Probe { at: at, found: true } }
+      }
+      at = (at + 1) & mask
+    }
+  }
+
+  // Grow, and re-place every entry.
+  //
+  // Rehashing is what drops the tombstones: a probe walks past a `DELETED`
+  // slot, so a table that removed as often as it inserted would slow to a walk
+  // without ever holding more entries. The new table has no tombstones at all.
+  grow :: func (self: *mut Self) -> void {
+    let mut cap: usize := self.state.len() * 2
+    if cap < 8 { cap = 8 }
+    let old_keys: []mut K := self.keys
+    let old_values: []mut V := self.values
+    let old_state: []mut u8 := self.state
+    self.keys = make.<[]K>(cap)
+    self.values = make.<[]V>(cap)
+    self.state = make.<[]u8>(cap)
+    self.count = 0
+    self.used = 0
+    for i in 0..<old_state.len() {
+      if old_state[i] == OCCUPIED {
+        // The answer is always `.none` — a rehash into a fresh table cannot
+        // find a key already there — and a `match` that says so is how a
+        // value-returning call is used as a statement.
+        self.insert(old_keys[i], old_values[i]).match { .some(_) => (), .none => () }
+      }
+    }
+  }
+
+  // Put `value` under `key`, answering what was there before.
+  //
+  // It grows when the table is **three-quarters used**, counting tombstones:
+  // past that, linear probing's probe lengths stop being short, which is the
+  // one thing it depends on.
+  @public insert :: func (self: *mut Self, key: K, value: V) -> Option.<V> {
+    if (self.used + 1) * 4 > self.state.len() * 3 { self.grow() }
+    let p: Probe := self.probe(key)
+    if p.found {
+      let held: V := self.values[p.at]
+      self.values[p.at] = value
+      return .some(held)
+    }
+    if self.state[p.at] == EMPTY { self.used = self.used + 1 }
+    self.state[p.at] = OCCUPIED
+    self.keys[p.at] = key
+    self.values[p.at] = value
+    self.count = self.count + 1
+    return .none
+  }
+
+  // What is under `key`, or `.none`.
+  @public get :: func (self: *Self, key: K) -> Option.<V> {
+    if self.count == 0 { return .none }
+    let p: Probe := self.probe(key)
+    if p.found { return .some(self.values[p.at]) }
+    return .none
+  }
+
+  // Whether `key` is in the table.
+  @public contains :: func (self: *Self, key: K) -> bool {
+    return self.get(key).match { .some(_) => true, .none => false }
+  }
+
+  // Take `key` out, answering what it held.
+  //
+  // The slot becomes a tombstone rather than empty, so that a key which probed
+  // past it is still reachable. `used` does not drop, which is what makes a
+  // remove-and-insert cycle eventually rehash instead of degrading.
+  @public remove :: func (self: *mut Self, key: K) -> Option.<V> {
+    if self.count == 0 { return .none }
+    let p: Probe := self.probe(key)
+    if p.found == false { return .none }
+    let held: V := self.values[p.at]
+    self.state[p.at] = DELETED
+    self.count = self.count - 1
+    return .some(held)
+  }
+
+  // Every key, in no particular order. A fresh list, because the keys are
+  // scattered through the table rather than laid out end to end.
+  @public keys_of :: func (self: *Self) -> []K {
+    let out: []mut K := make.<[]K>(self.count)
+    let mut have: usize := 0
+    for i in 0..<self.state.len() {
+      if self.state[i] == OCCUPIED {
+        out[have] = self.keys[i]
+        have = have + 1
+      }
+    }
+    return cast.<[]K>(out)
+  }
+
+  // Forget every entry, keeping the storage.
+  @public clear :: func (self: *mut Self) -> void {
+    for i in 0..<self.state.len() { self.state[i] = EMPTY }
+    self.count = 0
+    self.used = 0
+  }
+}
+
+// What `probe` answers: a slot, and whether the key is already in it.
+Probe :: struct {
+  at: usize,
+  found: bool,
+}

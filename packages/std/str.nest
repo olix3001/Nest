@@ -1,0 +1,350 @@
+// Text: what `core`'s `str` does not carry.
+//
+// `core/str.nest` declares the type and two things about it — that it is
+// `distinct []u8`, and that it compares by its bytes — and says the rest
+// belongs to `std`. This is the rest.
+//
+// ### Everything borrows unless it says otherwise
+//
+// `trim`, `find`, `split` and the rest hand back views into the same bytes:
+// nothing is copied and nothing is allocated, so splitting a file into lines
+// costs the list of views and no text at all. The functions that *do* allocate
+// are the ones that must — `concat`, `join`, `repeat` and `to_string` — and
+// each says so.
+//
+// ### There is no owned `String`
+//
+// `core/str.nest` says the growable, owned string belongs here. It is not
+// written, and deliberately: `core/fmt`'s `Buf` is already a byte buffer that
+// grows and hands back a `str`, and `std/collections`'s `Vec.<u8>` is the same
+// shape again. A third would be a third spelling of one thing, and the `#lang`
+// tag `core` reserves for it — the one that would make a `str` coerce into it —
+// is a language feature rather than a container. It waits for a program that
+// needs what neither of the two already here can do.
+//
+// ### The indices are byte indices
+//
+// `find` answers where a byte is, and `slice` cuts at bytes. That is what a
+// `str`'s own `len()` already counts (`core/str.nest`), and it is the only
+// index that is O(1). A cut in the middle of a multi-byte character produces a
+// `str` that is not valid UTF-8, which `from_utf8` is the check for — none of
+// these validate, because validating on every operation is what having the
+// invariant on the type was supposed to avoid.
+
+{ make } :: import <core/mem>
+{ Eq } :: import <core/cmp>
+{ Buf, start, end, Display } :: import <core/fmt>
+
+// ===< Validating >===
+
+// `bytes` as text, if they are UTF-8.
+//
+// The one conversion that needs a check, and the reason `str` is `distinct`
+// (§2.4): every other operation may then assume the invariant instead of
+// re-establishing it. `fs.read_to_string` deliberately does *not* call this —
+// see the note there.
+@public from_utf8 :: func (bytes: []u8) -> Option.<str> {
+  if valid_utf8(bytes) == false { return .none }
+  return .some(cast.<str>(bytes))
+}
+
+// Whether `bytes` are well-formed UTF-8.
+//
+// It rejects what the encoding rejects and not merely what it cannot decode:
+// an over-long encoding, a surrogate, and anything above `U+10FFFF` are all
+// refused, because each is a byte sequence that *looks* decodable and is not
+// valid text. That is what makes this a check rather than a guess.
+@public valid_utf8 :: func (bytes: []u8) -> bool {
+  let mut i: usize := 0
+  while i < bytes.len() {
+    let b: u8 := bytes[i]
+    if b < 128 {
+      i = i + 1
+    } else {
+      if b < 194 {
+        // A continuation byte with nothing to continue, or an over-long
+        // two-byte form (`C0` / `C1` can only encode ASCII).
+        return false
+      }
+      if b < 224 {
+        if cont(bytes, i + 1) == false { return false }
+        i = i + 2
+      } else {
+        if b < 240 {
+          if cont(bytes, i + 1) == false { return false }
+          if cont(bytes, i + 2) == false { return false }
+          // `E0 80..9F` is over-long, and `ED A0..BF` is a surrogate — the one
+          // range UTF-8 excludes that UTF-16 needs.
+          if b == 224 {
+            if bytes[i + 1] < 160 { return false }
+          }
+          if b == 237 {
+            if bytes[i + 1] > 159 { return false }
+          }
+          i = i + 3
+        } else {
+          if b > 244 { return false }
+          if cont(bytes, i + 1) == false { return false }
+          if cont(bytes, i + 2) == false { return false }
+          if cont(bytes, i + 3) == false { return false }
+          // `F0 80..8F` is over-long; `F4 90..` is above `U+10FFFF`.
+          if b == 240 {
+            if bytes[i + 1] < 144 { return false }
+          }
+          if b == 244 {
+            if bytes[i + 1] > 143 { return false }
+          }
+          i = i + 4
+        }
+      }
+    }
+  }
+  return true
+}
+
+// Whether `bytes[at]` exists and is a continuation byte (`10xxxxxx`).
+cont :: func (bytes: []u8, at: usize) -> bool {
+  if at >= bytes.len() { return false }
+  let b: u8 := bytes[at]
+  return b >= 128 && b < 192
+}
+
+// ===< Looking >===
+
+// Whether `s` begins with `prefix`.
+@public starts_with :: func (s: str, prefix: str) -> bool {
+  if prefix.len() > s.len() { return false }
+  return slice(s, 0, prefix.len()) == prefix
+}
+
+// Whether `s` ends with `suffix`.
+@public ends_with :: func (s: str, suffix: str) -> bool {
+  if suffix.len() > s.len() { return false }
+  return slice(s, s.len() - suffix.len(), s.len()) == suffix
+}
+
+// Where `needle` first appears in `s`, as a byte index, or `.none`.
+//
+// The plain scan, not Boyer-Moore: the needles a program actually searches for
+// are a few bytes long, and a table costs more to build than the scan costs to
+// run. An empty needle is at `0`, which is where it is.
+@public find :: func (s: str, needle: str) -> Option.<usize> {
+  if needle.len() == 0 { return .some(0) }
+  if needle.len() > s.len() { return .none }
+  let last: usize := s.len() - needle.len()
+  for at in 0..=last {
+    if slice(s, at, at + needle.len()) == needle { return .some(at) }
+  }
+  return .none
+}
+
+// Where `needle` last appears, or `.none`.
+@public rfind :: func (s: str, needle: str) -> Option.<usize> {
+  if needle.len() == 0 { return .some(s.len()) }
+  if needle.len() > s.len() { return .none }
+  let mut at: usize := s.len() - needle.len() + 1
+  while at > 0 {
+    at = at - 1
+    if slice(s, at, at + needle.len()) == needle { return .some(at) }
+  }
+  return .none
+}
+
+// Whether `needle` appears at all.
+@public contains :: func (s: str, needle: str) -> bool {
+  return find(s, needle).match { .some(_) => true, .none => false }
+}
+
+// `s`'s bytes from `from` up to `to`, as text.
+//
+// **It panics on a bad range**, because a slice out of bounds is a bug in the
+// caller rather than a condition to report: the indices come from `find` and
+// from `len`, both of which answer positions in this same string.
+@public slice :: func (s: str, from: usize, to: usize) -> str {
+  if from > to { panic("a `str` slice whose start is past its end") }
+  if to > s.len() { panic("a `str` slice past the end of the string") }
+  return cast.<str>(s.as_bytes()[from..<to])
+}
+
+// ===< Trimming >===
+
+// `s` without leading or trailing ASCII whitespace.
+//
+// **ASCII whitespace**, not Unicode's: the full set needs a table of properties
+// that belongs with the rest of Unicode support rather than in the file that
+// splits a configuration file into lines. The five characters below are the
+// ones a text format actually puts between tokens.
+@public trim :: func (s: str) -> str { return trim_end(trim_start(s)) }
+
+@public trim_start :: func (s: str) -> str {
+  let raw: []u8 := s.as_bytes()
+  let mut at: usize := 0
+  while at < raw.len() && space(raw[at]) { at = at + 1 }
+  return slice(s, at, s.len())
+}
+
+@public trim_end :: func (s: str) -> str {
+  let raw: []u8 := s.as_bytes()
+  let mut at: usize := raw.len()
+  while at > 0 && space(raw[at - 1]) { at = at - 1 }
+  return slice(s, 0, at)
+}
+
+// Space, tab, newline, carriage return, form feed.
+space :: func (b: u8) -> bool {
+  return b == 32 || b == 9 || b == 10 || b == 13 || b == 12
+}
+
+// ===< Splitting >===
+
+// `s` cut at every occurrence of `sep`.
+//
+// The pieces are **views** into `s`, so this costs the list and nothing else.
+// An empty `sep` would cut everywhere and nowhere, so it answers the whole
+// string as one piece rather than looping forever.
+//
+// Adjacent separators produce empty pieces, and so do leading and trailing
+// ones: `",a,".split(",")` is three pieces, two of them empty. That is the
+// answer a parser wants, because it is the one that can be rebuilt with `join`.
+@public split :: func (s: str, sep: str) -> []str {
+  if sep.len() == 0 {
+    let one: []mut str := make.<[]str>(1)
+    one[0] = s
+    return cast.<[]str>(one)
+  }
+  let n: usize := count(s, sep) + 1
+  let out: []mut str := make.<[]str>(n)
+  let mut have: usize := 0
+  let mut at: usize := 0
+  while at <= s.len() {
+    let rest: str := slice(s, at, s.len())
+    find(rest, sep).match {
+      .some(k) => {
+        out[have] = slice(s, at, at + k)
+        have = have + 1
+        at = at + k + sep.len()
+      },
+      .none => {
+        out[have] = rest
+        have = have + 1
+        at = s.len() + 1
+      },
+    }
+  }
+  return cast.<[]str>(out[0..<have])
+}
+
+// `s` split at newlines, with a trailing `\r` dropped from each line.
+//
+// A final newline does **not** produce an empty last line: a file ending in
+// `\n` has as many lines as it has newlines, which is what every other tool
+// counts.
+@public lines :: func (s: str) -> []str {
+  let body: str := if ends_with(s, "\n") { slice(s, 0, s.len() - 1) } else { s }
+  if body.len() == 0 {
+    return cast.<[]str>(make.<[]str>(0))
+  }
+  let parts: []str := split(body, "\n")
+  let out: []mut str := make.<[]str>(parts.len())
+  for i in 0..<parts.len() {
+    let line: str := parts[i]
+    out[i] = if ends_with(line, "\r") { slice(line, 0, line.len() - 1) } else { line }
+  }
+  return cast.<[]str>(out)
+}
+
+// How many times `needle` appears, without overlapping.
+@public count :: func (s: str, needle: str) -> usize {
+  if needle.len() == 0 { return 0 }
+  let mut n: usize := 0
+  let mut at: usize := 0
+  while at + needle.len() <= s.len() {
+    if slice(s, at, at + needle.len()) == needle {
+      n = n + 1
+      at = at + needle.len()
+    } else {
+      at = at + 1
+    }
+  }
+  return n
+}
+
+// ===< Building >===
+
+// `a` then `b`, in fresh storage.
+@public concat :: func (a: str, b: str) -> str {
+  let mut out: Buf := start()
+  a.display(&mut out)
+  b.display(&mut out)
+  return end(&mut out)
+}
+
+// Every piece of `parts`, with `sep` between them.
+@public join :: func (parts: []str, sep: str) -> str {
+  let mut out: Buf := start()
+  for i in 0..<parts.len() {
+    if i > 0 { sep.display(&mut out) }
+    parts[i].display(&mut out)
+  }
+  return end(&mut out)
+}
+
+// `s`, `n` times over.
+@public repeat :: func (s: str, n: usize) -> str {
+  let mut out: Buf := start()
+  for _ in 0..<n { s.display(&mut out) }
+  return end(&mut out)
+}
+
+// Any `Display` value as text. What `f"{v}"` does, available to a program that
+// has the value in hand rather than a literal to interpolate it into.
+@public to_string :: func <T: Display> (v: T) -> str {
+  let mut out: Buf := start()
+  v.display(&mut out)
+  return end(&mut out)
+}
+
+// ===< Reading numbers >===
+
+// `s` as a decimal integer, or `.none` when it is not one.
+//
+// **All or nothing**: `"12x"` is `.none` rather than `12`, because a parser
+// that stops early and does not say where it stopped turns a typo into a
+// number. A leading `+` or `-` is accepted, and nothing else is — no
+// underscores, no radix prefix, no whitespace.
+@public parse_int :: func (s: str) -> Option.<i64> {
+  if s.len() == 0 { return .none }
+  let raw: []u8 := s.as_bytes()
+  let mut at: usize := 0
+  let mut negative: bool := false
+  if raw[0] == PLUS || raw[0] == MINUS {
+    negative = raw[0] == MINUS
+    at = 1
+  }
+  if at >= raw.len() { return .none }
+  // Accumulated on the **negative** side, so that the most negative value —
+  // which has no positive counterpart — parses rather than overflowing on the
+  // last digit.
+  let mut value: i64 := 0
+  while at < raw.len() {
+    let b: u8 := raw[at]
+    if b < ZERO || b > NINE { return .none }
+    value = value * 10 - cast.<i64>(b - ZERO)
+    at = at + 1
+  }
+  if negative { return .some(value) }
+  return .some(0 - value)
+}
+
+// `s` as a decimal `usize`, for the sizes and counts a manifest is full of.
+@public parse_usize :: func (s: str) -> Option.<usize> {
+  return parse_int(s).match {
+    .some(v) => if v < 0 { .none } else { .some(cast.<usize>(v)) },
+    .none    => .none,
+  }
+}
+
+PLUS:  u8 :: 43
+MINUS: u8 :: 45
+ZERO:  u8 :: 48
+NINE:  u8 :: 57

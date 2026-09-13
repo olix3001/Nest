@@ -812,7 +812,11 @@ fn lir_snapshot_a_split_carries_declarations_for_what_it_calls() {
     let mut session = Session::with_loader(Box::new(
         MemLoader::new().with("main", main).with("shapes", shapes),
     ));
-    session.options.codegen_units = 8;
+    // Enough units that **nothing is merged**: `partition` merges the smallest
+    // groups until there are at most `n`, so a number close to the file count
+    // makes this picture depend on how many files `core` happens to have. The
+    // split being demonstrated is the one between these two files.
+    session.options.codegen_units = 64;
     session.options.overflow = crate::common::options::OverflowMode::Wrap;
     let file = session.load_entry("main").expect("entry loads");
     analyze(&mut session, file);
@@ -1948,6 +1952,7 @@ fn every_declared_intrinsic_has_a_lir_case() {
         "len",
         "wrapping_add",
         "wrapping_sub",
+        "wrapping_mul",
         // Reflection: two constants and a byte offset (§9's addition). The
         // description and the identity are read-only data by the time this
         // runs, and `member_ptr` is the `Offset` a slice index already is.

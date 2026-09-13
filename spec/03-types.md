@@ -378,6 +378,15 @@ when `s : []mut T`. Indexing is `s[i]`, length is `s.len()`, sub-slicing is
 `s[lo..<hi]` (see the range operators in
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.12).
 
+A sub-slice **keeps the permission of what it was cut from**: `s[lo..<hi]` on a
+`[]mut T` is a `[]mut T`, because it is the same elements. Anything else makes
+writing to part of a buffer unsayable — a reader filling the tail of what it has
+already read, or a container copying into the free half of its storage, has no
+other way to name the region it may write. Cutting a sub-slice of an **array**
+is the exception and yields a read-only `[]T`: a `[N]T` carries no mutability in
+its type, since permission over an array's elements belongs to whatever holds
+the array.
+
 `.len()` is **not** compiler syntax. It is an ordinary inherent method the core
 library declares on the built-in sequences — `impl <T> []T { len :: ... }` and
 `impl <T, const N: usize> [N]T { len :: ... }` — whose body is the `len(s)`

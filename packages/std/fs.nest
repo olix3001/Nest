@@ -1,0 +1,174 @@
+// Files, by path.
+//
+// Everything here is written on `io.File` and `sys`, which is why there is so
+// little of it: opening is a descriptor and a set of flags, and reading a whole
+// file is `read_to_end` over one. What this file adds is the **path** — the
+// operations whose subject is a name rather than an open descriptor, and the
+// error reports that say which name.
+//
+// ### What is not here, and what it would cost
+//
+// **Metadata.** `stat` fills a `struct stat` whose layout differs between Linux
+// and macOS — different field order, different padding, and `st_mtime` is a
+// `timespec` on one and three fields on the other. Declaring it portably is not
+// possible without `#when`, and declaring it *wrongly* reads the wrong bytes
+// rather than failing to compile. So `size` below asks a descriptor instead of
+// asking the filesystem, and modification times are absent.
+//
+// **Directory listing.** `readdir` returns a `struct dirent` with the same
+// problem, and worse: `d_name`'s offset is 19 bytes into the struct on Linux
+// and 21 on macOS. `create_dir` and `remove_dir` are here because those take a
+// path and nothing else; walking a directory waits for `#when`, or for the one
+// declaration to be generated the way `core`'s `C_LONG` is.
+
+c :: import <core/c>
+io :: import "io.nest"
+sys :: import "sys.nest"
+libc :: import "libc.nest"
+
+// How a file is being opened. An enum rather than a set of flags, because the
+// four combinations below are every one a program actually wants, and the flag
+// bits that express them are the part that differs per target (`libc`).
+@public Mode :: enum {
+  // Read what is there. The file must exist.
+  read,
+  // Write from the beginning, creating the file or emptying it.
+  write,
+  // Write at the end, creating the file if it is not there.
+  append,
+  // Create the file, and fail if something is already at that path. The way to
+  // claim a name without a window between the check and the claim.
+  create_new,
+}
+
+impl Mode {
+  // The `open` flags this mode is.
+  flags :: func (self: Self) -> c.int {
+    return self.match {
+      .read       => libc.O_RDONLY,
+      .write      => libc.O_WRONLY + libc.O_CREAT() + libc.O_TRUNC(),
+      .append     => libc.O_WRONLY + libc.O_CREAT() + libc.O_APPEND(),
+      .create_new => libc.O_WRONLY + libc.O_CREAT() + libc.O_EXCL(),
+    }
+  }
+}
+
+// Open `path`.
+//
+// The `File` that comes back is **not closed for you** — see `io.File`. The
+// whole-file functions below open, read and close in one call, which is what
+// most callers want and what leaves nothing to forget.
+@public open :: func (path: str, mode: Mode) -> Result.<io.File, io.Error> {
+  let r: sys.Res := sys.open(path, mode.flags(), libc.MODE_FILE)
+  if r.failed() { return .err(io.error_of("open", path, r)) }
+  return .ok(io.File.from_fd(cast.<c.int>(r.n)))
+}
+
+// Every byte of `path`.
+//
+// It closes the descriptor on the way out of **both** exits: a read that failed
+// still opened a file, and a library that leaks one per failed read is a
+// library that runs out of them in a loop.
+@public read :: func (path: str) -> Result.<[]u8, io.Error> {
+  let mut f: io.File := open(path, .read).?
+  return io.read_to_end(&mut f).match {
+    .ok(bytes) => {
+      f.close().match { .ok(_) => (), .err(_) => () }
+      return .ok(bytes)
+    },
+    .err(e) => {
+      f.close().match { .ok(_) => (), .err(_) => () }
+      // The read's error, not the close's: the first thing that went wrong is
+      // what the caller is trying to understand.
+      return .err(io.Error { op: e.op, subject: path, code: e.code })
+    },
+  }
+}
+
+// The same, as text.
+//
+// **The bytes are not validated.** A `str` is UTF-8 by promise (§3), and this
+// is the one place `std` hands one out without checking — validating every file
+// read would cost a pass over it, and `str.from_utf8` is written for the caller
+// that needs the check. What this does guarantee is what the file held.
+@public read_to_string :: func (path: str) -> Result.<str, io.Error> {
+  return .ok(cast.<str>(read(path).?))
+}
+
+// Replace `path`'s contents with `bytes`, creating it if it is not there.
+@public write :: func (path: str, bytes: []u8) -> Result.<void, io.Error> {
+  return put(path, bytes, .write)
+}
+
+// Add `bytes` to the end of `path`, creating it if it is not there.
+@public append :: func (path: str, bytes: []u8) -> Result.<void, io.Error> {
+  return put(path, bytes, .append)
+}
+
+// What `write` and `append` both are. Private: the difference between them is
+// one enum value, and two names for it is what a caller reads.
+put :: func (path: str, bytes: []u8, mode: Mode) -> Result.<void, io.Error> {
+  let mut f: io.File := open(path, mode).?
+  let wrote: Result.<void, io.Error> := io.write_all(&mut f, bytes)
+  f.close().match { .ok(_) => (), .err(_) => () }
+  return wrote.match {
+    .ok(_)  => .ok(()),
+    .err(e) => .err(io.Error { op: e.op, subject: path, code: e.code }),
+  }
+}
+
+// ===< Paths, without opening anything >===
+
+// Whether something is at `path`. It answers `false` for a path the process
+// cannot reach as well as one that is not there — the two are the same answer
+// to "can I use this name", and `open` is what reports the difference.
+@public exists :: func (path: str) -> bool {
+  return sys.access(path, libc.F_OK).failed() == false
+}
+
+// Remove a file. Removing one that is not there is an error, and
+// `not_found` on it is how a caller says it does not mind.
+@public remove :: func (path: str) -> Result.<void, io.Error> {
+  let r: sys.Res := sys.unlink(path)
+  if r.failed() { return .err(io.error_of("remove", path, r)) }
+  return .ok(())
+}
+
+// Move `from` to `to`, replacing whatever was at `to`.
+//
+// It is one operation on one filesystem and **fails across two**, which is
+// POSIX's rule rather than this library's: a rename that crossed devices would
+// have to be a copy and a delete, which has a window in the middle where the
+// data is in two places and a failure leaves it in neither.
+@public rename :: func (from: str, to: str) -> Result.<void, io.Error> {
+  let r: sys.Res := sys.rename(from, to)
+  if r.failed() { return .err(io.error_of("rename", from, r)) }
+  return .ok(())
+}
+
+// Make a directory. Its parent must already exist.
+@public create_dir :: func (path: str) -> Result.<void, io.Error> {
+  let r: sys.Res := sys.mkdir(path, libc.MODE_DIR)
+  if r.failed() { return .err(io.error_of("create directory", path, r)) }
+  return .ok(())
+}
+
+// Remove an empty directory.
+@public remove_dir :: func (path: str) -> Result.<void, io.Error> {
+  let r: sys.Res := sys.rmdir(path)
+  if r.failed() { return .err(io.error_of("remove directory", path, r)) }
+  return .ok(())
+}
+
+// How many bytes `path` holds.
+//
+// It opens the file and asks the **descriptor**, rather than asking the
+// filesystem through `stat`, for the reason at the top of this file. The answer
+// is the same one; what it costs is a descriptor for the length of the call.
+@public size :: func (path: str) -> Result.<usize, io.Error> {
+  let mut f: io.File := open(path, .read).?
+  let r: sys.Res := sys.seek(f.fd_of(), 0, libc.SEEK_END)
+  f.close().match { .ok(_) => (), .err(_) => () }
+  if r.failed() { return .err(io.error_of("size", path, r)) }
+  return .ok(cast.<usize>(r.n))
+}

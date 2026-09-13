@@ -7908,3 +7908,59 @@ fn an_explicit_registration_beats_a_search_path() {
         "the search path's copy was read anyway: {read:#?}"
     );
 }
+
+// ===< `std`, the shipped package (`design/toolchain.md` step 6) >===
+
+/// **Every namespace of `std` analyzes clean.**
+///
+/// `std` is source that ships with this compiler and is compiled into each
+/// program that imports it, so a mistake in it is a mistake in every such
+/// program — and one that would otherwise only be found by whichever test
+/// happened to import that file. Naming all seven here means a change to `std`
+/// is checked by `cargo test` with no backend built.
+///
+/// It also pins the *resolution*: `import <std/io>` finds the shipped copy
+/// through [`Session::default_std_path`] with nothing registered and no `-L`,
+/// which is what "`std` ships with the compiler" means in practice.
+#[test]
+fn every_std_namespace_analyzes() {
+    let src = "\
+libc :: import <std/libc>
+io :: import <std/io>
+fs :: import <std/fs>
+process :: import <std/process>
+mem :: import <std/mem>
+str :: import <std/str>
+collections :: import <std/collections>
+main :: func () { }
+";
+    let session = crate::sema::analyze_source("std-all", src, &[]);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+
+    // The files really were read, rather than the imports resolving to nothing.
+    let read: Vec<&str> = session.sources.files().map(|f| f.name.as_str()).collect();
+    for want in [
+        "std.nest",
+        "libc.nest",
+        "io.nest",
+        "fs.nest",
+        "process.nest",
+        "sys.nest",
+        "collections.nest",
+    ] {
+        assert!(
+            read.iter().any(|n| n.ends_with(want)),
+            "`std`'s {want} was never read: {read:#?}"
+        );
+    }
+}
+
+/// **`sys` is `std`'s own.** It is the file every other one goes through, and
+/// the swap point for a target with no C library — so nothing outside the
+/// package may name it. That is enforced by the root not re-exporting it, and
+/// this is what says so.
+#[test]
+fn std_sys_is_not_reachable_from_outside() {
+    let session = crate::sema::analyze_source("std-sys", "sys :: import <std/sys>\n", &[]);
+    assert!(session.has_errors(), "`<std/sys>` resolved");
+}

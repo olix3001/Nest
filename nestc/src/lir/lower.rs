@@ -178,7 +178,7 @@ pub fn lower(
     if options.entry == crate::common::options::EntryMode::Auto
         && let Some(id) = main
     {
-        super::entry::synthesize(&mut unit, id);
+        super::entry::synthesize(&mut unit, id, options.target);
     }
     super::safepoint::annotate(&mut unit);
     super::unit::split(unit, options.codegen_units, sources)
@@ -3189,16 +3189,16 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // instruction on every target — the ordinary one, with the overflow
             // check the build would otherwise have added left off — so it is an
             // opcode rather than a name a backend has to know.
-            "wrapping_add" | "wrapping_sub" if args.len() == 2 => {
+            "wrapping_add" | "wrapping_sub" | "wrapping_mul" if args.len() == 2 => {
                 let vals: Vec<Operand> = args.iter().map(|a| self.eval(a)).collect();
                 let at = self.cx.lir(&ty);
                 // The same instruction `overflow=wrap` emits: an `add` wraps,
                 // by definition (§6.6, §7d). An opcode of its own would be a
                 // second spelling of one operation.
-                let op = if name.as_str() == "wrapping_add" {
-                    Op::Add
-                } else {
-                    Op::Sub
+                let op = match name.as_str() {
+                    "wrapping_add" => Op::Add,
+                    "wrapping_sub" => Op::Sub,
+                    _ => Op::Mul,
                 };
                 Some(Rvalue::Op {
                     op,
@@ -3653,7 +3653,8 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     ) -> Operand {
         let span = self.cx.meta.span(e.id);
         let ty = self.cx.ty_of(e.id);
-        let slot = (!matches!(ty, Ty::Void)).then(|| self.temp(ty, span));
+        let diverges = matches!(ty, Ty::Never);
+        let slot = yields_value(&ty).then(|| self.temp(ty, span));
         let c = self.eval(cond);
         let then_b = self.new_block(Some("then".to_string()));
         let else_b = self.new_block(Some("else".to_string()));
@@ -3681,6 +3682,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         self.goto(join, span);
 
         self.at = join;
+        self.seal_if_never(diverges, span);
         match slot {
             Some(s) => Operand::local(s),
             None => Operand::Const(Constant::Undef),
@@ -3696,7 +3698,8 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     fn lower_loop(&mut self, e: &Expr, body: &ir::Block) -> Operand {
         let span = self.cx.meta.span(e.id);
         let ty = self.cx.ty_of(e.id);
-        let slot = (!matches!(ty, Ty::Void)).then(|| self.temp(ty, span));
+        let diverges = matches!(ty, Ty::Never);
+        let slot = yields_value(&ty).then(|| self.temp(ty, span));
         let head = self.new_block(Some("loop".to_string()));
         let exit = self.new_block(Some("loop exit".to_string()));
         self.goto(head, span);
@@ -3713,9 +3716,24 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         self.goto(head, span);
         self.loops.pop();
         self.at = exit;
+        self.seal_if_never(diverges, span);
         match slot {
             Some(s) => Operand::local(s),
             None => Operand::Const(Constant::Undef),
+        }
+    }
+
+    /// End the block the walk has just arrived in when the expression it came
+    /// from was `never`.
+    ///
+    /// A `loop` with no `break`, an `if` whose arms both return, a `match`
+    /// whose every arm diverges: each leaves the walk positioned in a block
+    /// nothing jumps to. Saying so here is what keeps a dead `return` of an
+    /// undefined value out of the output — and it is the same thing the `never`
+    /// *call* above does, one statement earlier.
+    fn seal_if_never(&mut self, diverges: bool, span: Option<FileSpan>) {
+        if diverges {
+            self.terminate(Terminator::new(TermKind::Unreachable, span));
         }
     }
 
@@ -3741,7 +3759,8 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         let span = self.cx.meta.span(e.id);
         let ty = self.cx.ty_of(e.id);
         let sty = self.cx.ty_of(scrutinee.id);
-        let slot = (!matches!(ty, Ty::Void)).then(|| self.temp(ty, span));
+        let diverges = matches!(ty, Ty::Never);
+        let slot = yields_value(&ty).then(|| self.temp(ty, span));
         let Some(place) = self.place_of(scrutinee) else {
             return Operand::Const(Constant::Undef);
         };
@@ -3753,6 +3772,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             self.match_linear(&place, &sty, arms, slot, join, span);
         }
         self.at = join;
+        self.seal_if_never(diverges, span);
         match slot {
             Some(s) => Operand::local(s),
             None => Operand::Const(Constant::Undef),
@@ -4457,6 +4477,18 @@ fn kind_name(cx: &Cx<'_>, ty: &Ty) -> &'static str {
 
 fn is_void(ty: &Ty) -> bool {
     matches!(ty, Ty::Void)
+}
+
+/// Whether an expression of this type leaves a value behind to keep.
+///
+/// Two types do not, and they are not the same "no". A `void` expression
+/// finishes and yields nothing; a `never` one does not finish — every path
+/// through it returns, breaks or traps. Both mean there is no slot to allocate,
+/// and the second means the block after it is unreachable, which is why the
+/// callers of this terminate as well (§1: a local of type `never` is a slot no
+/// machine has).
+fn yields_value(ty: &Ty) -> bool {
+    !matches!(ty, Ty::Void | Ty::Never)
 }
 
 /// A float's width in bits. `f80` is ten bytes of data in a sixteen-byte slot

@@ -1,0 +1,109 @@
+// Bulk operations on memory, above what `core/mem` gives a single value.
+//
+// `core/mem` is the intrinsics — `size_of`, `transmute`, `new`, `make` — which
+// are about *one* value and what the compiler knows of it. This is about runs
+// of them: copying a slice into another, filling one, comparing two. Every
+// function here is an ordinary loop, and they are gathered rather than written
+// where each is needed so that a target with a `memcpy` worth calling has one
+// file to change.
+//
+// **Nothing here allocates.** Each takes the destination it is to work in,
+// which is what lets a caller reuse a buffer rather than getting a fresh one
+// per call.
+
+{ make } :: import <core/mem>
+// `Eq` is imported **by name**, not through a namespace: a trait's impls apply
+// only where the trait itself is in scope.
+{ Eq } :: import <core/cmp>
+
+// Copy `src` into the front of `dst`, answering how many elements moved — the
+// smaller of the two lengths.
+//
+// It does **not** panic on a short destination. A copy that fills what it was
+// given and says how much is what a reader filling a buffer wants; a caller
+// that meant to copy everything compares the answer against `src.len()`.
+//
+// The two must not overlap. Nothing here can check that — a slice knows its
+// address and its length, and two slices into one buffer are two ordinary
+// values — so it is stated rather than enforced.
+@public copy :: func <T> (dst: []mut T, src: []T) -> usize {
+  let mut n: usize := src.len()
+  if dst.len() < n { n = dst.len() }
+  for i in 0..<n { dst[i] = src[i] }
+  return n
+}
+
+// Set every element of `dst` to `value`.
+@public fill :: func <T> (dst: []mut T, value: T) -> void {
+  for i in 0..<dst.len() { dst[i] = value }
+}
+
+// A fresh slice holding `src`'s elements.
+//
+// The one function here that allocates, and it is here because the alternative
+// is every caller writing the same three lines. The copy is independent of the
+// original: writing to one does not change the other.
+@public clone :: func <T> (src: []T) -> []mut T {
+  let out: []mut T := make.<[]T>(src.len())
+  for i in 0..<src.len() { out[i] = src[i] }
+  return out
+}
+
+// Whether two slices hold equal elements, in order.
+//
+// Generic over any `T: Eq`, where `core`'s `bytes_eq` is bytes only — that one
+// is what a `str` comparison and a `"..."` pattern both call, and it stays
+// where it is because the compiler reaches it by tag.
+@public equal :: func <T: Eq> (a: []T, b: []T) -> bool {
+  if a.len() != b.len() { return false }
+  for i in 0..<a.len() {
+    if a[i].eq(b[i]) == false { return false }
+  }
+  return true
+}
+
+// Where `value` first appears in `xs`, or `.none`.
+@public index_of :: func <T: Eq> (xs: []T, value: T) -> Option.<usize> {
+  for i in 0..<xs.len() {
+    if xs[i].eq(value) { return .some(i) }
+  }
+  return .none
+}
+
+// Whether `xs` holds `value` at all.
+@public contains :: func <T: Eq> (xs: []T, value: T) -> bool {
+  return index_of.<T>(xs, value).match { .some(_) => true, .none => false }
+}
+
+// Exchange what two places hold.
+@public swap :: func <T> (a: *mut T, b: *mut T) -> void {
+  let held: T := a.*
+  a.* = b.*
+  b.* = held
+}
+
+// Move `a`'s elements into `b` and `b`'s into `a`, for as many as both have.
+@public swap_ranges :: func <T> (a: []mut T, b: []mut T) -> usize {
+  let mut n: usize := a.len()
+  if b.len() < n { n = b.len() }
+  for i in 0..<n {
+    let held: T := a[i]
+    a[i] = b[i]
+    b[i] = held
+  }
+  return n
+}
+
+// Reverse `xs` where it lies.
+@public reverse :: func <T> (xs: []mut T) -> void {
+  if xs.len() < 2 { return }
+  let mut lo: usize := 0
+  let mut hi: usize := xs.len() - 1
+  while lo < hi {
+    let held: T := xs[lo]
+    xs[lo] = xs[hi]
+    xs[hi] = held
+    lo = lo + 1
+    hi = hi - 1
+  }
+}

@@ -120,6 +120,7 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // no widening — because `Self` is the family member being implemented.
     plain("wrapping_add"),
     plain("wrapping_sub"),
+    plain("wrapping_mul"),
     // Reflection (§9's addition). All three are constants or one instruction:
     // `type_info` and `type_id` are read-only data the compiler already has by
     // the time it mangles a symbol, and `member_ptr` is the byte offset every

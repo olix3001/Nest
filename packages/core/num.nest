@@ -64,9 +64,15 @@ impl <const N: u16> int.<N> {
   // meant at the call site.
   @public wrapping_add :: #intrinsic("wrapping_add") func (self: Self, rhs: Self) -> Self
   @public wrapping_sub :: #intrinsic("wrapping_sub") func (self: Self, rhs: Self) -> Self
+  // Multiplication is here for the same reason the other two are, and it earns
+  // its place on its own: a hash function is a multiply that is *meant* to
+  // overflow, and under `-C overflow=trap` there is otherwise no way to write
+  // one (`std/collections`).
+  @public wrapping_mul :: #intrinsic("wrapping_mul") func (self: Self, rhs: Self) -> Self
 }
 
 impl <const N: u16> uint.<N> {
   @public wrapping_add :: #intrinsic("wrapping_add") func (self: Self, rhs: Self) -> Self
   @public wrapping_sub :: #intrinsic("wrapping_sub") func (self: Self, rhs: Self) -> Self
+  @public wrapping_mul :: #intrinsic("wrapping_mul") func (self: Self, rhs: Self) -> Self
 }

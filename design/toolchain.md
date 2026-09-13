@@ -289,8 +289,9 @@ leaves a half-built feature behind for the next one to finish.
 The numbering is a dependency order, not a wish list: every step needs the one
 before it, except where it says otherwise.
 
-**Steps 1–5 are done.** What is left is `std`, `twig` and the editor — steps 6
-through 10, in that order, and they are the whole of the focus now. Each step
+**Steps 1–6 are done.** What is left is `std/json`, the library format, `twig`
+and the editor — steps 7 through 10, in that order, and they are the whole of
+the focus now. Each step
 below that is finished says so and says what it actually turned out to be;
 `HANDOFF.md` carries the detail.
 
@@ -360,14 +361,49 @@ is readable from its descriptor.
 
 **Commit. Stop.**
 
-### Step 6 — the `std` floor
+### Step 6 — the `std` floor — **done**
 
-Only what `twig` and the language server need: `io`, `fs`, `process`, `mem`,
-`str`, `collections`, and `libc` raw beneath them, over the internal `sys`
-namespace that makes the backing swappable.
+`packages/std/`, seven namespaces over an internal `sys`: `libc` raw at the
+bottom, `sys` as the one file that knows there is a C library, and `io`, `fs`,
+`process`, `mem`, `str` and `collections` above it. It **ships with the
+compiler and is versioned with it** (decided), so `import <std/io>` resolves
+with nothing registered; it is still not linked automatically, because nothing
+reaches it without that import.
+
+What it turned out to need, none of which was library code:
+
+- **The entry point had no arguments.** `main` took none, so `argv` existed for
+  exactly one frame and was gone. It now takes `argc` / `argv` and hands them to
+  `nest_init`, which keeps them — and the parameters are pointer-sized
+  *integers*, not `Ptr`, so the collector does not treat C's stack as a root.
+  The environment is read from `environ` instead, because `envp` is a snapshot
+  and `setenv` replaces the table under it.
+- **Three C things Nest cannot say.** `errno` is a macro, `open` is variadic,
+  and `environ` is a symbol macOS hides behind a feature macro. Each is one line
+  in `runtime/nest_runtime.c`, which is where `core/c` already says a variadic C
+  function's shim belongs.
+- **The `open` flags differ per target** — Linux's `O_APPEND` is macOS's
+  `O_TRUNC` — so `std/libc` branches on `core/target`'s `OS`, which the compiler
+  generated for this build. That is the one place `#when` would have replaced
+  real code rather than a comment.
 
 *Done when*: a Nest program reads a file, writes to stdout, spawns a process and
-reads its arguments and environment. **Commit. Stop.**
+reads its arguments and environment. **It does** —
+`the_std_floor_reads_writes_spawns_and_reads_its_arguments` is that program.
+
+**What `std` does not have**, and what each waits on:
+
+- **Metadata and directory listing.** `struct stat` and `struct dirent` have
+  layouts that differ between Linux and macOS — `d_name` is 19 bytes in on one
+  and 21 on the other — and a wrong layout reads the wrong bytes rather than
+  failing to compile. `fs.size` asks a descriptor instead. This wants `#when`,
+  or the one declaration generated the way `C_LONG` is.
+- **An owned `String`.** `core/fmt`'s `Buf` and `Vec.<u8>` are both already a
+  growable byte buffer; a third is a third spelling of one thing.
+- **Buffered I/O.** `io.File` writes straight through. A `BufWriter` is the
+  first thing `twig` will want that is not here.
+- **Iterator adapters** (§10.4): `map`, `filter`, `enumerate`, `collect`. `for`
+  works over ranges and slices, and over a `Vec` through its `IntoIterator`.
 
 ### Step 7 — `std/json`
 

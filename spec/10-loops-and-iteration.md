@@ -108,6 +108,32 @@ for i in 0..=n     { ... }        // 0, 1, ..., n     (inclusive)
 for i in (0..<n).step(2) { ... }  // std adapter
 ```
 
+There is **one** such impl, over a `core` trait called `Step` that says what
+stepping needs of an element type — how one bound stands to another, and what
+the next value up is:
+
+```
+Step :: trait {
+  step_cmp :: func (self: Self, rhs: Self) -> Ordering
+  step_up  :: func (self: Self) -> Self
+}
+
+impl <T: Step> Iterator for Range.<T> { ... }
+```
+
+It is a trait of its own rather than `Ord` + `Add` because on a primitive those
+operators are *instructions* rather than calls (§6.13), so an unbounded `T` has
+no way to ask and a bound naming them is one the primitives do not satisfy.
+`core` implements `Step` for both integer families and for `usize` / `isize`.
+
+One impl rather than several is also what keeps inference working: in
+`for x in 0..<4` the element type is decided by the **body**, and a single
+blanket impl matches while it is still open, where a set of impls per integer
+family would have to choose between them before the body was read.
+
+A range with no start — `..`, `..<b`, `..=b` — has no first element, so
+iterating one **panics** rather than running zero times.
+
 ## 10.4 Iterator adapters
 
 Because iteration is a trait, ordinary methods compose lazily over any iterator —

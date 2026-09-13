@@ -137,7 +137,14 @@ impl Collector<'_> {
                 // Directives written *before* the binding (`#inline\nf :: func …`)
                 // and directives written on the RHS form (`f :: #inline func …`)
                 // mean the same thing, so the binding collects both.
-                let here = self.directives(&directives);
+                let mut here = self.directives(&directives);
+                // `@link_name("x")` is an **attribute** the compiler acts on
+                // (§9), and what acts on it is the mangler, which reads the
+                // def's directives. So it is recorded as one: it says the same
+                // kind of thing they say — how this declaration is to be
+                // emitted — and putting it anywhere else would mean a second
+                // lookup for one attribute.
+                here.extend(self.link_name(&attrs));
                 let outer = std::mem::replace(&mut self.pending, here);
                 self.collect_binding(item, vis, scope);
                 self.pending = outer;
@@ -715,6 +722,29 @@ impl Collector<'_> {
             | NodeKind::NamespaceExpr { directives, .. } => self.directives(directives),
             _ => Vec::new(),
         }
+    }
+
+    /// `@link_name("x")` on this declaration, as the directive the mangler
+    /// looks for.
+    ///
+    /// One string argument and nothing else: the whole of what the attribute
+    /// says is the symbol a linker will look for, and an `@link_name` written
+    /// with anything else has not said one. It is left off rather than
+    /// reported here — `sema::resolve` is what checks an attribute's shape.
+    fn link_name(&self, attrs: &[NodeId]) -> Option<Directive> {
+        attrs.iter().find_map(|&a| {
+            let NodeKind::Attribute { name, args } = &self.ast.node(a).kind else {
+                return None;
+            };
+            if name.as_str() != "link_name" || args.len() != 1 {
+                return None;
+            }
+            let arg = self.directive_arg(args[0]);
+            matches!(arg, DirectiveArg::Str(_)).then(|| Directive {
+                name: Symbol::new("link_name"),
+                args: vec![arg],
+            })
+        })
     }
 
     /// Read a run of `#name(args)` nodes into their [`Directive`] values.

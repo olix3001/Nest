@@ -3,7 +3,10 @@
 // `==` / `!=` lower through `Eq.eq`; `<`, `<=`, `>`, `>=` lower through
 // `Ord.cmp` and a match on the `Ordering` it returns (§6.13). The primitives
 // stay a primitive comparison instruction — see `sema::lower` — so these traits
-// are what *user* types implement to join in.
+// are what *user* types implement to join in, and what the impls at the bottom
+// of this file let a *generic* function ask of a primitive.
+
+{ usize, isize } :: import "num.nest"
 
 @public Ordering :: #lang("ordering") enum {
   less,
@@ -17,4 +20,41 @@
 
 @public Ord :: #lang("ord") trait {
   cmp :: func (self: Self, rhs: Self) -> Ordering
+}
+
+// ===< The primitives join in >===
+//
+// `a == b` on two integers stays a machine instruction — `sema::lower` decides
+// that from the operand types and never looks here. These impls are for the
+// *other* caller: a generic function with an `Eq` bound, which has no operand
+// types to look at and must find a method. Without them `T: Eq` is a bound no
+// integer satisfies, and a container keyed by one cannot be written at all.
+//
+// The two answers cannot disagree, because there is only one comparison either
+// could make.
+
+impl <const N: u16> Eq for uint.<N> {
+  eq :: func (self: Self, rhs: Self) -> bool { return self == rhs }
+}
+
+impl <const N: u16> Eq for int.<N> {
+  eq :: func (self: Self, rhs: Self) -> bool { return self == rhs }
+}
+
+// `usize` / `isize` are `distinct` (§2.4) and inherit no trait impl, so each
+// needs its own — the same shape `Display` has in `fmt.nest`.
+impl Eq for usize {
+  eq :: func (self: Self, rhs: Self) -> bool { return self == rhs }
+}
+
+impl Eq for isize {
+  eq :: func (self: Self, rhs: Self) -> bool { return self == rhs }
+}
+
+impl Eq for bool {
+  eq :: func (self: Self, rhs: Self) -> bool { return self == rhs }
+}
+
+impl Eq for char {
+  eq :: func (self: Self, rhs: Self) -> bool { return self == rhs }
 }

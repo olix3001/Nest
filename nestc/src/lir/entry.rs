@@ -16,12 +16,24 @@
 //! it could go. A `main` in `nest_runtime.c` would have to name the program's
 //! entry symbol, and that symbol is mangled by a scheme the runtime would then
 //! have to encode — and would have to encode *again* for a `main` returning a
-//! status rather than nothing. The shim stays six functions that know no names.
+//! status rather than nothing. The shim stays a handful of functions that know
+//! no names.
+//!
+//! **It takes `argc` and `argv`**, and hands them straight to the runtime's
+//! initializer. A program's arguments arrive exactly once, in the frame the
+//! operating system built, and nothing in C or POSIX hands them back to a
+//! running program afterwards — so the one function that is *given* them is the
+//! one that stores them, and `std/process` reads them back from there.
+//!
+//! The environment is **not** passed, though `main` receives one: `envp` is a
+//! snapshot, and `setenv` may replace the table under it. The runtime reads
+//! `environ` instead, which is the live one.
 
 use super::{
     Block, BlockId, CastKind, Callee, FuncId, Function, FunctionAttrs, Local, LocalId, Operand,
     Place, Rvalue, Stmt, StmtKind, Terminator, TermKind, Ty, Unit,
 };
+use crate::common::options::Target;
 use crate::common::source::FileSpan;
 use crate::common::symbol::Symbol;
 
@@ -38,8 +50,34 @@ const SYMBOL: &str = "main";
 /// what it is.
 const NAME: &str = "entry";
 
-/// The runtime's initializer (`runtime/nest_runtime.c`). Called once, first.
+/// The runtime's initializer (`runtime/nest_runtime.c`). Called once, first,
+/// with the two arguments this function was given.
 const INIT: &str = "nest_init";
+
+/// `argc`. C's `int`, which is what the startup passes and what `argv` is
+/// counted in.
+fn argc_ty() -> Ty {
+    status_ty()
+}
+
+/// `argv`: a `char **`, and **an integer here**, not a [`Ty::Ptr`].
+///
+/// The width is the target's, so it is a pointer's width and passes in a
+/// pointer's register — the C ABI sees no difference. What changes is what the
+/// collector sees: [`super::safepoint`] treats every `Ptr` local as a root, and
+/// these two address memory the startup owns and the collector has never heard
+/// of. Relocating one at a safepoint would move a pointer into C's stack, and
+/// keeping it in a root set is a claim about an object that does not exist.
+///
+/// It is the same answer `core/c` already gives: a `c.ptr.<T>` is one `usize`
+/// in a struct, untraced by construction, and that is the type `std/process`
+/// receives this as.
+fn argv_ty(target: Target) -> Ty {
+    Ty::Int {
+        bits: target.pointer_bits as u16,
+        signed: false,
+    }
+}
 
 /// What `main` returns to the operating system. C's `int` on every target this
 /// compiler can name.
@@ -55,19 +93,27 @@ fn status_ty() -> Ty {
 /// The synthesized function takes the program `main`'s **span**, so the codegen
 /// unit split (§11) puts it in the same unit as the function it calls rather
 /// than in a unit of its own.
-pub fn synthesize(unit: &mut Unit, entry: FuncId) {
+pub fn synthesize(unit: &mut Unit, entry: FuncId, target: Target) {
     let called = &unit.funcs[entry.0 as usize];
     let span = called.span;
     let ret = called.ret.clone();
 
-    let init = declare_init(unit);
+    let init = declare_init(unit, target);
 
+    // The parameters come first, because LIR's parameters *are* the leading
+    // locals (§7). The two are C's own, in C's own order.
     let mut locals: Vec<Local> = Vec::new();
+    let argc = push_local(&mut locals, argc_ty(), span);
+    let argv = push_local(&mut locals, argv_ty(target), span);
+
     let mut stmts = vec![Stmt::new(
         StmtKind::Call {
             dest: None,
             callee: Callee::Static(init),
-            args: Vec::new(),
+            args: vec![
+                Operand::Copy(Place::local(argc)),
+                Operand::Copy(Place::local(argv)),
+            ],
         },
         span,
     )];
@@ -145,7 +191,7 @@ pub fn synthesize(unit: &mut Unit, entry: FuncId) {
         name: NAME.to_string(),
         symbol: Symbol::new(SYMBOL),
         locals,
-        params: 0,
+        params: 2,
         ret: status_ty(),
         blocks: vec![Block {
             id: BlockId(0),
@@ -167,19 +213,24 @@ pub fn synthesize(unit: &mut Unit, entry: FuncId) {
 
 /// The declaration of `nest_init`, reusing one the program already has.
 ///
-/// A program is free to declare `extern("c") nest_init :: func ()` itself — it
-/// is an ordinary C function — and two declarations of one symbol is a thing a
-/// backend would have to resolve or reject.
-fn declare_init(unit: &mut Unit) -> FuncId {
+/// A program is free to declare `extern("c") nest_init :: func (...)` itself —
+/// it is an ordinary C function — and two declarations of one symbol is a thing
+/// a backend would have to resolve or reject. A program that declares it with a
+/// *different* signature has declared a different function under one symbol,
+/// which is the ordinary C hazard and not one this can see.
+fn declare_init(unit: &mut Unit, target: Target) -> FuncId {
     if let Some(i) = unit.funcs.iter().position(|f| f.symbol.as_str() == INIT) {
         return FuncId(i as u32);
     }
     let id = FuncId(unit.funcs.len() as u32);
+    let mut locals: Vec<Local> = Vec::new();
+    push_local(&mut locals, argc_ty(), None);
+    push_local(&mut locals, argv_ty(target), None);
     unit.funcs.push(Function {
         name: INIT.to_string(),
         symbol: Symbol::new(INIT),
-        locals: Vec::new(),
-        params: 0,
+        locals,
+        params: 2,
         ret: Ty::Void,
         blocks: Vec::new(),
         extern_abi: Some(Symbol::new("c")),

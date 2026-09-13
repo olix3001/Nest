@@ -580,7 +580,8 @@ pub enum Callee {
 ///
 /// The set is closed and small: what is here is what no library can write and
 /// what the lowering does not turn into ordinary instructions. `size_of`,
-/// `align_of`, `cast`, `drop`, `index`, `len`, `wrapping_add` and `wrapping_sub`
+/// `align_of`, `cast`, `drop`, `index`, `len`, `wrapping_add`, `wrapping_sub`
+/// and `wrapping_mul`
 /// are all *gone* by this point — folded to a constant, to a projection, to an
 /// [`Rvalue::Op`] or to [`StmtKind::Drop`].
 #[derive(Debug, Clone, PartialEq, Eq)]

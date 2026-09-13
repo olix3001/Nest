@@ -28,7 +28,16 @@ impl <T> IntoIterator for []T {
   }
 }
 
+// The cursor hands out **elements**, not pointers to them: `for x in xs` binds a
+// copy, and writing to it writes to the copy. Iterating for the sake of writing
+// — `for p in xs.iter_mut()` — is a second cursor handing out `*mut T`, and it
+// belongs with the rest of the adapters (§10.4) rather than here.
 impl <T> Iterator for SliceIter.<T> {
   Item :: T
-  next :: func (self: *mut SliceIter.<T>) -> Option.<T> { return .none }
+  next :: func (self: *mut SliceIter.<T>) -> Option.<T> {
+    if self.pos >= self.data.len() { return .none }
+    let v: T := self.data[self.pos]
+    self.pos = self.pos + 1
+    return .some(v)
+  }
 }

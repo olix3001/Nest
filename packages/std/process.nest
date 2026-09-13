@@ -1,0 +1,232 @@
+// This process: what it was started with, what it runs, and how it ends.
+//
+// ### Where the arguments come from
+//
+// From the entry point, by way of the runtime. `main`'s `argc` / `argv` /
+// `envp` are handed to `nest_init` and kept there
+// (`nestc/src/lir/entry.rs`, `runtime/nest_runtime.c`), because the call to
+// `main` is the **only** portable moment they exist: `environ` is not in the C
+// standard, and on macOS a dynamic executable cannot link against it at all.
+//
+// The strings belong to the startup and live as long as the process, so a `str`
+// cut out of one borrows rather than copies. That is why `args()` costs one
+// allocation for the list and nothing per argument.
+//
+// ### Spawning is `fork` and `exec`
+//
+// Not `posix_spawn`, whose `posix_spawn_file_actions_t` and `posix_spawnattr_t`
+// are opaque structs whose *size* differs by platform — there is nothing to
+// declare without `#when` or a shim. `fork` and `execvp` are two calls with
+// integer arguments, which is a thing this language can say today.
+
+c :: import <core/c>
+io :: import "io.nest"
+sys :: import "sys.nest"
+libc :: import "libc.nest"
+{ transmute, make } :: import <core/mem>
+
+// ===< Arguments >===
+
+// Every argument, `argv[0]` — the program's own name — first.
+//
+// One allocation, for the list. Each element points into the startup's own
+// storage, which outlives the program.
+@public args :: func () -> []str {
+  let n: usize := sys.argc()
+  let out: []mut str := make.<[]str>(n)
+  for i in 0..<n { out[i] = sys.arg(i) }
+  return cast.<[]str>(out)
+}
+
+// The name the program was invoked under, or `""` when there is no `argv[0]` —
+// which a program started through a bare `execve` really can have.
+@public program :: func () -> str {
+  if sys.argc() == 0 { return "" }
+  return sys.arg(0)
+}
+
+// ===< The environment >===
+
+// The value of `name`, or `.none` when it is not set.
+//
+// An empty value and an unset name are **different**: `FOO=` sets `FOO` to the
+// empty string, and this answers `.some("")` for it.
+@public env :: func (name: str) -> Option.<str> { return sys.getenv(name) }
+
+// Set `name` to `value` for this process and everything it spawns afterwards.
+@public set_env :: func (name: str, value: str) -> Result.<void, io.Error> {
+  let r: sys.Res := sys.setenv(name, value)
+  if r.failed() { return .err(io.error_of("set environment", name, r)) }
+  return .ok(())
+}
+
+// Unset `name`. Unsetting one that is not set is not an error.
+@public unset_env :: func (name: str) -> Result.<void, io.Error> {
+  let r: sys.Res := sys.unsetenv(name)
+  if r.failed() { return .err(io.error_of("unset environment", name, r)) }
+  return .ok(())
+}
+
+// One entry of the environment, already split.
+@public EnvVar :: struct {
+  name: str,
+  value: str,
+}
+
+// Every environment entry, in the order the operating system holds them.
+//
+// An entry with no `=` in it is skipped rather than reported: the table is the
+// operating system's and a program reading it is not the right place to
+// complain about its shape.
+@public env_vars :: func () -> []EnvVar {
+  // Counted first so the list is allocated once. Walking the table twice is
+  // two scans of a few dozen pointers, which is cheaper than growing.
+  let mut n: usize := 0
+  while sys.env_at(n).match { .some(_) => true, .none => false } { n = n + 1 }
+
+  let out: []mut EnvVar := make.<[]EnvVar>(n)
+  let mut have: usize := 0
+  for i in 0..<n {
+    let entry: str := sys.env_at(i).match { .some(s) => s, .none => "" }
+    let at: usize := index_of_eq(entry)
+    if at < entry.len() {
+      let raw: []u8 := entry.as_bytes()
+      out[have] = EnvVar {
+        name: cast.<str>(raw[0..<at]),
+        value: cast.<str>(raw[at + 1..<raw.len()]),
+      }
+      have = have + 1
+    }
+  }
+  return cast.<[]EnvVar>(out[0..<have])
+}
+
+// Where the first `=` is, or the length when there is none.
+index_of_eq :: func (s: str) -> usize {
+  let raw: []u8 := s.as_bytes()
+  for i in 0..<raw.len() {
+    if raw[i] == EQUALS { return i }
+  }
+  return raw.len()
+}
+
+EQUALS: u8 :: 61
+
+// ===< Ending >===
+
+// Stop with this status, now.
+//
+// Nothing is flushed on the way out, because `std/io` holds nothing back: a
+// `File` writes straight through to its descriptor. A buffered writer, when
+// there is one, will be the thing that has to be flushed before this is called
+// — by whoever made it.
+@public exit :: func (status: i32) -> never { sys.exit(status) }
+
+// ===< Running another program >===
+
+// How a process ended.
+@public Status :: enum {
+  // It returned this status from `main`, or passed it to `exit`.
+  exited(i32),
+  // It was killed by this signal. `9` is the one everybody knows.
+  signalled(i32),
+}
+
+impl Status {
+  // Whether it ended the way a program that worked ends.
+  @public ok :: func (self: Self) -> bool {
+    return self.match { .exited(code) => code == 0, .signalled(_) => false }
+  }
+
+  // The status to exit with when passing this one on: a signal has no status,
+  // so it becomes `128 + n`, which is what a shell reports.
+  @public code :: func (self: Self) -> i32 {
+    return self.match { .exited(code) => code, .signalled(n) => 128 + n }
+  }
+}
+
+// A process this one started, and has not yet waited for.
+@public Child :: struct {
+  pid: c.int,
+}
+
+impl Child {
+  // The process id, for a program calling something `std` does not wrap.
+  @public pid_of :: #inline func (self: Self) -> c.int { return self.pid }
+
+  // Wait for it to end.
+  //
+  // The status word is decoded here rather than in `sys` because `WIFEXITED`
+  // and its friends are **macros**, so there is nothing to call: what they are
+  // macros over is the same arithmetic on every target this library names — the
+  // low seven bits are the signal that killed it, and the next eight are the
+  // status it exited with.
+  @public wait :: func (self: Self) -> Result.<Status, io.Error> {
+    let r: sys.Res := sys.wait(self.pid)
+    if r.failed() { return .err(io.error_of("wait", "", r)) }
+    let raw: i32 := cast.<i32>(r.n)
+    let signal: i32 := raw % 128
+    if signal == 0 { return .ok(.exited((raw / 256) % 256)) }
+    return .ok(.signalled(signal))
+  }
+}
+
+// Start `program` with `args`, searching `PATH` for it.
+//
+// `args` is what the program receives **after** its own name: `spawn("ls",
+// .{ "-l" })` runs `ls -l`, and `argv[0]` is filled in as `"ls"`. That is the
+// opposite of `execvp`'s own convention and the same as every other language's,
+// because the alternative is a list whose first element must be repeated.
+//
+// **A failed `exec` ends the child**, with status 127 — the status a shell uses
+// for "command not found". It has to end: the child is a copy of this process,
+// and returning from here would run the rest of this program a second time.
+@public spawn :: func (program: str, args: []str) -> Result.<Child, io.Error> {
+  let argv: c.ptr.<c.cstr> := build_argv(program, args)
+  let forked: sys.Res := sys.fork()
+  if forked.failed() { return .err(io.error_of("spawn", program, forked)) }
+  if forked.n == 0 {
+    sys.exec(program, argv)
+    sys.exit(127)
+  }
+  return .ok(Child { pid: cast.<c.int>(forked.n) })
+}
+
+// Start it, wait for it, and answer how it ended.
+@public run :: func (program: str, args: []str) -> Result.<Status, io.Error> {
+  return spawn(program, args).?.wait()
+}
+
+// The `char **` `execvp` wants: the program's name, then the arguments, then a
+// null pointer.
+//
+// It is built in **two passes** on purpose. The NUL-terminated copies come
+// first, into a slice of byte slices the collector traces; only then is the
+// table of addresses allocated and filled. Done the other way round, the table
+// would be the only thing holding those copies — and it holds addresses, which
+// are integers, which the collector does not follow (`core/c`). The last
+// allocation before `exec` is the table itself, so nothing can be collected
+// after the addresses are written.
+build_argv :: func (program: str, args: []str) -> c.ptr.<c.cstr> {
+  let n: usize := args.len() + 1
+  let owned: []mut []u8 := make.<[][]u8>(n)
+  owned[0] = nul_terminated(program)
+  for i in 0..<args.len() { owned[i + 1] = nul_terminated(args[i]) }
+
+  let table: []mut usize := make.<[]usize>(n + 1)
+  for i in 0..<n { table[i] = transmute.<usize>(&owned[i][0]) }
+  table[n] = 0
+  return c.ptr.<c.cstr> { addr: transmute.<usize>(&table[0]) }
+}
+
+// `s`'s bytes with a NUL after them.
+//
+// It hands back an immutable view: the copy is finished, and `owned` below is a
+// slice of `[]u8` because that is what a list of finished buffers is.
+nul_terminated :: func (s: str) -> []u8 {
+  let src: []u8 := s.as_bytes()
+  let out: []mut u8 := make.<[]u8>(src.len() + 1)
+  for i in 0..<src.len() { out[i] = src[i] }
+  out[src.len()] = 0
+  return cast.<[]u8>(out)
+}

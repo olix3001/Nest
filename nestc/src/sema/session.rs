@@ -42,6 +42,24 @@ pub fn default_core_path() -> String {
     format!("{}/../packages/core/core.nest", env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Where to find the `std` package when nothing says otherwise.
+///
+/// `std` ships **with the compiler and is versioned with it**, the way Rust's
+/// does: one `std` per `nestc`, so a program never has to resolve which one it
+/// is being built against. This is what that decision costs — a second default
+/// path beside `core`'s.
+///
+/// It is a *fallback* and not a link. Registering the path only makes
+/// `import <std/io>` resolvable; a program that does not write that import gets
+/// nothing from here, and `-L` or `--package std=<path>` replaces it — which is
+/// how `twig` will hand over a `std` it resolved itself.
+pub fn default_std_path() -> String {
+    if let Ok(p) = std::env::var("NEST_STD") {
+        return p;
+    }
+    format!("{}/../packages/std/std.nest", env!("CARGO_MANIFEST_DIR"))
+}
+
 /// The fixed-name primitive types the prelude makes available without an import
 /// (§4.6). They have no source definition; each becomes a [`DefKind::Primitive`]
 /// def in the builtins scope.
@@ -336,6 +354,19 @@ impl Session {
             Package {
                 name: "core".to_string(),
                 root_path: core_path.to_string(),
+                explicit: false,
+            },
+        );
+        // `std` the same way, and for the same reason it is a *fallback*: it
+        // ships with this compiler, so `import <std/io>` resolves out of the
+        // box, and a `-L` directory or a `--package std=` replaces it. Unlike
+        // `core` it is not globbed into anything — nothing reaches it without
+        // an import naming it.
+        session.packages.insert(
+            "std".to_string(),
+            Package {
+                name: "std".to_string(),
+                root_path: default_std_path(),
                 explicit: false,
             },
         );

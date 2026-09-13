@@ -562,6 +562,32 @@ fn a_program_links_and_runs() {
              }\n",
             7,
         ),
+        // **A `for` loop runs its body.** `core`'s `Iterator` impls for a range
+        // and for a slice were stubs answering `.none`, so every `for` in
+        // every program ran zero times and said nothing — which is the worst
+        // shape a bug can have. The element type is inferred from the *body*
+        // here, which is what the single `impl <T: Step> Iterator for Range`
+        // buys: a set of impls per integer family would have to choose one
+        // before the body was read, and the literal would settle on `isize`.
+        //
+        // `250..=255` over a `u8` is the case the inclusive range is written
+        // the way it is for: stepping past the last element would compute
+        // `255 + 1` and trap. 6 + 6 + 12 + 100.
+        (
+            "{ make } :: import <core/mem>\n             main :: func () -> i32 {\n            \x20 let mut total: i32 := 0\n            \x20 for x in 0..<4 { total = total + x }\n            \x20 let mut n: usize := 0\n            \x20 for k in 1..=3 { n = n + k }\n            \x20 let xs: []mut i32 := make.<[]i32>(4)\n            \x20 for i in 0..<4 { xs[i] = cast.<i32>(i) * 2 }\n            \x20 let mut sum: i32 := 0\n            \x20 for v in cast.<[]i32>(xs) { sum = sum + v }\n            \x20 let mut top: u8 := 0\n            \x20 for b in 250..=255 { top = b }\n            \x20 for z in 5..<5 { sum = sum + 1000 }\n            \x20 if top != 255 { return 1 }\n            \x20 return total + cast.<i32>(n) + sum + 100\n             }\n",
+            124,
+        ),
+        // **`.?` carries the error out.** The `from_residual` it desugars to is
+        // a static trait call, and the generic arguments recorded for it were
+        // the *trait's* — one — where `impl <T, E> FromResidual.<E> for
+        // Result.<T, E>` has two. `T` was left unbound and the rebuilt error
+        // lowered to `undef`, so every propagated error was garbage. Across two
+        // different `Result` types, with a struct payload, which is the shape
+        // `std` uses everywhere.
+        (
+            "E :: struct { op: str, code: i32 }\n             inner :: func () -> Result.<i32, E> { return .err(E { op: \"open\", code: 7 }) }\n             outer :: func () -> Result.<[]u8, E> {\n            \x20 let v: i32 := inner().?\n            \x20 return .ok(\"x\".as_bytes())\n             }\n             main :: func () -> i32 {\n            \x20 return outer().match {\n            \x20   .ok(_) => 0,\n            \x20   .err(e) => { if e.op != \"open\" { return 1 }  return e.code },\n            \x20 }\n             }\n",
+            7,
+        ),
         // `#comptime for`, unrolled: four copies of the body, each typed on its
         // own, and the loop variable a compile-time constant — which is what
         // lets `[i]u8` be a different type in each. 0+1+2+3, then 1+1+2+2+3+3.
@@ -702,4 +728,151 @@ fn many_units_make_one_object() {
     .unwrap_or_else(|e| panic!("linking:\n{e}"));
     let ran = std::process::Command::new(&exe).status().expect("it runs");
     assert_eq!(ran.code(), Some(5), "the merged object ran wrong: {ran}");
+}
+
+/// **The `std` floor, as one program** (`design/toolchain.md` step 6).
+///
+/// The step is *done when* a Nest program reads a file, writes to stdout,
+/// spawns a process and reads its arguments and environment — so that is one
+/// program, run, with its output and its status both checked.
+///
+/// Every layer is in it: `core/c`'s types and `c.to_cstr`, the `nest_open`
+/// shim, `sys`'s `errno` reading, `io`'s `Write` impl and its buffer-free
+/// `print`, `fs`'s whole-file read, `process`'s `fork`/`execvp`/`waitpid`, and
+/// the arguments the synthesized entry point now takes from the startup and
+/// hands to the runtime. A failure anywhere shows up here as a status naming
+/// the check that failed, which is why each one returns its own number.
+#[test]
+fn the_std_floor_reads_writes_spawns_and_reads_its_arguments() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join("nestc-std-floor");
+    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = dir.join(format!("floor.{}.txt", unique()));
+    // Left over from an earlier run with a different `open` would defeat the
+    // point: the program creates this itself.
+    let _ = std::fs::remove_file(&scratch);
+
+    let src = format!(
+        "\
+io :: import <std/io>
+fs :: import <std/fs>
+process :: import <std/process>
+s :: import <std/str>
+col :: import <std/collections>
+
+PATH_OF: str :: \"{path}\"
+
+main :: func () -> i32 {{
+  // Written, read back, and gone again.
+  fs.write(PATH_OF, \"alpha\\nbeta\\n\".as_bytes()).match {{ .ok(_) => (), .err(_) => {{ return 1 }} }}
+  fs.append(PATH_OF, \"gamma\\n\".as_bytes()).match {{ .ok(_) => (), .err(_) => {{ return 2 }} }}
+  let text: str := fs.read_to_string(PATH_OF).match {{ .ok(t) => t, .err(_) => {{ return 3 }} }}
+  if text != \"alpha\\nbeta\\ngamma\\n\" {{ return 4 }}
+  if s.lines(text).len() != 3 {{ return 5 }}
+  if fs.size(PATH_OF).match {{ .ok(n) => n, .err(_) => 0 }} != 17 {{ return 6 }}
+  fs.remove(PATH_OF).match {{ .ok(_) => (), .err(_) => {{ return 7 }} }}
+  if fs.exists(PATH_OF) {{ return 8 }}
+
+  // A missing file is an error that says which file and why, not a trap.
+  fs.read(\"/nest/no/such/file\").match {{
+    .ok(_) => {{ return 9 }},
+    .err(e) => {{ if e.not_found() == false {{ return 10 }} }},
+  }}
+
+  // Arguments: `argv[0]` plus the two this test passes.
+  let args: []str := process.args()
+  if args.len() != 3 {{ return 11 }}
+  if args[1] != \"first\" {{ return 12 }}
+  if args[2] != \"second\" {{ return 13 }}
+
+  // The environment, read whole and by name.
+  process.set_env(\"NEST_FLOOR\", \"set\").match {{ .ok(_) => (), .err(_) => {{ return 14 }} }}
+  if process.env(\"NEST_FLOOR\").match {{ .some(v) => v, .none => \"\" }} != \"set\" {{ return 15 }}
+  if process.env(\"NEST_DEFINITELY_UNSET\").match {{ .some(_) => true, .none => false }} {{ return 16 }}
+  let mut seen: col.HashMap.<str, str> := col.map.<str, str>()
+  for v in process.env_vars() {{ seen.insert(v.name, v.value).match {{ .some(_) => (), .none => () }} }}
+  if seen.contains(\"NEST_FLOOR\") == false {{ return 17 }}
+
+  // A child process, run to completion, and one that does not exist.
+  let ran: process.Status := process.run(\"true\", .{{ }}).match {{ .ok(st) => st, .err(_) => {{ return 18 }} }}
+  if ran.ok() == false {{ return 19 }}
+  let missing: process.Status := process.run(\"nest_no_such_program\", .{{ }}).match {{
+    .ok(st) => st, .err(_) => {{ return 20 }},
+  }}
+  if missing.code() != 127 {{ return 21 }}
+
+  // And stdout, which is what the test reads back.
+  io.println(\"the floor holds\")
+  return 0
+}}
+",
+        path = scratch.to_string_lossy()
+    );
+
+    // **The target has to be the host's**, and asking the backend is the only
+    // way to know it: `Options::default` is a 64-bit Linux, which is a fallback
+    // rather than an answer (`common::options`). Nothing above this test needed
+    // the difference; `std` does, because `core/target.nest` is generated from
+    // it and `std/libc` reads `OS` to decide which numbers this platform spells
+    // its `open` flags with. Getting it wrong builds a program that opens files
+    // with Linux's bits — on macOS, Linux's `O_APPEND` is `O_TRUNC`, so an
+    // append emptied the file instead.
+    let mut probe = LlvmBackend::default();
+    let info = probe.target_info(None).expect("the host resolves");
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", &src)));
+    session.options.target = info.target();
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let layouts = crate::ir::layout::Layouts::new(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        session.options.target,
+    );
+    let program = crate::lir::lower(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        &layouts,
+        &session.options,
+        &session.lang_items,
+        &session.sources,
+    );
+
+    let stem = format!("{:x}.{}", hash(&src), unique());
+    let object = dir.join(format!("{stem}.o"));
+    let exe = dir.join(&stem);
+    let mut backend = LlvmBackend::default();
+    backend.target_info(None).expect("the host resolves");
+    backend
+        .emit_unit(program.unit(), OutputKind::Object, &object)
+        .unwrap_or_else(|e| panic!("emitting:\n{e}"));
+    crate::codegen::link::link(
+        &[object],
+        &exe,
+        &crate::codegen::link::LinkOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("linking:\n{e}"));
+
+    let ran = std::process::Command::new(&exe)
+        .args(["first", "second"])
+        .output()
+        .expect("it runs");
+    assert_eq!(
+        ran.status.code(),
+        Some(0),
+        "exited {}, stderr: {}",
+        ran.status,
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "the floor holds\n",
+        "stdout"
+    );
+    // The program removed it; a leftover means `fs.remove` did nothing.
+    assert!(!scratch.exists(), "the scratch file is still there");
 }

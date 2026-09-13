@@ -1,0 +1,247 @@
+// The backing, and the only file above `libc` that knows there is one.
+//
+// Every operation `std` performs on the outside world goes through a function
+// here, and nothing above it names `libc` at all. That is the whole point: a
+// target with no C library needs a second copy of *this* file — the same names,
+// the same signatures, syscalls underneath — and `io`, `fs` and `process` do
+// not change. Only the libc backing is written today.
+//
+// It is not re-exported from `std.nest`, so `import <std/sys>` does not
+// resolve: the names here are `std`'s own business, and a program that wants
+// the raw surface has `<std/libc>`, which is exposed on purpose.
+//
+// ### What a function here returns
+//
+// A **`Res`** — a count and an `errno` — rather than a `Result`. The error type
+// a program sees is `io.Error`, which carries a message and is built from one
+// of these; putting it here instead would make this file the one that decides
+// what an error *reads* like, which is a decision for the layer with the words
+// in it. A backing reports a number, because that is what the operating system
+// told it.
+//
+// ### Why the `errno` is read here and nowhere else
+//
+// `errno` is only meaningful immediately after the call that set it — any other
+// call may overwrite it, and a wrapper that returns first and asks later is a
+// wrapper that reports the wrong thing under load. Every function below reads
+// it in the same statement the failure is detected, which is the only place it
+// can be read correctly.
+
+c :: import <core/c>
+libc :: import "libc.nest"
+{ transmute, new, make } :: import <core/mem>
+
+// What a call to the outside world answered: what it did, or why it did not.
+//
+// `n` is the operation's own answer — bytes transferred, a descriptor, a
+// process id — and is meaningless when `err` is set. `err` is zero on success,
+// which is the one value `errno` never takes.
+@public Res :: struct {
+  n: isize,
+  err: c.int,
+}
+
+// A call that worked.
+ok :: #inline func (n: isize) -> Res { return Res { n: n, err: 0 } }
+
+// A call that did not, reading `errno` **now**.
+//
+// It substitutes a non-zero code when `errno` is somehow zero on a failed call.
+// A `Res` whose `n` is negative and whose `err` is zero would read as a success
+// with a nonsense count everywhere above here, and one library on one target
+// getting that wrong is not worth the shape of the bug it produces.
+failed :: #inline func () -> Res {
+  let e: c.int := libc.nest_errno()
+  if e == 0 { return Res { n: -1, err: -1 } }
+  return Res { n: -1, err: e }
+}
+
+impl Res {
+  // Whether the call failed.
+  @public failed :: #inline func (self: Self) -> bool { return self.err != 0 }
+
+  // Whether it failed only because a signal arrived, which is not a failure of
+  // the operation: the caller retries. Every loop below that can see one does.
+  @public interrupted :: #inline func (self: Self) -> bool {
+    return self.err == libc.EINTR
+  }
+}
+
+// ===< Descriptors >===
+
+// Open `path`. `flags` and `mode` are `libc`'s, because the set of ways to open
+// a file is exactly POSIX's and inventing a smaller one here would be a second
+// vocabulary to learn.
+@public open :: func (path: str, flags: c.int, mode: c.uint) -> Res {
+  let fd: c.int := libc.open(c.to_cstr(path), flags, mode)
+  if fd < 0 { return failed() }
+  return ok(cast.<isize>(fd))
+}
+
+@public close :: func (fd: c.int) -> Res {
+  if libc.close(fd) < 0 { return failed() }
+  return ok(0)
+}
+
+// Read into `into`, answering how many bytes arrived. Zero is end of file and
+// not an error, which is the distinction the whole read loop above is built on.
+//
+// A zero-length `into` would have nowhere to point, and `&into[0]` on it is an
+// index past the end — so it answers zero directly, which is also what `read`
+// would have answered.
+@public read :: func (fd: c.int, into: []mut u8) -> Res {
+  if into.len() == 0 { return ok(0) }
+  let n: c.ssize_t := libc.read(fd, c.from_ptr.<u8>(&into[0]), into.len())
+  if n < 0 { return failed() }
+  return ok(cast.<isize>(n))
+}
+
+// Write `bytes`, answering how many were taken.
+//
+// A short write is not an error and is not retried here: the caller is what
+// knows whether the rest still matters, and `io.Write.write_all` is the loop
+// that cares. An empty write answers zero for the same reason `read` does.
+@public write :: func (fd: c.int, bytes: []u8) -> Res {
+  if bytes.len() == 0 { return ok(0) }
+  let n: c.ssize_t := libc.write(fd, c.from_ptr.<u8>(&bytes[0]), bytes.len())
+  if n < 0 { return failed() }
+  return ok(cast.<isize>(n))
+}
+
+// Move the descriptor's offset, answering the new one.
+@public seek :: func (fd: c.int, offset: i64, whence: c.int) -> Res {
+  let at: c.longlong := libc.lseek(fd, offset, whence)
+  if at < 0 { return failed() }
+  return ok(cast.<isize>(at))
+}
+
+// ===< Paths >===
+
+@public unlink :: func (path: str) -> Res {
+  if libc.unlink(c.to_cstr(path)) < 0 { return failed() }
+  return ok(0)
+}
+
+@public rename :: func (from: str, to: str) -> Res {
+  if libc.rename(c.to_cstr(from), c.to_cstr(to)) < 0 { return failed() }
+  return ok(0)
+}
+
+@public mkdir :: func (path: str, mode: c.uint) -> Res {
+  if libc.mkdir(c.to_cstr(path), mode) < 0 { return failed() }
+  return ok(0)
+}
+
+@public rmdir :: func (path: str) -> Res {
+  if libc.rmdir(c.to_cstr(path)) < 0 { return failed() }
+  return ok(0)
+}
+
+// Whether the process may reach `path` in the way `mode` asks.
+@public access :: func (path: str, mode: c.int) -> Res {
+  if libc.access(c.to_cstr(path), mode) < 0 { return failed() }
+  return ok(0)
+}
+
+// ===< Processes >===
+
+// Duplicate this process. `0` in the child, the child's id in the parent.
+@public fork :: func () -> Res {
+  let pid: c.int := libc.fork()
+  if pid < 0 { return failed() }
+  return ok(cast.<isize>(pid))
+}
+
+// Replace this process's image, searching `PATH` for `file`.
+//
+// It returns only on failure, which is why the signature says `Res` and not
+// `never`: the whole reason to call it is that it does not come back.
+@public exec :: func (file: str, argv: c.ptr.<c.cstr>) -> Res {
+  libc.execvp(c.to_cstr(file), argv)
+  return failed()
+}
+
+// Wait for `pid` and answer the raw status word.
+//
+// Reading that word is `process`'s job: `WIFEXITED` and friends are macros, and
+// what they are macros *over* is the same on every target here — the low seven
+// bits are the terminating signal and the next eight are the exit code.
+@public wait :: func (pid: c.int) -> Res {
+  let slot: *mut c.int := new.<c.int>()
+  loop {
+    let got: c.int := libc.waitpid(pid, c.ptr.<c.int> { addr: transmute.<usize>(slot) }, 0)
+    if got >= 0 { return ok(cast.<isize>(slot.*)) }
+    let why: Res := failed()
+    if why.interrupted() == false { return why }
+  }
+}
+
+// ===< The environment >===
+
+// The value of `name`, or `.none` when it is not set.
+@public getenv :: func (name: str) -> Option.<str> {
+  let v: c.cstr := libc.getenv(c.to_cstr(name))
+  if v.is_null() { return .none }
+  return .some(c.from_cstr(v))
+}
+
+@public setenv :: func (name: str, value: str) -> Res {
+  if libc.setenv(c.to_cstr(name), c.to_cstr(value), 1) < 0 { return failed() }
+  return ok(0)
+}
+
+@public unsetenv :: func (name: str) -> Res {
+  if libc.unsetenv(c.to_cstr(name)) < 0 { return failed() }
+  return ok(0)
+}
+
+// ===< What the process was started with >===
+//
+// Both come from the entry point by way of the runtime — see `nest_argv` in
+// `runtime/nest_runtime.c`. The strings belong to the startup and outlive the
+// program, so a `str` cut out of one borrows rather than copies.
+
+@public argc :: func () -> usize { return cast.<usize>(libc.nest_argc()) }
+
+// Argument `i`, which the caller has already checked is below `argc()`.
+@public arg :: func (i: usize) -> str {
+  return c.from_cstr(libc.nest_argv().offset(i).read())
+}
+
+// Environment entry `i` as its raw `NAME=value`, or `.none` at the end of the
+// table.
+//
+// `envp` may be a null pointer: it is a third parameter to `main` that POSIX
+// permits rather than requires, and a program started by something exotic may
+// have none. That reads as an empty environment.
+@public env_at :: func (i: usize) -> Option.<str> {
+  let table: c.ptr.<c.cstr> := libc.nest_envp()
+  if table.is_null() { return .none }
+  let entry: c.cstr := table.offset(i).read()
+  if entry.is_null() { return .none }
+  return .some(c.from_cstr(entry))
+}
+
+// ===< Ending the process >===
+
+// Stop, running nothing on the way out — no `atexit` handler, no buffer
+// flushed. It is `_exit` rather than `exit` because the C library's buffers are
+// not this program's: `std/io` writes through descriptors, so there is nothing
+// of ours waiting in one, and a child that failed to `exec` must not run the
+// parent's handlers a second time.
+@public exit :: func (status: c.int) -> never { _exit_now(status) }
+
+_exit_now :: #inline func (status: c.int) -> never { libc._exit(status) }
+
+// The message the C library has for an `errno`, copied out of its storage.
+//
+// The copy is not optional: `strerror` returns a pointer into a buffer the
+// library owns and may reuse on the next call, so a `str` borrowing it would
+// change underneath whoever kept it.
+@public message :: func (code: c.int) -> str {
+  let borrowed: str := c.from_cstr(libc.strerror(code))
+  let src: []u8 := borrowed.as_bytes()
+  let out: []mut u8 := make.<[]u8>(src.len())
+  for i in 0..<src.len() { out[i] = src[i] }
+  return cast.<str>(out)
+}

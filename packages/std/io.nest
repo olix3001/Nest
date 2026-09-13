@@ -1,0 +1,249 @@
+// Reading and writing, and the error both of them report.
+//
+// ### `Error` is a value, not a code
+//
+// An `errno` alone is a number whose meaning the reader has to look up, and
+// which says nothing about what was being attempted. An `Error` carries the
+// code *and* the operation that failed, so a report reads
+// `open "nest.toml": No such file or directory` without the caller assembling
+// it. The message comes from the C library (`strerror`), copied out of its
+// storage, because that library is what knows what the number means on this
+// machine.
+//
+// ### The traits hand back a count
+//
+// `write` answers how many bytes it took, and `read` how many arrived, because
+// that is what the operating system answers and hiding it would be inventing a
+// guarantee the layer below does not make. A short write is not an error. What
+// most callers actually want is `write_all`, which is the loop over the
+// difference, written **once** as a default rather than in every implementation.
+//
+// ### There is no `Display for Error`
+//
+// `core/fmt`'s `Display` would let `f"{e}"` print one, and it is deliberately
+// not implemented: an `Error` is reported through `describe` below, which says
+// what failed as well as why. An impl that printed only the message would make
+// `f"{e}"` the shorter and worse of the two.
+
+c :: import <core/c>
+sys :: import "sys.nest"
+libc :: import "libc.nest"
+{ Buf, start, end, Display } :: import <core/fmt>
+{ make } :: import <core/mem>
+
+// ===< Errors >===
+
+// Why an operation on the outside world did not happen.
+@public Error :: struct {
+  // What was being attempted — `"open"`, `"read"`, `"spawn"`. A short verb, so
+  // that the report below reads as a sentence.
+  op: str,
+  // What it was attempted on: a path, a program name, or `""` when the
+  // operation names nothing (a write to a descriptor).
+  subject: str,
+  // The `errno` the call reported. Never zero: an `Error` that exists is a
+  // failure that happened.
+  code: c.int,
+}
+
+impl Error {
+  // The C library's message for this error. Already a copy — see `sys.message`
+  // — so it keeps as long as anything holds it.
+  @public message :: func (self: Self) -> str { return sys.message(self.code) }
+
+  // Whether the thing operated on was not there. The one code worth asking
+  // about by name: "no such file" is an answer a program acts on, where every
+  // other code is something it reports.
+  @public not_found :: func (self: Self) -> bool { return self.code == libc.ENOENT }
+
+  // The whole report, as one line and no newline: `open "nest.toml": No such
+  // file or directory`.
+  @public describe :: func (self: Self) -> str {
+    let mut b: Buf := start()
+    self.op.display(&mut b)
+    if self.subject.len() > 0 {
+      " \"".display(&mut b)
+      self.subject.display(&mut b)
+      "\"".display(&mut b)
+    }
+    ": ".display(&mut b)
+    self.message().display(&mut b)
+    return end(&mut b)
+  }
+}
+
+// An `Error` out of a failed `sys.Res`. Internal, and the only place the two
+// layers meet: above here nothing knows what an `errno` is.
+@public error_of :: func (op: str, subject: str, r: sys.Res) -> Error {
+  return Error { op: op, subject: subject, code: r.err }
+}
+
+// What every operation here answers.
+@public Res :: Result.<usize, Error>
+
+// ===< The two contracts >===
+
+// Somewhere bytes can be written.
+@public Write :: trait {
+  // Take as many of `bytes` as this sink will take now, answering how many.
+  // Zero is legal and means no progress, which `write_all` treats as the end.
+  write :: func (self: *mut Self, bytes: []u8) -> Result.<usize, Error>
+
+  // Push anything held back on to wherever it is really going. Unbuffered
+  // sinks have nothing to do, which is why this has a body.
+  flush :: func (self: *mut Self) -> Result.<void, Error> { return .ok(()) }
+}
+
+// Somewhere bytes come from.
+@public Read :: trait {
+  // Fill as much of `into` as is available now, answering how much. **Zero is
+  // end of input**, and it is the only way to say so — a reader with nothing
+  // *yet* to give blocks rather than answering zero.
+  read :: func (self: *mut Self, into: []mut u8) -> Result.<usize, Error>
+}
+
+// ===< What every writer gets for free >===
+
+// Write all of `bytes`, however many calls that takes.
+//
+// A free function rather than a default method on `Write`: a default body can
+// only call the trait's own members, and this needs to loop over a `*mut W`
+// that is generic — which is what a bounded free function says plainly.
+//
+// A sink that answers zero without having taken everything has stopped
+// accepting bytes and will not start again, so that is reported rather than
+// looped on forever.
+@public write_all :: func <W: Write> (w: *mut W, bytes: []u8) -> Result.<void, Error> {
+  let mut done: usize := 0
+  while done < bytes.len() {
+    let n: usize := w.write(bytes[done..<bytes.len()]).?
+    if n == 0 {
+      return .err(Error { op: "write", subject: "", code: libc.EIO })
+    }
+    done = done + n
+  }
+  return .ok(())
+}
+
+// Read until the input ends, answering everything that arrived.
+//
+// The buffer doubles rather than growing by a constant, so reading an `n`-byte
+// input costs `O(n)` copies in total instead of `O(n²)`.
+@public read_to_end :: func <R: Read> (r: *mut R) -> Result.<[]u8, Error> {
+  let mut out: []mut u8 := make.<[]u8>(4096)
+  let mut len: usize := 0
+  loop {
+    if len == out.len() {
+      let fresh: []mut u8 := make.<[]u8>(out.len() * 2)
+      for i in 0..<len { fresh[i] = out[i] }
+      out = fresh
+    }
+    let n: usize := r.read(out[len..<out.len()]).?
+    if n == 0 { return .ok(cast.<[]u8>(out[0..<len])) }
+    len = len + n
+  }
+}
+
+// ===< A descriptor >===
+
+// An open file descriptor: a file, a pipe, a terminal — whatever the operating
+// system gave a number to.
+//
+// It is **not closed for you**. The language has no destructors (`Drop` is
+// still a decision, see `design/toolchain.md`), so a `File` that goes out of
+// scope leaks its descriptor until the process ends. `close` is written, and
+// `fs.read`-style whole-file operations close their own.
+@public File :: struct {
+  fd: c.int,
+}
+
+impl File {
+  // Wrap a descriptor this program got from somewhere else. The `File` does not
+  // become its owner — closing it is still whoever opened it's business.
+  @public from_fd :: #inline func (fd: c.int) -> File { return File { fd: fd } }
+
+  // The descriptor, for a program calling something `std` does not wrap.
+  @public fd_of :: #inline func (self: Self) -> c.int { return self.fd }
+
+  // Close it. A descriptor closed twice is a descriptor another thread may have
+  // reopened, so this is called once and by whoever opened it.
+  @public close :: func (self: *mut File) -> Result.<void, Error> {
+    let r: sys.Res := sys.close(self.fd)
+    if r.failed() { return .err(error_of("close", "", r)) }
+    return .ok(())
+  }
+}
+
+impl Write for File {
+  write :: func (self: *mut File, bytes: []u8) -> Result.<usize, Error> {
+    loop {
+      let r: sys.Res := sys.write(self.fd, bytes)
+      if r.failed() == false { return .ok(cast.<usize>(r.n)) }
+      // A signal arriving mid-call is not a failed write, and retrying is what
+      // every program that does not install signal handlers wants.
+      if r.interrupted() == false { return .err(error_of("write", "", r)) }
+    }
+  }
+}
+
+impl Read for File {
+  read :: func (self: *mut File, into: []mut u8) -> Result.<usize, Error> {
+    loop {
+      let r: sys.Res := sys.read(self.fd, into)
+      if r.failed() == false { return .ok(cast.<usize>(r.n)) }
+      if r.interrupted() == false { return .err(error_of("read", "", r)) }
+    }
+  }
+}
+
+// ===< The three the process starts with >===
+//
+// Functions rather than constants because a `File` is a value and these are
+// three particular ones — and because a program is free to `close` a `File`,
+// which a shared constant would let it do to everyone's.
+
+@public stdin  :: #inline func () -> File { return File { fd: libc.STDIN } }
+@public stdout :: #inline func () -> File { return File { fd: libc.STDOUT } }
+@public stderr :: #inline func () -> File { return File { fd: libc.STDERR } }
+
+// ===< Printing >===
+//
+// Four functions, and what they are for is `f"..."`: `print(f"n is {n}")` is
+// the whole formatting story, because interpolation already produced a `str`.
+// There is no `print` taking a format string and arguments, and there will not
+// be — the language has interpolation, so a second way to say the same thing
+// would be a second set of rules to learn (§1.5).
+//
+// **A failed print is ignored.** Writing to a closed stdout is a real
+// condition, and it is not one a `print` call can do anything about: the caller
+// that wanted to know writes through `stdout()` and reads the `Result`. A
+// `print` that returned one would put a `.?` on every line of output in every
+// program.
+
+@public print :: func (s: str) -> void {
+  let mut out: File := stdout()
+  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
+}
+
+@public println :: func (s: str) -> void {
+  let mut out: File := stdout()
+  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
+  write_all(&mut out, NEWLINE.as_bytes()).match { .ok(_) => (), .err(_) => () }
+}
+
+@public eprint :: func (s: str) -> void {
+  let mut out: File := stderr()
+  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
+}
+
+@public eprintln :: func (s: str) -> void {
+  let mut out: File := stderr()
+  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
+  write_all(&mut out, NEWLINE.as_bytes()).match { .ok(_) => (), .err(_) => () }
+}
+
+// One byte, named, so that the four above do not each spell a literal for it.
+// A `str` rather than a `[]u8`: `as_bytes` is not `#const`, so the conversion
+// happens at each call — which is a cast between two views of the same bytes
+// and costs nothing.
+NEWLINE: str :: "\n"
