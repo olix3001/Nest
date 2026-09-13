@@ -3785,6 +3785,43 @@ f :: func (a: Foo) -> i32 { return a.tag() }
 }
 
 #[test]
+fn a_literal_receiver_settles_before_the_lookup() {
+    // `(5).tag()` used to lower to a call to `undef` with no receiver and no
+    // diagnostic: the receiver was still a `comptime_int`, which is a type no
+    // impl is written for, so every lookup in the chain missed. The literal
+    // settles on its default first, so the call resolves exactly as it would
+    // for a `let x: isize`.
+    let src = "\
+Tag :: trait { tag :: func (self: Self) -> i32 }
+impl Tag for isize { tag :: func (self: Self) -> i32 { return 7 } }
+f :: func () -> i32 { return (5).tag() }
+";
+    let s = analyze1(src);
+    assert!(!s.has_errors(), "{:#?}", s.diagnostics);
+    let file = entry_file(&s);
+    let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
+    assert!(ir.contains("tag"), "{ir}");
+    assert!(!ir.contains("undef"), "{ir}");
+}
+
+#[test]
+fn a_literal_receiver_with_no_impl_is_an_error() {
+    // The other half: a lookup that finds nothing is a diagnostic, not an
+    // `undef` call into a `void` slot. The note is the point — the type in the
+    // message is the default, not anything the source wrote.
+    let src = "\
+Tag :: trait { tag :: func (self: Self) -> i32 }
+impl Tag for i32 { tag :: func (self: Self) -> i32 { return 7 } }
+f :: func () -> i32 { return (5).tag() }
+";
+    let s = analyze1(src);
+    assert!(s.has_errors());
+    let d = format!("{:#?}", s.diagnostics);
+    assert!(d.contains("no method `tag` on `isize`"), "{d}");
+    assert!(d.contains("nothing to constrain it"), "{d}");
+}
+
+#[test]
 fn two_equally_specific_impls_are_ambiguous() {
     // A user `impl Add for i32` is exactly as specific as the builtin row for
     // the integer family, so a concrete `i32 + i32` has no best choice. (It is

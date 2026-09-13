@@ -2610,6 +2610,11 @@ impl Inferer<'_> {
             if self.resolved_def(callee).is_none() {
                 let recv = self.infer_expr(base);
                 let recv = self.pin_str(&recv);
+                // And a numeric literal settles here for the same reason: an
+                // open `comptime_int` is a type no impl is written for, so the
+                // whole chain below would find nothing and say nothing.
+                let settled_lit = self.cx.var_kind(&recv);
+                let recv = self.pin_numeric(&recv);
                 // Inherent (or trait-impl) method already collected into the
                 // receiver type's namespace: the fast path.
                 if let Some(m) = self.method_def(&recv, name.as_str()) {
@@ -2706,7 +2711,22 @@ impl Inferer<'_> {
                             self.infer_expr(*a);
                         }
                         let msg = format!("no method `{name}` on `{}`", r.display(self.defs));
-                        self.report(callee, msg);
+                        // A literal that reached this point had nothing else to
+                        // constrain it, so the type in the message is the
+                        // default rather than anything the source wrote. Saying
+                        // so is the difference between a puzzle and a fix.
+                        match settled_lit {
+                            Some(TyVarKind::Int | TyVarKind::Float) => self.report_with_note(
+                                callee,
+                                msg,
+                                format!(
+                                    "a literal with nothing to constrain it is `{}`; write the \
+                                     type you meant, as in `cast.<i32>(..)`",
+                                    r.display(self.defs)
+                                ),
+                            ),
+                            _ => self.report(callee, msg),
+                        }
                         return Ty::Error;
                     }
                 }
@@ -4015,6 +4035,12 @@ impl Inferer<'_> {
     /// literal on `[]u8`, indexing it is indexing a byte slice.
     fn pin_str(&mut self, ty: &Ty) -> Ty {
         self.cx.pin_str(ty)
+    }
+
+    /// Settle an open numeric literal on its default, so a method call on one
+    /// looks the impls up against a real type. See [`Cx::pin_numeric`].
+    fn pin_numeric(&mut self, ty: &Ty) -> Ty {
+        self.cx.pin_numeric(ty)
     }
 
     /// The exact literal a path names, when it resolves to a constant bound to
@@ -6068,6 +6094,22 @@ impl Inferer<'_> {
 
     fn report(&mut self, node: NodeId, message: impl Into<String>) {
         self.report_in(self.file, node, message);
+    }
+
+    /// Report against a node with a trailing note — used where the type in the
+    /// message is one inference chose rather than one the source wrote.
+    fn report_with_note(
+        &mut self,
+        node: NodeId,
+        message: impl Into<String>,
+        note: impl Into<String>,
+    ) {
+        let span = self.ast.node(node).span;
+        self.diags.push(
+            Diagnostic::error(message)
+                .with_primary(FileSpan::new(self.file, span), "")
+                .with_note(note),
+        );
     }
 
     /// Report against a node in another file's arena — a signature or a

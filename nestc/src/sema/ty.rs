@@ -739,6 +739,36 @@ impl InferCtxt {
         }
     }
 
+    /// Pin an unsolved numeric literal to its default (`isize` / `f64`), for
+    /// the reason [`Cx::pin_str`] pins a string literal: a method call has to
+    /// ask a question only a concrete type can answer.
+    ///
+    /// A `comptime_int` is not a type any impl is written for, so a lookup
+    /// against the open variable finds nothing at all. Settling it here is the
+    /// same collapse [`Cx::finalize`] performs at the end of the body, only
+    /// early enough for the call to see it — which means a method call on a
+    /// literal reaches exactly the impls a `let x: isize` would.
+    pub fn pin_numeric(&mut self, ty: &Ty) -> Ty {
+        let resolved = self.shallow(ty);
+        let Ty::Var(v) = resolved else {
+            return resolved;
+        };
+        let default = match self.kind(v) {
+            TyVarKind::Int => self.isize_ty(),
+            TyVarKind::Float => Some(Ty::Float(FloatWidth::F64)),
+            _ => return Ty::Var(v),
+        };
+        // No `#lang` `isize` means a program without `core`; leaving the
+        // variable open keeps that a single diagnostic, reported elsewhere.
+        match default {
+            Some(d) => {
+                let _ = self.unify(&Ty::Var(v), &d);
+                d
+            }
+            None => Ty::Var(v),
+        }
+    }
+
     /// Whether `ty` is a `distinct` type standing over a numeric primitive, and
     /// which family. `None` for everything else.
     pub fn numeric_distinct_kind(&self, ty: &Ty) -> Option<TyVarKind> {

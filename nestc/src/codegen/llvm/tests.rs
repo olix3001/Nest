@@ -457,6 +457,20 @@ fn a_program_links_and_runs() {
              }\n",
             31,
         ),
+        // A method call on a literal receiver, through the three impl shapes:
+        // concrete, family and blanket. The literal settles on its default
+        // before the lookup runs, so each finds the impl a `let x: isize`
+        // would. 7 + 11 + 23.
+        (
+            "A :: trait { a :: func (self: Self) -> i32 }\n\
+             B :: trait { b :: func (self: Self) -> i32 }\n\
+             C :: trait { c :: func (self: Self) -> i32 }\n\
+             impl A for isize { a :: func (self: Self) -> i32 { return 7 } }\n\
+             impl <const N: u16> B for int.<N> { b :: func (self: Self) -> i32 { return 11 } }\n\
+             impl <T> C for T { c :: func (self: Self) -> i32 { return 23 } }\n\
+             main :: func () -> i32 { return (5).a() + (5).b() + (5).c() }\n",
+            41,
+        ),
     ] {
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
         let file = session.load_entry("main").expect("entry loads");
