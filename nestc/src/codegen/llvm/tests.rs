@@ -449,3 +449,83 @@ fn a_program_links_and_runs() {
         assert_eq!(ran.code(), Some(status), "{src:?} exited {ran}");
     }
 }
+
+/// **However many codegen units, one object.**
+///
+/// A unit is a unit of work (§11) — four of them is how four cores compile a
+/// program — and nothing downstream should have to learn that a program is four
+/// files today and three tomorrow. The parts are emitted separately and merged
+/// with a partial link, and the merged object is a real one: it links and runs.
+#[test]
+fn many_units_make_one_object() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let src = "add :: func (a: i32, b: i32) -> i32 { return a + b }\nmain :: func () -> i32 { return add(2, 3) }\n";
+
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
+    session.options.codegen_units = 4;
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let layouts = crate::ir::layout::Layouts::new(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        session.options.target,
+    );
+    let program = crate::lir::lower(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        &layouts,
+        &session.options,
+        &session.lang_items,
+        &session.sources,
+    );
+    assert!(program.units.len() > 1, "the split did not happen");
+
+    // A directory of its own, because the assertion below is that **nothing
+    // else** is in it: another test's artifacts in a shared one would read as
+    // parts left behind.
+    let stem = format!("{:x}.{}", hash(src), unique());
+    // The process id is in the path because the directory outlives the run: the
+    // same source hashes to the same name every time, and last run's executable
+    // sitting there would read as a part left behind.
+    let dir = std::env::temp_dir()
+        .join(format!("nestc-merge-tests-{}", std::process::id()))
+        .join(&stem);
+    std::fs::create_dir_all(&dir).unwrap();
+    let object = dir.join("prog.o");
+    let exe = dir.join("prog");
+
+    let mut backend = LlvmBackend::default();
+    backend.target_info(None).expect("the host resolves");
+    crate::write_object(
+        &mut backend,
+        &program,
+        Some(&object),
+        "main.nest",
+        true,
+        &crate::codegen::link::LinkOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("emitting:\n{e}"));
+
+    // One file, and the parts are not beside it.
+    assert!(object.exists(), "no object");
+    let strays: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name != "prog.o")
+        .collect();
+    assert!(strays.is_empty(), "the parts were left behind: {strays:?}");
+
+    crate::codegen::link::link(
+        &[object],
+        &exe,
+        &crate::codegen::link::LinkOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("linking:\n{e}"));
+    let ran = std::process::Command::new(&exe).status().expect("it runs");
+    assert_eq!(ran.code(), Some(5), "the merged object ran wrong: {ran}");
+}

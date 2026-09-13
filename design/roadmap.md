@@ -863,6 +863,16 @@ asked for, `-o` names **it**: `--emit link,obj -o prog` writes the program to
 `prog` and the object beside it as `prog.o`, rather than writing both to one
 path and letting the second win.
 
+**`--emit obj` produces one object, however many codegen units there were.** A
+unit is a unit of *work* (§11) — four of them is how four cores compile a
+program — and what comes out should not tell you how it was compiled. With one
+unit that is one emission; with several it is several emissions into a scratch
+directory and a partial link (`ld -r`, `-C partial-linker=`) over them, and the
+parts are deleted. This is also the shape parallel code generation wants, since
+the units are independent and only the merge is not: **emission is still
+sequential**, and making it parallel is a backend instance (and an LLVM context)
+per thread rather than a change to what is produced.
+
 ### Built: the two things a build tool needs from a compiler
 
 `twig` is not built and was not started (below). These are the parts of it that
@@ -884,6 +894,9 @@ read what it says and to tell it where things are.
   convention, checked on the filesystem: a package `foo` is `<dir>/foo/foo.nest`,
   which is the layout `packages/` already has. Searched in the order given, so
   the first `-L` wins.
+  - **`--package name=path`** pins one package to its root file, which is how a
+    build tool that has already resolved a dependency hands over the answer
+    rather than a place to look. `-L` is for a person typing by hand.
   - **An explicit registration beats a search path**, and the fallback `core`
     starts on does not. That is the difference between a fact and a default: a
     build tool that resolved a package to a path has already searched, and a

@@ -33,6 +33,11 @@ const RUNTIME: Option<&str> = option_env!("NEST_RUNTIME_LIB");
 pub struct LinkOptions {
     /// `-C linker=` — the linker *driver*, `cc` by default.
     pub linker: String,
+    /// `-C partial-linker=` — the tool that merges several objects into one
+    /// (`ld -r`, a *partial* or *relocatable* link). It is not the same tool as
+    /// `linker`: that one is a C compiler being asked to find `crt1.o` and the
+    /// system libraries, and this one must do no such thing.
+    pub partial_linker: String,
     /// `-C link-arg=` — one extra argument, repeatable, passed through in the
     /// order given. `-lgc` for a Boehm runtime, `-L`/`-l` for a C library a
     /// program declares with `extern("c")`.
@@ -47,6 +52,7 @@ impl Default for LinkOptions {
     fn default() -> Self {
         LinkOptions {
             linker: "cc".to_string(),
+            partial_linker: "ld".to_string(),
             args: Vec::new(),
             runtime: None,
         }
@@ -81,6 +87,34 @@ impl LinkOptions {
                 .to_string()
         })
     }
+}
+
+/// Merge several objects into one at `out`, with a **partial link**.
+///
+/// A codegen unit is a unit of *work* (§11), not an artifact: splitting a
+/// program into four is how four cores compile it, and nothing downstream
+/// should have to learn that a program is four files today and three tomorrow.
+/// So `--emit obj` produces one object however many units were used, and this is
+/// what makes that true — `ld -r`, which resolves what it can between the inputs
+/// and leaves the rest for the real link.
+pub fn combine(objects: &[PathBuf], out: &Path, options: &LinkOptions) -> Result<(), String> {
+    let status = Command::new(&options.partial_linker)
+        .arg("-r")
+        .args(objects)
+        .arg("-o")
+        .arg(out)
+        .status()
+        .map_err(|e| {
+            format!(
+                "cannot run `{}` to merge {} objects: {e}\nset another with `-C partial-linker=<path>`",
+                options.partial_linker,
+                objects.len()
+            )
+        })?;
+    if !status.success() {
+        return Err(format!("`{} -r` failed: {status}", options.partial_linker));
+    }
+    Ok(())
 }
 
 /// Link `objects` into an executable at `out`.

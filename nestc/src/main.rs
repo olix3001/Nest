@@ -42,6 +42,8 @@ options:
                          <dir>/foo/foo.nest. Repeatable, in order
   --error-format <form>  human (default) or json — one JSON object per line,
                          on stderr, for a tool that consumes them
+  --package <name>=<path>
+                         a package pinned to a root file, beating any -L search
   -C <key>=<value>       a build setting; see below
   -h, --help             this
 
@@ -52,6 +54,8 @@ settings (-C):
   entry=auto|none        synthesize a C `main` calling the program's `main`
                          when it has one (default: auto)
   linker=<path>          the linker driver used by `--emit link` (default: cc)
+  partial-linker=<path>  merges several codegen units into one object
+                         (default: ld, run as `ld -r`)
   link-arg=<arg>         one more argument for it; repeatable, in order
   runtime=<path>         the runtime archive to link, overriding the one built
                          beside this compiler
@@ -219,6 +223,9 @@ fn run() -> Result<ExitCode, String> {
     // rather than `Options` because they are about finding source, not about
     // what is built from it.
     let mut search_paths: Vec<String> = Vec::new();
+    // Packages pinned by name, which is how a build tool that has already
+    // resolved a dependency hands the answer over rather than a place to look.
+    let mut packages: Vec<(String, String)> = Vec::new();
     // The link's settings, which are the driver's for the same reason `backend`
     // is: no pass reads them, and what is compiled does not change because a
     // different linker will run afterwards.
@@ -256,6 +263,13 @@ fn run() -> Result<ExitCode, String> {
                     Some(rest) => rest.trim_start_matches('=').to_string(),
                     None => unreachable!(),
                 });
+            }
+            a if a == "--package" || a.starts_with("--package=") => {
+                let spec = value("--package", &mut args)?;
+                let (name, root) = spec
+                    .split_once('=')
+                    .ok_or_else(|| format!("`--package {spec}` is not a `name=path` pair"))?;
+                packages.push((name.to_string(), root.to_string()));
             }
             a if a == "--error-format" || a.starts_with("--error-format=") => {
                 format = ErrorFormat::parse(&value("--error-format", &mut args)?)?;
@@ -336,6 +350,11 @@ fn run() -> Result<ExitCode, String> {
     for dir in &search_paths {
         session.add_search_path(dir);
     }
+    // After the search paths, though the order does not matter: a pinned
+    // package wins over a searched one wherever it was registered.
+    for (name, root) in &packages {
+        session.register_package(name, root);
+    }
     let file = session.sources.add(path.clone(), source.clone());
     let (ast, parse_errors) = parser::parse::Parser::parse_file(&source, file);
     for err in parse_errors {
@@ -401,14 +420,27 @@ fn run() -> Result<ExitCode, String> {
             // When a program is also being produced, `-o` names *it*: the
             // object and the executable would otherwise be written to one path,
             // and the second one would win silently.
-            write_units(
-                backend.as_mut(),
-                &program,
-                *kind,
-                out.as_deref(),
-                &path,
-                !emit.link,
-            )?;
+            let exact = !emit.link;
+            match kind {
+                // **One object, always.** How many codegen units a program was
+                // split into is a fact about how it was *compiled*, not about
+                // what it produces.
+                OutputKind::Object => write_object(
+                    backend.as_mut(),
+                    &program,
+                    out.as_deref(),
+                    &path,
+                    exact,
+                    &link_options,
+                )?,
+                // Assembly and the backend's IR stay one file per unit. They
+                // are for reading, and two units' text concatenated is not the
+                // assembly of anything — a real merge is what `ld -r` does, and
+                // it does it to objects.
+                kind => {
+                    write_units(backend.as_mut(), &program, *kind, out.as_deref(), &path, exact)?;
+                }
+            }
         }
         if emit.link {
             link_program(
@@ -506,6 +538,64 @@ fn write_units(
         written.push(path);
     }
     Ok(written)
+}
+
+/// Emit **one** object for the whole program, whatever it was split into.
+///
+/// With one unit that is one emission. With several it is several emissions into
+/// a scratch directory and a partial link over them
+/// ([`codegen::link::combine`]) — which is also the shape parallel code
+/// generation wants, since the units are independent and only the merge is not.
+fn write_object(
+    backend: &mut dyn Codegen,
+    program: &lir::Program,
+    out: Option<&Path>,
+    entry: &str,
+    exact: bool,
+    options: &codegen::link::LinkOptions,
+) -> Result<(), String> {
+    let ext = backend.extension(OutputKind::Object);
+    let path = artifact_path(out, entry, exact, ext);
+
+    if program.units.len() == 1 {
+        return backend
+            .emit_unit(&program.units[0], OutputKind::Object, &path)
+            .map_err(|e| format!("{}: {e}", backend.name()));
+    }
+
+    let scratch = temp_dir(entry)?;
+    let result = (|| {
+        let mut objects = Vec::with_capacity(program.units.len());
+        for (i, unit) in program.units.iter().enumerate() {
+            let part = scratch.join(format!("{i}.{ext}"));
+            backend
+                .emit_unit(unit, OutputKind::Object, &part)
+                .map_err(|e| format!("{}: {e}", backend.name()))?;
+            objects.push(part);
+        }
+        codegen::link::combine(&objects, &path, options)
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+/// Where a single-file output goes: `-o` when it names this artifact, `-o` plus
+/// the extension when something else has claimed that name, and the entry
+/// file's stem when there is no `-o` at all.
+fn artifact_path(out: Option<&Path>, entry: &str, exact: bool, ext: &str) -> PathBuf {
+    match out {
+        Some(p) if exact => p.to_path_buf(),
+        Some(p) => {
+            let mut p = p.to_path_buf();
+            let name = p.file_name().map(|s| s.to_string_lossy().into_owned());
+            p.set_file_name(format!("{}.{ext}", name.unwrap_or_else(|| "out".into())));
+            p
+        }
+        None => {
+            let stem = Path::new(entry).file_stem().unwrap_or_default();
+            PathBuf::from(format!("{}.{ext}", stem.to_string_lossy()))
+        }
+    }
 }
 
 /// Compile to objects and link them into a program.
@@ -611,6 +701,28 @@ mod tests {
         let e = Emit::parse("link,asm,obj").expect("a list");
         assert!(e.link);
         assert_eq!(e.backend, vec![OutputKind::Assembly, OutputKind::Object]);
+    }
+
+    /// `-o` names the artifact when nothing else claims that name, and grows
+    /// the extension when a link does. With no `-o` at all it is the entry
+    /// file's stem, beside the invocation.
+    #[test]
+    fn an_artifact_path_follows_o() {
+        let out = PathBuf::from("build/prog");
+        assert_eq!(
+            artifact_path(Some(&out), "src/prog.nest", true, "o"),
+            PathBuf::from("build/prog")
+        );
+        // The extension is appended rather than replacing one: `-o a.out` asked
+        // for a file called `a.out`.
+        assert_eq!(
+            artifact_path(Some(Path::new("a.out")), "src/prog.nest", false, "o"),
+            PathBuf::from("a.out.o")
+        );
+        assert_eq!(
+            artifact_path(None, "src/prog.nest", true, "o"),
+            PathBuf::from("prog.o")
+        );
     }
 
     /// A tool that asked for JSON gets the compiler's own failures in JSON too,
