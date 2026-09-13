@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
+use crate::ir::const_eval::ConstValue;
 use crate::parser::ast::{FileId, NodeId};
 
 /// A global definition id: an index into a [`DefTable`]. Stable across files.
@@ -170,6 +171,23 @@ pub enum DirectiveArg {
     Other,
 }
 
+/// One `@Name(args)` attribute written on a definition, once its name has been
+/// resolved to the `@attribute` struct it denotes (§9's addition).
+///
+/// The arguments are kept as written — named or positional, in source order —
+/// because matching them to the struct's members needs that struct's
+/// *declaration order*, which is a thing the layout engine knows and name
+/// resolution does not. What resolution does check is that every name is a
+/// member and that the count is right, so by the time this travels the only
+/// work left is putting the values in order.
+#[derive(Debug, Clone)]
+pub struct AttrValue {
+    /// The `@attribute` struct this is a value of.
+    pub def: DefId,
+    /// Each argument, with the member name when the source wrote one.
+    pub args: Vec<(Option<Symbol>, ConstValue)>,
+}
+
 /// One definition. Leaf defs (locals, params, fields) leave `ns` empty; the
 /// namespace-like kinds populate it during collection and import wiring.
 #[derive(Debug, Clone)]
@@ -208,6 +226,16 @@ pub struct Def {
     /// implicitly upcasts to the field's type (§3.10). At most one field per
     /// struct may set this.
     pub using: bool,
+    /// Whether this def is an `@attribute` — a struct a program may write on a
+    /// declaration, whose value then appears on that declaration's descriptor
+    /// (§9's addition). Only a struct may be one.
+    pub attribute: bool,
+    /// The `@Name(args)` attributes written on this def, resolved.
+    ///
+    /// Empty for everything else, which is nearly everything: today's
+    /// attributes are a fixed set the compiler reads (`@public`,
+    /// `@link_name`), and these are the ones a *program* declared.
+    pub attrs: Vec<AttrValue>,
     /// Whether this binding may be **assigned to** (§2.3).
     ///
     /// True for a `let` local and for a pattern binding written `mut`; false for
@@ -312,6 +340,8 @@ impl DefTable {
             ns: Namespace::default(),
             alias: None,
             using: false,
+            attribute: false,
+            attrs: Vec::new(),
             mutable: false,
         });
         id

@@ -73,6 +73,18 @@ impl Eq for TypeId {
   Other,
 }
 
+// One `@Name(...)` a program wrote on a declaration, as data.
+//
+// It is **not** a `*dyn Any`, though it could have been: the value is in
+// read-only data and its type is the `id` beside it, which is the same pair a
+// checked read already works over. A vtable would have bought dynamic dispatch
+// on a value nothing dispatches on.
+@public Attr :: #lang("reflect_attr") struct {
+  name: str,
+  id: TypeId,
+  data: *mut void,
+}
+
 // One member of a struct: where it sits, how big it is, and what it is.
 //
 // `offset` is what makes a run-time field read possible at all — `member_ptr`
@@ -84,6 +96,7 @@ impl Eq for TypeId {
   size: usize,
   kind: Kind,
   id: TypeId,
+  attrs: []Attr,
 }
 
 // A type, described.
@@ -99,6 +112,8 @@ impl Eq for TypeId {
   // Empty for everything that is not a struct. A tuple's positional members are
   // real members named `0`, `1`, … (§3.3), so they are here too.
   members: []Member,
+  // The attributes written on the type itself.
+  attrs: []Attr,
 }
 
 // ===< The intrinsics >===
@@ -176,6 +191,25 @@ impl <T> Any for T {
 // The two words a trait object is (§7b). Private, for the same reason `Raw` is
 // private in `core/c`: a program that wants the value back writes `downcast`.
 Dyn :: struct { data: *mut void, vtable: *mut void }
+
+// ===< Attributes >===
+
+// The `A` written on `m`, when one was.
+//
+// The same shape the checked read has, for the same reason: what is stored is
+// bytes plus an identity, and handing them back as an `A` is a comparison and a
+// reinterpretation.
+@public attr_of :: func <A> (attrs: []Attr) -> Option.<A> {
+  let want: TypeId := type_id.<A>()
+  let mut i: usize := 0
+  while i < attrs.len() {
+    if attrs[i].id == want {
+      return .some(transmute.<*A>(attrs[i].data).*)
+    }
+    i = i + 1
+  }
+  return .none
+}
 
 // The member of `T` called `name`, or nothing.
 @public member_of :: func <T> (name: str) -> Option.<Member> {

@@ -1180,6 +1180,7 @@ impl Inferer<'_> {
                 }
                 let bty = self.infer_expr(base);
                 let bty = self.pin_str(&bty);
+                let bty = self.settle(&bty);
                 if let Some(ft) = self.field_ty(&bty, name.as_str()) {
                     return ft;
                 }
@@ -1854,6 +1855,23 @@ impl Inferer<'_> {
     /// progress. Solving one obligation can solve a variable that unblocks
     /// another, so a single pass is not enough; a pass that decides nothing new
     /// means the rest are stuck (reported by [`Inferer::report_unsolved`]).
+    /// Resolve `ty`, running the solver first when it is still a variable.
+    ///
+    /// A receiver is the one place inference cannot afford to be lazy: what
+    /// `.name` and `.len()` *mean* depends on what the receiver is, and the
+    /// walk reaches them while a projection like `Index.Output` is still
+    /// queued. The obligation was registered with everything needed to solve
+    /// it, so asking the solver to run is not a guess — it is the same work,
+    /// done when the answer is wanted rather than at the end of the body.
+    fn settle(&mut self, ty: &Ty) -> Ty {
+        let shallow = self.cx.shallow(ty);
+        if !is_var(&shallow) {
+            return shallow;
+        }
+        self.solve_to_fixpoint();
+        self.cx.shallow(ty)
+    }
+
     fn solve_to_fixpoint(&mut self) {
         while self.cx.has_obligations() {
             let obligations = self.cx.take_obligations();
@@ -2674,6 +2692,9 @@ impl Inferer<'_> {
             if self.resolved_def(callee).is_none() {
                 let recv = self.infer_expr(base);
                 let recv = self.pin_str(&recv);
+                // A receiver decides which method is called, so it is settled
+                // here rather than at the end of the body — see `settle`.
+                let recv = self.settle(&recv);
                 // And a numeric literal settles here for the same reason: an
                 // open `comptime_int` is a type no impl is written for, so the
                 // whole chain below would find nothing and say nothing.

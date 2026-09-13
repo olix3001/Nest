@@ -541,6 +541,27 @@ fn a_program_links_and_runs() {
              }\n",
             17,
         ),
+        // A user-declared `@attribute`, read back off the descriptor it was
+        // written on. No expansion pass and no generated code: the value is a
+        // constant in read-only data and the member points at it.
+        (
+            "r :: import <core/reflect>\n\
+             @attribute Json :: struct { rename: str, skip: bool }\n\
+             P :: struct {\n\
+            \x20 @Json(rename: \"user_id\", skip: false) id: i32,\n\
+            \x20 n: i64,\n\
+             }\n\
+             main :: func () -> i32 {\n\
+            \x20 let info: r.TypeInfo := r.type_info.<P>()\n\
+            \x20 if info.members[0].attrs.len() != 1 { return 1 }\n\
+            \x20 if info.members[1].attrs.len() != 0 { return 2 }\n\
+            \x20 let j: Json := r.attr_of.<Json>(info.members[0].attrs).!\n\
+            \x20 if j.rename != \"user_id\" { return 3 }\n\
+            \x20 if j.skip { return 4 }\n\
+            \x20 return 7\n\
+             }\n",
+            7,
+        ),
     ] {
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
         let file = session.load_entry("main").expect("entry loads");

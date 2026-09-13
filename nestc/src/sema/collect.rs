@@ -43,6 +43,7 @@ pub fn collect_file(
         imports: Vec::new(),
         in_impl: false,
         pending: Vec::new(),
+        pending_attribute: false,
         anon_impls: 0,
     };
     if let Some(root) = ast.root() {
@@ -70,6 +71,8 @@ struct Collector<'a> {
     /// Directives written on the enclosing [`NodeKind::Decl`], waiting for the
     /// binding inside it to claim them.
     pending: Vec<Directive>,
+    /// Whether the binding being collected was written `@attribute`.
+    pending_attribute: bool,
     /// How many anonymous `impl` namespaces this file has needed so far; the
     /// count names them apart (`<impl 1>`, `<impl 2>`, …) so two impls on
     /// structural targets stay distinguishable in a def dump.
@@ -124,6 +127,12 @@ impl Collector<'_> {
                 item,
             } => {
                 let vis = self.visibility(&attrs);
+                // `@attribute` marks a struct as one a program may *write* on a
+                // declaration. It is recorded here rather than read where it is
+                // used because the use is in another file as often as not, and
+                // a def is what crosses that boundary.
+                let is_attr = self.has_attr(&attrs, "attribute");
+                let was_attr = std::mem::replace(&mut self.pending_attribute, is_attr);
                 self.check_namespace_binding(item, &directives);
                 // Directives written *before* the binding (`#inline\nf :: func …`)
                 // and directives written on the RHS form (`f :: #inline func …`)
@@ -132,6 +141,7 @@ impl Collector<'_> {
                 let outer = std::mem::replace(&mut self.pending, here);
                 self.collect_binding(item, vis, scope);
                 self.pending = outer;
+                self.pending_attribute = was_attr;
             }
             _ => {
                 self.check_namespace_binding(node, &[]);
@@ -202,6 +212,13 @@ impl Collector<'_> {
         // `DefId`, so a `#soa` on a struct or an `#inline` on a function is
         // available wherever that definition turns up, without the later stages
         // re-walking the AST.
+        if std::mem::take(&mut self.pending_attribute) {
+            if kind == DefKind::Struct {
+                self.defs.get_mut(def).attribute = true;
+            } else {
+                self.report(bind, "`@attribute` may only be written on a `struct`");
+            }
+        }
         let mut directives = std::mem::take(&mut self.pending);
         directives.extend(self.rhs_directives(&rhs_kind));
         // A `#static` binding names a mutable region, which is the whole point
@@ -654,6 +671,13 @@ impl Collector<'_> {
             NodeKind::Path { segments } => segments.first().cloned(),
             _ => None,
         }
+    }
+
+    /// Whether one of `attrs` is `@name`.
+    fn has_attr(&self, attrs: &[NodeId], want: &str) -> bool {
+        attrs.iter().any(|&a| {
+            matches!(&self.ast.node(a).kind, NodeKind::Attribute { name, .. } if name.as_str() == want)
+        })
     }
 
     fn visibility(&self, attrs: &[NodeId]) -> Vis {

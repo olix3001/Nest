@@ -18,8 +18,10 @@ use crate::common::diagnostic::Diagnostic;
 use crate::common::source::FileId;
 use crate::common::source::FileSpan;
 use crate::common::symbol::Symbol;
+use crate::ir::const_eval::ConstValue;
 use crate::parser::ast::{Ast, NodeId, NodeKind, SliceRest};
 
+use super::def::AttrValue;
 use super::def::{DefId, DefKind, DefTable, Visibility};
 use super::{DefMeta, PathRes, Resolution};
 
@@ -298,6 +300,12 @@ impl Resolver<'_> {
                 self.resolve_node(item);
                 self.decl_static = outer;
             }
+            // A `@Name(args)` a program wrote. The compiler's own attributes
+            // (`@public`, `@link_name`) are vocabulary and resolve to nothing;
+            // a name that *does* resolve is an `@attribute` struct, and its
+            // value is recorded on the declaration it decorates so the
+            // descriptor can carry it (§9's addition).
+            NodeKind::Attribute { name, args } => self.resolve_attribute(id, &name, &args),
             NodeKind::For {
                 pattern,
                 iter,
@@ -387,10 +395,10 @@ impl Resolver<'_> {
                 self.resolve_field(id, base, &name);
             }
 
-            // An attribute's / directive's arguments are drawn from a fixed
-            // compiler vocabulary — `@public(all)`, `#align(16)` — not from the
+            // A directive's arguments are drawn from a fixed compiler
+            // vocabulary — `#align(16)`, `#lang("add")` — not from the
             // program's names, so they are read by `collect`, never resolved.
-            NodeKind::Attribute { .. } | NodeKind::Directive { .. } => {}
+            NodeKind::Directive { .. } => {}
 
             // ===< everything else: structural recursion >===
             _ => {
@@ -554,6 +562,85 @@ impl Resolver<'_> {
     }
 
     // ===< scope search >===
+
+    /// Resolve one `@Name(args)` and, when `Name` is an `@attribute` struct,
+    /// record its value on the definition the attribute is written on.
+    ///
+    /// A name that resolves to nothing is left alone: `@public` is not a
+    /// program name, and every attribute the compiler reads is spelled like
+    /// one. A name that resolves to something that is *not* an `@attribute` is
+    /// the error — the program meant a struct it may not use this way.
+    fn resolve_attribute(&mut self, id: NodeId, name: &Symbol, args: &[NodeId]) {
+        let Some(Resolution::Def(def)) = self.lookup_unqualified(name) else {
+            return;
+        };
+        let def = self.defs.resolve_alias(def);
+        if !self.defs.get(def).attribute {
+            let msg = format!("`{name}` is not an `@attribute`; declare it `@attribute {name} :: struct {{ ... }}`");
+            self.report(id, msg);
+            return;
+        }
+        // The declaration this attribute sits on. Collection stamped the def
+        // onto the binding, and an attribute is a child of it.
+        let Some(owner) = self.attr_owner(id) else {
+            return;
+        };
+        let declared = self.defs.get(def).ns.members.len();
+        if args.len() != declared {
+            let msg = format!(
+                "`@{name}` takes {declared} argument(s), not {}: an attribute writes every member",
+                args.len()
+            );
+            self.report(id, msg);
+            return;
+        }
+        let mut values = Vec::new();
+        for &a in args {
+            let (arg_name, value) = match &self.ast.node(a).kind {
+                NodeKind::Arg { name, value } => (name.clone(), *value),
+                _ => (None, a),
+            };
+            if let Some(n) = &arg_name {
+                if !self.defs.get(def).ns.members.contains_key(n) {
+                    let msg = format!("`{name}` has no member `{n}`");
+                    self.report(a, msg);
+                    return;
+                }
+            }
+            let Some(v) = attr_literal(self.ast, value) else {
+                self.report(a, "an attribute's arguments are literals");
+                return;
+            };
+            values.push((arg_name, v));
+        }
+        self.defs
+            .get_mut(owner)
+            .attrs
+            .push(AttrValue { def, args: values });
+    }
+
+    /// The def an attribute node decorates: the field it sits on, or the
+    /// binding the enclosing `Decl` introduces.
+    fn attr_owner(&self, attr: NodeId) -> Option<DefId> {
+        let mut stack = vec![self.ast.root()?];
+        while let Some(n) = stack.pop() {
+            let kids = self.ast.children(n);
+            if kids.contains(&attr) {
+                if let Some(DefMeta(d)) = self.ast.meta::<DefMeta>(n) {
+                    return Some(d);
+                }
+                // A `Decl` carries the attributes and its `item` carries the def.
+                if let NodeKind::Decl { item, .. } = &self.ast.node(n).kind {
+                    if let Some(DefMeta(d)) = self.ast.meta::<DefMeta>(*item) {
+                        return Some(d);
+                    }
+                }
+                return None;
+            }
+            stack.extend(kids);
+        }
+        None
+    }
 
     fn lookup_local(&self, name: &Symbol) -> Option<DefId> {
         self.scopes
@@ -838,5 +925,23 @@ fn struct_kind_children(kind: &crate::parser::ast::StructKind) -> Vec<NodeId> {
     match kind {
         Record(ids) | Tuple(ids) => ids.clone(),
         Unit => Vec::new(),
+    }
+}
+
+/// One attribute argument, as a compile-time value.
+///
+/// The vocabulary is the literals, deliberately: an attribute is data written
+/// on a declaration, and a declaration is not a place an expression runs. The
+/// same restriction directives have had since §9.
+fn attr_literal(ast: &Ast, node: NodeId) -> Option<ConstValue> {
+    use crate::parser::ast::Lit;
+    match &ast.node(node).kind {
+        NodeKind::Lit(Lit::Str(s)) => Some(ConstValue::Str(s.clone())),
+        NodeKind::Lit(Lit::Int(n)) => Some(ConstValue::Int(n.clone())),
+        NodeKind::Lit(Lit::Float(f)) => Some(ConstValue::Float(*f)),
+        NodeKind::Lit(Lit::Bool(b)) => Some(ConstValue::Bool(*b)),
+        NodeKind::Lit(Lit::Char(c)) => Some(ConstValue::Char(*c)),
+        NodeKind::Lit(Lit::Bytes(b)) => Some(ConstValue::Bytes(b.clone())),
+        _ => None,
     }
 }

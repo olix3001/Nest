@@ -417,6 +417,34 @@ main :: func () -> i32 { return 0 }
 }
 
 #[test]
+fn an_attribute_must_be_declared_as_one() {
+    // Today's attributes are a fixed set the compiler reads. A program may add
+    // its own, and `@attribute` is what says so — writing a struct that is not
+    // one is the error, because the alternative is a typo that silently means
+    // nothing.
+    let src = "\
+Json :: struct { rename: str }
+P :: struct { @Json(rename: \"a\") id: i32 }
+";
+    let s = analyze1(src);
+    assert!(s.has_errors());
+    let d = format!("{:#?}", s.diagnostics);
+    assert!(d.contains("is not an `@attribute`"), "{d}");
+}
+
+#[test]
+fn an_attribute_writes_every_member() {
+    let src = "\
+@attribute Json :: struct { rename: str, skip: bool }
+P :: struct { @Json(rename: \"a\") id: i32 }
+";
+    let s = analyze1(src);
+    assert!(s.has_errors());
+    let d = format!("{:#?}", s.diagnostics);
+    assert!(d.contains("takes 2 argument(s)"), "{d}");
+}
+
+#[test]
 fn a_field_read_off_an_unsolved_base_is_deferred() {
     // `ms[i].name` reads a field of `Index.Output`, which is a variable until
     // the impl is selected. The lookup used to be answered right there, with

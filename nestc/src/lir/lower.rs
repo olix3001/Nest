@@ -1131,16 +1131,28 @@ impl Cx<'_> {
             Some(Ok(f)) => f.offsets,
             _ => Vec::new(),
         };
+        // A member's own def, so the attributes a program wrote on it can be
+        // found: `member_types` gives names and types, and the def table is
+        // what carries everything else about a declaration.
+        let defs_of: Vec<Option<DefId>> = match ty {
+            Ty::Nominal { def, .. } => match self.linked.ty(*def).map(|t| &t.kind) {
+                Some(TypeDefKind::Struct { members }) => members.iter().map(|m| m.def).collect(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
         let mut parts: Vec<Constant> = Vec::new();
         for (i, (name, mty)) in members.iter().enumerate() {
             let size = self.layouts.of(mty).map(|l| l.size).unwrap_or(0);
             let name_const = self.text_data(name.as_str().as_bytes(), &text);
+            let attrs = self.attrs_const(defs_of.get(i).copied().flatten(), &key, i);
             parts.push(Constant::Aggregate(vec![
                 name_const,
                 Constant::Int((*offsets.get(i).unwrap_or(&0) as i128).into()),
                 Constant::Int((size as i128).into()),
                 self.kind_const(mty),
                 self.type_id_const(mty),
+                attrs,
             ]));
         }
         let count = parts.len() as u64;
@@ -1158,6 +1170,11 @@ impl Cx<'_> {
 
         let layout = self.layouts.of(ty).unwrap_or(crate::ir::layout::Layout::ZERO);
         let name_const = self.text_data(ty.display(self.defs).as_bytes(), &text);
+        let own = match ty {
+            Ty::Nominal { def, .. } => Some(*def),
+            _ => None,
+        };
+        let own_attrs = self.attrs_const(own, &key, usize::MAX);
         let info = Constant::Aggregate(vec![
             name_const,
             Constant::Int((layout.size as i128).into()),
@@ -1169,6 +1186,7 @@ impl Cx<'_> {
                 Constant::Global(table),
                 Constant::Int((count as i128).into()),
             ]),
+            own_attrs,
         ]);
         let info_lty = self.lir(&info_ty);
         Some(self.data_global(
@@ -1177,6 +1195,96 @@ impl Cx<'_> {
             info,
             format!("reflect.info:{key}"),
         ))
+    }
+
+    /// The `[]Attr` slice for the attributes written on `def`, as a constant.
+    ///
+    /// Each value goes to a global of its own — read-only data, like every
+    /// other constant here — and the descriptor holds its address beside the
+    /// identity that says how to read it. `where` distinguishes one member's
+    /// table from another's in the global's key.
+    fn attrs_const(&mut self, def: Option<DefId>, key: &str, where_: usize) -> Constant {
+        // A slice with no elements still needs a *pointer*: a backend builds a
+        // global's initializer with no builder to hand, so an integer where an
+        // address belongs has nowhere to be converted. The empty table is a
+        // `[0]Attr` global, exactly as a zero-length string is a `[0]u8` one.
+        let Some(attr_ty) = self.lang_nominal("reflect_attr") else {
+            return Constant::Aggregate(vec![
+                Constant::Undef,
+                Constant::Int(0.into()),
+            ]);
+        };
+        let written = match def {
+            Some(d) => self.defs.get(d).attrs.clone(),
+            None => Vec::new(),
+        };
+        let text = Ty::Slice {
+            mutable: false,
+            inner: Box::new(Ty::u8()),
+        };
+        let mut parts: Vec<Constant> = Vec::new();
+        for a in &written {
+            let ty = Ty::Nominal {
+                def: a.def,
+                args: Vec::new(),
+            };
+            // The arguments, put in the struct's *declaration* order — which is
+            // the order the layout engine reports members in, and the one thing
+            // name resolution could not know.
+            let names: Vec<Symbol> = self
+                .layouts
+                .member_types(&ty)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+            let mut ordered: Vec<ConstValue> = Vec::new();
+            for (i, n) in names.iter().enumerate() {
+                let found = a
+                    .args
+                    .iter()
+                    .find(|(an, _)| an.as_ref() == Some(n))
+                    .or_else(|| a.args.get(i).filter(|(an, _)| an.is_none()));
+                match found {
+                    Some((_, v)) => ordered.push(v.clone()),
+                    // Resolution checked the count and the names, so this is
+                    // a program that did not type-check; drop the attribute
+                    // rather than emit a half-written value.
+                    None => continue,
+                }
+            }
+            let value = self.const_data(&ConstValue::Aggregate(ordered), &ty);
+            let lty = self.lir(&ty);
+            let g = self.data_global(
+                "attr",
+                lty,
+                value,
+                format!("reflect.attr:{key}:{where_}:{}", parts.len()),
+            );
+            let name = self.defs.get(a.def).name.clone();
+            let name_const = self.text_data(name.as_str().as_bytes(), &text);
+            parts.push(Constant::Aggregate(vec![
+                name_const,
+                self.type_id_const(&ty),
+                Constant::Global(g),
+            ]));
+        }
+        let n = parts.len() as u64;
+        let attr_lty = self.lir(&attr_ty);
+        let array = LirTy::Array {
+            len: n,
+            elem: Box::new(attr_lty),
+        };
+        let table = self.data_global(
+            "attrs",
+            array,
+            Constant::Aggregate(parts),
+            format!("reflect.attrs:{key}:{where_}"),
+        );
+        Constant::Aggregate(vec![
+            Constant::Global(table),
+            Constant::Int((n as i128).into()),
+        ])
     }
 
     fn variant_info(&self, ty: &Ty, name: &Symbol) -> (i128, Vec<Ty>) {
