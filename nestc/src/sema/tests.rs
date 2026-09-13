@@ -6264,6 +6264,51 @@ fn a_constant_arithmetic_result_must_fit_its_type() {
     assert!(ir.contains("// = 144"), "{ir}");
 }
 
+/// A name in **type position** that does not name a type has to be reported
+/// where it was written.
+///
+/// It used to be a silent [`Ty::Error`], which unifies with everything: the
+/// signature then type-checked against nothing, and the first thing that
+/// noticed was the backend refusing a `void` slot — in whatever function
+/// *called* the one with the mistake in it.
+///
+/// The way to get here by accident is shadowing. An `import` binding is an
+/// ordinary name, so `str :: import <std/str>` hides the `str` every file gets
+/// from the prelude, and `-> str` then names the namespace.
+#[test]
+fn a_name_that_is_not_a_type_is_reported_where_it_is_written() {
+    assert_eq!(
+        first_error(
+            "text :: namespace { x :: func () {} }\n\
+             f :: func () -> text { return 0 }\n"
+        ),
+        "`text` is a namespace, not a type"
+    );
+    // A function, a constant and a local are the other ways to write a value
+    // where a type belongs.
+    assert_eq!(
+        first_error("g :: func () {}\nf :: func (x: g) {}\n"),
+        "`g` is a func, not a type"
+    );
+    // And the shadowing case carries the note, because nothing else in the
+    // message says the name used to mean something else.
+    let session = analyze_mem(
+        &[(
+            "main",
+            "str :: namespace { to_string :: func () {} }\n\
+             f :: func () -> str { return \"\" }\n",
+        )],
+        "main",
+    );
+    let d = session.diagnostics.first().expect("a diagnostic");
+    assert_eq!(d.message, "`str` is a namespace, not a type");
+    assert!(
+        d.notes.iter().any(|n| n.contains("shadows any type")),
+        "{:#?}",
+        d.notes
+    );
+}
+
 /// `int.<N>` and `uint.<N>` are the integer **families** (§3.1), and the `i<N>` /
 /// `u<N>` spellings are sugar for members of them — the *same* types, not two
 /// that convert.

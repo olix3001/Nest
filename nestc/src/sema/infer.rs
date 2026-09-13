@@ -181,6 +181,16 @@ pub struct RangeReported;
 #[derive(Debug, Clone, Copy)]
 pub struct ConstSlotReported;
 
+/// A type-position path that named something that is not a type, already
+/// reported.
+///
+/// Same shape and same reason as [`ConstSlotReported`]: a type node is resolved
+/// **once per use**, so the sentence below would otherwise be said once for the
+/// signature, once for the body's check and once more per alias expansion. One
+/// written name is one mistake.
+#[derive(Debug, Clone, Copy)]
+pub struct TyPathReported;
+
 /// An `a[i]` that is the **place of an assignment** rather than a value.
 ///
 /// For a user container the two are different traits and the resolution says
@@ -5421,7 +5431,72 @@ impl Inferer<'_> {
                 self.report_in(file, node, msg);
                 Ty::Error
             }
-            _ => Ty::Error,
+            // Anything else named where a type belongs: a namespace, a function,
+            // a local, a field. **It has to be said**, and this is the only place
+            // that can say it — a `Ty::Error` unifies with everything, so a
+            // signature built from one type-checks against nothing and the
+            // mistake surfaces as the backend refusing a `void` slot, in a
+            // function that is not the one with the error in it.
+            //
+            // The common way to get here is a *shadowed* prelude type:
+            // `str :: import <std/str>` binds the namespace over the type, and
+            // then `-> str` names the import. That is what the note is for.
+            //
+            // [`DefKind::External`] is the exception and stays silent: it is a
+            // member of a package that was deliberately not loaded, so "not a
+            // type" is not something we know.
+            DefKind::External => Ty::Error,
+            kind => {
+                if self.asts[&file].meta::<TyPathReported>(node).is_none() {
+                    self.asts[&file].set_meta(node, TyPathReported);
+                    let name = self.written_path_in(file, node, def);
+                    let msg = format!("`{name}` is a {}, not a type", kind.label());
+                    // A one-word namespace is nearly always an `import`
+                    // binding, and an `import` binding shadows: `str :: import
+                    // <std/str>` hides the `str` the prelude gives every file,
+                    // so the signature under the caret looks right and names
+                    // the wrong thing. Say so, because nothing else in the
+                    // message hints that the name used to mean something.
+                    match kind == DefKind::Namespace && !name.contains('.') {
+                        true => self.report_with_note_in(
+                            file,
+                            node,
+                            msg,
+                            format!(
+                                "a binding of `{name}` shadows any type of that \
+                                 name \u{2014} bind the import under another \
+                                 name to write both"
+                            ),
+                        ),
+                        false => self.report_in(file, node, msg),
+                    }
+                }
+                Ty::Error
+            }
+        }
+    }
+
+    /// The path as the program **wrote** it — `"str"`, `"c.int"` — for a
+    /// message about a name in type position.
+    ///
+    /// Not the def's own name: `str :: import <std/str>` resolves to a namespace
+    /// called `std`, and naming that in the diagnostic points at a package the
+    /// program never wrote instead of the word under the caret.
+    fn written_path_in(&self, file: FileId, node: NodeId, def: DefId) -> String {
+        let ast = &self.asts[&file];
+        let path = match ast.node(node).kind {
+            NodeKind::TypePath { path, .. } => path,
+            _ => node,
+        };
+        match &ast.node(path).kind {
+            NodeKind::Path { segments } => segments
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+            // Not a path at all — nothing was written to quote, so the def's
+            // own name is the best there is.
+            _ => self.defs.get(def).name.to_string(),
         }
     }
 
@@ -6266,6 +6341,24 @@ impl Inferer<'_> {
         self.diags.push(
             Diagnostic::error(message)
                 .with_primary(FileSpan::new(self.file, span), "")
+                .with_note(note),
+        );
+    }
+
+    /// [`Inferer::report_with_note`] against another file's arena, for the same
+    /// reason [`Inferer::report_in`] exists: a signature is checked from
+    /// whatever body reached it, and the span belongs to the file that wrote it.
+    fn report_with_note_in(
+        &mut self,
+        file: FileId,
+        node: NodeId,
+        message: impl Into<String>,
+        note: impl Into<String>,
+    ) {
+        let span = self.asts[&file].node(node).span;
+        self.diags.push(
+            Diagnostic::error(message)
+                .with_primary(FileSpan::new(file, span), "")
                 .with_note(note),
         );
     }
