@@ -116,27 +116,70 @@ what **reflection** is. The decision is: **compile-time reflection *and*
 user-defined attributes, with attributes visible as data on the type
 information**. There is no `comptime` keyword.
 
+**The spelling is `#intrinsic`, not a sigil.** `$name` was retired in phase 3 and
+an intrinsic is a **bodyless `#intrinsic` function declared in `core`** (§9),
+called like any other function — `cast`, `size_of`, `make` and `transmute` all
+work this way already. Reflection is the same: a `core/reflect.nest` of bodyless
+declarations, and `@` stays what it is, the **attribute** sigil.
+
+```nest
+reflect :: import <core/reflect>
+
+// core/reflect.nest — every one of these is compiler-supplied.
+@public type_info :: #intrinsic("type_info") func <T> () -> TypeInfo
+```
+
 The shape:
 
-- `@typeinfo(T)` is a **value** — ordinary data, available at compile time
-  because `T` is known after monomorphization. Its members are a slice of
+- **`type_info.<T>()` returns a value** — ordinary data, and constant-folded
+  because `T` is concrete after monomorphization. Its `members` are a slice of
   descriptors, and a descriptor's `kind` is an **enum**. So a loop over
-  `@typeinfo(T).members` is an ordinary loop over ordinary data, and can happen
+  `type_info.<T>().members` is an ordinary loop over ordinary data, and can run
   at run time like any other: nothing about *reading the description* requires
   unrolling.
-- What does require unrolling is **typed access to the value**: `@member(v, m)`
-  has a different type for each `m`, so the loop that reads a struct's fields
-  out of a real value has to be unrolled to be typed at all. That is a property
-  of the loop's body, not of the data.
+- What does require unrolling is **typed access to the value**: an accessor that
+  yields a differently-typed value for each member can only be typed if the loop
+  around it is unrolled. That is a property of the loop's body, not of the data —
+  and reading a field by a **run-time** selector is a separate question, below.
 - **User attributes are data on the same descriptors.** An `@attribute`
   declaration defines a struct; writing `@json(rename: "user_id")` on a member
   puts that struct in the member's `attrs`. No expansion pass, no generated
   code, no second program representation — an encoder reads them like any other
-  field.
+  field. This is a **new** §9 addition: today's attributes are a fixed set
+  (`@public`, `@link_name`), and letting a program declare its own is the change.
+
+### Reading a field chosen at run time — decided
+
+**`member_ptr` plus an ordinary `cast`. No checked read.**
+
+```nest
+@public member_ptr :: #intrinsic("member_ptr") func <T> (v: *T, m: Member) -> *mut void
+```
+
+The address is `base + m.offset`, which LIR already computes for every static
+field access, so the intrinsic is one instruction. The caller casts it to what
+the descriptor said the member is, and `size_of` / `align_of` are already there
+for anything that needs them.
+
+**A *checked* read was considered and dropped, and the reason is not the check.**
+The branch is easy — it is the same lowering as the bounds check `a[i]` already
+gets (§3.2): a comparison, an edge, and a panic block. What is hard is what it
+would compare *against*: a member's `kind` enum does not distinguish two
+structs, so a real check needs a **stable run-time type identity across codegen
+units**, and there is none. LIR's `TypeId` is an index into one unit's table and
+`mono::type_key` is a compile-time string. That is a feature of its own, and a
+checked `member_read` can be added over `member_ptr` later without changing
+anything, if it ever arrives.
+
+**The GC hazard is pre-existing, not introduced here.** A member pointer is an
+*interior* pointer — and `&mut p.y` is one too, so the language has had them
+since `&` did. Boehm is conservative and traces interior pointers, so this works
+today. A precise or moving collector needs an interior address mapped back to
+the object it points into, which is exactly the **object-start table** already
+open in §5/§6 — the same item, reached from a second direction.
 
 **Decisions still open here** (see the bottom of this file): how the unrolling is
-spelled, and whether a `#unroll` directive on ordinary loops is the same feature
-or a different one.
+spelled, and whether a `#unroll` directive on ordinary loops is the same feature.
 
 ---
 

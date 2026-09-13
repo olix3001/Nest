@@ -131,22 +131,34 @@ arrow is real:
 **Compile-time reflection *and* user-defined attributes, with attributes visible
 as data on the type information. No `comptime` keyword.**
 
-- `@typeinfo(T)` is a **value** — ordinary data, known at compile time because
-  `T` is concrete after monomorphization. Its members are a slice of
-  descriptors whose `kind` is an **enum**, so a loop over the descriptions is an
-  ordinary loop and can run at run time like any other.
-- What must unroll is **typed access to the value**: `@member(v, m)` has a
-  different type per member, so that loop's *body* is what forces it — not the
-  data.
+**The spelling is `#intrinsic`, not a sigil**: `$name` was retired in phase 3, so
+reflection is a `core/reflect.nest` of **bodyless `#intrinsic` functions** called
+like any other — the way `cast`, `size_of` and `make` already work. `@` stays the
+**attribute** sigil.
+
+- `type_info.<T>()` returns a **value** — ordinary data, constant-folded because
+  `T` is concrete after monomorphization. Its members are a slice of descriptors
+  whose `kind` is an **enum**, so a loop over the descriptions is an ordinary
+  loop and can run at run time like any other.
+- What must unroll is **typed access to the value**: an accessor yielding a
+  different type per member is what forces it — the loop's body, not the data.
+- **A field chosen at run time is read with `member_ptr` and an ordinary
+  `cast`** — the address is `base + m.offset`, which LIR already computes. A
+  *checked* read was dropped: the branch is easy (the bounds check's lowering),
+  but what it would compare against — a stable run-time type identity across
+  codegen units — does not exist, and that is a feature of its own. The GC
+  hazard is pre-existing: `&mut p.y` is already an interior pointer, Boehm
+  traces them, and a precise collector wants the **object-start table** that is
+  already open in §5/§6.
 - An `@attribute` declaration defines a struct; `@json(rename: "user_id")` on a
   member puts that struct in the member's `attrs`. No expansion pass, no
-  generated code, no second program representation.
+  generated code, no second program representation. This is a **new** §9
+  addition — today's attributes are a fixed set (`@public`, `@link_name`).
 
 ## Still open, and yours to decide
 
 | Decision | Why it is open |
 |---|---|
-| **Runtime member access** | Reflection reads descriptions at run time, but reading a *value's* field by a run-time selector needs an answer for "what type comes back". Options recorded in `design/toolchain.md`; not decided |
 | **C varargs** (`printf`) | Not in the spec or the parser. `std` can do its own formatting; a program calling C cannot always |
 | **How unrolling is spelled** | Implicit (a loop whose body demands it unrolls), or written — `#unroll` |
 | **`#unroll` on ordinary loops** | A hint like `#inline` — the same feature as above, or a different one sharing a name |
@@ -230,6 +242,8 @@ Everything in the previous handoffs still stands. New this session:
 | C strings are explicit both ways | A `str` is `{ ptr, len }` and a C string is not; neither has what the other needs |
 | `std` sits on libc and also exposes it raw | One implementation across three platforms, and an unwrapped `ioctl` should not need re-declaring |
 | Reflection is data, attributes are data on it | A loop over descriptions is an ordinary loop; only typed access to a value must unroll |
+| Reflection is `#intrinsic` functions in `core`, not a sigil | `$name` was retired in phase 3; `@` is the attribute sigil |
+| A run-time field read is `member_ptr` + `cast`, unchecked | The check is cheap; the stable run-time type id it would need is not |
 
 ## Current State
 
