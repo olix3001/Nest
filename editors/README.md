@@ -51,7 +51,9 @@ settings:
 }
 ```
 
-`twig` and `nestc` there become `nest-lsp --twig <path> --nestc <path>`. Without
+`twig` and `nestc` there become `nest-lsp --twig <path> --nestc <path>`, and
+the `twig` and `nestc` initialization options too, since Zed starts a
+`binary.path` without asking the extension for its arguments. Without
 `nestc`, twig finds it as it always does (`NESTC`, then `PATH`). twig's `nestc`
 must be the same build as the server: the server reads libraries it wrote.
 

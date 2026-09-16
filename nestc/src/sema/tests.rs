@@ -6536,6 +6536,25 @@ fn a_name_that_is_not_a_type_is_reported_where_it_is_written() {
     );
 }
 
+/// A name in **value position** that has no value has to be reported too. A
+/// namespace used to get a fresh type variable, which took whatever type the
+/// slot wanted, so `let p: *mut T := mem` type-checked and reached code
+/// generation as an error type with nothing said about it.
+#[test]
+fn a_namespace_or_a_trait_is_not_a_value() {
+    assert_eq!(
+        first_error(
+            "text :: namespace { x :: func () {} }\n\
+             f :: func () { let p: *mut i32 := text }\n"
+        ),
+        "`text` is a namespace, not a value"
+    );
+    assert_eq!(
+        first_error("Show :: trait {}\nf :: func <T> () -> *mut T { return Show }\n"),
+        "`Show` is a trait, not a value"
+    );
+}
+
 /// `int.<N>` and `uint.<N>` are the integer **families** (§3.1), and the `i<N>` /
 /// `u<N>` spellings are sugar for members of them — the *same* types, not two
 /// that convert.

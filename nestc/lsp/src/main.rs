@@ -69,10 +69,6 @@ fn main() -> ExitCode {
 
     let (conn, io) = Connection::stdio();
     let result = server::run(&conn, |options| -> Arc<dyn Toolchain> {
-        eprintln!(
-            "nest-lsp(reminder): started with {:?}",
-            std::env::args().skip(1).collect::<Vec<_>>()
-        );
         let option = |name: &str| {
             options
                 .get(name)

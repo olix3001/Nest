@@ -24,16 +24,9 @@ impl zed::Extension for Nest {
     ) -> Result<Command> {
         let settings = LspSettings::for_worktree(id.as_ref(), worktree).unwrap_or_default();
         let mut flags = Vec::new();
-        for name in ["twig", "nestc"] {
-            let path = settings
-                .settings
-                .as_ref()
-                .and_then(|s| s.get(name))
-                .and_then(|v| v.as_str());
-            if let Some(path) = path {
-                flags.push(format!("--{name}"));
-                flags.push(absolute(path, worktree));
-            }
+        for (name, path) in toolchain(&settings, worktree) {
+            flags.push(format!("--{name}"));
+            flags.push(path);
         }
         let binary = settings.binary;
         let (path, args, env) = match binary {
@@ -60,10 +53,35 @@ impl zed::Extension for Nest {
         id: &LanguageServerId,
         worktree: &Worktree,
     ) -> Result<Option<zed::serde_json::Value>> {
-        Ok(LspSettings::for_worktree(id.as_ref(), worktree)
-            .ok()
-            .and_then(|s| s.initialization_options))
+        // Zed starts `lsp.nest-lsp.binary.path` itself, without asking
+        // `language_server_command`, so the flags never reach that server. The
+        // options do, and the server reads `twig` and `nestc` from them too.
+        let settings = LspSettings::for_worktree(id.as_ref(), worktree).unwrap_or_default();
+        let paths = toolchain(&settings, worktree);
+        let mut options = settings.initialization_options;
+        if !paths.is_empty() {
+            let mut map = match options.take() {
+                Some(zed::serde_json::Value::Object(map)) => map,
+                _ => Default::default(),
+            };
+            for (name, path) in paths {
+                map.insert(name.to_string(), zed::serde_json::Value::String(path));
+            }
+            options = Some(zed::serde_json::Value::Object(map));
+        }
+        Ok(options)
     }
+}
+
+/// `twig` and `nestc` from `lsp.nest-lsp.settings`, as absolute paths.
+fn toolchain(settings: &LspSettings, worktree: &Worktree) -> Vec<(&'static str, String)> {
+    ["twig", "nestc"]
+        .into_iter()
+        .filter_map(|name| {
+            let path = settings.settings.as_ref()?.get(name)?.as_str()?;
+            Some((name, absolute(path, worktree)))
+        })
+        .collect()
 }
 
 /// A path from the settings, as the server has to be given it: `~/` is the home

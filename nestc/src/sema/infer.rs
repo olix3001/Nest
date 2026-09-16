@@ -4385,6 +4385,15 @@ impl Inferer<'_> {
             // Something from an import that failed to load: already reported,
             // and whatever it is, nothing more can be known about it.
             DefKind::External => Ty::Error,
+            // A namespace or a trait has no value to take. A fresh variable
+            // here unifies with whatever the slot wants, so `let p: *mut T :=
+            // mem` would type-check silently and reach code generation as
+            // nothing at all.
+            kind @ (DefKind::Namespace | DefKind::Trait) => {
+                let name = self.written_path_in(self.file, node, def);
+                self.report(node, format!("`{name}` is a {}, not a value", kind.label()));
+                Ty::Error
+            }
             _ => self.cx.fresh(),
         }
     }
