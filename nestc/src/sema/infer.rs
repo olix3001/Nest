@@ -874,8 +874,13 @@ pub(crate) fn in_scope_traits(
 fn bound_traits(defs: &DefTable, ast: &Ast) -> HashSet<DefId> {
     let mut set = HashSet::new();
     for node in ast.ids() {
-        let NodeKind::Bounds { bounds } = ast.node(node).kind.clone() else {
-            continue;
+        // A `dyn` names its trait the same way a bound does: `*dyn reflect.Any`
+        // is as clear a statement that `Any` is wanted as `T: reflect.Any`, and
+        // the unsizing coercion selects its impl like any other use.
+        let bounds = match ast.node(node).kind.clone() {
+            NodeKind::Bounds { bounds } => bounds,
+            NodeKind::DynType { inner } => vec![inner],
+            _ => continue,
         };
         for b in bounds {
             // The head of `Trait.<Args>` is what names the trait; a bare path is

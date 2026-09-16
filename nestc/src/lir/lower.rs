@@ -1131,7 +1131,26 @@ impl Cx<'_> {
 
         // One `Member` per member, in declaration order — the order every
         // `Projection::Field` index is already counted in.
-        let members = self.layouts.member_types(ty).unwrap_or_default();
+        let members = match ty {
+            // A tuple's positions are members named `0`, `1`, … (§3.3), and
+            // `fields` below already lays them out.
+            Ty::Tuple(elems) => elems
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (Symbol::new(&i.to_string()), e.clone()))
+                .collect(),
+            // A `distinct` has a member in its layout and none in its
+            // description: it *is* its representation, not a wrapper round it.
+            Ty::Nominal { def, .. }
+                if matches!(
+                    self.linked.ty(*def).map(|t| &t.kind),
+                    Some(TypeDefKind::Struct { .. })
+                ) =>
+            {
+                self.layouts.member_types(ty).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
         let offsets = match self.layouts.fields(ty) {
             Some(Ok(f)) => f.offsets,
             _ => Vec::new(),

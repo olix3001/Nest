@@ -311,7 +311,9 @@ impl Resolver<'_> {
             // `#static` changes what the binding underneath *is*, so it has to
             // be visible while that binding is resolved.
             NodeKind::Decl {
-                directives, item, ..
+                attrs,
+                directives,
+                item,
             } => {
                 // Attributes and directives are compiler vocabulary, never
                 // program names, so neither is walked (see below).
@@ -329,6 +331,13 @@ impl Resolver<'_> {
                 self.resolve_node(item);
                 self.decl_static = outer;
                 self.decl_comptime = outer_ct;
+                // An `@attribute` value written on the declaration is recorded
+                // on its def, as one written on a field is — after the item, so
+                // a block-local binding has its def. The compiler's own
+                // attributes resolve to nothing and are left alone.
+                for a in attrs {
+                    self.resolve_node(a);
+                }
             }
             // A `@Name(args)` a program wrote. The compiler's own attributes
             // (`@public`, `@link_name`) are vocabulary and resolve to nothing;

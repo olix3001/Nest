@@ -564,6 +564,63 @@ fn a_program_links_and_runs() {
              }\n",
             7,
         ),
+        // Every `Kind` arm the compiler has a type for, a tuple's positions as
+        // members named `0` and `1`, and a `distinct` described as what it is
+        // rather than as a wrapper with one member.
+        (
+            "r :: import <core/reflect>\n\
+             Box :: struct <T> { item: T, n: u8 }\n\
+             Color :: enum { Red, Green }\n\
+             Meters :: distinct f64\n\
+             k :: func (t: r.TypeInfo) -> i32 {\n\
+            \x20 return t.kind.match {\n\
+            \x20   .Void => 1, .Bool => 2, .Int => 3, .Uint => 4, .Float => 5, .Ptr => 6,\n\
+            \x20   .Slice => 7, .Array => 8, .Tuple => 9, .Struct => 10, .Enum => 11, _ => 0,\n\
+            \x20 }\n\
+             }\n\
+             main :: func () -> i32 {\n\
+            \x20 if k(r.type_info.<void>()) != 1 { return 1 }\n\
+            \x20 if k(r.type_info.<bool>()) != 2 { return 2 }\n\
+            \x20 if k(r.type_info.<i16>()) != 3 { return 3 }\n\
+            \x20 if k(r.type_info.<u8>()) != 4 { return 4 }\n\
+            \x20 if k(r.type_info.<f32>()) != 5 { return 5 }\n\
+            \x20 if k(r.type_info.<*i32>()) != 6 { return 6 }\n\
+            \x20 if k(r.type_info.<[]u8>()) != 7 { return 7 }\n\
+            \x20 if k(r.type_info.<[3]u16>()) != 8 || r.type_info.<[3]u16>().size != 6 { return 8 }\n\
+            \x20 if k(r.type_info.<Color>()) != 11 { return 9 }\n\
+            \x20 let b: r.TypeInfo := r.type_info.<Box.<i64>>()\n\
+            \x20 if k(b) != 10 || b.members.len() != 2 || b.members[1].offset != 8 { return 10 }\n\
+            \x20 let t: r.TypeInfo := r.type_info.<(i32, f64)>()\n\
+            \x20 if k(t) != 9 || t.members.len() != 2 { return 11 }\n\
+            \x20 if t.members[1].name != \"1\" || t.members[1].offset != 8 { return 12 }\n\
+            \x20 let m: r.TypeInfo := r.type_info.<Meters>()\n\
+            \x20 if k(m) != 5 || m.members.len() != 0 { return 13 }\n\
+            \x20 return 42\n\
+             }\n",
+            42,
+        ),
+        // The write half of the checked read, `member_of`, an `@attribute` on
+        // the *type* rather than a member, and a `*dyn reflect.Any` whose trait
+        // is named only through the namespace. 40 + 2.
+        (
+            "r :: import <core/reflect>\n\
+             @attribute Tag :: struct { n: i32 }\n\
+             @Tag(n: 2)\n\
+             P :: struct { x: i32, y: f64 }\n\
+             Q :: struct { q: i8 }\n\
+             main :: func () -> i32 {\n\
+            \x20 let mut p: P := P { x: 1, y: 0.5 }\n\
+            \x20 let y: r.Member := r.member_of.<P>(\"y\").!\n\
+            \x20 r.member_write.<P, f64>(&mut p, y, 4.0)\n\
+            \x20 if p.y != 4.0 { return 1 }\n\
+            \x20 if r.member_of.<P>(\"w\").match { .some(_) => true, .none => false } { return 2 }\n\
+            \x20 let a: *dyn r.Any := &p\n\
+            \x20 if r.downcast.<Q>(a).match { .some(_) => true, .none => false } { return 3 }\n\
+            \x20 let tag: Tag := r.attr_of.<Tag>(r.type_info.<P>().attrs).!\n\
+            \x20 return cast.<i32>(r.downcast.<P>(a).!.*.y) * 10 + tag.n\n\
+             }\n",
+            42,
+        ),
         // **A `for` loop runs its body.** `core`'s `Iterator` impls for a range
         // and for a slice were stubs answering `.none`, so every `for` in
         // every program ran zero times and said nothing — which is the worst

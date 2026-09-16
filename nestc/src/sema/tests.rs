@@ -8350,3 +8350,16 @@ fn a_bare_self_needs_an_impl_or_a_trait() {
         msgs[0]
     );
 }
+
+/// Naming a trait in `dyn` puts it in scope for selection, as naming it in a
+/// bound does: `*dyn r.Any` with only the namespace imported must find the
+/// blanket impl rather than report a mismatch.
+#[test]
+fn a_trait_named_in_a_dyn_is_selectable() {
+    let msgs = messages(
+        "r :: import <core/reflect>\n\
+         P :: struct { x: i32 }\n\
+         f :: func (p: *P) { let a: *dyn r.Any := p }\n",
+    );
+    assert!(msgs.is_empty(), "{msgs:#?}");
+}
