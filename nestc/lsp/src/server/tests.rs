@@ -318,7 +318,7 @@ fn a_definition_is_its_name() {
 }
 
 fn labels(v: &serde_json::Value) -> Vec<String> {
-    v.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    v["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
 }
 
 /// After a `.` the members of the value's type are offered, and elsewhere the
@@ -340,4 +340,66 @@ fn completion_offers_members_and_names_in_scope() {
         assert!(names.contains(&want.to_string()), "{want} in {names:?}");
     }
     assert!(!names.contains(&"n".to_string()), "`n` is declared later: {names:?}");
+}
+
+/// A file a unit read, changed on disk while not open, is analyzed again when
+/// the client says so.
+#[test]
+fn a_file_changed_on_disk_is_analyzed_again() {
+    let dir = Scratch::new();
+    let main = dir.0.join("main.nest");
+    let other = dir.0.join("other.nest");
+    std::fs::write(&other, "@public g :: func () -> i32 { return true }\n").unwrap();
+    let mut client = Client::start(Fake(Err("no workspace here".to_string())));
+
+    client.open(&main, "{ g } :: import \"other.nest\"\nf :: func () -> i32 { return g() }\n");
+    assert!(!client.diagnostics(&other).is_empty(), "`other.nest` is wrong on disk");
+
+    std::fs::write(&other, "@public g :: func () -> i32 { return 1 }\n").unwrap();
+    let change = lsp_types::FileEvent::new(path_to_uri(&other).unwrap(), lsp_types::FileChangeType::CHANGED);
+    client.notify(
+        lsp_types::notification::DidChangeWatchedFiles::METHOD,
+        lsp_types::DidChangeWatchedFilesParams { changes: vec![change] },
+    );
+    assert_eq!(client.diagnostics(&other), Vec::new());
+}
+
+/// After a `.` on a primitive, a slice or a string literal, their impls'
+/// methods; in a `match` arm and where an enum is expected, its variants.
+#[test]
+fn completion_knows_primitives_slices_and_variants() {
+    let (_dir, file, mut client) = program();
+    let text = PROGRAM.replace(
+        "  return p.sum() + n",
+        "  let w: i32 := n.\n  let q: Color := .\n  let r: i32 := q.match { . => 1, _ => 2 }\n  return p.sum() + n",
+    ) + "Color :: enum { red, green }\n";
+    client.change(&file, &text);
+
+    let ints = labels(&client.at(Completion::METHOD, &file, position(&text, "n.\n", 0, 2)));
+    assert!(ints.contains(&"wrapping_add".to_string()), "{ints:?}");
+
+    let made = labels(&client.at(Completion::METHOD, &file, position(&text, "Color := .", 0, 10)));
+    assert!(made.contains(&"red".to_string()) && made.contains(&"green".to_string()), "{made:?}");
+
+    let arms = labels(&client.at(Completion::METHOD, &file, position(&text, "{ . =>", 0, 3)));
+    assert!(arms.contains(&"red".to_string()) && arms.contains(&"green".to_string()), "{arms:?}");
+}
+
+/// A name no import brings in is offered with the import that does, and
+/// choosing it adds that import, after the file's others.
+#[test]
+fn completion_imports_what_it_offers() {
+    let (_dir, file, mut client) = program();
+    let text = "io :: import <std/io>\n".to_string()
+        + &PROGRAM.replace("  return p.sum() + n", "  let h := HashM\n  return p.sum() + n");
+    client.change(&file, &text);
+
+    let answer = client.at(Completion::METHOD, &file, position(&text, "HashM\n", 0, 5));
+    let items = answer["items"].as_array().unwrap();
+    let map = items.iter().find(|i| i["label"] == "HashMap").expect("`HashMap` is offered");
+    let edit = &map["additionalTextEdits"][0];
+    assert_eq!(edit["newText"], "{ HashMap } :: import <std/collections>\n", "{map}");
+    assert_eq!(edit["range"]["start"]["line"], 1, "{map}");
+    // What is imported already is not offered again.
+    assert!(!items.iter().any(|i| i["label"] == "io" && i.get("additionalTextEdits").is_some()), "{answer}");
 }

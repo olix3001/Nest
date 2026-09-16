@@ -1,6 +1,6 @@
 //! Questions about a place in a file, answered from an analyzed session: what is
 //! here (hover), where was it defined (go-to-definition), and what could be
-//! written here (completion).
+//! written here (completion, in [`crate::complete`]).
 //!
 //! ### What is at an offset
 //!
@@ -17,13 +17,11 @@
 //! and directives in between allowed.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 
-use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
 use nestc::common::source::FileId;
 use nestc::common::span::Span;
 use nestc::parser::ast::{Ast, NodeId, NodeKind};
-use nestc::sema::def::{Def, DefId, DefKind, Visibility};
+use nestc::sema::def::{Def, DefId, DefKind};
 use nestc::sema::infer::MethodRes;
 use nestc::sema::session::Session;
 use nestc::sema::ty::Ty;
@@ -271,222 +269,7 @@ pub fn docs(s: &Session, def: DefId) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-/// What could be written at `offset` in `file`, where the session was analyzed
-/// with `placeholder` written there: a member after a `.`, or a name in scope.
-pub fn complete(s: &Session, file: FileId, offset: usize, placeholder: &str) -> Vec<CompletionItem> {
-    let Some(ast) = s.asts.get(&file) else {
-        return Vec::new();
-    };
-    let at = offset + placeholder.len();
-    let mut nodes: Vec<NodeId> = ast
-        .ids()
-        .filter(|&id| {
-            let n = ast.node(id);
-            n.file == file && n.span.start <= offset && at <= n.span.end
-        })
-        .collect();
-    nodes.sort_by_key(|&id| {
-        let span = ast.node(id).span;
-        span.end - span.start
-    });
-    for id in nodes {
-        let kind = ast.node(id).kind.clone();
-        match kind {
-            NodeKind::FieldAccess { base, name } if name.as_str().ends_with(placeholder) => {
-                if let Some(Resolution::Def(d)) = ast.meta::<Resolution>(base) {
-                    let d = target(s, d);
-                    if s.defs.get(d).kind.is_namespace_like() {
-                        return items(s, members(s, d));
-                    }
-                }
-                return match ast.meta::<Ty>(base) {
-                    Some(ty) => items(s, ty_members(s, &ty)),
-                    None => Vec::new(),
-                };
-            }
-            NodeKind::Path { segments } if segments.last().is_some_and(|l| l.as_str().ends_with(placeholder)) => {
-                if segments.len() == 1 {
-                    return scope(s, file, offset);
-                }
-                let before = ast.meta::<PathRes>(id).and_then(|p| p.0.get(segments.len() - 2).cloned());
-                return match before {
-                    Some(Resolution::Def(d)) => items(s, members(s, target(s, d))),
-                    _ => Vec::new(),
-                };
-            }
-            _ => {}
-        }
-    }
-    scope(s, file, offset)
-}
-
-/// The members of a namespace or a type that a `.` reaches: every member of a
-/// type, and the public ones of a namespace. What a namespace only imported is
-/// not reachable through it.
-fn members(s: &Session, def: DefId) -> Vec<DefId> {
-    let d = s.defs.get(def);
-    let namespace = d.kind == DefKind::Namespace;
-    let mut out: Vec<DefId> = d
-        .ns
-        .members
-        .values()
-        .copied()
-        .filter(|&m| !namespace || s.defs.get(m).vis == Visibility::Public)
-        .collect();
-    out.extend(impl_members(s, def));
-    out
-}
-
-/// What a value of type `ty` has after a `.`: fields and methods, through any
-/// number of pointers.
-fn ty_members(s: &Session, ty: &Ty) -> Vec<DefId> {
-    match ty {
-        Ty::Ptr { inner, .. } => ty_members(s, inner),
-        Ty::Nominal { def, .. } => {
-            let d = s.defs.get(*def);
-            let mut out: Vec<DefId> = d
-                .ns
-                .members
-                .values()
-                .copied()
-                .filter(|&m| matches!(s.defs.get(m).kind, DefKind::Field | DefKind::Func))
-                .collect();
-            out.extend(impl_members(s, *def).filter(|&m| s.defs.get(m).kind == DefKind::Func));
-            out
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// The members of every impl for `def`.
-fn impl_members(s: &Session, def: DefId) -> impl Iterator<Item = DefId> + '_ {
-    s.impls
-        .impls
-        .iter()
-        .filter(move |i| i.self_head == Some(def))
-        .flat_map(|i| i.members.values().copied())
-}
-
-/// Whether a local `d` is visible at `offset`: after the statement declaring
-/// it, and inside the innermost block around it.
-fn in_scope(ast: &Ast, d: &Def, offset: usize) -> bool {
-    let (Some(node), Some(span)) = (d.node, d.span) else {
-        return true;
-    };
-    let mut block: Option<Span> = None;
-    for id in ast.ids() {
-        let n = ast.node(id);
-        match &n.kind {
-            NodeKind::LocalDecl { pattern, .. } if *pattern == node && offset < n.span.end => return false,
-            NodeKind::Block { .. } if n.span.start <= span.start && span.end <= n.span.end => {
-                if block.is_none_or(|b| n.span.end - n.span.start < b.end - b.start) {
-                    block = Some(n.span);
-                }
-            }
-            _ => {}
-        }
-    }
-    block.is_none_or(|b| contains(b, offset))
-}
-
-const KEYWORDS: &[&str] = &[
-    "func", "extern", "struct", "enum", "trait", "impl", "namespace", "distinct", "let", "const",
-    "mut", "return", "defer", "match", "import", "if", "else", "for", "in", "while", "loop", "break",
-    "continue", "dyn", "true", "false",
-];
-
-/// Every name visible at `offset`: the function's parameters and the locals
-/// declared before it, the file's names, and the prelude's.
-fn scope(s: &Session, file: FileId, offset: usize) -> Vec<CompletionItem> {
-    let mut defs: Vec<DefId> = Vec::new();
-    if let Some(ast) = s.asts.get(&file) {
-        let function = ast
-            .ids()
-            .filter(|&id| {
-                let n = ast.node(id);
-                matches!(n.kind, NodeKind::FuncExpr { .. }) && n.span.start <= offset && offset <= n.span.end
-            })
-            .min_by_key(|&id| {
-                let span = ast.node(id).span;
-                span.end - span.start
-            })
-            .map(|id| ast.node(id).span);
-        if let Some(function) = function {
-            let mut locals: Vec<&Def> = s
-                .defs
-                .iter()
-                .filter(|d| matches!(d.kind, DefKind::Local | DefKind::Param | DefKind::TypeParam | DefKind::ConstParam))
-                .filter(|d| d.file == Some(file))
-                .filter(|d| d.span.is_some_and(|sp| function.start <= sp.start && sp.start < offset))
-                .filter(|d| in_scope(ast, d, offset))
-                .collect();
-            // The nearest of two with one name is the one in scope.
-            locals.sort_by_key(|d| std::cmp::Reverse(d.span.map_or(0, |sp| sp.start)));
-            defs.extend(locals.iter().map(|d| d.id));
-        }
-    }
-    if let Some(meta) = s.files.get(&file) {
-        let ns = &s.defs.get(meta.ns).ns;
-        defs.extend(ns.members.values().chain(ns.imported.values()).copied());
-        for &glob in &ns.globs {
-            defs.extend(members(s, target(s, glob)));
-        }
-    }
-    for &glob in &s.prelude_globs {
-        defs.extend(members(s, target(s, glob)));
-    }
-    let mut out = items(s, defs);
-    out.extend(KEYWORDS.iter().map(|k| CompletionItem {
-        label: k.to_string(),
-        kind: Some(CompletionItemKind::KEYWORD),
-        ..Default::default()
-    }));
-    out
-}
-
-/// A completion item per name, the first def of each name winning, and nothing
-/// the compiler made up.
-fn items(s: &Session, defs: impl IntoIterator<Item = DefId>) -> Vec<CompletionItem> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut out = Vec::new();
-    for def in defs {
-        let d = s.defs.get(def);
-        let name = d.name.as_str();
-        let written = name.chars().next().is_some_and(|c| c == '_' || c.is_alphabetic());
-        if !written || !seen.insert(name.to_string()) {
-            continue;
-        }
-        let real = target(s, def);
-        let kind = match s.defs.get(real).kind {
-            DefKind::Namespace | DefKind::External => CompletionItemKind::MODULE,
-            DefKind::Struct => CompletionItemKind::STRUCT,
-            DefKind::Enum => CompletionItemKind::ENUM,
-            DefKind::Trait => CompletionItemKind::INTERFACE,
-            DefKind::TypeAlias | DefKind::Primitive => CompletionItemKind::CLASS,
-            DefKind::TypeParam => CompletionItemKind::TYPE_PARAMETER,
-            DefKind::Const | DefKind::ConstParam => CompletionItemKind::CONSTANT,
-            DefKind::Func => CompletionItemKind::FUNCTION,
-            DefKind::Field => CompletionItemKind::FIELD,
-            DefKind::Variant => CompletionItemKind::ENUM_MEMBER,
-            DefKind::Param | DefKind::Local => CompletionItemKind::VARIABLE,
-            DefKind::Import => CompletionItemKind::MODULE,
-        };
-        let declared = declaration(s, real, None);
-        let detail = declared.lines().next().map(str::to_string);
-        out.push(CompletionItem {
-            label: name.to_string(),
-            kind: Some(kind),
-            detail,
-            documentation: docs(s, real).map(|value| {
-                Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value })
-            }),
-            ..Default::default()
-        });
-    }
-    out
-}
-
-fn contains(span: Span, offset: usize) -> bool {
+pub(crate) fn contains(span: Span, offset: usize) -> bool {
     span.start <= offset && offset <= span.end
 }
 
@@ -509,7 +292,7 @@ fn segment_at<'a>(
 }
 
 /// The first place `word` is written in `span` of `src` as a whole identifier.
-fn word_in(src: &str, span: Span, word: &str) -> Option<Span> {
+pub(crate) fn word_in(src: &str, span: Span, word: &str) -> Option<Span> {
     let text = src.get(span.start..span.end.min(src.len()))?;
     let ident = |c: char| c == '_' || c.is_alphanumeric();
     let mut from = 0;

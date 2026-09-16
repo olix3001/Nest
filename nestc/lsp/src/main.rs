@@ -5,6 +5,7 @@
 //! compiler twig runs, which otherwise it finds the way it always does.
 
 mod analysis;
+mod complete;
 mod ide;
 mod server;
 mod workspace;

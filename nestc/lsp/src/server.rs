@@ -21,14 +21,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crossbeam_channel::{Sender, select};
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit,
-    Notification as _, PublishDiagnostics,
+    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
+    DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{Completion, GotoDefinition, HoverRequest, Request as _};
+use lsp_types::request::{Completion, GotoDefinition, HoverRequest, RegisterCapability, Request as _};
 use lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
+    CompletionList, CompletionOptions, CompletionParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, FileChangeType, FileSystemWatcher, GlobPattern,
+    Registration, RegistrationParams, CompletionResponse, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, Location, MarkupContent, MarkupKind, OneOf, Position,
@@ -37,7 +39,7 @@ use lsp_types::{
 };
 
 use crate::analysis::{self, Outcome, path_to_uri, uri_to_path};
-use crate::ide;
+use crate::{complete, ide};
 use crate::workspace::{self, Metadata, Toolchain};
 
 /// Run the server over `conn` until the client says to exit. `toolchain` makes
@@ -67,6 +69,28 @@ pub fn run(
         .initialize(serde_json::to_value(capabilities).expect("capabilities serialize"))
         .map_err(|e| e.to_string())?;
     let options = params.get("initializationOptions").cloned().unwrap_or_default();
+    // Files change on disk without the editor having them open — a checkout, a
+    // formatter, another editor — so the client is asked to say when, where it
+    // can be asked.
+    if params.pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration") == Some(&serde_json::Value::Bool(true)) {
+        let watchers: Vec<FileSystemWatcher> = ["**/*.nest", "**/nest.toml"]
+            .iter()
+            .map(|glob| FileSystemWatcher { glob_pattern: GlobPattern::String(glob.to_string()), kind: None })
+            .collect();
+        let registration = Registration {
+            id: "nest-files".to_string(),
+            method: DidChangeWatchedFiles::METHOD.to_string(),
+            register_options: Some(
+                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers }).expect("options serialize"),
+            ),
+        };
+        let request = Request::new(
+            RequestId::from("nest-files".to_string()),
+            RegisterCapability::METHOD.to_string(),
+            RegistrationParams { registrations: vec![registration] },
+        );
+        let _ = conn.sender.send(request.into());
+    }
 
     let (prepared_tx, prepared) = crossbeam_channel::unbounded();
     let mut server = Server {
@@ -271,7 +295,12 @@ impl Server {
         buffers.insert(path.clone(), written);
         let o = analysis::analyze(&key.args, Rc::new(buffers)).ok()?;
         let file = ide::file_of(&o.session, &path)?;
-        Some(CompletionResponse::Array(ide::complete(&o.session, file, offset, PLACEHOLDER)))
+        // Incomplete, because what an import would bring in is offered by what
+        // is typed so far.
+        Some(CompletionResponse::List(CompletionList {
+            is_incomplete: true,
+            items: complete::complete(&o.session, file, text, offset, PLACEHOLDER),
+        }))
     }
 
     fn notification(&mut self, n: Notification) {
@@ -291,6 +320,10 @@ impl Server {
                 let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else { return };
                 self.set(&p.text_document.uri, None);
             }
+            DidChangeWatchedFiles::METHOD => {
+                let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else { return };
+                self.changed_on_disk(p);
+            }
             DidSaveTextDocument::METHOD => {
                 let Ok(_) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else { return };
                 let roots: Vec<PathBuf> = self.workspaces.keys().cloned().collect();
@@ -299,6 +332,33 @@ impl Server {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Files changed on disk. An open document is the editor's, and a save of it
+    /// says so on its own; any other file may be one a unit read, or one a
+    /// dependency's library was built from, so the units that read it are
+    /// analyzed again and every workspace is prepared again. A file created or
+    /// deleted may change what an import finds, so every unit of its
+    /// workspace goes.
+    fn changed_on_disk(&mut self, p: DidChangeWatchedFilesParams) {
+        let mut any = false;
+        for change in p.changes {
+            let Some(path) = uri_to_path(&change.uri) else { continue };
+            if self.docs.contains_key(&path) {
+                continue;
+            }
+            any = true;
+            if change.typ != FileChangeType::CHANGED {
+                self.units.retain(|key, _| !key.root.as_ref().is_some_and(|root| path.starts_with(root)));
+            }
+            self.changed.insert(path);
+        }
+        if any {
+            let roots: Vec<PathBuf> = self.workspaces.keys().cloned().collect();
+            for root in roots {
+                self.prepare(&root);
+            }
         }
     }
 

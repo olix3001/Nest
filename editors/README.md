@@ -56,4 +56,5 @@ settings:
 must be the same build as the server: the server reads libraries it wrote.
 
 The server answers diagnostics, hover, go-to-definition and completion. Hover
-shows a definition's `///` lines as its documentation.
+shows a definition's `///` lines as its documentation. Completion offers names
+that are not imported yet, and adds the import when one is chosen.

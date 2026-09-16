@@ -601,8 +601,18 @@ The server, as built so far:
   declaration as written (a function's without its body), a binding's type, and
   the `///` lines above a definition as its documentation. Completion analyzes
   the buffer again with a placeholder name at the cursor, so `p.` is a member
-  access whose base has a type, then offers that type's fields and methods, a
-  namespace's public members, or the names in scope.
+  access whose base has a type, then offers that type's fields and the methods
+  of every impl whose self type has the same head (primitives, slices and
+  `distinct` types included), a namespace's public members, an enum's variants
+  for `.variant`, or the names in scope.
+- **What is not in scope is offered too, and imported on use.** Walking every
+  importable package's public members from its root gives each reachable
+  definition its shortest import; a file of the program no package reaches is
+  imported by its relative path. Choosing such a name, or a method of a trait
+  the file has not imported, adds the `import` line after the file's last one.
+- **Files changed on disk** are watched (`**/*.nest`, `**/nest.toml`) where the
+  client supports it: a unit that read one is analyzed again, and every
+  workspace is prepared again, so a dependency's library is rebuilt.
 - **`editors/zed`** starts `nest-lsp` from `PATH`, or from
   `lsp.nest-lsp.binary` in Zed's settings; `lsp.nest-lsp.settings.twig` and
   `.nestc` become its `--twig` and `--nestc`.
