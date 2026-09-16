@@ -292,6 +292,28 @@ impl<'ctx> Cx<'ctx, '_> {
                 // (§9): a second one would be an overlap.
                 None => self.zeroed(&g.ty).map_err(|e| within(&g.name, e))?,
             };
+            let declared = self.globals[i];
+            if declared.get_value_type() != inkwell::types::AnyType::as_any_type_enum(&value.get_type()) {
+                // A constant holding an address inside an enum payload has no
+                // value of the enum's own LLVM type (§7b's payload is bytes), so
+                // it is built as a packed struct with the same bytes and the
+                // global is re-declared at that type. Every use reaches it
+                // through a pointer, which does not carry the pointee's type.
+                declared.set_name("");
+                let global = self.module.add_global(
+                    value.get_type(),
+                    Some(AddressSpace::default()),
+                    g.symbol.as_str(),
+                );
+                global.set_linkage(declared.get_linkage());
+                global.set_constant(declared.is_constant());
+                global.set_alignment(declared.get_alignment());
+                declared
+                    .as_pointer_value()
+                    .replace_all_uses_with(global.as_pointer_value());
+                unsafe { declared.delete() };
+                self.globals[i] = global;
+            }
             self.globals[i].set_initializer(&value);
         }
         Ok(())
@@ -524,7 +546,14 @@ impl<'ctx> Cx<'ctx, '_> {
                     .iter()
                     .map(|c| self.constant(elem, c))
                     .collect::<Result<_>>()?;
-                Ok(const_array(self.llty(elem)?, &vals))
+                let elem_ty = self.llty(elem)?;
+                // Elements of one LIR type can still come out as different
+                // LLVM shapes (see `shaped`), and an array cannot hold those —
+                // a packed struct of them back to back is the same bytes.
+                if vals.iter().any(|v| v.get_type() != elem_ty) {
+                    return Ok(self.context.const_struct(&vals, true).into());
+                }
+                Ok(const_array(elem_ty, &vals))
             }
             Ty::Named(id) => {
                 let def = self.unit.ty(*id);
@@ -555,7 +584,7 @@ impl<'ctx> Cx<'ctx, '_> {
                 if def.layout.size > at {
                     values.push(self.zero_bytes(def.layout.size - at));
                 }
-                Ok(self.types[id.0 as usize].const_named_struct(&values).into())
+                Ok(self.shaped(*id, &values))
             }
             other => Err(failed(format!("an aggregate constant in a {other:?} slot"))),
         }
@@ -578,18 +607,6 @@ impl<'ctx> Cx<'ctx, '_> {
             return Err(failed(format!("a variant constant in a {ty:?} slot")));
         };
         let def = self.unit.ty(*id);
-        // A constant payload with members in it would have to be laid out into
-        // bytes here, and doing that correctly means knowing each member's
-        // representation byte for byte — which is the layout engine's job, not
-        // this file's. A payload-free variant (`.none`) is the common case and
-        // is exact.
-        if !payload.is_empty() {
-            return Err(unsupported(format!(
-                "`{}.{name}` is a constant with a payload; this backend can only \
-                 build a payload-free variant as a constant",
-                def.name
-            )));
-        }
         let mut members: Vec<_> = def.members.iter().collect();
         members.sort_by_key(|m| m.offset);
         let mut values: Vec<BasicValueEnum<'ctx>> = Vec::new();
@@ -600,17 +617,74 @@ impl<'ctx> Cx<'ctx, '_> {
             }
             // Member 0 is the tag; everything after it is the payload, which is
             // zero for a variant that has none.
-            values.push(if i == 0 {
-                self.int_constant(&m.ty, &num_bigint::BigInt::from(tag))?.into()
+            if i == 0 {
+                values.push(self.int_constant(&m.ty, &num_bigint::BigInt::from(tag))?.into());
+            } else if payload.is_empty() {
+                values.push(self.zeroed(&m.ty)?);
             } else {
-                self.zeroed(&m.ty)?
-            });
+                // The payload is `[N]u8`, and what goes in it may be an
+                // address, which no byte can spell. So its members are laid
+                // out one by one at the variant's own offsets, and the result
+                // is a packed struct of the same bytes rather than the array.
+                let variant = match &def.origin {
+                    crate::lir::Origin::Enum { variants } => variants.iter().find(|v| v.tag == tag),
+                    _ => None,
+                }
+                .ok_or_else(|| failed(format!("`{}.{name}` is not a variant", def.name)))?;
+                let vdef = self.unit.ty(variant.ty);
+                let mut fields: Vec<_> = vdef.members.iter().collect();
+                fields.sort_by_key(|f| f.offset);
+                if fields.len() != payload.len() {
+                    return Err(failed(format!(
+                        "`{}.{name}` has {} members and its constant has {}",
+                        def.name,
+                        fields.len(),
+                        payload.len()
+                    )));
+                }
+                let mut inner = 0u64;
+                for (f, c) in fields.iter().zip(payload) {
+                    if self.size_of(&f.ty) == 0 {
+                        continue;
+                    }
+                    if f.offset > inner {
+                        values.push(self.zero_bytes(f.offset - inner));
+                    }
+                    values.push(self.constant(&f.ty, c)?);
+                    inner = f.offset + self.size_of(&f.ty);
+                }
+                let size = self.size_of(&m.ty);
+                if size > inner {
+                    values.push(self.zero_bytes(size - inner));
+                }
+                at = m.offset + size;
+                continue;
+            }
             at = m.offset + self.size_of(&m.ty);
         }
         if def.layout.size > at {
             values.push(self.zero_bytes(def.layout.size - at));
         }
-        Ok(self.types[id.0 as usize].const_named_struct(&values).into())
+        Ok(self.shaped(*id, &values))
+    }
+
+    /// `values` as a constant of the named type `id` when they are exactly its
+    /// members, and otherwise as a packed struct of the same bytes.
+    ///
+    /// Every gap is already an explicit run of zero bytes, so the named type
+    /// has no implicit padding and packing it moves nothing.
+    fn shaped(&self, id: TypeId, values: &[BasicValueEnum<'ctx>]) -> BasicValueEnum<'ctx> {
+        let named = self.types[id.0 as usize];
+        let exact = named.count_fields() as usize == values.len()
+            && values
+                .iter()
+                .zip(named.get_field_types())
+                .all(|(v, t)| v.get_type() == t);
+        if exact {
+            named.const_named_struct(values).into()
+        } else {
+            self.context.const_struct(values, true).into()
+        }
     }
 
     fn zero_bytes(&self, n: u64) -> BasicValueEnum<'ctx> {

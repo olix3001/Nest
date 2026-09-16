@@ -565,17 +565,20 @@ fn a_program_links_and_runs() {
             7,
         ),
         // Every `Kind` arm the compiler has a type for, a tuple's positions as
-        // members named `0` and `1`, and a `distinct` described as what it is
-        // rather than as a wrapper with one member.
+        // members named `0` and `1`, a `distinct` described as the declaration
+        // with its representation's description in the payload, and a pointer
+        // payload that leads back to the type it sits in.
         (
             "r :: import <core/reflect>\n\
              Box :: struct <T> { item: T, n: u8 }\n\
              Color :: enum { Red, Green }\n\
              Meters :: distinct f64\n\
+             Node :: struct { v: i32, next: *Node }\n\
              k :: func (t: r.TypeInfo) -> i32 {\n\
             \x20 return t.kind.match {\n\
-            \x20   .Void => 1, .Bool => 2, .Int => 3, .Uint => 4, .Float => 5, .Ptr => 6,\n\
-            \x20   .Slice => 7, .Array => 8, .Tuple => 9, .Struct => 10, .Enum => 11, _ => 0,\n\
+            \x20   .Void => 1, .Bool => 2, .Int => 3, .Uint => 4, .Float => 5, .Ptr(_) => 6,\n\
+            \x20   .Slice(_) => 7, .Array(_, _) => 8, .Tuple => 9, .Struct => 10, .Enum => 11,\n\
+            \x20   .Distinct(_) => 12, _ => 0,\n\
             \x20 }\n\
              }\n\
              main :: func () -> i32 {\n\
@@ -594,7 +597,11 @@ fn a_program_links_and_runs() {
             \x20 if k(t) != 9 || t.members.len() != 2 { return 11 }\n\
             \x20 if t.members[1].name != \"1\" || t.members[1].offset != 8 { return 12 }\n\
             \x20 let m: r.TypeInfo := r.type_info.<Meters>()\n\
-            \x20 if k(m) != 5 || m.members.len() != 0 { return 13 }\n\
+            \x20 if k(m) != 12 || m.members.len() != 0 { return 13 }\n\
+            \x20 if m.kind.match { .Distinct(i) => k(i.*) != 5 || i.size != 8, _ => true } { return 15 }\n\
+            \x20 let node: r.TypeInfo := r.type_info.<Node>()\n\
+            \x20 if node.members[1].kind.match { .Ptr(p) => p.id != node.id, _ => true } { return 16 }\n\
+            \x20 if r.type_info.<[3]u16>().kind.match { .Array(n, e) => n != 3 || e.size != 2, _ => true } { return 17 }\n\
             \x20 return 42\n\
              }\n",
             42,

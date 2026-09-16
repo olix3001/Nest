@@ -1101,18 +1101,51 @@ impl Cx<'_> {
         Constant::Int(num_bigint::BigInt::from(fnv1a_128(key.as_bytes())))
     }
 
-    /// Which variant of `core`'s `Kind` enum `ty` is.
-    fn kind_const(&self, ty: &Ty) -> Constant {
-        let name = Symbol::new(kind_name(self, ty));
+    /// Which variant of `core`'s `Kind` enum `ty` is, with the description of
+    /// the type it is made of where it is made of one.
+    ///
+    /// A `distinct` is asked about before `strip` erases it: it is the one kind
+    /// whose answer is about the declaration rather than the representation.
+    fn kind_const(&mut self, ty: &Ty) -> Constant {
         let Some(kind_ty) = self.lang_nominal("reflect_kind") else {
             return Constant::Undef;
         };
+        let repr = match ty {
+            Ty::Nominal { def, .. }
+                if matches!(
+                    self.linked.ty(*def).map(|t| &t.kind),
+                    Some(TypeDefKind::Distinct { .. })
+                ) =>
+            {
+                self.layouts
+                    .member_types(ty)
+                    .and_then(|ms| ms.into_iter().next())
+                    .map(|(_, t)| t)
+            }
+            _ => None,
+        };
+        let (name, payload) = match (repr, ty) {
+            (Some(inner), _) => ("Distinct", self.info_ptr(&inner).into_iter().collect()),
+            (None, Ty::Ptr { inner, .. }) => ("Ptr", self.info_ptr(inner).into_iter().collect()),
+            (None, Ty::Slice { inner, .. }) => {
+                ("Slice", self.info_ptr(inner).into_iter().collect())
+            }
+            (None, Ty::Array { len, inner, .. }) => {
+                let n = len.value().unwrap_or(0) as i128;
+                let mut parts = vec![Constant::Int(n.into())];
+                parts.extend(self.info_ptr(inner));
+                ("Array", parts)
+            }
+            (None, _) => (kind_name(self, ty), Vec::new()),
+        };
+        let name = Symbol::new(name);
         let (tag, _) = self.variant_info(&kind_ty, &name);
-        Constant::Variant {
-            tag,
-            name,
-            payload: Vec::new(),
-        }
+        Constant::Variant { tag, name, payload }
+    }
+
+    /// The address of `ty`'s description, as a `*TypeInfo` constant.
+    fn info_ptr(&mut self, ty: &Ty) -> Option<Constant> {
+        self.type_info_global(ty).map(Constant::Global)
     }
 
     /// The global holding the description of `ty`, built once per type.
@@ -1124,6 +1157,15 @@ impl Cx<'_> {
         let key = crate::ir::mono::type_key(self.defs, ty);
         let info_ty = self.lang_nominal("reflect_info")?;
         let member_ty = self.lang_nominal("reflect_member")?;
+        // A description can reach itself — `Node { next: *Node }` — so the
+        // global is claimed before its contents are built, and a second request
+        // for the same type on the way down is handed the address.
+        let info_key = format!("reflect.info:{key}");
+        if let Some(id) = self.data_index.get(&info_key) {
+            return Some(*id);
+        }
+        let info_lty = self.lir(&info_ty);
+        let slot = self.data_global("type_info", info_lty, Constant::Undef, info_key);
         let text = Ty::Slice {
             mutable: false,
             inner: Box::new(Ty::u8()),
@@ -1177,6 +1219,7 @@ impl Cx<'_> {
                 self.kind_const(mty),
                 self.type_id_const(mty),
                 attrs,
+                Constant::Int((i as i128).into()),
             ]));
         }
         let count = parts.len() as u64;
@@ -1212,13 +1255,8 @@ impl Cx<'_> {
             ]),
             own_attrs,
         ]);
-        let info_lty = self.lir(&info_ty);
-        Some(self.data_global(
-            "type_info",
-            info_lty,
-            info,
-            format!("reflect.info:{key}"),
-        ))
+        self.globals[slot.0 as usize].init = Some(info);
+        Some(slot)
     }
 
     /// The `[]Attr` slice for the attributes written on `def`, as a constant.

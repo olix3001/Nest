@@ -60,6 +60,10 @@ impl Eq for TypeId {
 // and a `match` on this is exhaustively checked. `Other` is the honest tail: a
 // type the compiler has that this vocabulary does not name is reported as one
 // rather than as a lie.
+//
+// A kind made of another type carries that type's description, so one `match`
+// answers both what a type is and what it is made of. `Distinct` is the
+// declaration, not the representation: `str` is `Distinct` over `[]u8`.
 @public Kind :: #lang("reflect_kind") enum {
   Void,
   Never,
@@ -68,14 +72,15 @@ impl Eq for TypeId {
   Int,
   Uint,
   Float,
-  Ptr,
-  Slice,
-  Array,
+  Ptr(*TypeInfo),
+  Slice(*TypeInfo),
+  Array(usize, *TypeInfo),
   Tuple,
   Struct,
   Enum,
   Func,
   Dyn,
+  Distinct(*TypeInfo),
   Other,
 }
 
@@ -103,6 +108,9 @@ impl Eq for TypeId {
   kind: Kind,
   id: TypeId,
   attrs: []Attr,
+  // The position in declaration order, which is what `member_dyn` indexes its
+  // table of vtables by.
+  index: usize,
 }
 
 // A type, described.
