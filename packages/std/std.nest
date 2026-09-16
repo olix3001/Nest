@@ -24,6 +24,7 @@
 @public mem         :: import "mem.nest"
 @public str         :: import "str.nest"
 @public collections :: import "collections.nest"
+@public string      :: import "string.nest"
 
 // `sys.nest` gets **no re-export**, and that is what makes it internal: without
 // a binding here, `import <std/sys>` does not resolve, so the backing every

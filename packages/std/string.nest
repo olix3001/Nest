@@ -1,0 +1,138 @@
+// The owned, growable string.
+//
+// `str` is a borrowed view (`core/str.nest`); this is the thing a view is taken
+// of when the text is being built rather than read. It is a `Vec.<u8>` that
+// promises its bytes are UTF-8, in the same way `str` is a `[]u8` that does —
+// every way in below keeps that promise, and the one way to break it
+// (`from_utf8_unchecked`) says so.
+//
+// **There is no coercion from `str`.** `core/str.nest` reserves a `#lang` tag
+// for one, and whether a `str` written where a `String` is wanted should
+// silently allocate is a language decision still to be made. Until then the
+// copy is spelled: `string.from("text")`.
+//
+// A `String` is a value holding a pointer, so copying one copies the handle and
+// not the bytes: two copies share storage until one of them grows. That is the
+// rule `Vec` already has.
+
+{ Vec } :: import "collections.nest"
+collections :: import "collections.nest"
+io :: import "io.nest"
+{ Buf, Display } :: import <core/fmt>
+{ Eq } :: import <core/cmp>
+
+@public String :: struct {
+  bytes: Vec.<u8>,
+}
+
+// An empty one.
+@public new :: func () -> String {
+  return String { bytes: collections.new.<u8>() }
+}
+
+// An empty one with room for `n` bytes.
+@public with_capacity :: func (n: usize) -> String {
+  return String { bytes: collections.with_capacity.<u8>(n) }
+}
+
+// A copy of `s`.
+@public from :: func (s: str) -> String {
+  let mut out: String := with_capacity(s.len())
+  out.push_str(s)
+  return out
+}
+
+// `bytes` as a `String`, taking the vector as it is. The caller promises the
+// bytes are UTF-8; nothing checks.
+@public from_utf8_unchecked :: func (bytes: Vec.<u8>) -> String {
+  return String { bytes: bytes }
+}
+
+// The UTF-8 encoding of `c`, appended to `out` — shared with anything else that
+// writes a `char` into bytes.
+@public encode_char :: func (c: char, out: *mut Vec.<u8>) -> void {
+  let n: u32 := cast.<u32>(c)
+  if n < 0x80 {
+    out.push(cast.<u8>(n))
+  } else if n < 0x800 {
+    out.push(cast.<u8>(0xC0 | (n >> 6)))
+    out.push(cast.<u8>(0x80 | (n & 0x3F)))
+  } else if n < 0x10000 {
+    out.push(cast.<u8>(0xE0 | (n >> 12)))
+    out.push(cast.<u8>(0x80 | ((n >> 6) & 0x3F)))
+    out.push(cast.<u8>(0x80 | (n & 0x3F)))
+  } else {
+    out.push(cast.<u8>(0xF0 | (n >> 18)))
+    out.push(cast.<u8>(0x80 | ((n >> 12) & 0x3F)))
+    out.push(cast.<u8>(0x80 | ((n >> 6) & 0x3F)))
+    out.push(cast.<u8>(0x80 | (n & 0x3F)))
+  }
+}
+
+impl String {
+  // The length in bytes, which is what `str.len()` counts too.
+  @public len :: #inline func (self: *Self) -> usize { return self.bytes.len() }
+  @public is_empty :: #inline func (self: *Self) -> bool { return self.bytes.is_empty() }
+  @public capacity :: #inline func (self: *Self) -> usize { return self.bytes.capacity() }
+
+  // A view of the text. Like `Vec.as_slice`, it stops being valid when the
+  // string grows out from under it.
+  @public as_str :: #inline func (self: *Self) -> str {
+    return cast.<str>(self.bytes.as_slice())
+  }
+
+  @public as_bytes :: #inline func (self: *Self) -> []u8 { return self.bytes.as_slice() }
+
+  @public reserve :: func (self: *mut Self, extra: usize) -> void { self.bytes.reserve(extra) }
+
+  @public clear :: func (self: *mut Self) -> void { self.bytes.clear() }
+
+  // Keep the first `n` bytes. A cut inside a character is the caller's to avoid,
+  // as it is for `str.slice`.
+  @public truncate :: func (self: *mut Self, n: usize) -> void {
+    if n < self.bytes.count { self.bytes.count = n }
+  }
+
+  @public push_str :: func (self: *mut Self, s: str) -> void {
+    self.bytes.extend(s.as_bytes())
+  }
+
+  @public push :: func (self: *mut Self, c: char) -> void {
+    encode_char(c, &mut self.bytes)
+  }
+
+  // One byte, for a caller writing ASCII it already knows is ASCII.
+  @public push_byte :: func (self: *mut Self, b: u8) -> void {
+    self.bytes.push(b)
+  }
+
+  // Anything `Display`, written on the end — `f"{v}"` without the temporary.
+  @public append :: func <T: Display> (self: *mut Self, v: T) -> void {
+    self.push_str(f"{v}")
+  }
+
+  // An independent copy: its bytes are its own.
+  @public clone :: func (self: *Self) -> String { return from(self.as_str()) }
+}
+
+impl Display for String {
+  display :: func (self: Self, out: *mut Buf) -> void {
+    out.bytes(self.as_bytes())
+  }
+}
+
+impl Eq for String {
+  eq :: func (self: Self, rhs: Self) -> bool { return self.as_str() == rhs.as_str() }
+}
+
+impl collections.Hash for String {
+  hash :: func (self: Self) -> u64 { return collections.hash_bytes(self.as_bytes()) }
+}
+
+// A `String` is somewhere bytes can be written. It takes all of them, always.
+impl io.Write for String {
+  write :: func (self: *mut Self, bytes: []u8) -> Result.<usize, io.Error> {
+    self.bytes.extend(bytes)
+    return .ok(bytes.len())
+  }
+}
