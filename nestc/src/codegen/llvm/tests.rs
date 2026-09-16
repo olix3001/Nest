@@ -836,7 +836,7 @@ fn many_units_make_one_object() {
 
     let mut backend = LlvmBackend::default();
     backend.target_info(None).expect("the host resolves");
-    crate::write_object(
+    crate::driver::write_object(
         &mut backend,
         &program,
         Some(&object),

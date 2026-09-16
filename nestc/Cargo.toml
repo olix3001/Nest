@@ -5,6 +5,10 @@ authors = ["Oliwier Michalik"]
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+# The language server, which is a client of this crate's library.
+members = ["lsp"]
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

@@ -141,15 +141,24 @@ fn normalize(path: &std::path::Path) -> std::path::PathBuf {
     out
 }
 
-/// Resolve `spec` against `from`'s directory and read it. Shared by [`FsLoader`]
-/// and by [`MemLoader`]'s fallback.
-fn load_from_fs(from: &str, spec: &str) -> Result<(String, String), String> {
+/// The file `import "spec"` in `from` names: `spec` against `from`'s directory,
+/// normalized, with `.nest` when it has no extension. Its spelling is the key
+/// [`FsLoader`] loads it under, so a loader that shadows some files — an
+/// editor's unsaved buffers — finds them by it.
+pub fn resolve_import(from: &str, spec: &str) -> std::path::PathBuf {
     use std::path::Path;
     let base = Path::new(from).parent().unwrap_or_else(|| Path::new(""));
     let mut path = normalize(&base.join(spec));
     if path.extension().is_none() {
         path.set_extension("nest");
     }
+    path
+}
+
+/// Resolve `spec` against `from`'s directory and read it. Shared by [`FsLoader`]
+/// and by [`MemLoader`]'s fallback.
+fn load_from_fs(from: &str, spec: &str) -> Result<(String, String), String> {
+    let path = resolve_import(from, spec);
     let key = path.to_string_lossy().into_owned();
     match std::fs::read_to_string(&path) {
         Ok(src) => Ok((key, src)),

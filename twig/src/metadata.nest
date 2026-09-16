@@ -1,0 +1,76 @@
+// `twig metadata`: how every package in a workspace is compiled, as JSON, for a
+// tool that has to analyze a package the way a build would — the language
+// server, above all.
+//
+// The arguments are `build.command`'s, verbatim, so a tool reading this never
+// works out a flag of its own. The libraries they name are where a build puts
+// them, and `twig build --deps` is what makes them exist.
+
+collections :: import <std/collections>
+{ Vec } :: import <std/collections>
+{ String } :: import <std/string>
+json :: import <std/serialize/json>
+build :: import "build.nest"
+{ Profile, Target, Command } :: import "build.nest"
+{ Workspace, Member } :: import "workspace.nest"
+
+@public Metadata :: struct {
+  // The root package's directory.
+  root: str,
+  profile: str,
+  // Every package, each after the ones it depends on, the root last.
+  packages: []Package,
+}
+
+@public Package :: struct {
+  name: str,
+  dir: str,
+  // A dependency's library; the root's library, then its binaries.
+  targets: []TargetInfo,
+}
+
+@public TargetInfo :: struct {
+  name: str,
+  entry: str,
+  lib: bool,
+  output: str,
+  program: str,
+  args: []str,
+}
+
+// The workspace `ws`, built with `p`, as JSON.
+@public describe :: func (ws: *Workspace, p: Profile) -> Result.<String, str> {
+  let mut packages: Vec.<Package> := collections.new.<Package>()
+  let libs: []Target := build.libraries(ws)
+  for d in ws.deps {
+    let mut targets: Vec.<TargetInfo> := collections.new.<TargetInfo>()
+    for t in libs {
+      if t.name == d.name { targets.push(target(ws, p, t)) }
+    }
+    packages.push(Package { name: d.name, dir: d.dir, targets: targets.as_slice() })
+  }
+  let mut own: Vec.<TargetInfo> := collections.new.<TargetInfo>()
+  for t in libs {
+    if t.name == ws.root.name { own.push(target(ws, p, t)) }
+  }
+  for t in build.binaries(ws) { own.push(target(ws, p, t)) }
+  packages.push(Package { name: ws.root.name, dir: ws.root.dir, targets: own.as_slice() })
+
+  let m: Metadata := Metadata { root: ws.root.dir, profile: p.name, packages: packages.as_slice() }
+  return json.to_string_pretty(m).match {
+    .ok(text) => .ok(text),
+    .err(e) => .err(f"could not write the metadata: {e.message}"),
+  }
+}
+
+target :: func (ws: *Workspace, p: Profile, t: Target) -> TargetInfo {
+  let c: Command := build.command(ws, p, t)
+  return TargetInfo {
+    name: t.name,
+    entry: t.entry,
+    lib: t.lib,
+    output: build.output(ws, p, t),
+    program: c.program,
+    args: c.args,
+  }
+}

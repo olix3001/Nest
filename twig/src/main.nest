@@ -9,11 +9,13 @@ s :: import <std/str>
 process :: import <std/process>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
+{ String } :: import <std/string>
 path :: import "path.nest"
 build :: import "build.nest"
 { Profile, Target } :: import "build.nest"
 workspace :: import "workspace.nest"
 { Workspace, Member } :: import "workspace.nest"
+metadata :: import "metadata.nest"
 new :: import "new.nest"
 term :: import "term.nest"
 
@@ -26,10 +28,12 @@ usage :: func () -> str {
     "  init             create a package in the current directory",
     "  build            compile the package's targets",
     "  run [-- <args>]  build a binary, then run it with <args>",
+    "  metadata         how each package is compiled, as JSON, for tools",
     "",
     "options:",
     "  --release        build with the release profile (default: debug)",
     "  --bin <name>     build or run only this binary",
+    "  --deps           build: only the libraries the package depends on",
     "  --lib            new, init: a library rather than a binary",
     "  -h, --help       this",
     "",
@@ -41,6 +45,7 @@ Options :: struct {
   release: bool,
   bin: Option.<str>,
   lib: bool,
+  deps: bool,
   positional: Vec.<str>,
   // Everything after `--`, for `run` to pass on.
   rest: []str,
@@ -65,6 +70,8 @@ main :: func () -> i32 {
     run_build(&opts)
   } else if opts.command == "run" {
     run_run(&opts)
+  } else if opts.command == "metadata" {
+    run_metadata(&opts)
   } else {
     .err(f"no command `{opts.command}`; see `twig --help`")
   }
@@ -88,6 +95,7 @@ parse :: func (args: []str) -> Result.<Options, str> {
     release: false,
     bin: .none,
     lib: false,
+    deps: false,
     positional: collections.new.<str>(),
     rest: args[args.len()..<args.len()],
   }
@@ -104,6 +112,8 @@ parse :: func (args: []str) -> Result.<Options, str> {
       o.release = true
     } else if a == "--lib" {
       o.lib = true
+    } else if a == "--deps" {
+      o.deps = true
     } else if a == "--bin" {
       if i + 1 == args.len() { return .err("`--bin` needs a name") }
       o.bin = .some(args[i + 1])
@@ -160,6 +170,10 @@ run_build :: func (o: *Options) -> Result.<i32, str> {
   if o.positional.len() != 0 { return .err("`twig build` takes no arguments") }
   let ws: Workspace := open().?
   let p: Profile := build.profile(&ws.root.manifest, o.release)
+  if o.deps {
+    compile_deps(&ws, p).?
+    return .ok(0)
+  }
   let all: []Target := build.binaries(&ws)
   let chosen: []Target := o.bin.match {
     .some(name) => select(all, name).?,
@@ -208,6 +222,29 @@ compile_all :: func (ws: *Workspace, p: Profile, bins: []Target) -> Result.<void
   for t in bins { build.compile(ws, p, t).? }
   term.status("Finished", f"`{p.name}` profile, in `{shown(ws, build.out_dir(ws, p))}`")
   return .ok(())
+}
+
+// Every library but the root's own that is out of date, in order:
+// what a tool that analyzes the root itself needs built.
+compile_deps :: func (ws: *Workspace, p: Profile) -> Result.<void, str> {
+  for t in build.libraries(ws) {
+    if t.name == ws.root.name { continue }
+    if build.fresh(ws, p, t).? { continue }
+    let m: Member := ws.member(t.name)
+    compiling(&m)
+    build.compile(ws, p, t).?
+  }
+  return .ok(())
+}
+
+run_metadata :: func (o: *Options) -> Result.<i32, str> {
+  if o.positional.len() != 0 { return .err("`twig metadata` takes no arguments") }
+  let ws: Workspace := open().?
+  let p: Profile := build.profile(&ws.root.manifest, o.release)
+  let text: String := metadata.describe(&ws, p).?
+  io.print(text.as_str())
+  io.print("\n")
+  return .ok(0)
 }
 
 compiling :: func (m: *Member) -> void {
