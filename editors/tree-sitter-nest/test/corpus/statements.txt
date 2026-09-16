@@ -1,0 +1,194 @@
+===========================================
+A struct literal is not read in a condition
+===========================================
+
+f :: func () {
+  if x { a }
+  for i in 0..<n { b }
+  while ok() { c }
+  let p := Point { x: 1 }
+}
+
+---
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (func_expression
+        (parameters)
+        (block
+          (expression_statement
+            (if_expression
+              (identifier)
+              (block
+                (expression_statement
+                  (identifier)))))
+          (for_statement
+            (identifier)
+            (range_expression
+              (integer)
+              (identifier))
+            (block
+              (expression_statement
+                (identifier))))
+          (while_statement
+            (call_expression
+              (identifier)
+              (arguments))
+            (block
+              (expression_statement
+                (identifier))))
+          (declaration
+            (let_declaration
+              (identifier)
+              (composite_literal
+                (identifier)
+                (field_initializer
+                  (field_identifier)
+                  (integer))))))))))
+
+===================================================
+A line starting with a dot continues the one before
+===================================================
+
+f :: func () {
+  let q := v
+    .map()
+  g()
+}
+
+---
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (func_expression
+        (parameters)
+        (block
+          (declaration
+            (let_declaration
+              (identifier)
+              (call_expression
+                (field_expression
+                  (identifier)
+                  (field_identifier))
+                (arguments))))
+          (expression_statement
+            (call_expression
+              (identifier)
+              (arguments))))))))
+
+================================
+Match, try and trailing closures
+================================
+
+f :: func () -> i32 {
+  let s := x.match { .some(v) => v, .none => 0 }
+  items.each { v => g(v) }
+  let r := cast.<[]u8>(y).?
+  return loop { break 1 }
+}
+
+---
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (func_expression
+        (parameters)
+        (type_path
+          (type_identifier))
+        (block
+          (declaration
+            (let_declaration
+              (identifier)
+              (method_match_expression
+                (identifier)
+                (match_block
+                  (match_arm
+                    (variant_pattern
+                      (identifier)
+                      (identifier))
+                    (identifier))
+                  (match_arm
+                    (variant_pattern
+                      (identifier))
+                    (integer))))))
+          (expression_statement
+            (trailing_closure
+              (field_expression
+                (identifier)
+                (field_identifier))
+              (block
+                (closure_parameter
+                  (identifier))
+                (expression_statement
+                  (call_expression
+                    (identifier)
+                    (arguments
+                      (identifier)))))))
+          (declaration
+            (let_declaration
+              (identifier)
+              (try_expression
+                (call_expression
+                  (generic_expression
+                    (identifier)
+                    (generic_arguments
+                      (slice_type
+                        (type_path
+                          (type_identifier)))))
+                  (arguments
+                    (identifier))))))
+          (return_statement
+            (loop_expression
+              (block
+                (break_statement
+                  (integer))))))))))
+
+=======
+Strings
+=======
+
+f :: func () {
+  io.println(f"a{g(1)}b{{")
+  let c := 'λ'
+  let b := b"\x00"
+}
+
+---
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (func_expression
+        (parameters)
+        (block
+          (expression_statement
+            (call_expression
+              (field_expression
+                (identifier)
+                (field_identifier))
+              (arguments
+                (interpolated_string
+                  (string_content)
+                  (interpolation
+                    (call_expression
+                      (identifier)
+                      (arguments
+                        (integer))))
+                  (string_content)
+                  (escape_sequence)))))
+          (declaration
+            (let_declaration
+              (identifier)
+              (char)))
+          (declaration
+            (let_declaration
+              (identifier)
+              (byte_string
+                (escape_sequence)))))))))

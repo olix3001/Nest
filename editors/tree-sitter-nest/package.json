@@ -1,0 +1,16 @@
+{
+  "name": "tree-sitter-nest",
+  "version": "0.1.0",
+  "description": "Nest grammar for tree-sitter",
+  "license": "MIT",
+  "main": "bindings/node",
+  "keywords": ["tree-sitter", "parser", "nest"],
+  "files": ["grammar.js", "src/**", "queries/*", "tree-sitter.json"],
+  "devDependencies": {
+    "tree-sitter-cli": "0.25.10"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test"
+  }
+}

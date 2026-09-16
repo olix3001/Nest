@@ -1,0 +1,200 @@
+==============================
+Imports, constants and statics
+==============================
+
+io :: import <std/io>
+util :: import "util.nest"
+RED: str :: "\u{1B}[1;31m"
+#static n: usize := 0
+
+---
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (import_expression
+        (package_path))))
+  (declaration
+    (const_binding
+      (identifier)
+      (import_expression
+        (string
+          (string_content)))))
+  (declaration
+    (const_binding
+      (identifier)
+      (type_path
+        (type_identifier))
+      (string
+        (escape_sequence)
+        (string_content))))
+  (declaration
+    (directive
+      (directive_name))
+    (static_declaration
+      (identifier)
+      (type_path
+        (type_identifier))
+      (integer))))
+
+=====
+Types
+=====
+
+@public Option :: #lang("option") enum <T> {
+  some(T),
+  none,
+}
+Point :: struct { @rename(name: "px") x: i32, y: i32 }
+Id :: distinct usize
+Hash :: trait {
+  hash :: func (self: Self) -> u64
+}
+
+---
+
+(source_file
+  (declaration
+    (attribute
+      (attribute_name))
+    (const_binding
+      (identifier)
+      (directive
+        (directive_name)
+        (arguments
+          (string
+            (string_content))))
+      (enum_type
+        (generic_parameters
+          (generic_parameter
+            (type_identifier)))
+        (variant
+          (identifier)
+          (tuple_type
+            (type_path
+              (type_identifier))))
+        (variant
+          (identifier)))))
+  (declaration
+    (const_binding
+      (identifier)
+      (struct_type
+        (field_list
+          (field_declaration
+            (attribute
+              (attribute_name)
+              (arguments
+                (named_argument
+                  (identifier)
+                  (string
+                    (string_content)))))
+            (field_identifier)
+            (type_path
+              (type_identifier)))
+          (field_declaration
+            (field_identifier)
+            (type_path
+              (type_identifier)))))))
+  (declaration
+    (const_binding
+      (identifier)
+      (distinct_type
+        (type_path
+          (type_identifier)))))
+  (declaration
+    (const_binding
+      (identifier)
+      (trait_type
+        (item_body
+          (declaration
+            (const_binding
+              (identifier)
+              (func_expression
+                (parameters
+                  (parameter
+                    (identifier)
+                    (type_path
+                      (type_identifier))))
+                (type_path
+                  (type_identifier))))))))))
+
+=======================
+Impls and extern blocks
+=======================
+
+impl <T> Try for Option.<T> {
+  Output :: T
+  unwrap :: func (self: Option.<T>) -> T { return self.! }
+}
+extern("c") {
+  @public write :: func (fd: c.int, buf: c.ptr.<u8>, n: usize) -> isize
+}
+
+---
+
+(source_file
+  (impl_block
+    (generic_parameters
+      (generic_parameter
+        (type_identifier)))
+    (type_path
+      (type_identifier))
+    (type_path
+      (type_identifier)
+      (generic_arguments
+        (type_path
+          (type_identifier))))
+    (item_body
+      (declaration
+        (const_binding
+          (identifier)
+          (identifier)))
+      (declaration
+        (const_binding
+          (identifier)
+          (func_expression
+            (parameters
+              (parameter
+                (identifier)
+                (type_path
+                  (type_identifier)
+                  (generic_arguments
+                    (type_path
+                      (type_identifier))))))
+            (type_path
+              (type_identifier))
+            (block
+              (return_statement
+                (try_expression
+                  (identifier)))))))))
+  (extern_block
+    (string
+      (string_content))
+    (item_body
+      (declaration
+        (attribute
+          (attribute_name))
+        (const_binding
+          (identifier)
+          (func_expression
+            (parameters
+              (parameter
+                (identifier)
+                (type_path
+                  (type_identifier)
+                  (identifier)))
+              (parameter
+                (identifier)
+                (type_path
+                  (type_identifier)
+                  (identifier)
+                  (generic_arguments
+                    (type_path
+                      (type_identifier)))))
+              (parameter
+                (identifier)
+                (type_path
+                  (type_identifier))))
+            (type_path
+              (type_identifier))))))))

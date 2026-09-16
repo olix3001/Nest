@@ -552,13 +552,32 @@ What it does not do yet:
 
 **Commit. Stop.**
 
-### Step 10 — the editor
+### Step 10 — the editor — **highlighting done**; the language server is next
 
 Syntax highlighting first (it needs nothing), then the language server, **in
 Rust**, and **before steps 8 and 9** (see Stage 4).
 
-*Done when*: a `.nest` file is highlighted in VS Code, and the server reports
-diagnostics for an open buffer.
+*Done when*: a `.nest` file is highlighted in Zed, and the server reports
+diagnostics for an open buffer. **Zed only, on the user's call**: no VS Code
+grammar for now.
+
+The highlighting half, as built (`editors/`):
+
+- **`editors/tree-sitter-nest`**, a tree-sitter grammar. It parses every `.nest`
+  file in the repository with no error node, and `tree-sitter test` checks the
+  shapes that are easy to get wrong.
+  - **Newlines end statements** through an external scanner, the way
+    `filter_newlines` decides: only where a statement can end, and not before a
+    line starting with `.`, `+` or `::`.
+  - **`Name { ... }` after a condition** is kept as both a struct literal and a
+    block (a GLR conflict) instead of a second, struct-free expression grammar.
+    The reading that fails is dropped, and the block wins a tie.
+  - **Types are values.** `[4]u8` and `[]u8` are also expressions, and a
+    binding's value may be any type form.
+  - `src/parser.c` is generated and committed, because Zed builds the grammar
+    from the repository at a pinned commit.
+- **`editors/zed`**, the extension: highlights (a copy of the grammar's),
+  brackets, indents, and an outline of bindings and `impl`s.
 
 **Commit. Stop.**
 
@@ -591,5 +610,4 @@ Nothing below is assumed anywhere in this plan.
 | Decision | Why it is open |
 |---|---|
 | **Whether `std` is versioned with the compiler** | Rust ships one std per compiler; a package tool could resolve it like any dependency |
-| **What `.nlib` holds beside the code** | Whether the metadata is duplicated inside it or only in the `.nmeta` |
 | **Blanket impls** | `impl <T> Trait for T` type-checks and fails in codegen. Required before `Any` — see stage 2 |
