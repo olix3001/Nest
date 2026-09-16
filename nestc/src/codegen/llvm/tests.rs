@@ -723,6 +723,24 @@ fn a_program_links_and_runs() {
              }\n",
             18,
         ),
+        // A call through a bound on a method taking `self: *Self` reaches the
+        // concrete impl rather than a blanket one at `T = *bool`, and the
+        // `int.<N>` and `uint.<N>` impls of one trait are two functions rather
+        // than one symbol. 4 + 16 + 32.
+        (
+            "Tag :: trait { tag :: func (self: *Self) -> i32 }\n\
+             impl <T> Tag for T { tag :: func (self: *Self) -> i32 { return 1 } }\n\
+             impl Tag for bool { tag :: func (self: *Self) -> i32 { return 4 } }\n\
+             Sign :: trait { sign :: func (self: *Self) -> i32 }\n\
+             impl <const N: u16> Sign for int.<N> { sign :: func (self: *Self) -> i32 { return 16 } }\n\
+             impl <const N: u16> Sign for uint.<N> { sign :: func (self: *Self) -> i32 { return 32 } }\n\
+             tag_of :: func <T: Tag> (x: T) -> i32 { return x.tag() }\n\
+             sign_of :: func <T: Sign> (x: T) -> i32 { return x.sign() }\n\
+             main :: func () -> i32 {\n\
+            \x20 return tag_of(true) + sign_of(cast.<i8>(1)) + sign_of(cast.<u8>(1))\n\
+             }\n",
+            52,
+        ),
     ] {
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
         let file = session.load_entry("main").expect("entry loads");

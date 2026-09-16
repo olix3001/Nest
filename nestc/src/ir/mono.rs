@@ -884,7 +884,21 @@ impl Mono<'_> {
         call_args: &[GenericArg],
     ) -> Option<(DefId, Vec<GenericArg>)> {
         let name = self.defs.get(method).name.clone();
-        let (i, bindings) = self.match_impl(trait_def, self_ty, trait_args)?;
+        // A receiver by pointer arrives as the `self` parameter's type, `*X`, and
+        // the impl is for `X`. Matching `*X` first let a blanket `impl <T> Trait
+        // for T` claim it at `T = *X` before `impl Trait for X` was tried, so the
+        // pointer comes off exactly when the declaration says it is there.
+        let by_ptr = match linked.ty(trait_def).map(|t| &t.kind) {
+            Some(super::TypeDefKind::Trait { methods, .. }) => methods
+                .iter()
+                .any(|m| m.def == method && matches!(m.recv, super::Recv::Ptr | super::Recv::MutPtr)),
+            _ => false,
+        };
+        let matched = match self_ty {
+            Ty::Ptr { inner, .. } if by_ptr => self.match_impl_exact(trait_def, inner, trait_args),
+            _ => self.match_impl(trait_def, self_ty, trait_args),
+        };
+        let (i, bindings) = matched?;
         let target = self.impls.impls[i]
             .members
             .get(&name)
@@ -1719,10 +1733,14 @@ fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
                 s.push(if *signed { 'i' } else { 'u' });
                 s.push_str(&n.to_string());
             }
-            // A width still symbolic at this point is a defect, not a program
-            // error; encode it so the symbol stays injective rather than
-            // silently picking a number.
-            None => s.push('Z'),
+            // A width still symbolic at this point is a `const` parameter of an
+            // impl's self type (see [`mangle`]) or a defect. Either way it keeps
+            // its signedness, so `impl <const N> T for int.<N>` and its `uint`
+            // twin stay apart.
+            None => {
+                s.push(if *signed { 'i' } else { 'u' });
+                push_const(s, defs, width);
+            }
         },
         Ty::Float(w) => {
             s.push('f');
@@ -1898,6 +1916,10 @@ fn push_const(s: &mut String, defs: &DefTable, k: &Const) {
                 // among the values that do arrive rather than inventing one.
                 _ => s.push('Z'),
             }
+        }
+        Const::Param(d) => {
+            s.push('G');
+            push_len(s, defs.get(*d).name.as_str());
         }
         _ => s.push('Z'),
     }
