@@ -5,13 +5,23 @@
 // `command` is the only place that knows which flags a build passes. Anything
 // else that needs to know how a package is compiled — a `twig metadata` for an
 // editor, when there is one — asks it, so the answer it gives and the build
-// that runs cannot drift apart.
+// that runs cannot drift apart. Asking whether a library is up to date is the
+// same command with `--up-to-date` added.
 //
-// ### Dependencies are source
+// ### One run per package
 //
-// There is no library format yet, so a dependency is not compiled on its own:
-// every target is one `nestc` run over the whole program, from the target's
-// entry file, with every package in the graph registered by `--package`.
+// Every package with a `[lib]`, `core` and `std` included, is compiled once, on
+// its own, into a `.nlib`, after the packages it depends on and against their
+// `.nlib`s — never their source. So what a package may import is exactly what
+// its command line gives it as `--extern`.
+//
+//     build/<profile>/deps/<name>.nlib    a dependency
+//     build/<profile>/<name>.nlib         the root's own `[lib]`
+//     build/<profile>/<bin>               a binary
+//
+// A library whose inputs have not changed is not compiled again; `nestc` decides
+// that, from a fingerprint in the library itself. A binary is always linked
+// again.
 
 fs :: import <std/fs>
 process :: import <std/process>
@@ -54,24 +64,37 @@ toolchain :: import "toolchain.nest"
 
 // What one target compiles from, and to.
 @public Target :: struct {
-  // What the output is called: the binary's name, or the package's for `[lib]`.
+  // What the output is called: the binary's name, or the package's for a
+  // library.
   name: str,
   entry: str,
   lib: bool,
 }
 
-// The root package's targets: its library first, then its binaries.
-@public targets :: func (ws: *Workspace) -> []Target {
-  let root: *Member := &ws.root
+// Every library the build makes, each after the ones it depends on: the
+// dependencies', then the root's own.
+@public libraries :: func (ws: *Workspace) -> []Target {
   let mut out: Vec.<Target> := collections.new.<Target>()
-  root.lib_root().match {
-    .some(entry) => out.push(Target { name: root.name, entry: entry, lib: true }),
+  for d in ws.deps { out.push(library(&d)) }
+  ws.root.lib_root().match {
+    .some(_) => out.push(library(&ws.root)),
     .none => (),
   }
+  return out.as_slice()
+}
+
+// The root package's binaries.
+@public binaries :: func (ws: *Workspace) -> []Target {
+  let root: *Member := &ws.root
+  let mut out: Vec.<Target> := collections.new.<Target>()
   for b in root.manifest.bins() {
     out.push(Target { name: b.name, entry: path.normalize(path.join(root.dir, b.path)), lib: false })
   }
   return out.as_slice()
+}
+
+library :: func (m: *Member) -> Target {
+  return Target { name: m.name, entry: m.lib_root().!, lib: true }
 }
 
 // Where a build with `p` writes.
@@ -81,9 +104,15 @@ toolchain :: import "toolchain.nest"
 
 // The file `t` produces.
 @public output :: func (ws: *Workspace, p: Profile, t: Target) -> str {
+  if t.lib { return library_file(ws, p, t.name) }
+  return path.join(out_dir(ws, p), t.name)
+}
+
+// The `.nlib` of the package called `name`.
+library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
   let dir: str := out_dir(ws, p)
-  if t.lib { return path.join(dir, f"{t.name}.o") }
-  return path.join(dir, t.name)
+  if name == ws.root.name { return path.join(dir, f"{name}.nlib") }
+  return path.join(path.join(dir, "deps"), f"{name}.nlib")
 }
 
 @public Command :: struct {
@@ -95,27 +124,38 @@ toolchain :: import "toolchain.nest"
 @public command :: func (ws: *Workspace, p: Profile, t: Target) -> Command {
   let mut args: Vec.<str> := collections.new.<str>()
   args.push(t.entry)
+  if t.lib {
+    args.push("--package")
+    args.push(f"{t.name}={t.entry}")
+  }
   args.push("--emit")
-  args.push(if t.lib { "obj" } else { "link" })
+  args.push(if t.lib { "nlib" } else { "link" })
   args.push("-o")
   args.push(output(ws, p, t))
-  // The root's own library is a package too, so its binaries can import it by
-  // name.
-  ws.root.lib_root().match {
-    .some(r) => package(&mut args, ws.root.name, r),
-    .none => (),
+
+  // A library may import what its package depends on. A binary may import
+  // that too, and the root's own library as well, by name.
+  let mut direct: Vec.<str> := collections.new.<str>()
+  if t.lib == false {
+    ws.root.lib_root().match {
+      .some(_) => direct.push(ws.root.name),
+      .none => (),
+    }
   }
-  for d in ws.deps { package(&mut args, d.name, d.lib_root().!) }
-  for d in ws.shipped { package(&mut args, d.name, d.lib_root().!) }
+  let m: Member := if t.lib { ws.member(t.name) } else { ws.root }
+  direct.extend(ws.direct(&m))
+  for d in direct.as_slice() { library_flag(&mut args, ws, p, "--extern", d) }
+  for d in ws.indirect(direct.as_slice()) { library_flag(&mut args, ws, p, "--indirect", d) }
+
   setting(&mut args, f"profile={p.name}")
   setting(&mut args, f"overflow={p.overflow}")
   setting(&mut args, f"codegen-units={p.codegen_units}")
   return Command { program: toolchain.nestc(), args: args.as_slice() }
 }
 
-package :: func (args: *mut Vec.<str>, name: str, root: str) -> void {
-  args.push("--package")
-  args.push(f"{name}={root}")
+library_flag :: func (args: *mut Vec.<str>, ws: *Workspace, p: Profile, flag: str, name: str) -> void {
+  args.push(flag)
+  args.push(f"{name}={library_file(ws, p, name)}")
 }
 
 setting :: func (args: *mut Vec.<str>, value: str) -> void {
@@ -123,23 +163,41 @@ setting :: func (args: *mut Vec.<str>, value: str) -> void {
   args.push(value)
 }
 
+// Whether the library `t` is up to date, so that compiling it would produce what
+// is already there.
+@public fresh :: func (ws: *Workspace, p: Profile, t: Target) -> Result.<bool, str> {
+  let c: Command := command(ws, p, t)
+  let mut args: Vec.<str> := collections.from_slice.<str>(c.args)
+  args.push("--up-to-date")
+  let status: process.Status := run(c.program, args.as_slice()).?
+  return status.match {
+    .exited(0) => .ok(true),
+    .exited(1) => .ok(false),
+    // What a child that could not `exec` exits with (`process.spawn`).
+    .exited(127) => .err(toolchain.not_found(c.program)),
+    _ => .err(f"could not tell whether `{t.name}` is up to date"),
+  }
+}
+
 // Build `t`, with the compiler's diagnostics going straight to this process's
 // stderr.
 @public compile :: func (ws: *Workspace, p: Profile, t: Target) -> Result.<void, str> {
-  let dir: str := out_dir(ws, p)
-  fs.create_dir_all(dir).match {
+  fs.create_dir_all(path.parent(output(ws, p, t))).match {
     .ok(_) => (),
     .err(e) => { return .err(e.describe()) },
   }
   let c: Command := command(ws, p, t)
-  let status: process.Status := process.run(c.program, c.args).match {
-    .ok(s) => s,
-    .err(e) => { return .err(f"could not run `{c.program}`: {e.describe()}") },
-  }
+  let status: process.Status := run(c.program, c.args).?
   return status.match {
     .exited(0) => .ok(()),
-    // What a child that could not `exec` exits with (`process.spawn`).
     .exited(127) => .err(toolchain.not_found(c.program)),
     _ => .err(f"could not compile `{t.name}`"),
+  }
+}
+
+run :: func (program: str, args: []str) -> Result.<process.Status, str> {
+  return process.run(program, args).match {
+    .ok(s) => .ok(s),
+    .err(e) => .err(f"could not run `{program}`: {e.describe()}"),
   }
 }

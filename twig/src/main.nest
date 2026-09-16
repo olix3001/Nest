@@ -13,7 +13,7 @@ path :: import "path.nest"
 build :: import "build.nest"
 { Profile, Target } :: import "build.nest"
 workspace :: import "workspace.nest"
-{ Workspace } :: import "workspace.nest"
+{ Workspace, Member } :: import "workspace.nest"
 new :: import "new.nest"
 term :: import "term.nest"
 
@@ -160,7 +160,7 @@ run_build :: func (o: *Options) -> Result.<i32, str> {
   if o.positional.len() != 0 { return .err("`twig build` takes no arguments") }
   let ws: Workspace := open().?
   let p: Profile := build.profile(&ws.root.manifest, o.release)
-  let all: []Target := build.targets(&ws)
+  let all: []Target := build.binaries(&ws)
   let chosen: []Target := o.bin.match {
     .some(name) => select(all, name).?,
     .none => all,
@@ -173,13 +173,13 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
   if o.positional.len() != 0 { return .err("arguments for the program go after `--`") }
   let ws: Workspace := open().?
   let p: Profile := build.profile(&ws.root.manifest, o.release)
-  let bins: Vec.<Target> := binaries(build.targets(&ws))
+  let bins: []Target := build.binaries(&ws)
   let t: Target := o.bin.match {
-    .some(name) => select(bins.as_slice(), name).?[0],
+    .some(name) => select(bins, name).?[0],
     .none => {
       if bins.len() == 0 { return .err(f"`{ws.root.name}` has no `[[bin]]` to run") }
       if bins.len() > 1 { return .err(f"`{ws.root.name}` has several binaries; say which with `--bin`") }
-      bins.get(0).!
+      bins[0]
     },
   }
   let one: Vec.<Target> := collections.from_slice.<Target>(.{ t })
@@ -194,28 +194,33 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
   return .ok(status.code())
 }
 
-compile_all :: func (ws: *Workspace, p: Profile, targets: []Target) -> Result.<void, str> {
-  term.status("Compiling", f"{ws.root.name} v{ws.root.manifest.package.version} ({ws.root.dir})")
-  for t in targets { build.compile(ws, p, t).? }
+// Every library that is out of date, in order, then `bins`.
+compile_all :: func (ws: *Workspace, p: Profile, bins: []Target) -> Result.<void, str> {
+  let mut root_done: bool := false
+  for t in build.libraries(ws) {
+    if build.fresh(ws, p, t).? { continue }
+    let m: Member := ws.member(t.name)
+    compiling(&m)
+    if t.name == ws.root.name { root_done = true }
+    build.compile(ws, p, t).?
+  }
+  if bins.len() > 0 && root_done == false { compiling(&ws.root) }
+  for t in bins { build.compile(ws, p, t).? }
   term.status("Finished", f"`{p.name}` profile, in `{shown(ws, build.out_dir(ws, p))}`")
   return .ok(())
+}
+
+compiling :: func (m: *Member) -> void {
+  term.status("Compiling", f"{m.name} v{m.manifest.package.version} ({m.dir})")
 }
 
 // A path under the package, written from the package's directory.
 shown :: func (ws: *Workspace, p: str) -> str { return path.relative_to(p, ws.root.dir) }
 
-binaries :: func (all: []Target) -> Vec.<Target> {
-  let mut out: Vec.<Target> := collections.new.<Target>()
-  for t in all {
-    if t.lib == false { out.push(t) }
-  }
-  return out
-}
-
 // The binary called `name`, as a list of one.
 select :: func (all: []Target, name: str) -> Result.<[]Target, str> {
   for t in all {
-    if t.lib == false && t.name == name {
+    if t.name == name {
       let one: Vec.<Target> := collections.from_slice.<Target>(.{ t })
       return .ok(one.as_slice())
     }

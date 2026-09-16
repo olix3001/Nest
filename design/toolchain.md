@@ -467,6 +467,28 @@ through TOML too — `a_struct_round_trips_through_json` and
 its `.nmeta` without reading its source, and the two link into a program.
 **Commit. Stop.**
 
+**The library format is done; `-C opt-level` and `-C target-cpu` are not.** As
+built (`nestc/src/library/`):
+
+- **`.nmeta` is semantic, not parsed.** A downstream package reads an upstream
+  signature from the upstream AST plus its resolution facts, so the metadata
+  carries each analyzed AST with its side tables, the defs, and the pre-mono IR
+  with its facts. Every side-table type is registered in `library/metas.rs`;
+  writing fails, naming the type, when one is not.
+- **Ids are session indices**, written as a package and an index (or a builtin's
+  name) and laid out again as one contiguous run per id kind when loaded.
+- **`.nlib` is an `ar` archive**: `nest.nmeta` beside one object per codegen
+  unit. Linking extracts the objects; the linker never sees the archive.
+- **Generic bodies travel; instances do not.** Metadata is pre-mono, so a
+  program instantiates what it uses, and an instance is `weak_odr` so the same
+  one in two libraries is one symbol.
+- **Flags**: `--emit nmeta|nlib`, `--extern name=path` (importable),
+  `--indirect name=path` (loaded and linked, not importable — importing it is an
+  error naming why), and `--up-to-date`, which compiles nothing and exits 0 when
+  the library at `-o` has the fingerprint compiling it again would give: a hash
+  of the compiler, target, settings, files and the dependencies' fingerprints.
+  Content, not time, so it needs no `stat`.
+
 ### Step 9 — `twig` — **done** (the build half)
 
 The package tool, **written in Nest**: `nest.toml`, dependency resolution, the
@@ -490,17 +512,25 @@ nothing needs a library format yet. What it is, as built (`twig/`):
   `std` and `core` are not dependencies.
 - **Commands**: `new <path>`, `init` (both `--lib`), `build`, `run [-- args]`,
   with `--release` and `--bin`. Output goes to `build/<profile>/`: a binary by
-  its name, a library as `<name>.o`.
-- **One `nestc` run per target**, over the whole program, with every package in
-  the graph (the root's own `[lib]` included) as `--package`. `build::command`
-  is the one function that writes that command line; a `twig metadata` should
-  read it rather than repeat it.
+  its name, the root's library as `<name>.nlib`, and every dependency's —
+  `core` and `std` included — as `deps/<name>.nlib`.
+- **One `nestc` run per package** (since step 8), in dependency order, each
+  against its dependencies' `.nlib`s. A package's direct dependencies are the
+  shipped packages before it (all of them, for a package that does not ship)
+  plus its `[dependencies]`; those are `--extern`, and whatever they depend on
+  is `--indirect`. A binary is compiled the same way, with the root's own
+  library as one more `--extern`. `build::command` is the one function that
+  writes that command line; a `twig metadata` should read it rather than repeat
+  it.
+- **Up to date** is `nestc --up-to-date` on that same command line: a library
+  is compiled only when it says so, and a binary is always linked again.
+- **A cycle** in the graph is an error that names it.
 - **`nestc`** is `$NESTC`, else `nestc` on `PATH`.
 - **`core` and `std` ship with the compiler** and have manifests of their own
   (`packages/*/nest.toml`), so `twig build` works inside them. For every other
   package twig asks `nestc -C print=packages` where they are and passes them as
-  `--package` like any other; a root that *is* `std` or `core` replaces the
-  shipped one.
+  libraries like any other; a root that *is* `std` or `core` replaces the
+  shipped one, and is built against only the shipped packages before it.
 - **No lockfile** yet: path dependencies have nothing to lock.
 - **Diagnostics are the compiler's.** `nestc` renders them (ariadne), coloured
   under `--color auto` — a terminal and no `NO_COLOR` — and twig leaves stderr
@@ -509,11 +539,6 @@ nothing needs a library format yet. What it is, as built (`twig/`):
 
 What it does not do yet:
 
-- **Import visibility.** In one `nestc` run every package sees every other. The
-  fix is step 8's shape — one run per package against its dependencies'
-  `.nmeta`, the way rustc takes `--extern` — so it waits for that.
-- **Up-to-date checks.** Every build recompiles: there is no `stat`, so no
-  modification times (the `struct stat` layout problem in `std/fs`).
 - `check`, `clean`, `test`, `metadata`.
 
 **Commit. Stop.**
