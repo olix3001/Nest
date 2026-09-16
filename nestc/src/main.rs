@@ -76,6 +76,9 @@ settings (-C):
   runtime=<path>         the runtime archive to link, overriding the one built
                          beside this compiler
   overflow=trap|wrap     what a run-time integer overflow does (default: trap)
+  opt-level=0|1|2|3|s|z  how hard the backend optimizes (default: 0)
+  target-cpu=<name>      the processor the code may assume: generic (default),
+                         native for this one, or any name the backend knows
   pointer-width=16|32|64 override the target's pointer width
   os=<name>              override the target's operating system
   arch=<name>            override the target's architecture
@@ -416,6 +419,7 @@ fn run() -> Result<ExitCode, String> {
     for (key, value) in &settings {
         options.set(key, value)?;
     }
+    backend.configure(&options);
 
     if print_options {
         print!("{}", options.render());

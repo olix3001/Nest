@@ -37,6 +37,8 @@ toolchain :: import "toolchain.nest"
   name: str,
   overflow: str,
   codegen_units: usize,
+  // `0`, `1`, `2`, `3`, `s` or `z`, as `nestc -C opt-level` takes it.
+  opt_level: str,
 }
 
 // `debug` or `release`, with whatever the root manifest changed about it.
@@ -44,9 +46,9 @@ toolchain :: import "toolchain.nest"
 // program's decision.
 @public profile :: func (m: *Manifest, release: bool) -> Profile {
   let mut p: Profile := if release {
-    Profile { name: "release", overflow: "wrap", codegen_units: 1 }
+    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3" }
   } else {
-    Profile { name: "debug", overflow: "trap", codegen_units: 1 }
+    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0" }
   }
   let settings: Option.<ProfileSettings> := m.profile.match {
     .some(ps) => if release { ps.release } else { ps.debug },
@@ -56,6 +58,7 @@ toolchain :: import "toolchain.nest"
     .some(s) => {
       s.overflow.match { .some(o) => { p.overflow = o }, .none => () }
       s.codegen_units.match { .some(n) => { p.codegen_units = n }, .none => () }
+      s.opt_level.match { .some(l) => { p.opt_level = l }, .none => () }
     },
     .none => (),
   }
@@ -150,6 +153,7 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
   setting(&mut args, f"profile={p.name}")
   setting(&mut args, f"overflow={p.overflow}")
   setting(&mut args, f"codegen-units={p.codegen_units}")
+  setting(&mut args, f"opt-level={p.opt_level}")
   return Command { program: toolchain.nestc(), args: args.as_slice() }
 }
 

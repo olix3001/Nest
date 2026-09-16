@@ -467,8 +467,8 @@ through TOML too — `a_struct_round_trips_through_json` and
 its `.nmeta` without reading its source, and the two link into a program.
 **Commit. Stop.**
 
-**The library format is done; `-C opt-level` and `-C target-cpu` are not.** As
-built (`nestc/src/library/`):
+**Done.** As built (`nestc/src/library/`, and the LLVM backend for the two
+settings):
 
 - **`.nmeta` is semantic, not parsed.** A downstream package reads an upstream
   signature from the upstream AST plus its resolution facts, so the metadata
@@ -488,6 +488,15 @@ built (`nestc/src/library/`):
   the library at `-o` has the fingerprint compiling it again would give: a hash
   of the compiler, target, settings, files and the dependencies' fingerprints.
   Content, not time, so it needs no `stat`.
+- **`-C opt-level=0|1|2|3|s|z`** runs LLVM's new pass manager, `default<O…>`,
+  on each unit after verification; `0` (the default) runs nothing. Overflow
+  checks survive every level, since they are intrinsics that trap, not UB.
+- **`-C target-cpu=<name>`**: `generic` by default, `native` resolved to the
+  host's processor and features, any other name passed to LLVM, which warns
+  and ignores one it does not know. Both settings are in `-C print=options`, so
+  both are in a library's fingerprint.
+- **twig's profiles** set `opt-level`: `0` for debug, `3` for release, and a
+  manifest may override it as a string (`opt-level = "s"`).
 
 ### Step 9 — `twig` — **done** (the build half)
 
@@ -505,8 +514,8 @@ nothing needs a library format yet. What it is, as built (`twig/`):
   explicit** — `[lib] path` and `[[bin]] name`, `path` — and nothing is inferred
   from which files exist. A dependency is `name = { path = "..." }`; it is a
   table so `version`/`git` have somewhere to go when the package-manager half
-  arrives. `[profile.debug]` / `[profile.release]` may override `overflow` and
-  `codegen-units`; only the root package's profile is read.
+  arrives. `[profile.debug]` / `[profile.release]` may override `overflow`,
+  `codegen-units` and `opt-level`; only the root package's profile is read.
 - **The graph is flat**: one directory per package name across the whole graph,
   and a dependency must have a `[lib]` whose package name matches its key.
   `std` and `core` are not dependencies.

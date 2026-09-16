@@ -17,6 +17,7 @@
 //     [profile.release]
 //     overflow = "trap"
 //     codegen-units = 4
+//     opt-level = "s"
 //
 // **Targets are explicit.** Nothing is inferred from which files exist: a
 // package with no `[lib]` cannot be depended on, and one with no `[[bin]]` has
@@ -70,6 +71,7 @@ path :: import "path.nest"
 @public ProfileSettings :: struct {
   overflow: Option.<str>,
   @rename(name: "codegen-units") codegen_units: Option.<usize>,
+  @rename(name: "opt-level") opt_level: Option.<str>,
 }
 
 impl Manifest {
@@ -167,6 +169,15 @@ check_settings :: func (profile: str, settings: Option.<ProfileSettings>) -> Res
   set.codegen_units.match {
     .some(n) => {
       if n == 0 { return .err(f"`profile.{profile}.codegen-units` must be at least 1") }
+    },
+    .none => (),
+  }
+  set.opt_level.match {
+    .some(l) => {
+      let known: bool := l == "0" || l == "1" || l == "2" || l == "3" || l == "s" || l == "z"
+      if known == false {
+        return .err(f"`profile.{profile}.opt-level` is `{l}`; it is \"0\", \"1\", \"2\", \"3\", \"s\" or \"z\"")
+      }
     },
     .none => (),
   }

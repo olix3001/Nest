@@ -23,12 +23,13 @@ use std::sync::Once;
 
 use inkwell::OptimizationLevel;
 use inkwell::context::Context;
+use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
 
 use super::{Codegen, CodegenError, Endian, OutputKind, TargetInfo};
-use crate::common::options::{ARCHES, OSES};
+use crate::common::options::{ARCHES, OSES, OptLevel, Options};
 use crate::lir::Unit;
 
 mod unit;
@@ -40,6 +41,9 @@ pub struct LlvmBackend {
     /// [`Codegen::emit_unit`] generates for. `None` until it is asked, which
     /// only happens in a test that emits without resolving first.
     triple: Option<String>,
+    /// What [`Codegen::configure`] was given; the defaults until then.
+    opt_level: OptLevel,
+    cpu: Option<String>,
 }
 
 /// LLVM's target registry is global and initializing it twice is not defined.
@@ -52,14 +56,18 @@ fn initialize() {
 /// The [`TargetMachine`] for a triple, which is what every question below is
 /// really asked of.
 ///
-/// The three settings are the ones a first backend has no reason to vary.
 /// `RelocMode::PIC` because every current system links position-independent
 /// executables and a build tool should not have to ask; `CodeModel::Default`
-/// because LLVM picks the right one per target; and `OptimizationLevel::None`
-/// because optimization is a `-C opt-level` this compiler does not have yet, and
-/// a backend that silently optimized would make the first debugging session
-/// harder than it needs to be.
-fn machine(triple: &str) -> Result<TargetMachine, CodegenError> {
+/// because LLVM picks the right one per target. The processor and the
+/// optimization level are `-C target-cpu` and `-C opt-level`; asking about the
+/// machine rather than generating for it passes `generic` and `O0`, which do not
+/// change the data layout.
+fn machine(
+    triple: &str,
+    cpu: &str,
+    features: &str,
+    level: OptimizationLevel,
+) -> Result<TargetMachine, CodegenError> {
     initialize();
     let triple = TargetTriple::create(triple);
     let target = Target::from_triple(&triple).map_err(|e| {
@@ -71,9 +79,9 @@ fn machine(triple: &str) -> Result<TargetMachine, CodegenError> {
     target
         .create_target_machine(
             &triple,
-            "generic",
-            "",
-            OptimizationLevel::None,
+            cpu,
+            features,
+            level,
             RelocMode::PIC,
             CodeModel::Default,
         )
@@ -99,7 +107,7 @@ impl Codegen for LlvmBackend {
                 .to_string_lossy()
                 .into_owned(),
         };
-        let machine = machine(&triple)?;
+        let machine = machine(&triple, "generic", "", OptimizationLevel::None)?;
         let data = machine.get_target_data();
 
         // The pointer width and the byte order both come off the data layout,
@@ -131,6 +139,11 @@ impl Codegen for LlvmBackend {
         })
     }
 
+    fn configure(&mut self, options: &Options) {
+        self.opt_level = options.opt_level;
+        self.cpu = Some(options.target_cpu.to_string());
+    }
+
     fn emit_unit(
         &mut self,
         unit: &Unit,
@@ -148,7 +161,23 @@ impl Codegen for LlvmBackend {
             Some(t) => TargetTriple::create(t),
             None => TargetMachine::get_default_triple(),
         };
-        let machine = machine(&triple.as_str().to_string_lossy())?;
+        // `native` is the processor compiling, with every feature it has, which
+        // LLVM does not resolve by that name itself.
+        let (cpu, features) = match self.cpu.as_deref() {
+            None => ("generic".to_string(), String::new()),
+            Some("native") => (
+                TargetMachine::get_host_cpu_name().to_string(),
+                TargetMachine::get_host_cpu_features().to_string(),
+            ),
+            Some(cpu) => (cpu.to_string(), String::new()),
+        };
+        let level = match self.opt_level {
+            OptLevel::O0 => OptimizationLevel::None,
+            OptLevel::O1 => OptimizationLevel::Less,
+            OptLevel::O2 | OptLevel::Os | OptLevel::Oz => OptimizationLevel::Default,
+            OptLevel::O3 => OptimizationLevel::Aggressive,
+        };
+        let machine = machine(&triple.as_str().to_string_lossy(), &cpu, &features, level)?;
         let pointer_bytes = machine.get_target_data().get_pointer_byte_size(None) as u64;
         let module = unit::build(&context, unit, pointer_bytes)?;
         module.set_triple(&triple);
@@ -161,6 +190,16 @@ impl Codegen for LlvmBackend {
         module
             .verify()
             .map_err(|e| CodegenError::Failed(format!("LLVM rejected unit `{}`:\n{e}", unit.name)))?;
+
+        // The new pass manager's standard pipeline for the level, after
+        // verification so a rejected module is still reported as what was built.
+        // `0` runs nothing, so a debug build is the module as lowered.
+        if self.opt_level != OptLevel::O0 {
+            let pipeline = format!("default<O{}>", self.opt_level.name());
+            module
+                .run_passes(&pipeline, &machine, PassBuilderOptions::create())
+                .map_err(|e| CodegenError::Failed(format!("optimizing unit `{}`: {e}", unit.name)))?;
+        }
 
         match kind {
             OutputKind::Ir => module

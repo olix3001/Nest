@@ -982,6 +982,7 @@ main :: func () -> i32 {{
     let exe = dir.join(&stem);
     let mut backend = LlvmBackend::default();
     backend.target_info(None).expect("the host resolves");
+    backend.configure(&session.options);
     backend
         .emit_unit(program.unit(), OutputKind::Object, &object)
         .unwrap_or_else(|e| panic!("emitting:\n{e}"));
@@ -1017,10 +1018,18 @@ main :: func () -> i32 {{
 /// The host target for the reason [`the_std_floor_reads_writes_spawns_and_reads_its_arguments`]
 /// gives: anything reaching `std/libc` reads `OS` from it.
 fn run_on_host(src: &str) -> std::process::Output {
+    run_on_host_with(src, &[])
+}
+
+/// [`run_on_host`], with `-C` settings applied on top of the host's.
+fn run_on_host_with(src: &str, settings: &[(&str, &str)]) -> std::process::Output {
     let mut probe = LlvmBackend::default();
     let info = probe.target_info(None).expect("the host resolves");
     let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
     session.options.target = info.target();
+    for (key, value) in settings {
+        session.options.set(key, value).expect("a valid setting");
+    }
     let file = session.load_entry("main").expect("entry loads");
     analyze(&mut session, file);
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
@@ -1057,6 +1066,34 @@ fn run_on_host(src: &str) -> std::process::Output {
     )
     .unwrap_or_else(|e| panic!("linking:\n{e}"));
     std::process::Command::new(&exe).output().expect("it runs")
+}
+
+/// **Optimizing changes nothing a program does**: at every `opt-level`, and for
+/// the processor compiling, the same output, and an overflow that traps at `0`
+/// still traps — the checked arithmetic is not something LLVM may fold away.
+#[test]
+fn every_opt_level_runs_the_same_program() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let src = "io :: import <std/io>\n\
+               process :: import <std/process>\n\
+               sum :: func (n: i32) -> i32 {\n\
+               \x20 let mut t: i32 := 0\n\
+               \x20 for i in 0..<n { t = t + i }\n\
+               \x20 return t\n\
+               }\n\
+               main :: func () -> i32 {\n\
+               \x20 io.println(f\"sum={sum(10)}\")\n\
+               \x20 let big: i32 := 2147483600 + cast.<i32>(process.args().len()) * 100\n\
+               \x20 io.println(f\"big={big}\")\n\
+               \x20 return 0\n\
+               }\n";
+    for level in ["0", "1", "2", "3", "s", "z"] {
+        let ran = run_on_host_with(src, &[("opt-level", level), ("target-cpu", "native")]);
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "sum=45\n", "at opt-level={level}");
+        assert!(!ran.status.success(), "the overflow trapped at opt-level={level}");
+    }
 }
 
 /// The types `std/serialize`'s tests write and read: every shape the blanket

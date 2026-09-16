@@ -34,7 +34,7 @@
 
 use std::path::Path;
 
-use crate::common::options::Target;
+use crate::common::options::{Options, Target};
 use crate::lir::Unit;
 
 pub mod link;
@@ -196,6 +196,12 @@ pub trait Codegen {
     /// to generate for, and a backend that could not remember it would quietly
     /// emit for the host whenever a `--target` was given.
     fn target_info(&mut self, triple: Option<&str>) -> Result<TargetInfo, CodegenError>;
+
+    /// Take the settings that decide how code is generated rather than what it
+    /// does — `opt-level` and `target-cpu` — once they are resolved, before the
+    /// first [`emit_unit`](Codegen::emit_unit). A backend with nothing to tune
+    /// ignores them.
+    fn configure(&mut self, _options: &Options) {}
 
     /// Write one unit out as `kind`, to `out`.
     ///

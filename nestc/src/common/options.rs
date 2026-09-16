@@ -159,6 +159,49 @@ impl EntryMode {
     }
 }
 
+/// How hard the backend optimizes. It changes how fast the program runs and how
+/// big it is, and never what it does: an overflow that traps at `0` traps at `3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OptLevel {
+    /// None. The default, for the reason a debug build is the default: the code
+    /// is the code that was written, which is the code a debugger steps through.
+    #[default]
+    O0,
+    O1,
+    O2,
+    O3,
+    /// For size, with the speed `2` would give where it costs little.
+    Os,
+    /// For size above everything.
+    Oz,
+}
+
+impl OptLevel {
+    fn parse(value: &str) -> Option<OptLevel> {
+        match value {
+            "0" => Some(OptLevel::O0),
+            "1" => Some(OptLevel::O1),
+            "2" => Some(OptLevel::O2),
+            "3" => Some(OptLevel::O3),
+            "s" => Some(OptLevel::Os),
+            "z" => Some(OptLevel::Oz),
+            _ => None,
+        }
+    }
+
+    /// The spelling `-C opt-level=` accepts.
+    pub fn name(self) -> &'static str {
+        match self {
+            OptLevel::O0 => "0",
+            OptLevel::O1 => "1",
+            OptLevel::O2 => "2",
+            OptLevel::O3 => "3",
+            OptLevel::Os => "s",
+            OptLevel::Oz => "z",
+        }
+    }
+}
+
 /// Everything a build decides for the compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
@@ -176,6 +219,13 @@ pub struct Options {
     pub codegen_units: usize,
     /// Whether a C `main` is synthesized; see [`EntryMode`].
     pub entry: EntryMode,
+    /// How hard the backend optimizes; see [`OptLevel`].
+    pub opt_level: OptLevel,
+    /// The processor the code may assume, by the backend's name for it:
+    /// `generic` (the default) for any of the architecture, `native` for the one
+    /// compiling. Free text, because the list is the backend's, not this
+    /// compiler's.
+    pub target_cpu: &'static str,
 }
 
 impl Default for Options {
@@ -186,6 +236,8 @@ impl Default for Options {
             profile: "debug",
             codegen_units: 1,
             entry: EntryMode::default(),
+            opt_level: OptLevel::default(),
+            target_cpu: "generic",
         }
     }
 }
@@ -234,6 +286,20 @@ impl Options {
                 self.entry = EntryMode::parse(value)
                     .ok_or_else(|| format!("`entry` must be `auto` or `none`, not `{value}`"))?;
             }
+            "opt-level" => {
+                self.opt_level = OptLevel::parse(value).ok_or_else(|| {
+                    format!("`opt-level` must be 0, 1, 2, 3, s or z, not `{value}`")
+                })?;
+            }
+            "target-cpu" => {
+                if value.is_empty() {
+                    return Err("`target-cpu` wants a processor name".to_string());
+                }
+                // Leaked so `Options` stays `Copy`: set once per compilation,
+                // from the command line, and alive until the process ends
+                // anyway.
+                self.target_cpu = Box::leak(value.to_string().into_boxed_str());
+            }
             other => return Err(format!("unknown setting `{other}`")),
         }
         Ok(())
@@ -243,14 +309,35 @@ impl Options {
     /// prints, so a build tool can check what its profile actually resolved to.
     pub fn render(&self) -> String {
         format!(
-            "arch={}\ncodegen-units={}\nentry={}\noverflow={}\nos={}\npointer-width={}\nprofile={}\n",
+            "arch={}\ncodegen-units={}\nentry={}\nopt-level={}\noverflow={}\nos={}\npointer-width={}\nprofile={}\ntarget-cpu={}\n",
             self.target.arch,
             self.codegen_units,
             self.entry.name(),
+            self.opt_level.name(),
             self.overflow.name(),
             self.target.os,
             self.target.pointer_bits,
-            self.profile
+            self.profile,
+            self.target_cpu
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opt_level_and_target_cpu_are_settings_and_are_rendered() {
+        let mut o = Options::default();
+        assert!(o.render().contains("opt-level=0\n"));
+        assert!(o.render().contains("target-cpu=generic\n"));
+        o.set("opt-level", "s").unwrap();
+        o.set("target-cpu", "native").unwrap();
+        assert_eq!(o.opt_level, OptLevel::Os);
+        assert!(o.render().contains("opt-level=s\n"));
+        assert!(o.render().contains("target-cpu=native\n"));
+        assert!(o.set("opt-level", "4").is_err());
+        assert!(o.set("target-cpu", "").is_err());
     }
 }
