@@ -7073,6 +7073,138 @@ fn an_extern_function_keeps_its_bare_name() {
     assert_eq!(symbol_of(&session, "puts"), "puts");
 }
 
+// ===< `#c_vararg` >===
+
+/// A call to a `#c_vararg` declaration may pass a tail past its fixed
+/// parameters, and each argument in that tail stands on its own — there is no
+/// parameter to check it against, which is exactly what C says about one.
+#[test]
+fn a_c_vararg_call_takes_a_tail() {
+    let msgs = messages(
+        "extern(\"c\") {\n\
+         \x20 printf :: #c_vararg func (fmt: *u8) -> i32\n\
+         }\n\
+         @public main :: func () {\n\
+         \x20 let c: u8 := 1\n\
+         \x20 let p: *u8 := &c\n\
+         \x20 let b: u8 := 1\n\
+         \x20 let f: f32 := 1.0\n\
+         \x20 let n1: i32 := printf(p, 1, b, f, p)\n\
+         \x20 let n2: i32 := printf(p)\n\
+         }\n",
+    );
+    assert!(msgs.is_empty(), "{msgs:#?}");
+}
+
+/// The tail is a tail: the fixed parameters are still required, and the arity
+/// message says "at least" because there is no upper bound to name.
+#[test]
+fn a_c_vararg_call_still_needs_its_fixed_arguments() {
+    let msgs = messages(
+        "extern(\"c\") {\n\
+         \x20 printf :: #c_vararg func (fmt: *u8) -> i32\n\
+         }\n\
+         @public main :: func () { printf() }\n",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("takes at least 1 argument(s) but 0 were supplied")),
+        "{msgs:#?}"
+    );
+}
+
+/// Accepting a variadic tail is one thing and reading one is another: reading
+/// it is `va_list`, whose layout differs per target and which nothing here
+/// emits. So the directive is a declaration's, and a body is refused.
+#[test]
+fn only_an_extern_declaration_may_be_c_vararg() {
+    let msgs = messages(
+        "f :: #c_vararg func (a: i32) -> i32 { return a }\n\
+         @public main :: func () { const _ = f(1) }\n",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("only an `extern` declaration may be `#c_vararg`")),
+        "{msgs:#?}"
+    );
+}
+
+/// C's `va_start` names the last fixed parameter, so a variadic function with
+/// none is a thing C cannot express either.
+#[test]
+fn a_c_vararg_declaration_needs_a_fixed_parameter() {
+    let msgs = messages(
+        "extern(\"c\") {\n\
+         \x20 f :: #c_vararg func () -> i32\n\
+         }\n\
+         @public main :: func () { const _ = f() }\n",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("needs at least one fixed parameter")),
+        "{msgs:#?}"
+    );
+}
+
+/// A `str` is a pointer and a length, and a C function reads one argument out
+/// of the tail. The note names the two spellings that do cross, because the
+/// mistake is a `printf("%s", s)` away in any program that writes one.
+#[test]
+fn a_str_may_not_cross_a_c_variadic_tail() {
+    let msgs = messages(
+        "extern(\"c\") {\n\
+         \x20 printf :: #c_vararg func (fmt: *u8) -> i32\n\
+         }\n\
+         @public main :: func () {\n\
+         \x20 let c: u8 := 1\n\
+         \x20 let n: i32 := printf(&c, \"text\")\n\
+         }\n",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("cannot be passed in a C variadic tail")),
+        "{msgs:#?}"
+    );
+}
+
+/// The tail lives in the calling convention and a `Ty::Func` says nothing about
+/// it, so a pointer to a variadic declaration would be indistinguishable from
+/// one to the fixed-arity function of the same parameters — and calling through
+/// it would use the wrong convention with nothing to notice.
+#[test]
+fn a_c_vararg_function_is_not_a_value() {
+    let msgs = messages(
+        "extern(\"c\") {\n\
+         \x20 printf :: #c_vararg func (fmt: *u8) -> i32\n\
+         }\n\
+         @public main :: func () { let f := printf }\n",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("can only be called, not used as a value")),
+        "{msgs:#?}"
+    );
+}
+
+/// A named argument binds to a parameter, and the tail has none. Refusing is
+/// the point: the tail would keep its position while the head moved.
+#[test]
+fn a_c_vararg_call_may_not_name_an_argument() {
+    let msgs = messages(
+        "extern(\"c\") {\n\
+         \x20 printf :: #c_vararg func (fmt: *u8) -> i32\n\
+         }\n\
+         @public main :: func () {\n\
+         \x20 let c: u8 := 1\n\
+         \x20 let n: i32 := printf(fmt: &c)\n\
+         }\n",
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("may not name an argument")),
+        "{msgs:#?}"
+    );
+}
+
 /// The `#const` check defers every call in a generic body — which function it
 /// reaches is a question about the instantiation, and there were none. Once
 /// there are, the calls it skipped are ordinary static ones and get judged.

@@ -284,6 +284,19 @@ impl Def {
             _ => self.name.clone(),
         })
     }
+
+    /// Whether this declaration is `#c_vararg` — a C function whose declared
+    /// parameters are the **fixed** ones and which accepts a tail of further
+    /// arguments passed under the platform's variadic convention (§9).
+    ///
+    /// The tail has no type, because C's does not: each argument is checked and
+    /// promoted at the call site on its own. That is also why this is a fact
+    /// about the *declaration* rather than about its [`Ty::Func`](super::ty::Ty)
+    /// — a variadic signature has no function-pointer type here, and a
+    /// declaration is the only place one can be written.
+    pub fn is_c_variadic(&self) -> bool {
+        self.directives.iter().any(|d| d.is("c_vararg"))
+    }
 }
 
 impl DefTable {

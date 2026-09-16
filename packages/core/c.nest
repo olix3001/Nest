@@ -18,10 +18,16 @@
 // reaches code written on the promise that it cannot see one, so the two are
 // kept apart and the conversion between them is a check.
 //
-// **There are no varargs.** `printf` is the first thing anyone tries and it is
-// not declarable here; a program that needs a variadic C function writes a
-// fixed-arity shim in C. `std` declares fixed-arity functions and formats things
-// itself, which it was going to do anyway (`core/fmt`).
+// **A variadic C function is declared `#c_vararg`** (§9): the written
+// parameters are C's *fixed* ones, and a call may pass a tail past them, each
+// argument promoted the way C promotes one — anything narrower than an `int` to
+// an `int`, a `float` to a `double`. `printf` is declarable, and so is `open`,
+// whose `mode` is read only when the flags ask to create.
+//
+// What cannot be written is a `#c_vararg` function with a **body**: reading a
+// tail is `va_list`, whose layout differs per target and which nothing here
+// emits. Declaring is the whole of it, which is what a C library needs. `std`
+// still formats things itself (`core/fmt`) rather than going out to `printf`.
 
 { C_LONG, C_ULONG, C_CHAR } :: import "target.nest"
 { transmute, size_of, make } :: import "mem.nest"

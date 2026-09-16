@@ -64,10 +64,13 @@ unblocks everything else: without it a Nest program cannot call `open`, and
 
 ### Open questions for this stage
 
-- **Varargs are not supported.** Decided. `printf` is the first thing anyone
-  tries and it is not declarable — `std` declares fixed-arity C functions and
-  does its own formatting, which it was going to do anyway. A program that needs
-  a variadic C function writes a fixed-arity C shim.
+- **Varargs.** Decided, and then revisited once `std` had to call `open`.
+  Nest has **no variadics of its own** — a function wanting many arguments takes
+  a tuple, which is already sayable — but a **C** variadic is declarable with
+  `#c_vararg`, because the alternative was a C shim per function and the first
+  one was already written. The directive marks a declaration, never a
+  definition: accepting a tail costs a flag on a signature, and *reading* one is
+  `va_list`, which is per-target and which nothing emits.
 
 ---
 
@@ -320,8 +323,9 @@ lookup, and a lookup that finds nothing is an error.
 ### Step 3 — `core/c` — **done**
 
 The C boundary as described above: the type aliases, `c.ptr.<T>`, `c.null`, and
-the `c"..."` literal with its trailing NUL. **No varargs.** `extern("c")`
-already works; this is the vocabulary to use it with.
+the `c"..."` literal with its trailing NUL. **Varargs** arrived later, with
+`#c_vararg` (stage 2's `open`). `extern("c")` already works; this is the
+vocabulary to use it with.
 
 *Done when*: a Nest program calls `write(1, ...)` through libc and the output
 appears. **Commit. Stop.**
@@ -378,10 +382,13 @@ What it turned out to need, none of which was library code:
   *integers*, not `Ptr`, so the collector does not treat C's stack as a root.
   The environment is read from `environ` instead, because `envp` is a snapshot
   and `setenv` replaces the table under it.
-- **Three C things Nest cannot say.** `errno` is a macro, `open` is variadic,
-  and `environ` is a symbol macOS hides behind a feature macro. Each is one line
-  in `runtime/nest_runtime.c`, which is where `core/c` already says a variadic C
-  function's shim belongs.
+- **Two C things Nest cannot say.** `errno` is a macro, and `environ` is a
+  symbol macOS hides behind a feature macro. Each is one line in
+  `runtime/nest_runtime.c`. **`open` was a third** and is not any more:
+  `#c_vararg` declares it as the variadic function it is, and the shim is gone.
+  It is the case that paid for the directive — on arm64 a fixed argument arrives
+  in a register and a variadic one on the stack, so a three-parameter
+  declaration of `open` created files with whatever the stack held.
 - **The `open` flags differ per target** — Linux's `O_APPEND` is macOS's
   `O_TRUNC` — so `std/libc` branches on `core/target`'s `OS`, which the compiler
   generated for this build. That is the one place `#when` would have replaced

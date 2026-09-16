@@ -1,0 +1,21 @@
+---
+source: src/lir/tests.rs
+expression: lir_text(src)
+---
+unit mem:main {
+
+  declare extern("c") func printf(fmt_0: *u8) -> i32 #c_vararg  // printf
+
+  func shout(s_0: *u8, b_1: u8) -> i32  // _NC5shout
+    let _2: i32
+    let _3: i32
+    let _4: i32
+  bb0:                    // entry
+    _2 := cast.zext b_1 : u8 -> i32
+    _3 := 1
+    _4 := call printf(s_0, _3, _2)
+      @safepoint { live: [s_0]
+        s_0 := reloc s_0
+      }
+    return _4
+}

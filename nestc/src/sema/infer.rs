@@ -1228,7 +1228,7 @@ impl Inferer<'_> {
                 // (a function, type, or const) is typed from that def; a value
                 // `place.field` is typed from the base's struct type.
                 if let Some(def) = self.resolved_def(node) {
-                    return self.def_ty(def);
+                    return self.def_ty(node, def);
                 }
                 let bty = self.infer_expr(base);
                 let bty = self.pin_str(&bty);
@@ -2917,7 +2917,8 @@ impl Inferer<'_> {
                         };
                     }
                 };
-                let result = self.apply_call(callee, &inst, &args);
+                let variadic = self.defs.get(def).is_c_variadic();
+                let result = self.apply_call_with(callee, &inst, &args, variadic);
                 return self.intrinsic_result(def, result, &args);
             }
         }
@@ -3096,6 +3097,21 @@ impl Inferer<'_> {
     /// does not bind, having reported why.
     fn bind_args(&mut self, callee: NodeId, def: DefId, args: &[NodeId]) -> ArgBinding {
         let named = args.iter().any(|&a| self.arg_name(a).is_some());
+        // A `#c_vararg` call has a tail no parameter names, so there is no
+        // parameter order to bind into: the arguments are already in the only
+        // order they have. Naming one is refused rather than ignored — the tail
+        // would silently keep its position while the head moved.
+        if self.defs.get(def).is_c_variadic() {
+            if named {
+                self.report(
+                    callee,
+                    "a `#c_vararg` call may not name an argument: the variadic tail has no \
+                     parameter names to bind against",
+                );
+                return ArgBinding::Failed;
+            }
+            return ArgBinding::AsWritten;
+        }
         let Some(names) = self.func_param_names(def) else {
             return ArgBinding::AsWritten;
         };
@@ -3221,15 +3237,53 @@ impl Inferer<'_> {
     /// is nothing to infer or check there: the default was type-checked against
     /// this very parameter once, at the declaration, and lowering fills it in.
     fn apply_call(&mut self, callee: NodeId, callee_ty: &Ty, args: &[Option<NodeId>]) -> Ty {
+        self.apply_call_with(callee, callee_ty, args, false)
+    }
+
+    /// As [`apply_call`](Self::apply_call), but `variadic` says the callee is a
+    /// `#c_vararg` declaration: the parameters are the **fixed** ones and
+    /// everything past them is a C variadic tail, checked one argument at a time
+    /// by [`check_vararg_arg`](Self::check_vararg_arg) rather than against a
+    /// parameter type there is none of.
+    fn apply_call_with(
+        &mut self,
+        callee: NodeId,
+        callee_ty: &Ty,
+        args: &[Option<NodeId>],
+        variadic: bool,
+    ) -> Ty {
         let arg_tys: Vec<Option<Ty>> = args.iter().map(|a| a.map(|n| self.infer_expr(n))).collect();
         match self.cx.shallow(callee_ty) {
             Ty::Func { params, ret } => {
-                if params.len() == arg_tys.len() {
+                let fits = if variadic {
+                    arg_tys.len() >= params.len()
+                } else {
+                    arg_tys.len() == params.len()
+                };
+                if fits {
                     for (a, (arg_node, aty)) in params.iter().zip(args.iter().zip(&arg_tys)) {
                         if let (Some(node), Some(aty)) = (arg_node, aty) {
                             self.expect(*node, aty, a);
                         }
                     }
+                    // The tail. Each argument stands on its own — C's convention
+                    // has no parameter to match it against — so what is checked
+                    // is that it can cross at all, and what is recorded is the
+                    // promotion C would have applied silently.
+                    for (arg_node, aty) in args.iter().zip(&arg_tys).skip(params.len()) {
+                        if let (Some(node), Some(aty)) = (arg_node, aty) {
+                            self.check_vararg_arg(*node, aty);
+                        }
+                    }
+                } else if variadic {
+                    self.report(
+                        callee,
+                        format!(
+                            "this function takes at least {} argument(s) but {} were supplied",
+                            params.len(),
+                            arg_tys.len()
+                        ),
+                    );
                 } else {
                     self.report(
                         callee,
@@ -3244,6 +3298,124 @@ impl Inferer<'_> {
             }
             // Unknown callee type: don't cascade (and don't dangle a variable).
             _ => Ty::Error,
+        }
+    }
+
+    /// One argument in a `#c_vararg` tail: refuse what cannot cross, and record
+    /// the **default argument promotion** C would have applied.
+    ///
+    /// The promotions are not a convenience. A variadic callee reads its tail
+    /// with `va_arg`, which can only be asked for a promoted type, so a `u8`
+    /// passed as a `u8` is read back as an `int` from a slot that was never
+    /// filled. Recording a [`Coercion`] here is what makes `printf("%d", b)`
+    /// pass the `int` the callee is about to read — and it is recorded rather
+    /// than required of the program because C's rule is the *callee's*, not
+    /// something the call site chose.
+    ///
+    /// What is refused is what this language owns the representation of: a `str`
+    /// and a slice are two words with no C spelling, an array and a tuple have
+    /// no argument convention here at all, and a `dyn` is a pair whose second
+    /// half is a vtable. A **struct** is not refused — `c.ptr.<T>` is one, and an
+    /// `extern("c")` signature is already a promise that its types are C's.
+    fn check_vararg_arg(&mut self, node: NodeId, ty: &Ty) {
+        // Nothing else will constrain this argument — there is no parameter for
+        // it — so its literals settle here. The **default is C's**, not this
+        // language's: a bare `1` in `printf(c"%d", 1)` is an `int` to everyone
+        // who reads it and to the `va_arg` that will pick it up, where this
+        // language's own default of `isize` would put eight bytes under a
+        // conversion that reads four. A literal too large for an `int` keeps the
+        // ordinary default, which is what C does with one too.
+        let pinned = self.pin_str(ty);
+        if is_var(&self.cx.shallow(&pinned)) && self.fits_c_int(node) {
+            let _ = self.cx.unify(&pinned, &Ty::int(32, true));
+        }
+        let pinned = self.pin_numeric(&pinned);
+        let resolved = self.settle(&pinned);
+        if matches!(resolved, Ty::Error) || is_var(&resolved) {
+            return;
+        }
+        // A string literal in a tail is the mistake worth its own sentence: the
+        // C function is about to read a `char *`, and `c"..."` is the spelling
+        // that produces one.
+        if matches!(resolved, Ty::ComptimeStr) || self.cx.admits_str(&resolved) {
+            self.report_with_note(
+                node,
+                "a `str` cannot be passed in a C variadic tail".to_string(),
+                "a `str` is a pointer and a length, and C reads one argument — write `c\"...\"` \
+                 for a literal, or `c.to_cstr(s)` for a value"
+                    .to_string(),
+            );
+            return;
+        }
+        let bad = match &resolved {
+            Ty::Slice { .. } => Some("a slice"),
+            Ty::Array { .. } => Some("an array"),
+            Ty::Tuple(elems) if !elems.is_empty() => Some("a tuple"),
+            Ty::Void | Ty::Tuple(_) => Some("`void`"),
+            Ty::Never => Some("`never`"),
+            Ty::Dyn(_) => Some("a trait object"),
+            Ty::Func { .. } => Some("a function"),
+            _ => None,
+        };
+        if let Some(what) = bad {
+            let msg = format!(
+                "{what} cannot be passed in a C variadic tail: `{}` has no C argument convention",
+                resolved.display(self.defs)
+            );
+            self.report_with_note(
+                node,
+                msg,
+                "the tail is read with `va_arg`, which names a C type — pass the parts this \
+                 language owns the representation of separately"
+                    .to_string(),
+            );
+            return;
+        }
+        // A literal that has not settled yet carries its own `Coercion`, and its
+        // default is already a promoted type (`i32`, `f64`), so there is nothing
+        // to add and overwriting would lose the settling.
+        if self.ast.meta::<Coercion>(node).is_some() {
+            return;
+        }
+        if let Some(to) = self.c_promotion(&resolved) {
+            self.ast.set_meta(node, Coercion { to });
+        }
+    }
+
+    /// Whether `node` is an integer literal whose value an `int` holds — the
+    /// condition under which a C variadic tail settles one on `i32` rather than
+    /// on this language's `isize`.
+    fn fits_c_int(&self, node: NodeId) -> bool {
+        // An argument may be wrapped in an `Arg` — that is where a name would
+        // go — and the literal's value was recorded against the literal.
+        let node = match &self.ast.node(node).kind {
+            NodeKind::Arg { value, .. } => *value,
+            _ => node,
+        };
+        let Some(value) = self.int_values.get(&node) else {
+            return false;
+        };
+        num_bigint::BigInt::from(i32::MIN) <= *value && *value <= num_bigint::BigInt::from(i32::MAX)
+    }
+
+    /// C's default argument promotions: anything narrower than an `int` is read
+    /// as an `int`, and a `float` is read as a `double` (C17 §6.5.2.2).
+    ///
+    /// `bool` promotes too — it is a one-bit value here and a full `int` in the
+    /// register the callee reads. Everything `int`-wide or wider, every pointer
+    /// and every struct is passed as it stands.
+    fn c_promotion(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Bool => Some(Ty::int(32, true)),
+            // A width still symbolic is inside a family impl, which a
+            // `#c_vararg` call site cannot be: the declaration may not be
+            // generic, and the argument is a concrete value by the time it is
+            // checked. `None` here is "no promotion", which is right either way.
+            Ty::Int { width, .. } if width.bits().is_some_and(|b| b < 32) => {
+                Some(Ty::int(32, true))
+            }
+            Ty::Float(super::ty::FloatWidth::F32) => Some(Ty::Float(super::ty::FloatWidth::F64)),
+            _ => None,
         }
     }
 
@@ -4153,7 +4325,7 @@ impl Inferer<'_> {
     /// The type of a path expression from the def it resolved to.
     fn path_ty(&mut self, node: NodeId) -> Ty {
         match self.resolved_def(node) {
-            Some(def) => self.def_ty(def),
+            Some(def) => self.def_ty(node, def),
             None => Ty::Error,
         }
     }
@@ -4161,12 +4333,33 @@ impl Inferer<'_> {
     /// The type a value-position reference to `def` has: a local/param from the
     /// environment, a function from its signature, a type used as a constructor
     /// value as its nominal type.
-    fn def_ty(&mut self, def: super::def::DefId) -> Ty {
+    fn def_ty(&mut self, node: NodeId, def: super::def::DefId) -> Ty {
         if let Some(ty) = self.env.get(&def) {
             return ty.clone();
         }
         match self.defs.get(def).kind {
-            DefKind::Func => self.func_def_ty(def),
+            DefKind::Func => {
+                // A variadic signature has no function-pointer type: the tail
+                // lives in the calling convention, and a `Ty::Func` says nothing
+                // about it — so a pointer taken here would be indistinguishable
+                // from one to the fixed-arity function of the same parameters,
+                // and calling through it would use the wrong convention with
+                // nothing to notice. The call form is the only form.
+                if self.defs.get(def).is_c_variadic() {
+                    self.report_with_note(
+                        node,
+                        format!(
+                            "`{}` is `#c_vararg` and can only be called, not used as a value",
+                            self.defs.get(def).name
+                        ),
+                        "a variadic tail is part of the calling convention, and a function \
+                         pointer does not carry one"
+                            .to_string(),
+                    );
+                    return Ty::Error;
+                }
+                self.func_def_ty(def)
+            }
             DefKind::Struct | DefKind::Enum => self.nominal_of(def),
             DefKind::Const => self.const_def_ty(def),
             // `<const N: usize>` names a value in the body, of the type it was
@@ -4457,7 +4650,7 @@ impl Inferer<'_> {
             NodeKind::Unary { operand, .. } => self.const_rhs_ty(file, operand),
             // A constant naming another constant inherits its comptime-ness.
             NodeKind::Path { .. } => match self.resolved_def_in(file, rhs) {
-                Some(d) => self.def_ty(d),
+                Some(d) => self.def_ty(rhs, d),
                 None => Ty::Error,
             },
             // `#static count: u32 :: 0` (§2.6) and an associated constant

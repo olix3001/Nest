@@ -358,6 +358,16 @@ pub struct FunctionAttrs {
     /// act on it; it is carried because a profiler and a debugger both want to
     /// say so (§9).
     pub unchecked: bool,
+    /// `#c_vararg` — a C declaration whose parameters are the **fixed** ones and
+    /// which accepts a variadic tail beyond them (§9).
+    ///
+    /// A backend must act on this, and it is the one attribute here that changes
+    /// a *signature* rather than describing one: the tail exists only in the
+    /// calling convention, so a variadic declaration and a fixed one with the
+    /// same parameters are two different functions to a linker's ABI and one
+    /// and the same to everything above it. Only a declaration carries it —
+    /// there are no blocks behind a `#c_vararg`.
+    pub c_variadic: bool,
 }
 
 /// What `#inline` asked for. A hint, and a backend may ignore it (§9).

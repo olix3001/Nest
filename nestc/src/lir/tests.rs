@@ -631,6 +631,27 @@ shout :: func (s: *u8) -> i32 { return puts(s) }
     insta::assert_snapshot!(lir_text(src));
 }
 
+/// A `#c_vararg` declaration and a call that passes a tail past its fixed
+/// parameter.
+///
+/// Three things are locked down here, and each is something only this level
+/// shows. The declaration carries the tag, because a variadic signature and a
+/// fixed one are two different functions to a calling convention. The `u8`
+/// argument arrives under a `$cast` to `i32` — C's default argument promotion,
+/// which the callee's `va_arg` is going to assume happened. And the literal
+/// `1` is written into a **slot** before it is passed: a `Constant::Int` is a
+/// number with no width, and a tail argument has no parameter to lend it one.
+#[test]
+fn lir_snapshot_a_c_vararg_call_promotes_and_spills_its_tail() {
+    let src = "\
+extern(\"c\") {
+  printf :: #c_vararg func (fmt: *u8) -> i32
+}
+shout :: func (s: *u8, b: u8) -> i32 { return printf(s, 1, b) }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
 /// An array of constants is **one constant** — `{ 1, 2, 3 }` in the dump, not
 /// three stores — and an array is the one aggregate §7b does not flatten, so
 /// the type stays `[3]i32`.

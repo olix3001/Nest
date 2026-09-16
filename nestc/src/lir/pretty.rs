@@ -249,6 +249,13 @@ impl Printer<'_> {
         if f.attrs.unchecked {
             tags.push_str(" #unsafe");
         }
+        // The one tag that changes the *signature* rather than describing it:
+        // a call to a variadic declaration uses a different convention, so a
+        // dump that left it out would show two functions that are the same and
+        // are not.
+        if f.attrs.c_variadic {
+            tags.push_str(" #c_vararg");
+        }
         let ret = self.ty(&f.ret);
         let decl = if f.blocks.is_empty() { "declare " } else { "" };
         self.line(&format!(

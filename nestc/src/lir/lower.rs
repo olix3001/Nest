@@ -1334,6 +1334,7 @@ fn attrs_of(directives: &[Directive], public: bool) -> FunctionAttrs {
                 }
             }
             "unsafe" => attrs.unchecked = true,
+            "c_vararg" => attrs.c_variadic = true,
             _ => {}
         }
     }
@@ -2404,7 +2405,55 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 }
             },
         };
+        self.spill_variadic_tail(&callee, &mut vals, args, span);
         self.emit_call(callee, vals, ty, span)
+    }
+
+    /// Give every argument in a `#c_vararg` tail a slot to live in.
+    ///
+    /// A tail argument is the one operand in this language with no type attached
+    /// to it anywhere: a fixed parameter lends its type to the argument filling
+    /// it, and there is no parameter here. That is fine for a [`Place`], which
+    /// carries its local's type, and not for a [`Constant`] — `Constant::Int` is
+    /// a [`BigInt`](num_bigint::BigInt) and nothing more, so `printf(c"%d", 5)`
+    /// would reach a backend as a number with no width.
+    ///
+    /// So the constant is written to a slot and the slot is passed. The type is
+    /// the argument's own, which the front end already promoted to what C will
+    /// read (`i32`, `f64`) — and the store is a move a backend removes, which is
+    /// the cheapest way to say something LIR otherwise cannot.
+    fn spill_variadic_tail(
+        &mut self,
+        callee: &Callee,
+        vals: &mut [Operand],
+        args: &[Expr],
+        span: Option<FileSpan>,
+    ) {
+        let Callee::Static(id) = callee else { return };
+        let f = &self.cx.funcs[id.0 as usize];
+        if !f.attrs.c_variadic {
+            return;
+        }
+        let fixed = f.params;
+        // `passed` drops every `void` argument, and §9 drops the parameters they
+        // would have filled, so the two lists are still in step — but only the
+        // arguments that survived are here, and their types have to be read from
+        // the same surviving ones.
+        let tys: Vec<Ty> = args
+            .iter()
+            .map(|a| self.cx.ty_of(a.id))
+            .filter(|t| !is_void(t))
+            .collect();
+        for i in fixed..vals.len() {
+            if !matches!(vals[i], Operand::Const(_)) {
+                continue;
+            }
+            let Some(ty) = tys.get(i).cloned() else { continue };
+            let slot = self.temp(ty, span);
+            let value = Rvalue::Use(vals[i].clone());
+            self.assign(Place::local(slot), value, span);
+            vals[i] = Operand::local(slot);
+        }
     }
 
     /// The arguments a call actually passes.

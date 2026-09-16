@@ -46,7 +46,6 @@
  */
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -157,24 +156,6 @@ extern char **environ;
 
 char **nest_envp(void) {
     return environ;
-}
-
-/* `open`, with a fixed arity.
- *
- * C's `open` is **variadic** — `int open(const char *, int, ...)`, with `mode`
- * read only when the flags ask to create — and Nest has no varargs (`core/c`).
- * Calling it through a three-argument declaration is not a small lie: on arm64
- * a variadic argument is passed on the stack and a fixed one in a register, so
- * `open` reads a `mode` that was never written there. It creates files with
- * whatever was on the stack for permissions, which is how this shim came to be
- * written — the first `fs.write` returned `EACCES`.
- *
- * `core/c` already names the remedy: a program needing a variadic C function
- * writes a fixed-arity shim in C. This is that shim, and it is the only one.
- * The flags are the caller's, unexamined — `std/libc` is what decides which
- * bits this target spells them with. */
-int nest_open(const char *path, int flags, unsigned int mode) {
-    return open(path, flags, (mode_t)mode);
 }
 
 /* The last error a libc call reported.

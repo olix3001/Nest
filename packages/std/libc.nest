@@ -12,10 +12,12 @@
 // end. A pointer is the exception: a `c.ptr.<T>` is one address, untraced, and
 // converting to a `*T` is a checked call — see `core/c`.
 //
-// **No varargs.** `open` is the one function here whose C declaration is
-// variadic (`mode` is read only when `O_CREAT` is set), and it is declared with
-// the third argument always present, which is what every caller of the variadic
-// form compiles to anyway.
+// **`open` is variadic**, and is declared as one. `#c_vararg` says the declared
+// parameters are C's *fixed* ones and that a call may pass a tail beyond them,
+// which is what `open`'s `mode` is — read only when the flags ask to create.
+// The distinction is not cosmetic: on arm64 a fixed argument arrives in a
+// register and a variadic one on the stack, so a three-parameter declaration
+// of it creates files with whatever the stack held.
 //
 // **This is the POSIX surface**, and it is what `std` is written on today:
 // Linux, macOS and the BSDs. A Windows backing is a second file under `sys`
@@ -53,13 +55,10 @@ extern("c") {
 // ===< Files and descriptors >===
 
 extern("c") {
-  // **`nest_open`, not `open`.** C's `open` is variadic and this language has
-  // no varargs, so a three-argument declaration of it passes `mode` in a
-  // register that libc never reads — see the shim in `runtime/nest_runtime.c`.
-  // Everything else on this list is fixed-arity in C and is declared as
-  // itself.
-  @link_name("nest_open")
-  @public open  :: func (path: c.cstr, flags: c.int, mode: c.uint) -> c.int
+  // `open`'s `mode` is the tail: C reads it only when the flags ask to create a
+  // file, and a caller that is not creating one passes nothing. Everything else
+  // on this list is fixed-arity in C and is declared as itself.
+  @public open  :: #c_vararg func (path: c.cstr, flags: c.int) -> c.int
   @public close :: func (fd: c.int) -> c.int
   @public read  :: func (fd: c.int, buf: c.ptr.<c.uchar>, n: c.size_t) -> c.ssize_t
   @public write :: func (fd: c.int, buf: c.ptr.<c.uchar>, n: c.size_t) -> c.ssize_t

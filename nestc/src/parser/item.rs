@@ -558,6 +558,12 @@ impl Parser {
 
     /// `extern '(' abi ')' '{' declaration* '}'` — desugars each bodyless member
     /// to a standalone binding carrying that ABI (no distinct block node).
+    ///
+    /// A member is decorated the way any other item is — attributes, then
+    /// directives — because the block is sugar for a run of bindings and a
+    /// desugaring that dropped half the decoration would make the sugar mean
+    /// something the long form does not. `@link_name` was already read here;
+    /// `#c_vararg` is the directive that made the other half matter.
     fn parse_extern_block(&mut self, out: &mut Vec<NodeId>) {
         self.bump(); // 'extern'
         self.expect(&TokenKind::LParen);
@@ -582,9 +588,10 @@ impl Parser {
             }
             let start = self.cur_span();
             let attrs = self.parse_attributes();
+            let directives = self.parse_directives();
             let member = self.parse_const_bind(false);
             self.set_extern_abi(member, &abi);
-            out.push(self.finish_decl(attrs, Vec::new(), member, start));
+            out.push(self.finish_decl(attrs, directives, member, start));
             self.skip_newlines();
             self.eat(&TokenKind::Comma);
         }

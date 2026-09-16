@@ -685,11 +685,36 @@ could do differently. So the ones that still matter are **decided here**, into a
 | `#offset(N)` | `attrs.offset` | a fixed position in the generated binary |
 | `#inline` | `attrs.inline` | a codegen hint, never semantics |
 | `#unsafe` | `attrs.unchecked` | the checks this body was compiled without |
+| `#c_vararg` | `attrs.c_variadic` | the declared parameters are C's **fixed** ones, and a call may pass a tail past them under the platform's variadic convention |
 | `@public` | `attrs.public` | whether the symbol must be visible outside the program — everything else may be given internal linkage (§11) |
 
 `#packed`, `#align(N)` and `#soa` do not appear: layout consumed them, and what
 they decided is in the offsets the type table already carries. `#raw` is a
 field's, and zero-initialization is the global's initializer being absent.
+
+**`#c_vararg` is the one entry here a backend must act on rather than record.**
+Every other row describes a function; this one changes its *signature*, because
+the tail exists only in the calling convention and the two conventions differ on
+every target — which register a float goes in on x86-64, whether a slot is
+spilled on AArch64. A declaration and a fixed-arity one with the same parameters
+are the same function to everything above this level and two different ones to a
+linker's ABI, so a backend that ignored the flag would emit calls that are
+silently wrong.
+
+Two things follow from the tail having no parameters, and both are settled
+before LIR rather than left to a backend:
+
+- **Every tail argument is already promoted.** The front end applies C's default
+  argument promotions — anything narrower than an `int` to an `int`, a `float`
+  to a `double` — as an explicit `$cast`, because the callee's `va_arg` can only
+  be asked for a promoted type.
+- **No tail argument is a bare constant.** A `Constant::Int` is a number and no
+  width, and a fixed argument gets its width from the parameter it fills. A tail
+  argument has none, so lowering writes it to a slot first and passes the slot.
+
+Only a **declaration** carries the flag. Reading a tail is `va_list`, whose
+layout is per-target and which nothing in this compiler emits, so a `#c_vararg`
+with a body is refused in the front end and never reaches here.
 
 ## 7b. Type definitions, and aggregates flattened to structs
 

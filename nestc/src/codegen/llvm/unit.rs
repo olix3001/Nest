@@ -303,14 +303,23 @@ impl<'ctx> Cx<'ctx, '_> {
     /// a `void` or `never` return is LLVM's `void`. Neither erases anything
     /// further: §9 already dropped every `void` parameter on both sides of every
     /// call, so the arities here agree by construction.
+    ///
+    /// A `#c_vararg` declaration is the one signature whose parameters are not
+    /// the whole story: they are the fixed ones, and the trailing flag is what
+    /// tells LLVM to lower a call to it under the platform's variadic
+    /// convention rather than the ordinary one. The two conventions differ on
+    /// every target this compiler has — which register a float goes in on
+    /// x86-64, whether a slot is spilled on AArch64 — so this flag is the whole
+    /// of what a backend must do, and getting it wrong is silent.
     fn signature(&self, f: &Function) -> Result<inkwell::types::FunctionType<'ctx>> {
         let mut params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
         for local in &f.locals[..f.params] {
             params.push(self.llty(&local.ty)?.into());
         }
+        let variadic = f.attrs.c_variadic;
         Ok(match &f.ret {
-            Ty::Void | Ty::Never => self.context.void_type().fn_type(&params, false),
-            other => self.llty(other)?.fn_type(&params, false),
+            Ty::Void | Ty::Never => self.context.void_type().fn_type(&params, variadic),
+            other => self.llty(other)?.fn_type(&params, variadic),
         })
     }
 
@@ -1365,11 +1374,23 @@ impl<'ctx> Cx<'ctx, '_> {
                 let value = self.funcs[id.0 as usize];
                 let mut built: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
                 for (i, a) in args.iter().enumerate() {
-                    let want = target
-                        .locals
-                        .get(i)
-                        .map(|l| l.ty.clone())
-                        .ok_or_else(|| failed(format!("{}: `{}` takes no argument {i}", f.name, target.name)))?;
+                    // Past the fixed parameters of a `#c_vararg` callee there is
+                    // no parameter to take a type from, so the argument's own is
+                    // the only one there is — which is exactly what C does, and
+                    // why the front end has already promoted it.
+                    let want = match target.locals.get(i) {
+                        Some(l) if i < target.params => l.ty.clone(),
+                        _ if target.attrs.c_variadic && i >= target.params => self
+                            .operand_ty(fx, f, a)
+                            .ok_or_else(|| failed(format!("{}: a variadic argument with no type", f.name)))?,
+                        Some(l) => l.ty.clone(),
+                        None => {
+                            return Err(failed(format!(
+                                "{}: `{}` takes no argument {i}",
+                                f.name, target.name
+                            )))
+                        }
+                    };
                     built.push(self.operand(fx, f, a, &want)?.into());
                 }
                 let site = self.builder.build_call(value, &built, "").map_err(failed)?;

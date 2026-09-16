@@ -310,11 +310,16 @@ impl Collector<'_> {
     /// not.
     fn check_bodyless(&mut self, rhs: NodeId, rhs_kind: &NodeKind, def: DefId) {
         let NodeKind::FuncExpr {
-            body, extern_abi, ..
+            body,
+            extern_abi,
+            params,
+            generics,
+            ..
         } = rhs_kind
         else {
             return;
         };
+        self.check_c_vararg(rhs, def, body, extern_abi, params, generics);
         let tag = self.defs.get(def).intrinsic_tag();
         // An `#intrinsic` **must** be bodyless: the compiler is going to supply
         // the body, so a written one would be dead code with no way to tell.
@@ -335,6 +340,65 @@ impl Collector<'_> {
                 rhs,
                 "a function with no body must be `#intrinsic`, `extern`, or a trait requirement",
             );
+        }
+    }
+
+    /// What `#c_vararg` may be written on (§9).
+    ///
+    /// The directive says the declared parameters are a C function's **fixed**
+    /// ones and that a call may pass a tail beyond them. Everything refused here
+    /// is refused because the tail would have no meaning, not because it is hard:
+    ///
+    /// - **It must be `extern`.** Accepting the tail is one thing and *reading*
+    ///   it is another — that is `va_list`, whose layout differs per target and
+    ///   which nothing in this compiler emits. A declaration never reads it.
+    /// - **It must have a fixed parameter.** C has no way to start a variadic
+    ///   tail with nothing before it, because `va_start` names the last fixed
+    ///   parameter.
+    /// - **No defaults, and no generics.** Both decide arguments by a rule of
+    ///   this language, and the tail is decided by C's — a defaulted parameter
+    ///   and a tail argument would compete for the same position.
+    fn check_c_vararg(
+        &mut self,
+        rhs: NodeId,
+        def: DefId,
+        body: &Option<NodeId>,
+        extern_abi: &Option<Symbol>,
+        params: &[NodeId],
+        generics: &[NodeId],
+    ) {
+        if !self.defs.get(def).is_c_variadic() {
+            return;
+        }
+        if extern_abi.is_none() || body.is_some() {
+            self.report(
+                rhs,
+                "only an `extern` declaration may be `#c_vararg`: reading a variadic tail needs \
+                 `va_list`, which this compiler does not emit",
+            );
+            return;
+        }
+        if params.is_empty() {
+            self.report(
+                rhs,
+                "a `#c_vararg` function needs at least one fixed parameter, because `va_start` \
+                 names the last one",
+            );
+        }
+        if !generics.is_empty() {
+            self.report(rhs, "a `#c_vararg` function may not be generic");
+        }
+        for &p in params {
+            if let NodeKind::Param {
+                default: Some(_), ..
+            } = self.ast.node(p).kind
+            {
+                self.report(
+                    p,
+                    "a `#c_vararg` function may not have a default argument: the default and the \
+                     variadic tail would claim the same position",
+                );
+            }
         }
     }
 
