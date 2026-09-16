@@ -5,8 +5,8 @@
 // `command` is the only place that knows which flags a build passes. Anything
 // else that needs to know how a package is compiled — `twig metadata`, for an
 // editor — asks it, so the answer it gives and the build that runs cannot drift
-// apart. Asking whether a library is up to date is the
-// same command with `--up-to-date` added.
+// apart. Asking whether a library is up to date is the same command with
+// `--up-to-date` added.
 //
 // ### One run per package
 //

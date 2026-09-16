@@ -1,0 +1,14 @@
+[package]
+name = "zed-nest"
+description = "The Zed extension for Nest."
+authors = ["Oliwier Michalik"]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

@@ -1,7 +1,8 @@
 # Editor support
 
 - `tree-sitter-nest/` — the tree-sitter grammar.
-- `zed/` — the Zed extension, which builds that grammar.
+- `zed/` — the Zed extension, which builds that grammar and starts the language
+  server (`nestc/lsp`).
 
 ## Changing the grammar
 
@@ -30,3 +31,25 @@ point `repository` at `file:///<absolute path to this repository>` and `rev` at 
 local commit. Don't commit that change.
 
 Then run `zed: install dev extension` and pick `editors/zed`.
+
+## The language server
+
+```sh
+cd nestc
+cargo build --release -p nest-lsp   # target/release/nest-lsp
+```
+
+Put `nest-lsp`, `twig` and `nestc` on `PATH`, or tell Zed where the server is
+and the server where twig is:
+
+```json
+"lsp": {
+  "nest-lsp": {
+    "binary": { "path": "/path/to/nest-lsp" },
+    "initialization_options": { "twig": "/path/to/twig" }
+  }
+}
+```
+
+twig finds `nestc` as it always does (`NESTC`, then `PATH`), and the two must be
+the same build: the server reads libraries that `nestc` wrote.

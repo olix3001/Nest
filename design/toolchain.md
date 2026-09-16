@@ -552,7 +552,7 @@ What it does not do yet:
 
 **Commit. Stop.**
 
-### Step 10 — the editor — **highlighting done**; the language server is next
+### Step 10 — the editor — **highlighting and diagnostics done**; hover, go-to-definition and completion are next
 
 Syntax highlighting first (it needs nothing), then the language server, **in
 Rust**, and **before steps 8 and 9** (see Stage 4).
@@ -578,6 +578,25 @@ The highlighting half, as built (`editors/`):
     from the repository at a pinned commit.
 - **`editors/zed`**, the extension: highlights (a copy of the grammar's),
   brackets, indents, and an outline of bindings and `impl`s.
+
+The server, as built so far:
+
+- **`nestc` is a library** with a thin binary, and **`nest-lsp`** (`nestc/lsp`,
+  a workspace member) is a client of it, on `lsp-server`: synchronous, like the
+  compiler.
+- **twig says how a file is compiled.** A file belongs to the package whose
+  `nest.toml` is nearest above it. The server runs `twig build --deps` there,
+  which builds the dependencies' `.nlib`s that are stale, then `twig metadata`,
+  which prints every target's `nestc` command line as JSON. The command line is
+  parsed by `driver::Invocation`, the parser `nestc` itself uses, so no flag is
+  derived twice. Both run on a thread, and again after every save.
+- **Only the open package is analyzed from source**, with the editor's buffers
+  in place of the files on disk, against its dependencies' libraries. A binary
+  reads its own package's library from source too.
+- **A file with no manifest** is analyzed on its own, against the `core` and
+  `std` that ship with the compiler, from source.
+- **`editors/zed`** starts `nest-lsp` from `PATH`, or from
+  `lsp.nest-lsp.binary` in Zed's settings.
 
 **Commit. Stop.**
 
