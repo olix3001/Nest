@@ -741,6 +741,17 @@ fn a_program_links_and_runs() {
              }\n",
             52,
         ),
+        // A slice constant is a view of an array of its own, whatever its
+        // elements are: text, numbers, or slices again. 2 + 3 + 6 + 3.
+        (
+            "NAMES: []str :: .{ \"ab\", \"cde\" }\n\
+             NUMS: []i32 :: .{ 4, 5, 6 }\n\
+             NESTED: [][]i32 :: .{ .{ 1 }, .{ 2, 3 } }\n\
+             main :: func () -> i32 {\n\
+            \x20 return cast.<i32>(NAMES.len() + NAMES[1].len()) + NUMS[2] + NESTED[1][1]\n\
+             }\n",
+            14,
+        ),
     ] {
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
         let file = session.load_entry("main").expect("entry loads");

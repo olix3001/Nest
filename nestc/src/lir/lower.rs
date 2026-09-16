@@ -1034,6 +1034,12 @@ impl Cx<'_> {
             // of them, which is a pointer and a length.
             ConstValue::Str(s) => self.text_data(s.as_bytes(), &ty),
             ConstValue::Bytes(b) => self.text_data(b, &ty),
+            // A slice is a view, like text: the elements are an array of their
+            // own, and the value is its address and length.
+            ConstValue::Aggregate(items) if let Ty::Slice { inner, .. } = &ty => {
+                let (g, len) = self.slice_storage(v, items, inner);
+                Constant::Aggregate(vec![Constant::Global(g), Constant::Int((len as i128).into())])
+            }
             ConstValue::Aggregate(items) => {
                 let tys = self.member_tys(&ty);
                 let parts = items
@@ -1063,6 +1069,14 @@ impl Cx<'_> {
                 }
             }
         }
+    }
+
+    /// The global holding a slice constant's elements, `[N]inner`, and `N`.
+    fn slice_storage(&mut self, v: &ConstValue, items: &[ConstValue], inner: &Ty) -> (GlobalId, u64) {
+        let elems = items.iter().map(|x| self.const_data(x, inner)).collect();
+        let lty = LirTy::Array { len: items.len() as u64, elem: Box::new(self.lir(inner)) };
+        let key = format!("[{}]{}:{}", items.len(), self.key(inner), v.display());
+        (self.data_global("data", lty, Constant::Aggregate(elems), key), items.len() as u64)
     }
 
     /// A run of bytes at the type it is being used as.
@@ -3768,6 +3782,17 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             ConstValue::Void => Rvalue::Use(Operand::Const(Constant::Undef)),
             ConstValue::Str(s) => self.text_rvalue(s.as_bytes(), &ty, span),
             ConstValue::Bytes(b) => self.text_rvalue(b, &ty, span),
+            // A slice is built from its storage's address and length, the way
+            // text is.
+            ConstValue::Aggregate(items) if let Ty::Slice { inner, .. } = &ty => {
+                let (g, len) = self.cx.slice_storage(v, items, inner);
+                let lty = self.cx.lir(&ty);
+                let kind = self.struct_kind(&lty);
+                Rvalue::Aggregate {
+                    kind,
+                    fields: vec![Operand::Const(Constant::Global(g)), Operand::int(len as i128)],
+                }
+            }
             // A composite the evaluator folded is data, and data has an address.
             ConstValue::Aggregate(_) | ConstValue::Variant { .. } => {
                 let init = self.cx.const_data(v, &ty);
