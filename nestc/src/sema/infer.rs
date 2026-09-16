@@ -967,7 +967,8 @@ impl Inferer<'_> {
                     (Some(_), _) => defaulted = Some(name.clone()),
                     (None, Some(prev)) => {
                         let msg = format!(
-                            "parameter `{name}` has no default but follows `{prev}`, which does                              — every parameter after a defaulted one must be defaulted too"
+                            "parameter `{name}` has no default but follows `{prev}`, which does \
+                             — every parameter after a defaulted one must be defaulted too"
                         );
                         self.report(*p, msg);
                     }

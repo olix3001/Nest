@@ -1096,11 +1096,9 @@ impl Cx<'_> {
     /// the answer a checked read wants.
     fn type_id_const(&self, ty: &Ty) -> Constant {
         let key = crate::ir::mono::type_key(self.defs, ty);
-        let h = fnv1a_128(key.as_bytes());
-        Constant::Aggregate(vec![
-            Constant::Int(((h as u64) as i128).into()),
-            Constant::Int((((h >> 64) as u64) as i128).into()),
-        ])
+        // One `u128`, which is what `core`'s `TypeId` is: the language has
+        // arbitrary integer widths, so there is no half to split this into.
+        Constant::Int(num_bigint::BigInt::from(fnv1a_128(key.as_bytes())))
     }
 
     /// Which variant of `core`'s `Kind` enum `ty` is.

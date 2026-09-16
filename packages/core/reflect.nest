@@ -37,11 +37,17 @@
 // differ. That is exactly the answer a checked read wants: the two have the same
 // representation and are not the same type, and a program that stored one must
 // not read the other.
-@public TypeId :: #lang("reflect_type_id") struct { lo: u64, hi: u64 }
+//
+// It is **one `u128`**, not two `u64`s. Splitting it is what a language without
+// arbitrary integer widths has to do, and this one has them (§3.1): the hash is
+// computed as a `u128` and comparing it is one instruction. `distinct` rather
+// than a bare `u128` because an identity is not a number — nothing should be
+// able to add two of them.
+@public TypeId :: #lang("reflect_type_id") distinct u128
 
 impl Eq for TypeId {
   eq :: func (self: Self, rhs: Self) -> bool {
-    return self.lo == rhs.lo && self.hi == rhs.hi
+    return cast.<u128>(self) == cast.<u128>(rhs)
   }
 }
 

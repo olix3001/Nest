@@ -186,7 +186,9 @@ fn a_bool_is_a_byte_and_a_comparison_is_widened_into_one() {
     let text = ir("@public less :: func (a: i32, b: i32) -> bool { return a < b }\n");
     assert!(text.contains("define i8 @_NC4less"), "a bool is not a byte:\n{text}");
     assert!(text.contains("zext i1"), "the comparison was not widened:\n{text}");
-    assert!(!text.contains("alloca i1"), "an i1 reached a slot:\n{text}");
+    // The comma matters: `alloca i1` is a prefix of `alloca i128`, and `core`
+    // has a 128-bit local in it (`reflect.TypeId`).
+    assert!(!text.contains("alloca i1,"), "an i1 reached a slot:\n{text}");
 }
 
 /// **A `-> void` function returns nothing**, rather than an `undef` of a type no
