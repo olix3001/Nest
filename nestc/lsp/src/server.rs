@@ -26,14 +26,18 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit,
     Notification as _, PublishDiagnostics,
 };
+use lsp_types::request::{Completion, GotoDefinition, HoverRequest, Request as _};
 use lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, PublishDiagnosticsParams, SaveOptions, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, Uri,
+    CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, Location, MarkupContent, MarkupKind, OneOf, Position,
+    PublishDiagnosticsParams, Range, SaveOptions, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
 };
 
 use crate::analysis::{self, Outcome, path_to_uri, uri_to_path};
+use crate::ide;
 use crate::workspace::{self, Metadata, Toolchain};
 
 /// Run the server over `conn` until the client says to exit. `toolchain` makes
@@ -51,6 +55,12 @@ pub fn run(
             })),
             ..Default::default()
         })),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".to_string()]),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let params = conn
@@ -97,6 +107,14 @@ pub fn run(
         }
         server.analyze();
     }
+}
+
+/// What completion writes at the cursor before analyzing: a name nothing
+/// declares.
+const PLACEHOLDER: &str = "__nest_lsp_complete";
+
+fn to_value<T: serde::Serialize>(v: Option<T>) -> serde_json::Value {
+    serde_json::to_value(v).expect("a response serializes")
 }
 
 #[derive(PartialEq, Eq)]
@@ -170,12 +188,90 @@ impl Server {
     }
 
     fn request(&mut self, req: Request) {
-        let response = Response::new_err(
-            req.id,
-            ErrorCode::MethodNotFound as i32,
-            format!("`{}` is not supported", req.method),
-        );
+        // A question is about the text as it is now, so an edit still waiting
+        // is analyzed first.
+        self.analyze();
+        let result = match req.method.as_str() {
+            HoverRequest::METHOD => serde_json::from_value::<HoverParams>(req.params)
+                .map(|p| to_value(self.hover(&p.text_document_position_params.text_document.uri, p.text_document_position_params.position))),
+            GotoDefinition::METHOD => serde_json::from_value::<GotoDefinitionParams>(req.params)
+                .map(|p| to_value(self.definition(&p.text_document_position_params.text_document.uri, p.text_document_position_params.position))),
+            Completion::METHOD => serde_json::from_value::<CompletionParams>(req.params)
+                .map(|p| to_value(self.completion(&p.text_document_position.text_document.uri, p.text_document_position.position))),
+            _ => {
+                let response = Response::new_err(
+                    req.id,
+                    ErrorCode::MethodNotFound as i32,
+                    format!("`{}` is not supported", req.method),
+                );
+                self.send(response.into());
+                return;
+            }
+        };
+        let response = match result {
+            Ok(value) => Response::new_ok(req.id, value),
+            Err(e) => Response::new_err(req.id, ErrorCode::InvalidParams as i32, e.to_string()),
+        };
         self.send(response.into());
+    }
+
+    /// The unit that read `path`, and the file it is there.
+    fn unit_for(&self, path: &Path) -> Option<(&UnitKey, &Outcome, nestc::common::source::FileId)> {
+        self.units.iter().find_map(|(key, outcome)| {
+            let o = outcome.as_ref().ok()?;
+            let file = ide::file_of(&o.session, path)?;
+            Some((key, o, file))
+        })
+    }
+
+    fn hover(&self, uri: &Uri, position: Position) -> Option<Hover> {
+        let path = uri_to_path(uri)?;
+        let (_, o, file) = self.unit_for(&path)?;
+        let src = ide::source(&o.session, file)?;
+        let found = ide::find(&o.session, file, analysis::offset(&src, position))?;
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: ide::hover(&o.session, file, found),
+            }),
+            range: Some(analysis::range(&src, found.span.start, found.span.end)),
+        })
+    }
+
+    fn definition(&self, uri: &Uri, position: Position) -> Option<GotoDefinitionResponse> {
+        let path = uri_to_path(uri)?;
+        let (_, o, file) = self.unit_for(&path)?;
+        let s = &o.session;
+        let src = ide::source(s, file)?;
+        let found = ide::find(s, file, analysis::offset(&src, position))?;
+        let def = ide::target(s, found.def);
+        let d = s.defs.get(def);
+        let there = d.file?;
+        let text = ide::source(s, there)?;
+        let range = match ide::name_span(s, def).or(d.span) {
+            Some(span) => analysis::range(&text, span.start, span.end),
+            // A whole file, which has nowhere in particular to point.
+            None => Range::default(),
+        };
+        let uri = path_to_uri(Path::new(&s.sources.file(there)?.name))?;
+        Some(GotoDefinitionResponse::Scalar(Location::new(uri, range)))
+    }
+
+    fn completion(&self, uri: &Uri, position: Position) -> Option<CompletionResponse> {
+        let path = uri_to_path(uri)?;
+        let (key, _, _) = self.unit_for(&path)?;
+        let text = self.docs.get(&path)?;
+        let offset = analysis::offset(text, position);
+        // Analyzed again with a name written where the cursor is, so that
+        // `p.` is a member access rather than a syntax error, and the tree
+        // says what `p` is.
+        let mut buffers = self.docs.clone();
+        let mut written = text.clone();
+        written.insert_str(offset, PLACEHOLDER);
+        buffers.insert(path.clone(), written);
+        let o = analysis::analyze(&key.args, Rc::new(buffers)).ok()?;
+        let file = ide::file_of(&o.session, &path)?;
+        Some(CompletionResponse::Array(ide::complete(&o.session, file, offset, PLACEHOLDER)))
     }
 
     fn notification(&mut self, n: Notification) {

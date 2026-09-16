@@ -14,7 +14,7 @@ use nestc::common::diagnostic::{Diagnostic, Severity};
 use nestc::common::source::{FileId, FileSpan, SourceMap};
 use nestc::driver::Invocation;
 use nestc::sema;
-use nestc::sema::session::{FileLoader, FsLoader, resolve_import};
+use nestc::sema::session::{FileLoader, FsLoader, Session, resolve_import};
 
 /// The open documents' text, by path.
 pub type Buffers = Rc<HashMap<PathBuf, String>>;
@@ -35,12 +35,13 @@ impl FileLoader for Overlay {
 }
 
 /// What one analysis found.
-#[derive(Debug, Default)]
 pub struct Outcome {
     /// Every file it read from source, whether or not it had anything to say
     /// about it: the files whose diagnostics it is the authority on.
     pub files: HashSet<PathBuf>,
     pub diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// The analyzed session itself, for the questions asked about it later.
+    pub session: Session,
 }
 
 /// Analyze what `args` compiles. A command line that cannot even be set up — a
@@ -54,22 +55,23 @@ pub fn analyze(args: &[String], buffers: Buffers) -> Result<Outcome, String> {
         sema::analyze(&mut session, file);
     }
 
-    let mut outcome = Outcome::default();
+    let mut files = HashSet::new();
     for i in 0..session.sources.len() {
         let id = FileId(i as u32);
         if session.is_foreign_file(id) {
             continue;
         }
         if let Some(file) = session.sources.file(id) {
-            outcome.files.insert(PathBuf::from(&file.name));
+            files.insert(PathBuf::from(&file.name));
         }
     }
     let entry = PathBuf::from(entry);
+    let mut diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>> = HashMap::new();
     for diag in &session.diagnostics {
         let (path, lsp) = convert(diag, &session.sources, &entry);
-        outcome.diagnostics.entry(path).or_default().push(lsp);
+        diagnostics.entry(path).or_default().push(lsp);
     }
-    Ok(outcome)
+    Ok(Outcome { files, diagnostics, session })
 }
 
 /// `diag` as the protocol has it, and the file it belongs in: its primary
@@ -142,6 +144,27 @@ pub fn position(src: &str, offset: usize) -> Position {
     Position::new(line as u32, character as u32)
 }
 
+/// A line and a UTF-16 column in `src` as a byte offset, clamped to the line's
+/// end and to the text's.
+pub fn offset(src: &str, position: Position) -> usize {
+    let mut start = 0;
+    for _ in 0..position.line {
+        match src[start..].find('\n') {
+            Some(i) => start += i + 1,
+            None => return src.len(),
+        }
+    }
+    let end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+    let mut units = 0;
+    for (i, c) in src[start..end].char_indices() {
+        if units >= position.character as usize {
+            return start + i;
+        }
+        units += c.len_utf16();
+    }
+    end
+}
+
 pub fn path_to_uri(path: &Path) -> Option<Uri> {
     let url = url::Url::from_file_path(path).ok()?;
     url.as_str().parse().ok()
@@ -165,6 +188,10 @@ mod tests {
         assert_eq!(position(src, c), Position::new(1, 4));
         // Past the end clamps to it.
         assert_eq!(position(src, 100), Position::new(1, 5));
+        // And back.
+        assert_eq!(offset(src, Position::new(1, 4)), c);
+        assert_eq!(offset(src, Position::new(1, 99)), src.len());
+        assert_eq!(offset(src, Position::new(7, 0)), src.len());
     }
 
     #[test]

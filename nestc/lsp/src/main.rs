@@ -1,9 +1,11 @@
 //! The Nest language server, over stdin and stdout.
 //!
-//! It finds twig on `PATH`, or where the `twig` initialization option or
-//! `NEST_TWIG` says, and twig finds `nestc` the way it always does.
+//! twig is found at `--twig`, then where the `twig` initialization option or
+//! `NEST_TWIG` says, then on `PATH`. `--nestc` (or the `nestc` option) is the
+//! compiler twig runs, which otherwise it finds the way it always does.
 
 mod analysis;
+mod ide;
 mod server;
 mod workspace;
 
@@ -14,16 +16,51 @@ use lsp_server::Connection;
 
 use workspace::{Toolchain, Twig};
 
+const USAGE: &str = "\
+usage: nest-lsp [options]
+
+Speaks the Language Server Protocol on stdin and stdout.
+
+options:
+  --twig <path>   the twig to prepare workspaces with (default: `twig` on PATH)
+  --nestc <path>  the nestc twig compiles with (default: twig's own choice)
+  -h, --help      this
+";
+
 fn main() -> ExitCode {
+    let mut twig: Option<String> = None;
+    let mut nestc: Option<String> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let slot = match arg.as_str() {
+            "-h" | "--help" => {
+                print!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            "--twig" => &mut twig,
+            "--nestc" => &mut nestc,
+            other => {
+                eprint!("nest-lsp: unknown argument `{other}`\n{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match args.next() {
+            Some(value) => *slot = Some(value),
+            None => {
+                eprintln!("nest-lsp: `{arg}` wants a path");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     let (conn, io) = Connection::stdio();
     let result = server::run(&conn, |options| -> Arc<dyn Toolchain> {
-        let program = options
-            .get("twig")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
+        let option = |name: &str| options.get(name).and_then(|v| v.as_str()).map(str::to_string);
+        let program = twig
+            .or_else(|| option("twig"))
             .or_else(|| std::env::var("NEST_TWIG").ok().filter(|p| !p.is_empty()))
             .unwrap_or_else(|| "twig".to_string());
-        Arc::new(Twig { program })
+        Arc::new(Twig { program, nestc: nestc.or_else(|| option("nestc")) })
     });
     drop(conn);
     let joined = io.join();

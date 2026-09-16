@@ -39,17 +39,21 @@ cd nestc
 cargo build --release -p nest-lsp   # target/release/nest-lsp
 ```
 
-Put `nest-lsp`, `twig` and `nestc` on `PATH`, or tell Zed where the server is
-and the server where twig is:
+Put `nest-lsp`, `twig` and `nestc` on `PATH`, or say where they are in Zed's
+settings:
 
 ```json
 "lsp": {
   "nest-lsp": {
     "binary": { "path": "/path/to/nest-lsp" },
-    "initialization_options": { "twig": "/path/to/twig" }
+    "settings": { "twig": "/path/to/twig", "nestc": "/path/to/nestc" }
   }
 }
 ```
 
-twig finds `nestc` as it always does (`NESTC`, then `PATH`), and the two must be
-the same build: the server reads libraries that `nestc` wrote.
+`twig` and `nestc` there become `nest-lsp --twig <path> --nestc <path>`. Without
+`nestc`, twig finds it as it always does (`NESTC`, then `PATH`). twig's `nestc`
+must be the same build as the server: the server reads libraries it wrote.
+
+The server answers diagnostics, hover, go-to-definition and completion. Hover
+shows a definition's `///` lines as its documentation.

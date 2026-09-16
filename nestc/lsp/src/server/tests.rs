@@ -11,11 +11,12 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidOpenTextDocument, Exit, Initialized, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Initialize, Request as _, Shutdown};
+use lsp_types::request::{Completion, GotoDefinition, HoverRequest, Initialize, Request as _, Shutdown};
 use lsp_types::{
     DiagnosticSeverity, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
-    InitializeParams, PublishDiagnosticsParams, TextDocumentContentChangeEvent,
-    TextDocumentItem, VersionedTextDocumentIdentifier,
+    InitializeParams, Position, PublishDiagnosticsParams, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    VersionedTextDocumentIdentifier,
 };
 
 use super::run;
@@ -91,6 +92,27 @@ impl Client {
             Message::Response(r) if r.id == RequestId::from(id) => {}
             other => panic!("expected the response to {id}, got {other:?}"),
         }
+    }
+
+    /// Ask `method`, and wait for its answer past any notifications.
+    fn ask(&mut self, method: &str, params: impl serde::Serialize) -> serde_json::Value {
+        self.version += 1;
+        let id = 1000 + self.version;
+        self.request(id, method, params);
+        loop {
+            if let Message::Response(r) = self.recv() {
+                assert_eq!(r.id, RequestId::from(id));
+                return r.response_result.expect("an answer");
+            }
+        }
+    }
+
+    fn at(&mut self, method: &str, path: &Path, position: Position) -> serde_json::Value {
+        let params = TextDocumentPositionParams::new(
+            TextDocumentIdentifier::new(path_to_uri(path).unwrap()),
+            position,
+        );
+        self.ask(method, params)
     }
 
     fn open(&mut self, path: &Path, text: &str) {
@@ -209,4 +231,113 @@ fn a_workspace_that_cannot_be_prepared_says_why() {
     let diags = client.diagnostics(&file);
     assert_eq!(diags.len(), 1, "{diags:?}");
     assert!(diags[0].message.contains("twig metadata"), "{diags:?}");
+}
+
+const PROGRAM: &str = "\
+/// A point on a plane.
+@public
+Point :: struct {
+  /// Across.
+  x: i32,
+  y: i32,
+}
+
+impl Point {
+  /// Both coordinates, added.
+  sum :: func (self: *Self) -> i32 { return self.x + self.y }
+}
+
+add :: func (a: i32, b: i32) -> i32 { return a + b }
+
+main :: func () -> i32 {
+  let p: Point := Point { x: 1, y: 2 }
+  let n: i32 := add(p.x, 3)
+  return p.sum() + n
+}
+";
+
+/// Where the `nth` `needle` in `text` starts, plus `past` columns.
+fn position(text: &str, needle: &str, nth: usize, past: u32) -> Position {
+    let offset = text.match_indices(needle).nth(nth).expect("the needle is there").0;
+    let pos = crate::analysis::position(text, offset);
+    Position::new(pos.line, pos.character + past)
+}
+
+/// An open file, analyzed, and a client to ask about it.
+fn program() -> (Scratch, PathBuf, Client) {
+    let dir = Scratch::new();
+    let file = dir.0.join("main.nest");
+    let mut client = Client::start(Fake(Err("no workspace here".to_string())));
+    // A correct file has no diagnostics to publish, and a question analyzes it.
+    client.open(&file, PROGRAM);
+    (dir, file, client)
+}
+
+fn hover_text(v: &serde_json::Value) -> String {
+    v["contents"]["value"].as_str().unwrap_or_default().to_string()
+}
+
+/// A hover shows a function's declaration without its body, a method's
+/// container and documentation, and a local's type.
+#[test]
+fn a_hover_shows_the_declaration_and_its_documentation() {
+    let (_dir, file, mut client) = program();
+
+    let add = hover_text(&client.at(HoverRequest::METHOD, &file, position(PROGRAM, "add(p.x", 0, 1)));
+    assert!(add.contains("add :: func (a: i32, b: i32) -> i32\n```"), "{add}");
+
+    let sum = hover_text(&client.at(HoverRequest::METHOD, &file, position(PROGRAM, "sum()", 0, 2)));
+    assert!(sum.contains("sum :: func (self: *Self) -> i32"), "{sum}");
+    assert!(sum.contains("Point"), "{sum}");
+    assert!(sum.contains("Both coordinates, added."), "{sum}");
+
+    let p = hover_text(&client.at(HoverRequest::METHOD, &file, position(PROGRAM, "p.sum", 0, 0)));
+    assert!(p.contains("p: Point"), "{p}");
+
+    // On a definition's own name, past its attribute.
+    let point = hover_text(&client.at(HoverRequest::METHOD, &file, position(PROGRAM, "Point ::", 0, 1)));
+    assert!(point.contains("A point on a plane."), "{point}");
+    assert!(point.contains("x: i32"), "{point}");
+
+    // A function's body is not its name.
+    let body = client.at(HoverRequest::METHOD, &file, position(PROGRAM, "{ return a + b }", 0, 0));
+    assert!(body.is_null(), "{body}");
+}
+
+/// Go-to-definition lands on the name: a function's, and a field's.
+#[test]
+fn a_definition_is_its_name() {
+    let (_dir, file, mut client) = program();
+
+    let add = client.at(GotoDefinition::METHOD, &file, position(PROGRAM, "add(p.x", 0, 0));
+    assert_eq!(add["range"]["start"], serde_json::to_value(position(PROGRAM, "add ::", 0, 0)).unwrap());
+    assert_eq!(add["uri"], serde_json::to_value(path_to_uri(&file)).unwrap());
+
+    let x = client.at(GotoDefinition::METHOD, &file, position(PROGRAM, "p.x", 0, 2));
+    assert_eq!(x["range"]["start"], serde_json::to_value(position(PROGRAM, "x: i32", 0, 0)).unwrap());
+}
+
+fn labels(v: &serde_json::Value) -> Vec<String> {
+    v.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+}
+
+/// After a `.` the members of the value's type are offered, and elsewhere the
+/// names in scope.
+#[test]
+fn completion_offers_members_and_names_in_scope() {
+    let (_dir, file, mut client) = program();
+    let text = PROGRAM.replace("  return p.sum() + n", "  let m: i32 := p.\n  return p.sum() + n");
+    client.change(&file, &text);
+
+    let members = labels(&client.at(Completion::METHOD, &file, position(&text, "p.\n", 0, 2)));
+    for want in ["x", "y", "sum"] {
+        assert!(members.contains(&want.to_string()), "{want} in {members:?}");
+    }
+    assert!(!members.contains(&"add".to_string()), "{members:?}");
+
+    let names = labels(&client.at(Completion::METHOD, &file, position(&text, "add(p.x", 0, 0)));
+    for want in ["add", "p", "Point", "main", "let"] {
+        assert!(names.contains(&want.to_string()), "{want} in {names:?}");
+    }
+    assert!(!names.contains(&"n".to_string()), "`n` is declared later: {names:?}");
 }

@@ -52,9 +52,11 @@ pub trait Toolchain: Send + Sync {
     fn prepare(&self, root: &Path) -> Result<Metadata, String>;
 }
 
-/// twig, found at `program`.
+/// twig, found at `program`, finding `nestc` at `nestc` when that is given and
+/// the way it always does otherwise.
 pub struct Twig {
     pub program: String,
+    pub nestc: Option<String>,
 }
 
 impl Toolchain for Twig {
@@ -67,9 +69,12 @@ impl Toolchain for Twig {
 
 impl Twig {
     fn run(&self, root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-        let out = Command::new(&self.program)
-            .args(args)
-            .current_dir(root)
+        let mut command = Command::new(&self.program);
+        command.args(args).current_dir(root);
+        if let Some(nestc) = &self.nestc {
+            command.env("NESTC", nestc);
+        }
+        let out = command
             .output()
             .map_err(|e| format!("could not run `{}`: {e}", self.program))?;
         if !out.status.success() {

@@ -552,7 +552,7 @@ What it does not do yet:
 
 **Commit. Stop.**
 
-### Step 10 — the editor — **highlighting and diagnostics done**; hover, go-to-definition and completion are next
+### Step 10 — the editor — **done**
 
 Syntax highlighting first (it needs nothing), then the language server, **in
 Rust**, and **before steps 8 and 9** (see Stage 4).
@@ -595,8 +595,17 @@ The server, as built so far:
   reads its own package's library from source too.
 - **A file with no manifest** is analyzed on its own, against the `core` and
   `std` that ship with the compiler, from source.
+- **Hover, go-to-definition and completion** read the analyzed session.
+  What is at an offset is the smallest node containing it that names something:
+  a resolved use, a method call, or a definition's own name. Hover shows the
+  declaration as written (a function's without its body), a binding's type, and
+  the `///` lines above a definition as its documentation. Completion analyzes
+  the buffer again with a placeholder name at the cursor, so `p.` is a member
+  access whose base has a type, then offers that type's fields and methods, a
+  namespace's public members, or the names in scope.
 - **`editors/zed`** starts `nest-lsp` from `PATH`, or from
-  `lsp.nest-lsp.binary` in Zed's settings.
+  `lsp.nest-lsp.binary` in Zed's settings; `lsp.nest-lsp.settings.twig` and
+  `.nestc` become its `--twig` and `--nestc`.
 
 **Commit. Stop.**
 
