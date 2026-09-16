@@ -17,11 +17,19 @@ impl zed::Extension for Nest {
         Nest
     }
 
-    fn language_server_command(&mut self, id: &LanguageServerId, worktree: &Worktree) -> Result<Command> {
+    fn language_server_command(
+        &mut self,
+        id: &LanguageServerId,
+        worktree: &Worktree,
+    ) -> Result<Command> {
         let settings = LspSettings::for_worktree(id.as_ref(), worktree).unwrap_or_default();
         let mut flags = Vec::new();
         for name in ["twig", "nestc"] {
-            let path = settings.settings.as_ref().and_then(|s| s.get(name)).and_then(|v| v.as_str());
+            let path = settings
+                .settings
+                .as_ref()
+                .and_then(|s| s.get(name))
+                .and_then(|v| v.as_str());
             if let Some(path) = path {
                 flags.push(format!("--{name}"));
                 flags.push(absolute(path, worktree));
@@ -40,7 +48,11 @@ impl zed::Extension for Nest {
         vars.extend(env.unwrap_or_default());
         let mut args = args.unwrap_or_default();
         args.extend(flags);
-        Ok(Command { command, args, env: vars })
+        Ok(Command {
+            command,
+            args,
+            env: vars,
+        })
     }
 
     fn language_server_initialization_options(
@@ -58,7 +70,11 @@ impl zed::Extension for Nest {
 /// directory, and a relative path is relative to the worktree.
 fn absolute(path: &str, worktree: &Worktree) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
-        let home = worktree.shell_env().into_iter().find(|(k, _)| k == "HOME").map(|(_, v)| v);
+        let home = worktree
+            .shell_env()
+            .into_iter()
+            .find(|(k, _)| k == "HOME")
+            .map(|(_, v)| v);
         if let Some(home) = home {
             return format!("{home}/{rest}");
         }

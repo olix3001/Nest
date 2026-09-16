@@ -38,8 +38,11 @@ fn expand_home(path: &str) -> String {
 }
 
 fn main() -> ExitCode {
-    eprintln!("nest-lsp: started with {:?}", std::env::args().skip(1).collect::<Vec<_>>());
     let mut twig: Option<String> = None;
+    eprintln!(
+        "nest-lsp: started with {:?}",
+        std::env::args().skip(1).collect::<Vec<_>>()
+    );
     let mut nestc: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -66,7 +69,16 @@ fn main() -> ExitCode {
 
     let (conn, io) = Connection::stdio();
     let result = server::run(&conn, |options| -> Arc<dyn Toolchain> {
-        let option = |name: &str| options.get(name).and_then(|v| v.as_str()).map(str::to_string);
+        eprintln!(
+            "nest-lsp(reminder): started with {:?}",
+            std::env::args().skip(1).collect::<Vec<_>>()
+        );
+        let option = |name: &str| {
+            options
+                .get(name)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
         let program = twig
             .or_else(|| option("twig"))
             .or_else(|| std::env::var("NEST_TWIG").ok().filter(|p| !p.is_empty()))
@@ -74,7 +86,10 @@ fn main() -> ExitCode {
         let nestc = nestc.or_else(|| option("nestc")).map(|p| expand_home(&p));
         let program = expand_home(&program);
         // Stderr is where an editor's language server log shows it.
-        eprintln!("nest-lsp: twig is `{program}`, nestc is `{}`", nestc.as_deref().unwrap_or("twig's own"));
+        eprintln!(
+            "nest-lsp: twig is `{program}`, nestc is `{}`",
+            nestc.as_deref().unwrap_or("twig's own")
+        );
         Arc::new(Twig { program, nestc })
     });
     drop(conn);

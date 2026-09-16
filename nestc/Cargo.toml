@@ -15,6 +15,7 @@ codegen-units = 1
 lto = "thin"
 
 [features]
+default = ["llvm"]
 # Code generation through LLVM. **Off by default**, deliberately: a compiler
 # whose test suite cannot run without a system LLVM is a compiler most people
 # cannot build. With it off, `nestc` still resolves a target, lays every type
