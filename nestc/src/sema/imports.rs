@@ -137,7 +137,7 @@ fn bind_pattern(
     match kind {
         // `name :: import ...` — bind the whole namespace under `name`.
         NodeKind::BindingPat { name, .. } => {
-            let alias = alias_def(defs, name.clone(), base, scope, file);
+            let alias = alias_def(defs, name.clone(), base, scope, file, reexport);
             insert(defs, scope, name, alias, reexport);
         }
         // `* :: import ...` — glob every public member into this scope.
@@ -216,13 +216,15 @@ fn bind_field(
     }
 }
 
-/// Create the [`DefKind::Import`] alias def for a whole-namespace binding.
+/// Create the [`DefKind::Import`] alias def for a whole-namespace binding,
+/// public when the binding re-exports what it names.
 fn alias_def(
     defs: &mut DefTable,
     name: Symbol,
     base: Option<DefId>,
     scope: DefId,
     file: crate::common::source::FileId,
+    reexport: bool,
 ) -> DefId {
     match base {
         Some(base) => {
@@ -230,7 +232,7 @@ fn alias_def(
             let id = defs.alloc(
                 name,
                 DefKind::Import,
-                Visibility::Private,
+                if reexport { Visibility::Public } else { Visibility::Private },
                 Some(scope),
                 Some(file),
                 None,

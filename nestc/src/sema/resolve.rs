@@ -732,7 +732,10 @@ impl Resolver<'_> {
     fn resolve_member(&self, base: DefId, name: &Symbol) -> Option<DefId> {
         let base = self.defs.resolve_alias(base);
         let same_file = self.defs.get(base).file == Some(self.file);
-        let d = self.defs.get(base).ns.get_direct(name)?;
+        // What a namespace imported without `@public` is its own business:
+        // another file reaches its members, never its imports.
+        let ns = &self.defs.get(base).ns;
+        let d = if same_file { ns.get_direct(name)? } else { *ns.members.get(name)? };
         let d = self.defs.resolve_alias(d);
         if same_file || self.defs.get(d).vis.is_public() {
             Some(d)

@@ -27,7 +27,7 @@ use nestc::parser::ast::{Ast, NodeId, NodeKind};
 use nestc::sema::def::{Def, DefId, DefKind, Visibility};
 use nestc::sema::session::Session;
 use nestc::sema::ty::Ty;
-use nestc::sema::{PathRes, Resolution};
+use nestc::sema::{PathRes, Resolution, builtins};
 
 use crate::analysis;
 use crate::ide::{self, contains, target};
@@ -207,8 +207,8 @@ impl Cx<'_> {
                 let fields = s.defs.get(*def).ns.members.values().copied();
                 found.extend(fields.filter(|&m| s.defs.get(m).kind == DefKind::Field).map(|m| (m, None)));
             }
-            for (imp, t) in s.impls.impls.iter().zip(&s.impl_targets) {
-                if !self.same_head(&t.self_ty, &ty) {
+            for (i, imp) in s.impls.impls.iter().enumerate() {
+                if !self.applies(i, &ty, 0) {
                     continue;
                 }
                 for &m in imp.members.values() {
@@ -262,21 +262,78 @@ impl Cx<'_> {
         }
     }
 
-    /// Whether an impl for `imp` can apply to `ty`, judged by what kind of type
-    /// each is; its generics could be anything.
-    fn same_head(&self, imp: &Ty, ty: &Ty) -> bool {
+    /// Whether impl `i` applies to `ty`: its self type has `ty`'s shape, and
+    /// what matching binds its generics to meets their bounds.
+    fn applies(&self, i: usize, ty: &Ty, depth: usize) -> bool {
+        let s = self.s;
+        let (Some(imp), Some(target)) = (s.impls.impls.get(i), s.impl_targets.get(i)) else {
+            return false;
+        };
+        let mut bound: HashMap<DefId, Ty> = HashMap::new();
+        if !self.bind(&target.self_ty, ty, &mut bound) {
+            return false;
+        }
+        imp.generics.iter().all(|g| match bound.get(g) {
+            Some(arg) => bounds(s, *g).into_iter().all(|t| self.implements(arg, t, depth + 1)),
+            None => true,
+        })
+    }
+
+    /// Match an impl's self type `imp` against `ty`, binding the impl's type
+    /// parameters. What is not known yet matches anything.
+    fn bind(&self, imp: &Ty, ty: &Ty, map: &mut HashMap<DefId, Ty>) -> bool {
+        let all = |a: &[Ty], b: &[Ty], map: &mut HashMap<DefId, Ty>| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.bind(x, y, map))
+        };
         match (imp, ty) {
-            (Ty::Nominal { def, .. }, _) if self.s.defs.get(*def).kind == DefKind::TypeParam => true,
-            (Ty::Nominal { def: a, .. }, Ty::Nominal { def: b, .. }) => a == b,
+            (_, Ty::Var(_) | Ty::Error) => true,
+            (Ty::Nominal { def, .. }, _) if self.s.defs.get(*def).kind == DefKind::TypeParam => {
+                map.entry(*def).or_insert_with(|| ty.clone());
+                true
+            }
+            (Ty::Nominal { def: a, args: x }, Ty::Nominal { def: b, args: y }) => a == b && all(x, y, map),
             (Ty::Int { signed: a, .. }, Ty::Int { signed: b, .. }) => a == b,
             (Ty::Float(a), Ty::Float(b)) => a == b,
-            (Ty::Slice { .. }, Ty::Slice { .. } | Ty::Array { .. }) | (Ty::Array { .. }, Ty::Array { .. }) => true,
             (Ty::Bool, Ty::Bool) | (Ty::Char, Ty::Char) | (Ty::Void, Ty::Void) => true,
-            (Ty::Tuple(a), Ty::Tuple(b)) => a.len() == b.len(),
-            (Ty::Ptr { inner: a, .. }, Ty::Ptr { inner: b, .. }) => self.same_head(a, b),
+            (Ty::Slice { inner: a, .. }, Ty::Slice { inner: b, .. } | Ty::Array { inner: b, .. })
+            | (Ty::Array { inner: a, .. }, Ty::Array { inner: b, .. })
+            | (Ty::Ptr { inner: a, .. }, Ty::Ptr { inner: b, .. }) => self.bind(a, b, map),
+            (Ty::Tuple(a), Ty::Tuple(b)) => all(a, b, map),
+            (Ty::Func { params: a, ret: r }, Ty::Func { params: b, ret: q }) => all(a, b, map) && self.bind(r, q, map),
             (Ty::Dyn(a), Ty::Dyn(b)) => a == b,
             _ => false,
         }
+    }
+
+    /// Whether `ty` implements `trait_def`: an operator the compiler provides
+    /// for a primitive, an impl that applies, or an impl for what a `distinct`
+    /// type stands over. Past a few levels of bounds on bounds, and for a type
+    /// not known yet, the answer is yes, so nothing is hidden for a guess.
+    fn implements(&self, ty: &Ty, trait_def: DefId, depth: usize) -> bool {
+        const DEPTH: usize = 4;
+        let s = self.s;
+        let ty = self.concrete(ty.clone());
+        if depth > DEPTH || matches!(ty, Ty::Var(_) | Ty::Error) {
+            return true;
+        }
+        // A generic parameter of the code being written: its bounds say what it
+        // implements, and they are checked where it is instantiated.
+        if let Ty::Nominal { def, .. } = &ty
+            && s.defs.get(*def).kind == DefKind::TypeParam
+        {
+            return true;
+        }
+        let builtin = s.defs.get(trait_def).lang.as_ref().and_then(|l| builtins::row_for_lang(l.as_str()));
+        if builtin.is_some_and(|row| row.applies.matches(&ty)) {
+            return true;
+        }
+        let direct = (0..s.impls.impls.len())
+            .any(|i| s.impls.impls[i].trait_def == Some(trait_def) && self.applies(i, &ty, depth));
+        direct
+            || match &ty {
+                Ty::Nominal { def, .. } => representation(s, *def).is_some_and(|r| self.implements(&r, trait_def, depth + 1)),
+                _ => false,
+            }
     }
 
     /// Names in scope, then what an import would bring in that starts with what
@@ -426,6 +483,37 @@ fn written(name: &str) -> bool {
 
 fn starts_with(name: &str, typed: &str) -> bool {
     name.to_lowercase().starts_with(&typed.to_lowercase())
+}
+
+/// The traits the generic parameter `param` is bounded by.
+fn bounds(s: &Session, param: DefId) -> Vec<DefId> {
+    let d = s.defs.get(param);
+    let (Some(file), Some(node)) = (d.file, d.node) else {
+        return Vec::new();
+    };
+    let Some(ast) = s.asts.get(&file) else {
+        return Vec::new();
+    };
+    let NodeKind::GenericTypeParam { constraint: Some(constraint), .. } = ast.node(node).kind else {
+        return Vec::new();
+    };
+    let nodes = match &ast.node(constraint).kind {
+        NodeKind::Bounds { bounds } => bounds.clone(),
+        _ => vec![constraint],
+    };
+    nodes.into_iter().filter_map(|n| trait_of(ast, n)).map(|t| target(s, t)).collect()
+}
+
+/// The trait a bound's type node names: `Eq`, `Add.<f64>`, `core.cmp.Eq`.
+fn trait_of(ast: &Ast, node: NodeId) -> Option<DefId> {
+    if let Some(Resolution::Def(d)) = ast.meta::<Resolution>(node) {
+        return Some(d);
+    }
+    match ast.node(node).kind {
+        NodeKind::TypePath { path, .. } => trait_of(ast, path),
+        NodeKind::GenericApply { base, .. } => trait_of(ast, base),
+        _ => None,
+    }
 }
 
 /// What the `distinct` type `def` stands over.

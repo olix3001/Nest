@@ -8663,3 +8663,37 @@ fn member_dyn_needs_an_impl_for_every_member() {
         msgs[0]
     );
 }
+
+/// Another file reaches what a namespace declares or re-exports with `@public`,
+/// and never what it only imported for itself.
+#[test]
+fn a_private_import_is_not_a_member_to_other_files() {
+    let session = analyze_mem(
+        &[
+            ("b", "@public helper :: func () -> i32 { return 1 }\n"),
+            (
+                "a",
+                "{ helper } :: import \"b\"\n\
+                 b :: import \"b\"\n\
+                 @public { helper: shared } :: import \"b\"\n\
+                 @public again :: import \"b\"\n",
+            ),
+            (
+                "main",
+                "a :: import \"a\"\n\
+                 main :: func () -> i32 {\n\
+                   let x: i32 := a.helper()\n\
+                   let y: i32 := a.b.helper()\n\
+                   return x + y + a.shared() + a.again.helper()\n\
+                 }\n",
+            ),
+        ],
+        "main",
+    );
+    let messages: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages.len(), 2, "{messages:#?}");
+    assert!(messages.iter().any(|m| m.contains("`helper` is not a public member")), "{messages:#?}");
+    assert!(messages.iter().any(|m| m.contains("`b` is not a public member")), "{messages:#?}");
+    let again = session.defs.iter().find(|d| d.name.as_str() == "again").expect("the alias");
+    assert_eq!(again.vis, super::def::Visibility::Public, "a re-exporting binding is public");
+}

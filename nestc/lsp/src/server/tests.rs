@@ -403,3 +403,42 @@ fn completion_imports_what_it_offers() {
     // What is imported already is not offered again.
     assert!(!items.iter().any(|i| i["label"] == "io" && i.get("additionalTextEdits").is_some()), "{answer}");
 }
+
+/// An impl whose generics are bounded applies only where the bounds hold: a
+/// blanket impl's methods are offered on a type that meets them, and not on one
+/// that does not.
+#[test]
+fn completion_checks_an_impl_s_bounds() {
+    let (_dir, file, mut client) = program();
+    let text = PROGRAM.replace(
+        "  return p.sum() + n",
+        "  let sq: Square := Square { side: 2 }\n  let a: i32 := sq.\n  let b: i32 := p.\n  return p.sum() + n",
+    ) + "\
+Shape :: trait {
+  area :: func (self: *Self) -> i32
+}
+
+Described :: trait {
+  describe :: func (self: *Self) -> i32
+}
+
+impl <T: Shape> Described for T {
+  describe :: func (self: *Self) -> i32 { return self.area() }
+}
+
+Square :: struct { side: i32 }
+
+impl Shape for Square {
+  area :: func (self: *Self) -> i32 { return self.side * self.side }
+}
+";
+    client.change(&file, &text);
+
+    let square = labels(&client.at(Completion::METHOD, &file, position(&text, "sq.\n", 0, 3)));
+    assert!(square.contains(&"describe".to_string()), "{square:?}");
+    assert!(square.contains(&"area".to_string()), "{square:?}");
+
+    let point = labels(&client.at(Completion::METHOD, &file, position(&text, "p.\n", 0, 2)));
+    assert!(point.contains(&"sum".to_string()), "{point:?}");
+    assert!(!point.contains(&"describe".to_string()), "`Point` is not a `Shape`: {point:?}");
+}
