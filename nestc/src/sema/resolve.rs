@@ -462,6 +462,9 @@ impl Resolver<'_> {
         // Subsequent segments: member hops.
         for seg in &segments[1..] {
             cur = match &cur {
+                // A member of an import that failed to load is as unknown as
+                // the import, which was already reported.
+                Resolution::Def(base) if self.is_external(*base) => Resolution::Def(*base),
                 Resolution::Def(base) => self
                     .resolve_member(*base, seg)
                     .map(Resolution::Def)
@@ -585,18 +588,27 @@ impl Resolver<'_> {
         {
             return;
         }
+        if self.is_external(base_def) {
+            self.ast.set_meta(id, Resolution::Def(base_def));
+            return;
+        }
         match self.resolve_member(base_def, name) {
             Some(d) => {
                 self.ast.set_meta(id, Resolution::Def(d));
             }
-            None => self.report(
-                id,
-                format!(
-                    "`{name}` is not a public member of `{}`",
-                    self.defs
-                        .canonical_string(self.defs.resolve_alias(base_def))
-                ),
-            ),
+            None => {
+                // Marked, so inference knows the access was already reported
+                // rather than reading `namespace.member` as a field of a value.
+                self.ast.set_meta(id, Resolution::Error);
+                self.report(
+                    id,
+                    format!(
+                        "`{name}` is not a public member of `{}`",
+                        self.defs
+                            .canonical_string(self.defs.resolve_alias(base_def))
+                    ),
+                )
+            }
         }
     }
 
@@ -730,6 +742,11 @@ impl Resolver<'_> {
     }
 
     /// Resolve `name` as a member of `base`, enforcing visibility across files.
+    /// Whether `def` stands in for an import that could not be loaded.
+    fn is_external(&self, def: DefId) -> bool {
+        self.defs.get(self.defs.resolve_alias(def)).kind == DefKind::External
+    }
+
     fn resolve_member(&self, base: DefId, name: &Symbol) -> Option<DefId> {
         let base = self.defs.resolve_alias(base);
         let same_file = self.defs.get(base).file == Some(self.file);

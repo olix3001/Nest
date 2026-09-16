@@ -16,6 +16,8 @@ collections :: import <std/collections>
 path :: import "path.nest"
 manifest :: import "manifest.nest"
 { Manifest } :: import "manifest.nest"
+toolchain :: import "toolchain.nest"
+{ Shipped } :: import "toolchain.nest"
 
 // A package, where it is, and what its manifest says.
 @public Member :: struct {
@@ -39,6 +41,9 @@ impl Member {
   root: Member,
   // Every other package in the graph, sorted by name.
   deps: []Member,
+  // The packages that ship with the compiler, less the root when it is one of
+  // them: building `std` builds that `std`, not the compiler's.
+  shipped: []Member,
 }
 
 // The directory holding the manifest `start` is under: `start` itself, or the
@@ -100,7 +105,25 @@ impl Member {
   let order: []str := manifest.sorted(cast.<[]str>(names))
   let deps: []mut Member := make.<[]Member>(order.len())
   for i in 0..<order.len() { deps[i] = find(all.as_slice(), order[i]).! }
-  return .ok(Workspace { root: root, deps: cast.<[]Member>(deps) })
+  return .ok(Workspace { root: root, deps: cast.<[]Member>(deps), shipped: shipped(root.name).? })
+}
+
+// The compiler's own packages, each read from the manifest beside its root.
+shipped :: func (root: str) -> Result.<[]Member, str> {
+  let mut out: Vec.<Member> := collections.new.<Member>()
+  for p in toolchain.packages().? {
+    if p.name == root { continue }
+    let dir: str := path.parent(p.root)
+    let m: Manifest := manifest.load(dir).match {
+      .ok(m) => m,
+      .err(why) => { return .err(f"`{p.name}`, which ships with the compiler: {why}") },
+    }
+    if m.package.name != p.name {
+      return .err(f"the compiler ships `{p.name}` at `{dir}`, but the package there is `{m.package.name}`")
+    }
+    out.push(member(dir, m))
+  }
+  return .ok(out.as_slice())
 }
 
 member :: func (dir: str, m: Manifest) -> Member {

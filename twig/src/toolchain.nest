@@ -1,0 +1,62 @@
+// The compiler, and the packages that ship with it.
+//
+// `core` and `std` are not dependencies a manifest names: they come with
+// `nestc`, one of each per compiler, the way Rust's come with a toolchain. So
+// twig asks the compiler where they are (`-C print=packages`) rather than
+// looking for them, and passes the answer back as `--package` like any other —
+// which is what makes a build say, on its own command line, exactly what it was
+// built against.
+
+process :: import <std/process>
+s :: import <std/str>
+collections :: import <std/collections>
+{ Vec } :: import <std/collections>
+path :: import "path.nest"
+
+// The compiler: `$NESTC` when it is set, otherwise `nestc` from `PATH`.
+@public nestc :: func () -> str {
+  return process.env("NESTC").match {
+    .some(p) => if p.len() > 0 { p } else { "nestc" },
+    .none => "nestc",
+  }
+}
+
+// The message for a compiler that could not be started, which a child that
+// could not `exec` reports only as status 127 (`process.spawn`).
+@public not_found :: func (program: str) -> str {
+  return f"could not run `{program}`: put `nestc` on `PATH`, or set `NESTC` to it"
+}
+
+// A package that ships with the compiler: its name and its root file.
+@public Shipped :: struct {
+  name: str,
+  root: str,
+}
+
+// Every package the compiler ships, as it reports them.
+@public packages :: func () -> Result.<[]Shipped, str> {
+  let program: str := nestc()
+  let args: []str := .{ "-C", "print=packages" }
+  let out: process.Output := process.output(program, args).match {
+    .ok(o) => o,
+    .err(e) => { return .err(f"could not run `{program}`: {e.describe()}") },
+  }
+  let failed: bool := out.status.match {
+    .exited(0) => false,
+    .exited(127) => { return .err(not_found(program)) },
+    _ => true,
+  }
+  if failed { return .err(f"`{program} -C print=packages` failed") }
+
+  let mut found: Vec.<Shipped> := collections.new.<Shipped>()
+  for line in s.lines(cast.<str>(out.stdout)) {
+    s.find(line, "=").match {
+      .some(at) => found.push(Shipped {
+        name: s.slice(line, 0, at),
+        root: path.normalize(s.slice(line, at + 1, line.len())),
+      }),
+      .none => (),
+    }
+  }
+  return .ok(found.as_slice())
+}

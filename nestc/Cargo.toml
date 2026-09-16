@@ -20,6 +20,7 @@ lto = "thin"
 llvm = ["dep:inkwell"]
 
 [dependencies]
+ariadne = "0.6.0"
 inkwell = { version = "0.10.0", features = ["llvm21-1"], optional = true }
 logos = "0.16.1"
 num-bigint = { version = "0.4", features = ["serde"] }

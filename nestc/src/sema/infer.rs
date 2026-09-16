@@ -1236,6 +1236,9 @@ impl Inferer<'_> {
                 if let Some(def) = self.resolved_def(node) {
                     return self.def_ty(node, def);
                 }
+                if self.failed_resolution(node) {
+                    return Ty::Error;
+                }
                 let bty = self.infer_expr(base);
                 let bty = self.pin_str(&bty);
                 let bty = self.settle(&bty);
@@ -2758,6 +2761,10 @@ impl Inferer<'_> {
         // did not link to a namespace member): resolve `method` against the
         // receiver's nominal type and instantiate its generics.
         if let NodeKind::FieldAccess { base, name } = self.ast.node(callee).kind.clone() {
+            if self.failed_resolution(callee) {
+                self.infer_args_only(args);
+                return Ty::Error;
+            }
             if self.resolved_def(callee).is_none() {
                 let recv = self.infer_expr(base);
                 let recv = self.pin_str(&recv);
@@ -2868,7 +2875,13 @@ impl Inferer<'_> {
                 // callee, so only complain when there is no such member at all.
                 if self.field_ty(&recv, name.as_str()).is_none() {
                     let r = self.cx.resolve(&recv);
-                    if !matches!(r, Ty::Error) && !is_var(&r) {
+                    // A receiver that is already an error was reported where it
+                    // went wrong; so is whatever a method on it returns.
+                    if matches!(r, Ty::Error) {
+                        self.infer_args_only(args);
+                        return Ty::Error;
+                    }
+                    if !is_var(&r) {
                         for a in args {
                             self.infer_expr(*a);
                         }
@@ -4369,6 +4382,9 @@ impl Inferer<'_> {
             // `<const N: usize>` names a value in the body, of the type it was
             // declared with (§5).
             DefKind::ConstParam => self.const_param_ty(def),
+            // Something from an import that failed to load: already reported,
+            // and whatever it is, nothing more can be known about it.
+            DefKind::External => Ty::Error,
             _ => self.cx.fresh(),
         }
     }
@@ -5223,6 +5239,10 @@ impl Inferer<'_> {
 
     /// Bind the locals a pattern introduces, unifying against the scrutinee type.
     fn bind_pattern(&mut self, pat: NodeId, ty: &Ty) {
+        if matches!(self.cx.resolve(ty), Ty::Error) {
+            self.bind_pattern_to_error(pat);
+            return;
+        }
         match self.ast.node(pat).kind.clone() {
             NodeKind::BindingPat { .. } => {
                 if let Some(def) = self.def_of(pat) {
@@ -5340,6 +5360,25 @@ impl Inferer<'_> {
 
     /// Bind one record `FieldPat` (`{ radius }` shorthand or `{ radius: p }`),
     /// typed from `payload` (the enclosing variant's field types) by name.
+    /// Bind every name in `pat` to [`Ty::Error`]: the value it destructures is
+    /// already an error, so nothing is known about its parts, and leaving them
+    /// as fresh variables would report each one as "type annotations needed".
+    fn bind_pattern_to_error(&mut self, pat: NodeId) {
+        let kind = self.ast.node(pat).kind.clone();
+        let names = matches!(
+            kind,
+            NodeKind::BindingPat { .. } | NodeKind::AtPat { .. } | NodeKind::FieldPat { .. }
+        );
+        if names {
+            if let Some(def) = self.def_of(pat) {
+                self.env.insert(def, Ty::Error);
+            }
+        }
+        for child in kind.children() {
+            self.bind_pattern_to_error(child);
+        }
+    }
+
     fn bind_record_field(
         &mut self,
         f: NodeId,
@@ -6564,6 +6603,11 @@ impl Inferer<'_> {
 
     fn resolved_def(&self, node: NodeId) -> Option<super::def::DefId> {
         self.resolved_def_in(self.file, node)
+    }
+
+    /// Whether the resolver tried `node` and failed, which it has reported.
+    fn failed_resolution(&self, node: NodeId) -> bool {
+        matches!(self.ast.meta::<Resolution>(node), Some(Resolution::Error))
     }
 
     fn resolved_def_in(&self, file: FileId, node: NodeId) -> Option<super::def::DefId> {

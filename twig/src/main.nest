@@ -15,6 +15,7 @@ build :: import "build.nest"
 workspace :: import "workspace.nest"
 { Workspace } :: import "workspace.nest"
 new :: import "new.nest"
+term :: import "term.nest"
 
 usage :: func () -> str {
   return s.join(.{
@@ -49,7 +50,7 @@ main :: func () -> i32 {
   let opts: Options := parse(process.args()).match {
     .ok(o) => o,
     .err(why) => {
-      io.eprintln(f"error: {why}")
+      term.error(why)
       io.eprint(usage())
       return 2
     },
@@ -70,7 +71,7 @@ main :: func () -> i32 {
   return done.match {
     .ok(code) => code,
     .err(why) => {
-      io.eprintln(f"error: {why}")
+      term.error(why)
       1
     },
   }
@@ -134,7 +135,7 @@ run_new :: func (o: *Options) -> Result.<i32, str> {
   let name: str := path.file_name(dir)
   if fs.exists(dir) { return .err(f"`{given}` already exists") }
   new.create(dir, name, o.lib).?
-  build.status("Created", f"{kind(o.lib)} `{name}`")
+  term.status("Created", f"{kind(o.lib)} `{name}`")
   return .ok(0)
 }
 
@@ -143,7 +144,7 @@ run_init :: func (o: *Options) -> Result.<i32, str> {
   let dir: str := cwd().?
   let name: str := path.file_name(dir)
   new.create(dir, name, o.lib).?
-  build.status("Created", f"{kind(o.lib)} `{name}`")
+  term.status("Created", f"{kind(o.lib)} `{name}`")
   return .ok(0)
 }
 
@@ -185,7 +186,7 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
   compile_all(&ws, p, one.as_slice()).?
 
   let exe: str := build.output(&ws, p, t)
-  build.status("Running", f"`{shown(&ws, exe)}`")
+  term.status("Running", f"`{shown(&ws, exe)}`")
   let status: process.Status := process.run(exe, o.rest).match {
     .ok(s) => s,
     .err(e) => { return .err(f"could not run `{exe}`: {e.describe()}") },
@@ -194,9 +195,9 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
 }
 
 compile_all :: func (ws: *Workspace, p: Profile, targets: []Target) -> Result.<void, str> {
-  build.status("Compiling", f"{ws.root.name} v{ws.root.manifest.package.version} ({ws.root.dir})")
+  term.status("Compiling", f"{ws.root.name} v{ws.root.manifest.package.version} ({ws.root.dir})")
   for t in targets { build.compile(ws, p, t).? }
-  build.status("Finished", f"`{p.name}` profile, in `{shown(ws, build.out_dir(ws, p))}`")
+  term.status("Finished", f"`{p.name}` profile, in `{shown(ws, build.out_dir(ws, p))}`")
   return .ok(())
 }
 

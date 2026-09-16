@@ -87,11 +87,12 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
                 match root_ns {
                     Some(ns) => match walk_package(&session.defs, ns, members) {
                         Ok(target) => Some(target),
-                        Err(seg) => {
+                        Err((within, seg)) => {
+                            let within = session.defs.canonical_string(within);
                             session.error(
                                 file,
                                 imp.span,
-                                format!("package has no public member `{seg}`"),
+                                format!("`{within}` has no public namespace `{seg}`"),
                             );
                             None
                         }
@@ -313,12 +314,16 @@ fn child_path(defs: &DefTable, scope: DefId, name: &Symbol) -> Vec<Symbol> {
 /// segment that names a non-namespace member — e.g. a function in
 /// `<std/math/fibonacci>` — is an error: `import` always yields a namespace.
 /// Returns the final namespace def, or the offending segment on a miss.
-pub fn walk_package(defs: &DefTable, root: DefId, members: &[Symbol]) -> Result<DefId, Symbol> {
+pub fn walk_package(
+    defs: &DefTable,
+    root: DefId,
+    members: &[Symbol],
+) -> Result<DefId, (DefId, Symbol)> {
     let mut cur = defs.resolve_alias(root);
     for seg in members {
         match lookup_public(defs, cur, seg) {
             Some(next) if defs.get(next).kind.is_namespace_like() => cur = next,
-            _ => return Err(seg.clone()),
+            _ => return Err((cur, seg.clone())),
         }
     }
     Ok(cur)

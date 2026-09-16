@@ -297,6 +297,10 @@ pub struct Session {
     /// Each loaded package's directory, by name: what a file's path inside the
     /// package — and so its canonical path — is measured from.
     pkg_dir: HashMap<String, String>,
+    /// The entry file's directory, when the entry is not a package's root: what
+    /// the canonical path of a file outside every package is measured from
+    /// ([`Session::program_module_path`]).
+    entry_dir: Option<(FileId, String)>,
     /// Module paths already reported as claimed by both a file and a directory
     /// (see [`Session::module_twin`]), so the pair is reported once.
     pub(crate) twins_reported: HashSet<Vec<Symbol>>,
@@ -372,6 +376,7 @@ impl Session {
             search_paths: Vec::new(),
             pkg_of: HashMap::new(),
             pkg_dir: HashMap::new(),
+            entry_dir: None,
             twins_reported: HashSet::new(),
             cache: HashMap::new(),
             loader,
@@ -535,6 +540,75 @@ impl Session {
         segments.into_iter().map(Symbol::new).collect()
     }
 
+    /// Where a file outside every package sits in the program, as namespace
+    /// segments: its path from the entry file's directory, by the rules
+    /// [`Session::module_path`] uses inside a package, with the entry itself as
+    /// the root.
+    ///
+    /// Without it every such file had an empty path, and so did every
+    /// declaration in it: a `message` in one file and a `message` in another
+    /// were one symbol, and one silently replaced the other. A file that is not
+    /// under the entry's directory keeps its whole path, which is still its own.
+    pub fn program_module_path(&self, file: FileId, file_name: &str) -> Vec<Symbol> {
+        let Some((entry, dir)) = &self.entry_dir else {
+            return Vec::new();
+        };
+        if *entry == file {
+            return Vec::new();
+        }
+        let rel = match file_name.strip_prefix(dir.as_str()) {
+            Some(rel) if dir.is_empty() || dir.ends_with(':') || rel.starts_with('/') => {
+                rel.trim_start_matches('/')
+            }
+            _ => file_name.trim_start_matches('/'),
+        };
+        let mut segments: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+        if let Some(last) = segments.pop() {
+            let stem = last.strip_suffix(".nest").unwrap_or(last);
+            if segments.last() != Some(&stem) {
+                segments.push(stem);
+            }
+        }
+        segments.into_iter().map(Symbol::new).collect()
+    }
+
+    /// Settle what the entry file is, before anything is loaded.
+    ///
+    /// **An entry that is a registered package's root is that package.** It is
+    /// how a package is compiled on its own — `nestc std/package.nest --package
+    /// std=std/package.nest` — and without it the entry was a nameless program
+    /// whose `import <std/...>` loaded the same files a second time, as a second
+    /// set of types. Any other entry is the root of a program, and the files it
+    /// reaches outside every package are named from its directory.
+    pub fn claim_entry(&mut self, file: FileId) {
+        let Some(name) = self.sources.file(file).map(|f| f.name.clone()) else {
+            return;
+        };
+        let owner = self
+            .packages
+            .values()
+            .find(|p| same_file(&p.root_path, &name))
+            .map(|p| p.name.clone());
+        match owner {
+            Some(pkg) => {
+                self.cache.insert(format!("pkg:{pkg}"), file);
+                self.pkg_of.insert(file, pkg.clone());
+                let dir = parent_of(&name).unwrap_or("");
+                self.pkg_dir.insert(pkg, normalize_str(dir));
+            }
+            None => {
+                // An in-memory name has no directory, only its loader's `mem:`
+                // prefix, which every file it loads shares.
+                let dir = match (parent_of(&name), name.find(':')) {
+                    (Some(dir), _) => normalize_str(dir),
+                    (None, Some(colon)) => name[..=colon].to_string(),
+                    (None, None) => String::new(),
+                };
+                self.entry_dir = Some((file, dir));
+            }
+        }
+    }
+
     /// The other file that would be the same module as `file_name`, when it
     /// exists: `x.nest` for `x/x.nest`, and `x/x.nest` for `x.nest`.
     ///
@@ -696,6 +770,22 @@ impl Default for Session {
 }
 
 /// The directory part of a path key, or `None` if it has no separator.
+/// `path`, normalized the way the loader names what it loads.
+fn normalize_str(path: &str) -> String {
+    normalize(std::path::Path::new(path))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Whether two paths name one file: the same file on disk when both are there,
+/// the same normalized spelling otherwise (an in-memory loader's names).
+fn same_file(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => normalize_str(a) == normalize_str(b),
+    }
+}
+
 fn parent_of(path: &str) -> Option<&str> {
     path.rfind('/').map(|i| &path[..i])
 }

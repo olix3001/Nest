@@ -115,6 +115,28 @@ impl Res {
   return ok(cast.<isize>(at))
 }
 
+// A pipe: `n` packs both ends, the read end in the low 32 bits and the write end
+// in the high ones, because a `Res` has one number to answer with.
+@public pipe :: func () -> Res {
+  let fds: []mut c.int := make.<[]c.int>(2)
+  if libc.pipe(c.from_ptr.<c.int>(&fds[0])) < 0 { return failed() }
+  return ok(cast.<isize>(fds[0]) + cast.<isize>(fds[1]) * 4294967296)
+}
+
+// Make `to` a copy of `from`, closing whatever `to` was.
+@public dup2 :: func (from: c.int, to: c.int) -> Res {
+  loop {
+    if libc.dup2(from, to) >= 0 { return ok(0) }
+    let why: Res := failed()
+    if why.interrupted() == false { return why }
+  }
+}
+
+// Whether the descriptor is a terminal. Not a `Res`: "no" is the answer for
+// anything that is not one, a closed descriptor included, and that is the only
+// thing a caller asks this for.
+@public isatty :: func (fd: c.int) -> bool { return libc.isatty(fd) == 1 }
+
 // ===< Paths >===
 
 @public unlink :: func (path: str) -> Res {

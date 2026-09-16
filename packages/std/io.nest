@@ -165,6 +165,10 @@ impl File {
   // The descriptor, for a program calling something `std` does not wrap.
   @public fd_of :: #inline func (self: Self) -> c.int { return self.fd }
 
+  // Whether it is a terminal: what decides whether output meant for a person
+  // may carry colour.
+  @public is_terminal :: func (self: Self) -> bool { return sys.isatty(self.fd) }
+
   // Close it. A descriptor closed twice is a descriptor another thread may have
   // reopened, so this is called once and by whoever opened it.
   @public close :: func (self: *mut File) -> Result.<void, Error> {

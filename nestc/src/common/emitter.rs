@@ -1,123 +1,206 @@
-//! Terminal renderer for [`Diagnostic`]s — a small, dependency-free take on the
-//! familiar rustc layout:
+//! Terminal renderer for [`Diagnostic`]s, drawn by [ariadne]:
 //!
 //! ```text
-//! error[E0001]: unexpected token
-//!  --> main.nest:3:13
-//!   |
-//! 3 |     let x = ;
-//!   |             ^ expected an expression
-//!   |
-//!   = note: statements end at a newline
+//! error: unknown package `deep`
+//!    ╭─[ util/src/package.nest:1:1 ]
+//!    │
+//!  1 │ deep :: import <deep>
+//!    │ ──────────┬──────────
+//!    │           ╰──────────── not a dependency of `util`
+//! ───╯
 //! ```
 //!
-//! Rendering is intentionally simple: each label is shown against the first line
-//! of its span, with a caret run under the columns it covers. A span crossing
-//! several lines underlines from its start to the end of that first line — good
-//! enough for a bootstrap compiler, and the [`Diagnostic`] data it consumes is
-//! rich enough that a fancier renderer (or an LSP server) can be swapped in
-//! without touching the rest of the compiler.
+//! **The compiler builds [`Diagnostic`]s and nothing else knows ariadne exists.**
+//! This file is the whole of the translation: a severity becomes a report kind,
+//! a label becomes a coloured span, a note stays a note. What goes in is
+//! unchanged, which is what keeps `--error-format=json` and a language server
+//! reading the same data a person reads here.
+//!
+//! [ariadne]: https://docs.rs/ariadne
 
 use std::fmt::Write as _;
 
-use super::diagnostic::{Diagnostic, Label};
-use super::source::{FileSpan, SourceMap};
+use ariadne::{Cache, CharSet, Color, Config, Fmt, IndexType, Report, ReportKind, Source};
 
-/// Render a diagnostic to a `String` against `sources`. Never panics: spans in
-/// unknown files, or out-of-range offsets, degrade to a header-only render.
-pub fn render(diag: &Diagnostic, sources: &SourceMap) -> String {
-    let mut out = String::new();
+use super::diagnostic::{Diagnostic, Severity};
+use super::source::{FileId, SourceMap};
 
-    // Header: `error[E0001]: message`
-    out.push_str(diag.severity.label());
+/// Render a diagnostic to a `String` against `sources`, in colour when `color`
+/// is set. Never panics: a label in a file the map does not have is dropped, and
+/// a diagnostic with no label left is its header and notes alone.
+pub fn render(diag: &Diagnostic, sources: &SourceMap, color: bool) -> String {
+    let labels: Vec<_> = diag
+        .labels
+        .iter()
+        .filter(|l| sources.file(l.span.file).is_some())
+        .collect();
+    let anchor = labels
+        .iter()
+        .find(|l| l.primary)
+        .or_else(|| labels.first())
+        .copied();
+    let Some(anchor) = anchor else {
+        return render_bare(diag, color);
+    };
+
+    let config = Config::default()
+        .with_color(color)
+        .with_index_type(IndexType::Byte)
+        .with_char_set(CharSet::Unicode);
+    let mut report = Report::build(kind(diag.severity), span(anchor.span))
+        .with_config(config)
+        .with_message(&diag.message);
     if let Some(code) = &diag.code {
-        let _ = write!(out, "[{code}]");
+        report = report.with_code(code);
     }
-    let _ = writeln!(out, ": {}", diag.message);
-
-    // Gutter width: the widest line number any label lands on.
-    let gutter = gutter_width(diag, sources);
-    let pad = " ".repeat(gutter);
-
-    // Location arrow points at the primary label (or the first label).
-    let anchor = diag.primary_label().or_else(|| diag.labels.first());
-    if let Some(anchor) = anchor {
-        if let Some((name, lc)) = locate(anchor.span, sources) {
-            let _ = writeln!(out, "{pad}--> {name}:{}:{}", lc.line, lc.column);
-        }
-    }
-
-    // One snippet block per label.
-    for (i, label) in diag.labels.iter().enumerate() {
-        render_label(&mut out, label, sources, gutter);
-        // Blank gutter line between adjacent snippets and before notes.
-        if i + 1 < diag.labels.len() {
-            let _ = writeln!(out, "{pad} |");
-        }
-    }
-
-    // Trailing notes.
-    if !diag.notes.is_empty() && !diag.labels.is_empty() {
-        let _ = writeln!(out, "{pad} |");
+    for label in &labels {
+        let colour = if label.primary { tint(diag.severity) } else { Color::Blue };
+        // ariadne draws an underline only for a label with a message, so every
+        // label gets one — empty if it had none, and `bare_underline` below
+        // takes the arrow to nothing back out.
+        let l = ariadne::Label::new(span(label.span))
+            .with_color(colour)
+            .with_message(&label.message);
+        report = report.with_label(l);
     }
     for note in &diag.notes {
-        let _ = writeln!(out, "{pad} = note: {note}");
+        report = report.with_note(note);
     }
 
+    let mut out = Vec::new();
+    let cache = MapCache { sources, loaded: Default::default() };
+    if report.finish().write(cache, &mut out).is_err() {
+        return render_bare(diag, color);
+    }
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    if labels.len() == 1 && anchor.message.is_empty() {
+        text = bare_underline(&text);
+    }
+    // ariadne colours a custom report kind's header whatever the config says, so
+    // colour that was not asked for is taken back out here.
+    if color { text } else { strip_ansi(&text) }
+}
+
+/// A lone label with no message, drawn as an underline and nothing else.
+///
+/// ariadne draws the label as `─┬─` with `╰──` below it pointing at the message,
+/// and with no message that is an arrow to nothing. Only the simple shape is
+/// rewritten — one `┬` over one arrow — so a span over several lines, which
+/// ariadne draws differently, is left as it is.
+fn bare_underline(text: &str) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let is_arrow = |line: &str| {
+        let plain = strip_ansi(line);
+        let body = plain.trim_start().strip_prefix('│').unwrap_or("").trim();
+        body.starts_with('╰') && body.chars().skip(1).all(|c| c == '─')
+    };
+    let arrows: Vec<usize> = (1..lines.len()).filter(|&i| is_arrow(lines[i])).collect();
+    let [at] = arrows[..] else {
+        return text.to_string();
+    };
+    if strip_ansi(lines[at - 1]).matches('┬').count() != 1 {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in lines.iter().enumerate() {
+        match i {
+            _ if i == at => {}
+            _ if i == at - 1 => out.push_str(&line.replace('┬', "─")),
+            _ => out.push_str(line),
+        }
+    }
     out
 }
 
-/// Widest line-number string across every label; at least 1.
-fn gutter_width(diag: &Diagnostic, sources: &SourceMap) -> usize {
-    diag.labels
-        .iter()
-        .filter_map(|l| locate(l.span, sources).map(|(_, lc)| lc.line))
-        .map(|line| line.to_string().len())
-        .max()
-        .unwrap_or(1)
+/// `s` without its ANSI escape sequences (`ESC [ ... letter`).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
-/// Resolve a span's file name and start position, if the file is known.
-fn locate(span: FileSpan, sources: &SourceMap) -> Option<(&str, super::source::LineCol)> {
-    let file = sources.file(span.file)?;
-    Some((&file.name, file.line_col(span.span.start)))
+/// The header and notes, for a diagnostic with nothing in a file to point at: a
+/// failure of the compilation rather than one found in the program.
+fn render_bare(diag: &Diagnostic, color: bool) -> String {
+    let mut out = String::new();
+    let word = diag.severity.label();
+    let head = match &diag.code {
+        Some(code) => format!("{word}[{code}]"),
+        None => word.to_string(),
+    };
+    if color {
+        let _ = writeln!(out, "{}: {}", head.fg(tint(diag.severity)), diag.message);
+    } else {
+        let _ = writeln!(out, "{head}: {}", diag.message);
+    }
+    for note in &diag.notes {
+        let _ = writeln!(out, "  = note: {note}");
+    }
+    out
 }
 
-/// Emit the `N | line` / `  | ^^^ msg` pair for one label.
-fn render_label(out: &mut String, label: &Label, sources: &SourceMap, gutter: usize) {
-    let pad = " ".repeat(gutter);
-    let Some(file) = sources.file(label.span.file) else {
-        return;
-    };
+/// The report kind, spelled the way the rest of the toolchain prints it: `error`,
+/// not ariadne's `Error`, so a build tool's own `error:` lines match.
+fn kind(severity: Severity) -> ReportKind<'static> {
+    ReportKind::Custom(severity.label(), tint(severity))
+}
 
-    let start = file.line_col(label.span.span.start);
-    let end = file.line_col(label.span.span.end.max(label.span.span.start));
-    let line_text = file.line_text(start.line);
+fn tint(severity: Severity) -> Color {
+    match severity {
+        Severity::Error => Color::Red,
+        Severity::Warning => Color::Yellow,
+        Severity::Note => Color::Cyan,
+        Severity::Help => Color::Green,
+    }
+}
 
-    // Opening gutter line.
-    let _ = writeln!(out, "{pad} |");
-    // Source line, right-aligned line number in the gutter.
-    let num = start.line.to_string();
-    let lead = " ".repeat(gutter - num.len());
-    let _ = writeln!(out, "{lead}{num} | {line_text}");
+fn span(s: super::source::FileSpan) -> (FileId, std::ops::Range<usize>) {
+    (s.file, s.span.start..s.span.end.max(s.span.start))
+}
 
-    // Underline. Carets span the label's columns on the start line; a
-    // multi-line span underlines to end-of-line.
-    let caret = if label.primary { '^' } else { '-' };
-    let underline_cols = if end.line == start.line {
-        (end.column.saturating_sub(start.column)).max(1)
-    } else {
-        (line_text.chars().count() as u32 + 1).saturating_sub(start.column)
-    };
-    let spaces = " ".repeat(start.column.saturating_sub(1) as usize);
-    let carets: String = std::iter::repeat(caret)
-        .take(underline_cols.max(1) as usize)
-        .collect();
+/// The [`SourceMap`] as ariadne's source cache. Each file is split into lines
+/// the first time a label lands in it, and only then.
+struct MapCache<'a> {
+    sources: &'a SourceMap,
+    loaded: std::collections::HashMap<FileId, Source<&'a str>>,
+}
 
-    if label.message.is_empty() {
-        let _ = writeln!(out, "{pad} | {spaces}{carets}");
-    } else {
-        let _ = writeln!(out, "{pad} | {spaces}{carets} {}", label.message);
+impl<'a> Cache<FileId> for MapCache<'a> {
+    type Storage = &'a str;
+
+    fn fetch(&mut self, id: &FileId) -> Result<&Source<&'a str>, impl std::fmt::Debug> {
+        let sources = self.sources;
+        match self.loaded.entry(*id) {
+            std::collections::hash_map::Entry::Occupied(e) => Ok(e.into_mut()),
+            std::collections::hash_map::Entry::Vacant(e) => match sources.file(*id) {
+                Some(file) => Ok(e.insert(Source::from(file.src.as_str()))),
+                None => Err(format!("no source for file {}", id.0)),
+            },
+        }
+    }
+
+    /// The file's name, from the working directory when it is under it: the
+    /// path a person would type to open it.
+    fn display<'b>(&self, id: &'b FileId) -> Option<impl std::fmt::Display + 'b> {
+        let name = &self.sources.file(*id)?.name;
+        let relative = std::env::current_dir().ok().and_then(|cwd| {
+            std::path::Path::new(name)
+                .strip_prefix(cwd)
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        });
+        Some(relative.unwrap_or_else(|| name.clone()))
     }
 }
 
@@ -212,7 +295,7 @@ pub fn render_json(diag: &Diagnostic, sources: &SourceMap) -> String {
         message: &diag.message,
         labels,
         notes: &diag.notes,
-        rendered: render(diag, sources),
+        rendered: render(diag, sources, false),
     };
     // A diagnostic that cannot be serialized would be a diagnostic lost, so the
     // failure is reported in the one format that cannot fail.
@@ -233,7 +316,6 @@ mod tests {
     fn renders_single_line_error() {
         let mut sources = SourceMap::new();
         let file = sources.add("main.nest", "let x = ;\n");
-        // caret under the `;` at column 9 (0-based byte 8)
         let diag = Diagnostic::error("expected an expression")
             .with_code("E0001")
             .with_primary(
@@ -242,34 +324,59 @@ mod tests {
             )
             .with_note("statements end at a newline");
 
-        let rendered = render(&diag, &sources);
-        assert!(rendered.starts_with("error[E0001]: expected an expression\n"));
-        assert!(rendered.contains("--> main.nest:1:9"));
-        assert!(rendered.contains("1 | let x = ;"));
-        assert!(rendered.contains("^ expected an expression"));
-        assert!(rendered.contains("= note: statements end at a newline"));
+        let rendered = render(&diag, &sources, false);
+        assert!(rendered.starts_with("[E0001] error: expected an expression\n"), "got:\n{rendered}");
+        assert!(rendered.contains("main.nest:1:9"), "got:\n{rendered}");
+        assert!(rendered.contains("1 │ let x = ;"), "got:\n{rendered}");
+        assert!(rendered.contains("expected an expression"), "got:\n{rendered}");
+        assert!(rendered.contains("Note: statements end at a newline"), "got:\n{rendered}");
     }
 
+    /// Offsets are **bytes**, which is what a [`Span`] holds; read as characters
+    /// they would point past a multi-byte character by one column per extra byte.
     #[test]
-    fn caret_offset_matches_column() {
+    fn spans_are_byte_offsets() {
         let mut sources = SourceMap::new();
-        let file = sources.add("t.nest", "  bad\n");
-        let diag = Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(2, 5)), "");
-        let rendered = render(&diag, &sources);
-        // two leading spaces before the caret run of length 3
-        assert!(rendered.contains("\n  |   ^^^\n"), "got:\n{rendered}");
+        let file = sources.add("t.nest", "é bad\n");
+        let diag = Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(3, 6)), "here");
+        let rendered = render(&diag, &sources, false);
+        assert!(rendered.contains("t.nest:1:3"), "got:\n{rendered}");
     }
 
+    /// A label with nothing to say is an underline, not an arrow to nothing —
+    /// with or without colour.
     #[test]
-    fn secondary_label_uses_dashes() {
+    fn a_label_with_no_message_is_a_bare_underline() {
         let mut sources = SourceMap::new();
         let file = sources.add("t.nest", "ab cd\n");
-        let diag = Diagnostic::error("x").with_label(Label::secondary(
-            FileSpan::new(file, Span::new(0, 2)),
-            "here",
-        ));
-        let rendered = render(&diag, &sources);
-        assert!(rendered.contains("-- here"), "got:\n{rendered}");
+        let diag = Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(3, 5)), "");
+        for color in [false, true] {
+            let rendered = strip_ansi(&render(&diag, &sources, color));
+            assert!(!rendered.contains('╰') && !rendered.contains('┬'), "got:\n{rendered}");
+            assert!(rendered.contains("│    ──"), "got:\n{rendered}");
+        }
+    }
+
+    /// Several labels keep their arrows, and a secondary one is drawn too.
+    #[test]
+    fn secondary_labels_are_drawn() {
+        let mut sources = SourceMap::new();
+        let file = sources.add("t.nest", "let a: i32 := b\n");
+        let diag = Diagnostic::error("type mismatch")
+            .with_primary(FileSpan::new(file, Span::new(14, 15)), "this is a `bool`")
+            .with_label(Label::secondary(FileSpan::new(file, Span::new(7, 10)), "expected because of this"));
+        let rendered = render(&diag, &sources, false);
+        assert!(rendered.contains("this is a `bool`"), "got:\n{rendered}");
+        assert!(rendered.contains("expected because of this"), "got:\n{rendered}");
+    }
+
+    #[test]
+    fn colour_is_only_written_when_asked_for() {
+        let mut sources = SourceMap::new();
+        let file = sources.add("t.nest", "ab cd\n");
+        let diag = Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(0, 2)), "here");
+        assert!(!render(&diag, &sources, false).contains('\u{1b}'));
+        assert!(render(&diag, &sources, true).contains('\u{1b}'));
     }
 
     /// The machine-readable form carries what the human one shows *plus* the
@@ -306,7 +413,7 @@ mod tests {
         // does not have to reimplement the renderer to stay readable.
         assert_eq!(
             v["rendered"].as_str().expect("a render"),
-            render(&diag, &sources)
+            render(&diag, &sources, false)
         );
     }
 
@@ -334,7 +441,7 @@ mod tests {
             FileSpan::new(crate::common::source::FileId(7), Span::new(0, 1)),
             "",
         );
-        let rendered = render(&diag, &sources);
+        let rendered = render(&diag, &sources, false);
         assert_eq!(rendered, "error: boom\n");
     }
 }

@@ -64,6 +64,9 @@ extern("c") {
   @public read  :: func (fd: c.int, buf: c.ptr.<c.uchar>, n: c.size_t) -> c.ssize_t
   @public write :: func (fd: c.int, buf: c.ptr.<c.uchar>, n: c.size_t) -> c.ssize_t
   @public lseek :: func (fd: c.int, off: c.longlong, whence: c.int) -> c.longlong
+  @public isatty :: func (fd: c.int) -> c.int
+  @public pipe  :: func (fds: c.ptr.<c.int>) -> c.int
+  @public dup2  :: func (from: c.int, to: c.int) -> c.int
 
   @public unlink :: func (path: c.cstr) -> c.int
   @public rename :: func (from: c.cstr, to: c.cstr) -> c.int

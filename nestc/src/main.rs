@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use codegen::{Codegen, OutputKind};
-use common::diagnostic::Diagnostic;
+use common::diagnostic::{Diagnostic, Severity};
 use common::emitter::{render, render_json};
 use common::options::Options;
 use sema::session::Session;
@@ -40,6 +40,9 @@ options:
                            obj, asm, backend-ir what the backend writes, to files
   -L <dir>               a directory to search for packages; `<foo/...>` is
                          <dir>/foo/package.nest. Repeatable, in order
+  --color <when>         auto (default), always or never: colour in human
+                         diagnostics; auto means when stderr is a terminal
+                         and `NO_COLOR` is not set
   --error-format <form>  human (default) or json — one JSON object per line,
                          on stderr, for a tool that consumes them
   --package <name>=<path>
@@ -65,6 +68,8 @@ settings (-C):
   arch=<name>            override the target's architecture
   profile=debug|release  the build profile's name, readable from source
   print=options          print the resolved settings and exit
+  print=packages         print the packages that ship with this compiler, one
+                         `name=root` per line, and exit
 ";
 
 /// What was asked for, parsed.
@@ -162,10 +167,11 @@ impl ErrorFormat {
         }
     }
 
-    /// Write one diagnostic to stderr.
-    fn emit(self, diag: &Diagnostic, sources: &common::source::SourceMap) {
+    /// Write one diagnostic to stderr, in colour if `color` says so and the
+    /// format is one a person reads.
+    fn emit(self, diag: &Diagnostic, sources: &common::source::SourceMap, color: bool) {
         match self {
-            ErrorFormat::Human => eprint!("{}", render(diag, sources)),
+            ErrorFormat::Human => eprint!("{}", render(diag, sources, color)),
             ErrorFormat::Json => eprint!("{}", render_json(diag, sources)),
         }
     }
@@ -179,35 +185,75 @@ fn main() -> ExitCode {
             // out of `run`, because the failure may be the argument parsing
             // itself — and a tool that asked for JSON still wants this one in
             // JSON.
-            match requested_format() {
-                ErrorFormat::Human => eprintln!("nestc: {message}"),
-                // No file, so no labels: this is a failure *of* the compilation
-                // rather than one found in a program.
-                format => format.emit(
-                    &Diagnostic::error(message),
-                    &common::source::SourceMap::new(),
-                ),
-            }
+            let format = requested("--error-format")
+                .and_then(|v| ErrorFormat::parse(&v).ok())
+                .unwrap_or_default();
+            let color = requested("--color")
+                .and_then(|v| ColorChoice::parse(&v).ok())
+                .unwrap_or_default()
+                .enabled();
+            // No file, so no labels: this is a failure *of* the compilation
+            // rather than one found in a program.
+            format.emit(
+                &Diagnostic::error(message),
+                &common::source::SourceMap::new(),
+                color,
+            );
             ExitCode::FAILURE
         }
     }
 }
 
-/// `--error-format` as the command line asked for it, defaulting on anything
-/// unparseable — the message about *that* has to be printed somehow.
-fn requested_format() -> ErrorFormat {
+/// `flag`'s value as the command line wrote it, for printing a failure that may
+/// be the argument parsing itself — the message about *that* has to be printed
+/// somehow.
+fn requested(flag: &str) -> Option<String> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        let value = match arg.strip_prefix("--error-format=") {
-            Some(v) => Some(v.to_string()),
-            None if arg == "--error-format" => args.next(),
-            None => None,
-        };
-        if let Some(v) = value {
-            return ErrorFormat::parse(&v).unwrap_or_default();
+        match arg.strip_prefix(&format!("{flag}=")) {
+            Some(v) => return Some(v.to_string()),
+            None if arg == flag => return args.next(),
+            None => {}
         }
     }
-    ErrorFormat::Human
+    None
+}
+
+/// Whether human diagnostics are coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ColorChoice {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorChoice {
+    fn parse(value: &str) -> Result<ColorChoice, String> {
+        match value {
+            "auto" => Ok(ColorChoice::Auto),
+            "always" => Ok(ColorChoice::Always),
+            "never" => Ok(ColorChoice::Never),
+            other => Err(format!(
+                "`--color` takes `auto`, `always` or `never`, not `{other}`"
+            )),
+        }
+    }
+
+    /// `auto` is a terminal on stderr and no `NO_COLOR` (<https://no-color.org>).
+    /// A build tool that captures stderr and shows it to a person passes
+    /// `always` instead, because what it captured is not a terminal.
+    fn enabled(self) -> bool {
+        use std::io::IsTerminal as _;
+        match self {
+            ColorChoice::Always => true,
+            ColorChoice::Never => false,
+            ColorChoice::Auto => {
+                std::io::stderr().is_terminal()
+                    && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+            }
+        }
+    }
 }
 
 /// The compilation, with every failure a message rather than an exit.
@@ -218,7 +264,9 @@ fn run() -> Result<ExitCode, String> {
     let mut backend_name: Option<String> = None;
     let mut emit: Option<Emit> = None;
     let mut print_options = false;
+    let mut print_packages = false;
     let mut format = ErrorFormat::default();
+    let mut color = ColorChoice::default();
     // Where to look for a package nothing registered. The driver holds them
     // rather than `Options` because they are about finding source, not about
     // what is built from it.
@@ -271,6 +319,9 @@ fn run() -> Result<ExitCode, String> {
                     .ok_or_else(|| format!("`--package {spec}` is not a `name=path` pair"))?;
                 packages.push((name.to_string(), root.to_string()));
             }
+            a if a == "--color" || a.starts_with("--color=") => {
+                color = ColorChoice::parse(&value("--color", &mut args)?)?;
+            }
             a if a == "--error-format" || a.starts_with("--error-format=") => {
                 format = ErrorFormat::parse(&value("--error-format", &mut args)?)?;
             }
@@ -293,7 +344,10 @@ fn run() -> Result<ExitCode, String> {
                     // backend to hold. No pass reads either, which is exactly
                     // why neither is in `Options`.
                     "print" if val == "options" => print_options = true,
-                    "print" => return Err(format!("`print` takes `options`, not `{val}`")),
+                    "print" if val == "packages" => print_packages = true,
+                    "print" => {
+                        return Err(format!("`print` takes `options` or `packages`, not `{val}`"));
+                    }
                     "backend" => backend_name = Some(val.to_string()),
                     "linker" => link_options.linker = val.to_string(),
                     "link-arg" => link_options.args.push(val.to_string()),
@@ -331,6 +385,15 @@ fn run() -> Result<ExitCode, String> {
 
     if print_options {
         print!("{}", options.render());
+        return Ok(ExitCode::SUCCESS);
+    }
+    // What a build tool registers as `--package` for the packages it does not
+    // resolve itself, so that the `core` and `std` it builds against are this
+    // compiler's — the answer `NEST_CORE` and `NEST_STD` change, and the one a
+    // build with no `--package` would have used.
+    if print_packages {
+        println!("core={}", sema::session::default_core_path());
+        println!("std={}", sema::session::default_std_path());
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -457,20 +520,41 @@ fn run() -> Result<ExitCode, String> {
     // that the author probably meant something else, not a claim that the
     // program is wrong.
     if !session.diagnostics.is_empty() {
-        // The count and the blank lines are for a person reading a terminal. A
-        // JSON stream is one object per line and nothing else, so that a
-        // consumer can read it a line at a time.
-        if format == ErrorFormat::Human {
-            eprintln!("\n{} diagnostic(s):\n", session.diagnostics.len());
-        }
+        let color = color.enabled();
         for diag in &session.diagnostics {
-            format.emit(diag, &session.sources);
+            format.emit(diag, &session.sources, color);
+        }
+        // The count is for a person reading a terminal. A JSON stream is one
+        // object per line and nothing else, so that a consumer can read it a
+        // line at a time.
+        if format == ErrorFormat::Human
+            && let Some(summary) = summary(&session.diagnostics)
+        {
+            format.emit(&summary, &session.sources, color);
         }
     }
     Ok(if session.has_errors() {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    })
+}
+
+/// The line closing a run that reported something: how many errors and warnings,
+/// and — when there were errors — that nothing was built.
+fn summary(diagnostics: &[Diagnostic]) -> Option<Diagnostic> {
+    let count = |severity| diagnostics.iter().filter(|d| d.severity == severity).count();
+    let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));
+    Some(match (errors, warnings) {
+        (0, 0) => return None,
+        (0, w) => Diagnostic::warning(format!("{} emitted", plural(w, "warning"))),
+        (e, 0) => Diagnostic::error(format!("aborting due to {}", plural(e, "previous error"))),
+        (e, w) => Diagnostic::error(format!(
+            "aborting due to {}; {} emitted",
+            plural(e, "previous error"),
+            plural(w, "warning")
+        )),
     })
 }
 

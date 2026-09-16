@@ -236,6 +236,7 @@ pub fn analyze_source(name: &str, src: &str, packages: &[(&str, &str)]) -> Sessi
 /// Run the full pipeline over `entry` (already parsed into `session.asts`) and
 /// every file it transitively imports.
 pub fn analyze(session: &mut Session, entry: FileId) {
+    session.claim_entry(entry);
     // The prelude is globbed into every scope, so `core` must be collected
     // before anything resolves against it.
     if let Some(core_root) = session.load_package("core") {
@@ -416,7 +417,7 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
                 path.extend(session.module_path(n, &name));
                 path
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| session.program_module_path(file, &name));
         if let Some(pkg) = session.pkg_of.get(&file).cloned()
             && let Some(twin) = session.module_twin(&pkg, &name)
             && session.twins_reported.insert(canonical.clone())

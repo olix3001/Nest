@@ -126,7 +126,7 @@ main :: func () { const a := math.add(1, 2) }
     .expect("math.add field access");
     match resolution(&session, file, fa) {
         Resolution::Def(d) => {
-            assert_eq!(session.defs.canonical_string(d), "add");
+            assert_eq!(session.defs.canonical_string(d), "math.add");
             assert_eq!(session.defs.get(d).kind, DefKind::Func);
         }
         other => panic!("math.add unresolved: {other:?}"),
@@ -2552,6 +2552,65 @@ fn the_two_package_example_analyzes_cleanly() {
             "{want} is not linked: {names:?}"
         );
     }
+}
+
+/// Files outside every package are namespaces too, named from the entry file's
+/// directory: two of them declaring `message` declare two functions. They were
+/// one symbol, and one replaced the other in the object file.
+#[test]
+fn files_outside_a_package_are_named_from_the_entry() {
+    let session = analyze_mem(
+        &[
+            ("main", "a :: import \"a.nest\"\nb :: import \"b.nest\"\nmain :: func () -> i32 { return a.message() + b.message(1) }\n"),
+            ("a", "@public message :: func () -> i32 { return 1 }\n"),
+            ("b", "@public message :: func (n: i32) -> i32 { return n }\n"),
+        ],
+        "main",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let mut names: Vec<String> = session
+        .linked
+        .funcs()
+        .map(|f| session.defs.canonical_string(f.def))
+        .filter(|n| n.ends_with("message") || n == "main")
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a.message", "b.message", "main"]);
+}
+
+/// A package compiled on its own — its root as the entry, and registered under
+/// its name — is **that package**: a file of it importing `<pkg>` reaches the
+/// entry, not a second copy of it with a second set of types.
+#[test]
+fn an_entry_that_is_a_package_root_is_that_package() {
+    let dir = std::env::temp_dir().join(format!("nestc-entry-pkg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = dir.join("package.nest");
+    std::fs::write(
+        &root,
+        "@public Point :: struct { x: i32 }\n@public util :: import \"util.nest\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("util.nest"),
+        "geo :: import <geo>\n@public origin :: func () -> geo.Point { return geo.Point { x: 0 } }\n",
+    )
+    .unwrap();
+    let root = root.to_string_lossy().into_owned();
+
+    let mut session = Session::new();
+    session.register_package("geo", &root);
+    let file = session.load_entry(&root).expect("the root loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let points = session
+        .linked
+        .types()
+        .filter(|t| t.name.as_str() == "Point")
+        .count();
+    assert_eq!(points, 1, "the root was loaded twice");
+    assert_eq!(session.pkg_of.get(&file).map(String::as_str), Some("geo"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -8192,25 +8251,26 @@ main :: func () {}
     assert!(msgs[0].contains("cannot resolve name"), "{msgs:#?}");
 }
 
-/// Two files that each define a file-scope `main` are two entry points, and the
-/// program can only start at one. Reported rather than resolved by picking.
+/// The entry point is the `main` of the **entry file** (§5.6: the root
+/// namespace). Every file is a namespace of its own, so a `main` another file
+/// declares is `other.main` — an ordinary function, callable like any other —
+/// and not a second entry point.
 #[test]
-fn a_program_has_one_main() {
+fn only_the_entry_files_main_is_the_entry_point() {
     let session = analyze_mem(
         &[
-            ("main", "{ run } :: import \"other.nest\"\nmain :: func () { run() }\n"),
-            ("other", "@public main :: func () { }\n@public run :: func () { }\n"),
+            ("main", "other :: import \"other.nest\"\nmain :: func () { other.main() }\n"),
+            ("other", "@public main :: func () { }\n"),
         ],
         "main",
     );
-    let errors: Vec<&String> = session
-        .diagnostics
-        .iter()
-        .filter(|d| d.severity == crate::common::diagnostic::Severity::Error)
-        .map(|d| &d.message)
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let mains: Vec<String> = session
+        .linked
+        .mains(&session.defs)
+        .map(|f| session.defs.canonical_string(f.def))
         .collect();
-    assert_eq!(errors.len(), 1, "{errors:#?}");
-    assert!(errors[0].contains("a program has one `main`"), "{}", errors[0]);
+    assert_eq!(mains, ["main"]);
 }
 
 // ===< Package search paths (`-L`) >===
@@ -8257,6 +8317,62 @@ fn a_search_path_finds_a_package() {
     let file = session.load_entry(&main).expect("entry loads");
     analyze(&mut session, file);
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+/// An import that fails is reported **once**, where it is written. Every use of
+/// what it would have bound — a member, a call, a type, a value destructured in a
+/// `for` — is as unknown as the import, and saying so again at each one buries
+/// the error that matters under ones that do not.
+#[test]
+fn a_broken_import_is_reported_once() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "deep :: import <deep>\n\
+             m :: import \"missing.nest\"\n\
+             sub :: import <core/nope>\n\
+             { thing } :: import <nope>\n\
+             S :: struct { v: m.T }\n\
+             add :: func (a: i32, b: i32) -> i32 { return deep.add(a, b) * 2 }\n\
+             f :: func (s: S) -> i32 { return s.v.len() + m.CONST + sub.g().h }\n\
+             g :: func () -> i32 {\n\
+               let x := deep.Foo { a: 1 }\n\
+               for y in m.items() { return y.z }\n\
+               let t: deep.T := 3\n\
+               return thing(x)\n\
+             }\n",
+        )],
+        "main",
+    );
+    let messages: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages.len(), 4, "{messages:#?}");
+    assert!(messages.iter().any(|m| m.contains("unknown package `deep`")), "{messages:#?}");
+    assert!(messages.iter().any(|m| m.contains("unknown package `nope`")), "{messages:#?}");
+    assert!(messages.iter().any(|m| m.contains("`core` has no public namespace `nope`")), "{messages:#?}");
+}
+
+/// A member a namespace does not have is reported once, and a call, a field or a
+/// literal built on it adds nothing.
+#[test]
+fn an_unknown_member_is_reported_once() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "mem :: import <core/mem>
+             main :: func () -> i32 {
+               mem.nope(1)
+               let a := mem.missing
+               let b: i32 := a + 1
+               let c := mem.Nope { x: 1 }
+               return b + c.y
+             }
+",
+        )],
+        "main",
+    );
+    let messages: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages.len(), 3, "{messages:#?}");
+    assert!(messages.iter().all(|m| m.contains("is not a public member of `core.mem`")), "{messages:#?}");
 }
 
 /// **Every file is a namespace of its own.** Two files of one package may each

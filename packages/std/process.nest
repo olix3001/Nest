@@ -210,6 +210,58 @@ impl Child {
   return .ok(Child { pid: cast.<c.int>(forked.n) })
 }
 
+// What `output` answers: how the program ended, and everything it wrote to
+// stdout.
+@public Output :: struct {
+  status: Status,
+  stdout: []u8,
+}
+
+// Run `program` with `args` and collect what it writes to **stdout**.
+//
+// Its stderr is this process's, not captured: reading two pipes needs a way to
+// wait on both at once, or a program that fills one while this reads the other
+// blocks both forever. Stderr is where a program tells a person what went wrong,
+// and a person is still on the other end of this process's.
+@public output :: func (program: str, args: []str) -> Result.<Output, io.Error> {
+  let argv: c.ptr.<c.cstr> := build_argv(program, args)
+  let p: sys.Res := sys.pipe()
+  if p.failed() { return .err(io.error_of("spawn", program, p)) }
+  let read_end: c.int := cast.<c.int>(p.n % 4294967296)
+  let write_end: c.int := cast.<c.int>(p.n / 4294967296)
+
+  let forked: sys.Res := sys.fork()
+  if forked.failed() {
+    close_quietly(read_end)
+    close_quietly(write_end)
+    return .err(io.error_of("spawn", program, forked))
+  }
+  if forked.n == 0 {
+    if sys.dup2(write_end, libc.STDOUT).failed() { sys.exit(127) }
+    close_quietly(read_end)
+    close_quietly(write_end)
+    sys.exec(program, argv)
+    sys.exit(127)
+  }
+
+  // The parent's copy of the write end is closed **before** reading: the read
+  // sees end of file only once every write end is gone, and this one would
+  // never go.
+  close_quietly(write_end)
+  let child: Child := Child { pid: cast.<c.int>(forked.n) }
+  let mut from: io.File := io.File.from_fd(read_end)
+  let bytes: Result.<[]u8, io.Error> := io.read_to_end(&mut from)
+  from.close().match { .ok(_) => (), .err(_) => () }
+  let status: Status := child.wait().?
+  return .ok(Output { status: status, stdout: bytes.? })
+}
+
+// Close a descriptor whose failure to close changes nothing: one end of a pipe
+// on a path that is already failing, or in a child about to `exec`.
+close_quietly :: func (fd: c.int) -> void {
+  let closed: sys.Res := sys.close(fd)
+}
+
 // Start it, wait for it, and answer how it ended.
 @public run :: func (program: str, args: []str) -> Result.<Status, io.Error> {
   return spawn(program, args).?.wait()

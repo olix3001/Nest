@@ -496,12 +496,22 @@ nothing needs a library format yet. What it is, as built (`twig/`):
   is the one function that writes that command line; a `twig metadata` should
   read it rather than repeat it.
 - **`nestc`** is `$NESTC`, else `nestc` on `PATH`.
+- **`core` and `std` ship with the compiler** and have manifests of their own
+  (`packages/*/nest.toml`), so `twig build` works inside them. For every other
+  package twig asks `nestc -C print=packages` where they are and passes them as
+  `--package` like any other; a root that *is* `std` or `core` replaces the
+  shipped one.
 - **No lockfile** yet: path dependencies have nothing to lock.
+- **Diagnostics are the compiler's.** `nestc` renders them (ariadne), coloured
+  under `--color auto` — a terminal and no `NO_COLOR` — and twig leaves stderr
+  inherited, so the compiler sees the same terminal twig does. twig's own
+  `error:` and status lines follow the same rule.
 
 What it does not do yet:
 
-- **`--error-format=json`.** `std/process` cannot capture a child's output, so
-  `nestc` writes human diagnostics straight to the inherited stderr.
+- **Import visibility.** In one `nestc` run every package sees every other. The
+  fix is step 8's shape — one run per package against its dependencies'
+  `.nmeta`, the way rustc takes `--extern` — so it waits for that.
 - **Up-to-date checks.** Every build recompiles: there is no `stat`, so no
   modification times (the `struct stat` layout problem in `std/fs`).
 - `check`, `clean`, `test`, `metadata`.

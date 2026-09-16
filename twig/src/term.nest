@@ -1,0 +1,38 @@
+// What twig writes for a person: status lines and errors, in colour when stderr
+// is a terminal and `NO_COLOR` is not set (https://no-color.org).
+//
+// The compiler decides the same thing the same way for its own diagnostics, on
+// the same stderr, so the two agree without twig passing anything on.
+
+io :: import <std/io>
+process :: import <std/process>
+s :: import <std/str>
+
+RED: str :: "\u{1B}[1;31m"
+GREEN: str :: "\u{1B}[1;32m"
+RESET: str :: "\u{1B}[0m"
+
+color :: func () -> bool {
+  let off: bool := process.env("NO_COLOR").match { .some(v) => v.len() > 0, .none => false }
+  return off == false && io.stderr().is_terminal()
+}
+
+paint :: func (style: str, text: str) -> str {
+  if color() { return f"{style}{text}{RESET}" }
+  return text
+}
+
+// A status line, in the shape of cargo's: the verb right-aligned and green, then
+// the rest.
+@public status :: func (verb: str, rest: str) -> void {
+  let pad: usize := if verb.len() < 12 { 12 - verb.len() } else { 0 }
+  let spaces: str := s.repeat(" ", pad)
+  let word: str := paint(GREEN, verb)
+  io.eprintln(f"{spaces}{word} {rest}")
+}
+
+// `error: why`, the way the compiler starts its own.
+@public error :: func (why: str) -> void {
+  let word: str := paint(RED, "error")
+  io.eprintln(f"{word}: {why}")
+}
