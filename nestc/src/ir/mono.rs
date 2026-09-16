@@ -1318,8 +1318,14 @@ fn const_lit(k: &Const) -> Option<Lit> {
 ///
 /// `@link_name("...")` wins outright when it is present — the program named the
 /// symbol, and a mangled version of a name someone chose for a C library to find
-/// is of no use to anyone. An `extern` function with no `@link_name` mangles to
-/// its bare name, because that is what C expects.
+/// is of no use to anyone. `@no_mangle` is the same statement with the name left
+/// out: emit it under the one the program wrote. An `extern` function with no
+/// `@link_name` mangles to its bare name, because that is what C expects.
+///
+/// Both give up injectivity, and deliberately: a name a linker outside this
+/// program has to write is a name this compiler does not get to choose. Two
+/// declarations claiming one symbol is a collision the linker reports, which is
+/// the same place C reports it.
 ///
 /// The arguments are split where [`Generics::own`] says: the enclosing impl's go
 /// on the type the impl is for, the function's own on the function, so
@@ -1337,6 +1343,9 @@ fn mangle(
         && let Some(crate::sema::def::DirectiveArg::Str(name)) = link.args.first()
     {
         return name.clone();
+    }
+    if d.directives.iter().any(|x| x.is("no_mangle")) {
+        return d.name.clone();
     }
     let path = if d.canonical.is_empty() {
         vec![d.name.clone()]
@@ -1386,8 +1395,8 @@ fn mangle(
 ///
 /// A `#static` is not instantiated, so it has no [`Instance`] to carry a name —
 /// but it still needs one the linker can see, so it mangles the way a function
-/// does: the same length-prefixed path, under its own tag. `@link_name` wins
-/// outright, for the reason it wins on a function.
+/// does: the same length-prefixed path, under its own tag. `@link_name` and
+/// `@no_mangle` win outright, for the reason they win on a function.
 ///
 /// It is **not** injective on its own, and cannot be: a `#static` written inside
 /// a function body has no canonical path — its name is whatever the source wrote
@@ -1400,6 +1409,9 @@ pub fn global_symbol(defs: &DefTable, def: DefId) -> Symbol {
         && let Some(crate::sema::def::DirectiveArg::Str(name)) = link.args.first()
     {
         return name.clone();
+    }
+    if d.directives.iter().any(|x| x.is("no_mangle")) {
+        return d.name.clone();
     }
     let path = if d.canonical.is_empty() {
         vec![d.name.clone()]

@@ -145,6 +145,7 @@ impl Collector<'_> {
                 // emitted — and putting it anywhere else would mean a second
                 // lookup for one attribute.
                 here.extend(self.link_name(&attrs));
+                here.extend(self.no_mangle(item, &attrs));
                 let outer = std::mem::replace(&mut self.pending, here);
                 self.collect_binding(item, vis, scope);
                 self.pending = outer;
@@ -808,6 +809,46 @@ impl Collector<'_> {
                 name: Symbol::new("link_name"),
                 args: vec![arg],
             })
+        })
+    }
+
+    /// `@no_mangle` on this declaration: emit the symbol under the name the
+    /// program wrote, with no scheme applied.
+    ///
+    /// It is `@link_name` with the name left out — the declaration's own — and
+    /// it is recorded as its own directive rather than rewritten into one so
+    /// that the two can be told apart when they are both written, which is a
+    /// contradiction and is reported here.
+    ///
+    /// **Why it exists separately from `@public`.** Visibility says whether a
+    /// symbol leaves its unit; this says what it is *called*. A C caller — the
+    /// runtime, a startup file, another language's linker — looks a name up, and
+    /// a name this compiler chose the encoding of is not one anybody can write.
+    fn no_mangle(&mut self, item: NodeId, attrs: &[NodeId]) -> Option<Directive> {
+        let found = attrs.iter().find(|&&a| {
+            matches!(&self.ast.node(a).kind, NodeKind::Attribute { name, .. }
+                if name.as_str() == "no_mangle")
+        })?;
+        if let NodeKind::Attribute { args, .. } = &self.ast.node(*found).kind
+            && !args.is_empty()
+        {
+            self.report(
+                *found,
+                "`@no_mangle` takes no arguments: it is `@link_name` with the declaration's own \
+                 name, so there is nothing to write",
+            );
+        }
+        if self.link_name(attrs).is_some() {
+            self.report(
+                item,
+                "`@no_mangle` and `@link_name` both name the symbol, and they name different \
+                 ones: keep the `@link_name`, or drop it and take the written name",
+            );
+            return None;
+        }
+        Some(Directive {
+            name: Symbol::new("no_mangle"),
+            args: Vec::new(),
         })
     }
 

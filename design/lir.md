@@ -577,10 +577,25 @@ should not have to demangle by hand, and it is dropped at codegen.
 The precedence for `symbol`:
 
 1. `@link_name("...")` if present — verbatim, no mangling.
-2. Otherwise the mangled form of the canonical path plus type arguments.
+2. `@no_mangle` if present — the declaration's own written name, verbatim.
+3. Otherwise the mangled form of the canonical path plus type arguments.
 
 An `extern("c")` function with no `@link_name` mangles to its bare name, because
 that is what C expects.
+
+`@no_mangle` is `@link_name` with the name left out, and it exists because the
+name is usually the one already written: a function a C caller reaches — a
+runtime, a startup file, another language's linker — is looked up by a name
+somebody outside this program has to write, and repeating it in an attribute is
+a second place for it to be wrong. Writing both is refused rather than resolved:
+they name the symbol, they name different ones, and preferring either silently
+would make one of the two a thing the program wrote and the compiler ignored.
+
+Both give up injectivity, and deliberately — a name this compiler does not get
+to choose is a name it cannot encode. Two declarations claiming one symbol is a
+collision the linker reports, which is where C reports it too. Both apply to a
+`#static` exactly as they apply to a function, for the same reason: `global_symbol`
+is the same decision made about a different kind of definition.
 
 ### Mangling, and why monomorphization owns it
 

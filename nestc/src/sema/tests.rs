@@ -7073,6 +7073,54 @@ fn an_extern_function_keeps_its_bare_name() {
     assert_eq!(symbol_of(&session, "puts"), "puts");
 }
 
+// ===< `@no_mangle` >===
+
+/// `@no_mangle` is `@link_name` with the name left out: emit the symbol under
+/// the name the program wrote. A C caller — the runtime, a startup file,
+/// another language's linker — looks a name up, and a name this compiler chose
+/// the encoding of is not one anybody can write.
+#[test]
+fn no_mangle_emits_the_written_name() {
+    let session = analyze_clean(
+        "@no_mangle\n\
+         @public start_here :: func () -> i32 { return 1 }\n\
+         @public main :: func () { const a := start_here() }\n",
+    );
+    assert_eq!(symbol_of(&session, "start_here"), "start_here");
+}
+
+/// Both attributes name the symbol, and they name different ones. Reporting is
+/// the only honest answer: silently preferring either would make one of the two
+/// a thing the program wrote and the compiler ignored.
+#[test]
+fn no_mangle_and_link_name_together_are_refused() {
+    let msgs = messages(
+        "@no_mangle\n\
+         @link_name(\"other\")\n\
+         f :: extern(\"c\") func () -> i32\n\
+         @public main :: func () { const a := f() }\n",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("both name the symbol")),
+        "{msgs:#?}"
+    );
+}
+
+/// There is nothing to write in it: the name is the declaration's own.
+#[test]
+fn no_mangle_takes_no_arguments() {
+    let msgs = messages(
+        "@no_mangle(1)\n\
+         @public f :: func () -> i32 { return 1 }\n\
+         @public main :: func () { const a := f() }\n",
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("`@no_mangle` takes no arguments")),
+        "{msgs:#?}"
+    );
+}
+
 // ===< `#c_vararg` >===
 
 /// A call to a `#c_vararg` declaration may pass a tail past its fixed
