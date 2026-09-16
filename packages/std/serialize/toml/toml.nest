@@ -10,8 +10,8 @@
 // is left out, and reads back as `.none` because it is missing.
 
 { Error } :: import "../error.nest"
-{ Encode, Encoder } :: import "../encode.nest"
-{ Decode, Decoder } :: import "../decode.nest"
+{ Encode } :: import "../encode.nest"
+{ Decode } :: import "../decode.nest"
 { String } :: import "../../string.nest"
 mem :: import <core/mem>
 

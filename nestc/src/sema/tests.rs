@@ -4158,6 +4158,43 @@ fn only_in_scope_traits_are_selection_candidates() {
     assert!(set2.contains(&mytrait2), "an imported trait is a candidate");
 }
 
+/// **A trait already named elsewhere selects its impl without being in scope.**
+/// A `*dyn Speak` parameter, a method taking one, and a bound on a callee all
+/// name `Speak` in the file that declares them; the file passing a `*Dog` never
+/// writes the name, and does not have to.
+#[test]
+fn a_trait_named_by_a_dyn_or_a_bound_selects_where_it_is_not_imported() {
+    let files = [
+        ("tr", "@public Speak :: trait { speak :: func (self: *Self) -> i32 }\n"),
+        (
+            "dog",
+            "{ Speak } :: import \"tr.nest\"\n\
+             @public Dog :: struct { n: i32 }\n\
+             impl Speak for Dog { speak :: func (self: *Self) -> i32 { return self.n } }\n",
+        ),
+        (
+            "api",
+            "{ Speak } :: import \"tr.nest\"\n\
+             @public talk :: func (s: *dyn Speak) -> i32 { return s.speak() }\n\
+             @public loud :: func <T: Speak> (v: *T) -> i32 { return v.speak() }\n\
+             @public Hear :: trait { hear :: func (self: *Self, s: *dyn Speak) -> i32 }\n\
+             impl Hear for i32 { hear :: func (self: *Self, s: *dyn Speak) -> i32 { return self.* + s.speak() } }\n",
+        ),
+    ];
+    let clean = "{ Dog } :: import \"dog.nest\"\n\
+                 { talk, loud, Hear } :: import \"api.nest\"\n\
+                 via_hear :: func <H: Hear> (h: H, d: *Dog) -> i32 { return h.hear(d) }\n\
+                 f :: func () -> i32 {\n\
+                 \x20 let d: Dog := Dog { n: 3 }\n\
+                 \x20 let x: i32 := 1\n\
+                 \x20 return talk(&d) + loud(&d) + x.hear(&d) + via_hear(x, &d)\n\
+                 }\n";
+    let mut all: Vec<(&str, &str)> = files.to_vec();
+    all.push(("main", clean));
+    let s = analyze_mem(&all, "main");
+    assert!(!s.has_errors(), "{:#?}", s.diagnostics);
+}
+
 // --- IR snapshots ---
 
 #[test]
@@ -8250,6 +8287,41 @@ fn every_file_of_a_package_is_its_own_namespace() {
     assert_eq!(errors.len(), 1, "{errors:#?}");
     assert!(
         errors[0].contains("expected `greet.wire.Error`, found `greet.io.Error`"),
+        "{}",
+        errors[0]
+    );
+}
+
+/// **A file and a directory may not both be one module.** `wire.nest` and
+/// `wire/wire.nest` are both `greet.wire`, so a package has one or the other —
+/// and it is an error with either of them loaded, since it is the names that
+/// clash, not the imports.
+#[test]
+fn a_file_and_a_directory_of_the_same_name_are_refused() {
+    let (libs, main) = search_path_fixture(
+        "twins",
+        "@public wire :: import \"wire/wire.nest\"\n",
+        "wire :: import <greet/wire>\nmain :: func () { }\n",
+    );
+    let pkg = libs.join("greet");
+    std::fs::create_dir_all(pkg.join("wire")).expect("wire/");
+    std::fs::write(pkg.join("wire").join("wire.nest"), "@public A :: struct { }\n")
+        .expect("wire/wire.nest");
+    std::fs::write(pkg.join("wire.nest"), "@public B :: struct { }\n").expect("wire.nest");
+
+    let mut session = Session::new();
+    session.add_search_path(&libs.to_string_lossy());
+    let file = session.load_entry(&main).expect("entry loads");
+    analyze(&mut session, file);
+    let errors: Vec<&String> = session
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::common::diagnostic::Severity::Error)
+        .map(|d| &d.message)
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(
+        errors[0].contains("are both the module `greet.wire`"),
         "{}",
         errors[0]
     );

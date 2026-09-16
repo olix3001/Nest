@@ -2380,21 +2380,19 @@ impl Inferer<'_> {
     /// arguments `args`). Builtins and user impls are considered uniformly. A
     /// concrete impl beats a generic (blanket) one; two equally specific matches
     /// are an ambiguity error. An unknown self type defers; a known one with no
-    /// candidate is a "does not implement" error. Only [`in_scope`] traits are
-    /// candidates.
+    /// candidate is a "does not implement" error.
     ///
-    /// [`in_scope`]: Inferer::in_scope_traits
+    /// **Every trait is a candidate here, in scope or not.** By the time a trait
+    /// reaches selection it has already been named — by a `*dyn Trait` the value
+    /// is coerced to, by the bound of the function being called, by the operator
+    /// being lowered — and whether the file doing it imported the trait's name
+    /// has nothing to say about whether a type implements it. Scope decides one
+    /// question only: which trait a method *name* means, and that is asked where
+    /// a name is looked up ([`Inferer::in_scope_traits`]).
     fn select(&mut self, self_ty: &Ty, trait_def: DefId, args: &[Ty]) -> Select {
         let s = self.cx.shallow(self_ty);
         if matches!(s, Ty::Error) {
             return Select::Error;
-        }
-        if !self.in_scope_traits.contains(&trait_def) && !self.lang_traits.contains(&trait_def) {
-            return if is_var(&s) {
-                Select::Defer
-            } else {
-                Select::NoImpl
-            };
         }
 
         // Track the best (highest specificity) match, flagging a tie as

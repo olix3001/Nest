@@ -417,6 +417,25 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
                 path
             })
             .unwrap_or_default();
+        if let Some(pkg) = session.pkg_of.get(&file).cloned()
+            && let Some(twin) = session.module_twin(&pkg, &name)
+            && session.twins_reported.insert(canonical.clone())
+        {
+            let path = canonical
+                .iter()
+                .map(Symbol::as_str)
+                .collect::<Vec<_>>()
+                .join(".");
+            session.diagnostics.push(
+                crate::common::diagnostic::Diagnostic::error(format!(
+                    "`{name}` and `{twin}` are both the module `{path}`; a package may have one or the other"
+                ))
+                .with_primary(
+                    crate::common::source::FileSpan::new(file, crate::common::span::Span::new(0, 0)),
+                    "",
+                ),
+            );
+        }
         let ns_name = canonical
             .last()
             .cloned()

@@ -13,7 +13,7 @@
 //! pluggable [`FileLoader`] and packages (`import <...>`) from the registry. Once
 //! the transitive set is collected, the import / resolve / desugar stages run.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan, SourceMap};
@@ -297,6 +297,9 @@ pub struct Session {
     /// Each loaded package's directory, by name: what a file's path inside the
     /// package — and so its canonical path — is measured from.
     pkg_dir: HashMap<String, String>,
+    /// Module paths already reported as claimed by both a file and a directory
+    /// (see [`Session::module_twin`]), so the pair is reported once.
+    pub(crate) twins_reported: HashSet<Vec<Symbol>>,
     /// Cache: source key → the [`FileId`] it was parsed into (parse-once).
     cache: HashMap<String, FileId>,
     loader: Box<dyn FileLoader>,
@@ -369,6 +372,7 @@ impl Session {
             search_paths: Vec::new(),
             pkg_of: HashMap::new(),
             pkg_dir: HashMap::new(),
+            twins_reported: HashSet::new(),
             cache: HashMap::new(),
             loader,
         };
@@ -529,6 +533,38 @@ impl Session {
             }
         }
         segments.into_iter().map(Symbol::new).collect()
+    }
+
+    /// The other file that would be the same module as `file_name`, when it
+    /// exists: `x.nest` for `x/x.nest`, and `x/x.nest` for `x.nest`.
+    ///
+    /// Both are the namespace `pkg.x` ([`Session::module_path`]), and a
+    /// declaration's canonical path is its namespace's — so were both compiled,
+    /// an `Error` in each would be one type with one symbol, whichever file
+    /// imported which. A package may therefore have one or the other, the way a
+    /// Rust crate may have `x.rs` or `x/mod.rs`, and having both is an error
+    /// wherever either is loaded.
+    pub fn module_twin(&self, pkg: &str, file_name: &str) -> Option<String> {
+        let dir = self.pkg_dir.get(pkg)?;
+        let rel = file_name.strip_prefix(dir.as_str())?.trim_start_matches('/');
+        let stem = rel.strip_suffix(".nest")?;
+        let (parent, last) = match stem.rfind('/') {
+            Some(i) => (&stem[..i], &stem[i + 1..]),
+            None => ("", stem),
+        };
+        if parent.is_empty() && last == "package" {
+            return None;
+        }
+        let parent_last = parent.rsplit('/').next().unwrap_or("");
+        let twin = if !parent.is_empty() && parent_last == last {
+            // `a/x/x.nest` → `a/x.nest`
+            format!("{dir}/{parent}.nest")
+        } else if parent.is_empty() {
+            format!("{dir}/{last}/{last}.nest")
+        } else {
+            format!("{dir}/{parent}/{last}/{last}.nest")
+        };
+        std::path::Path::new(&twin).is_file().then_some(twin)
     }
 
     /// Whether `from` is a file of the `core` package, so a `target.nest` beside
