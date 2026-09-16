@@ -273,12 +273,19 @@ Two pieces, and only the second one waits:
   `FileLoader`, so an editor's unsaved buffers are an overlay rather than a
   special case; `parse_cached` is keyed by a stable source key; and
   `--error-format=json` is a protocol a server can consume without a linker.
-  - **It may be written in Nest itself**, which would make it the second real
-    program in the language and the first one with a reason to be long-running.
-    That is a decision to make when the time comes, and it is a real one: an LSP
-    in Nest cannot call into `nestc`'s own data structures, so it either drives
-    `nestc` as a process (fine for diagnostics, poor for hover) or grows a
-    parser of its own.
+  - **It is written in Rust, beside `nestc`** — decided. Everything it answers
+    is something only the compiler holds: spans, resolutions, the type on a
+    node, the descriptors reflection builds, the diagnostics. A server in Nest
+    could only reach them through `nestc` serializing all of it across a process
+    boundary, which is a second protocol to design and keep in step with the
+    compiler; in Rust it is a function call. The shape is a `nestc lsp`
+    subcommand (or a crate using `nestc` as a library): a `Session` over a
+    `MemLoader`-style overlay for unsaved buffers, diagnostics on change first,
+    then hover from the type on a node and go-to-definition from a resolution's
+    `Def.span`, then completion.
+  - **It does not wait for `twig` after all.** Without a manifest a workspace is
+    a guess about `-L` paths, and that guess is good enough to start: the
+    manifest refines what the server loads, not whether it can.
 
 ---
 
@@ -292,9 +299,9 @@ leaves a half-built feature behind for the next one to finish.
 The numbering is a dependency order, not a wish list: every step needs the one
 before it, except where it says otherwise.
 
-**Steps 1–6 are done.** What is left is `std/json`, the library format, `twig`
-and the editor — steps 7 through 10, in that order, and they are the whole of
-the focus now. Each step
+**Steps 1–7 are done.** What is left is the library format, `twig` and the
+editor — steps 8 through 10 — and the **language server comes first**, ahead of
+steps 8 and 9 (see Stage 4). Each step
 below that is finished says so and says what it actually turned out to be;
 `HANDOFF.md` carries the detail.
 
@@ -416,15 +423,38 @@ reads its arguments and environment. **It does** —
 - **Iterator adapters** (§10.4): `map`, `filter`, `enumerate`, `collect`. `for`
   works over ranges and slices, and over a `Vec` through its `IntoIterator`.
 
-### Step 7 — `std/json`
+### Step 7 — `std/serialize`: JSON and TOML — **done**
 
-Parse and serialize, generic over any type, using step 5 — and the `@json(...)`
-attribute for renaming. This is the step that proves reflection was worth
-building.
+Parse and serialize, generic over any type, using step 5. It grew from `std/json`
+into two formats over one pair of traits, the way serde has them:
+
+- **`Encoder` / `Decoder` are the format, `Encode` / `Decode` the type.** Every
+  type already has the second pair through a blanket impl that walks
+  `type_info.<T>()`: a struct is a map of its members, a tuple a sequence, and a
+  `distinct` its representation. What makes that work without a derive is
+  `member_dyn`, which hands a member back as a trait object whose vtable is that
+  member's own impl. A concrete impl beats the blanket one.
+- **The attributes are format-neutral**: `@rename(name: "...")` and `@skip`.
+- **Decoding is strict about what is missing and loose about what is extra**: a
+  missing key is an error unless the member is an `Option`, and an unknown key
+  is skipped.
+- **JSON** is a streaming writer (compact and pretty) and a pull parser. **TOML**
+  goes through a tree both ways, because a table's text is not in the order
+  its values are: tables, dotted keys, basic and literal strings, integers in
+  every base, floats, arrays, inline tables and `[[arrays of tables]]`; no
+  multi-line strings or dates. TOML has no null, so a `.none` is left out.
+- **Floats go through C** — `snprintf` at rising precision until `strtod` reads
+  the same bits back — until `core/fmt` has shortest float formatting.
+
+What it needed from the compiler: every file its own namespace (two `Error`s in
+one package were one type), and two monomorphization fixes — a call through a
+bound on a `self: *Self` method picked the blanket impl at `T = *X`, and the
+`int.<N>` and `uint.<N>` impls of one trait mangled to one symbol.
 
 *Done when*: a struct round-trips through JSON, a renamed member honours its
-attribute, and a malformed document is an error rather than a trap.
-**Commit. Stop.**
+attribute, and a malformed document is an error rather than a trap. **It does**,
+through TOML too — `a_struct_round_trips_through_json` and
+`a_struct_round_trips_through_toml`.
 
 ### Step 8 — `.nlib` / `.nmeta`, and the rest of `nestc`'s debt to `twig`
 
@@ -450,8 +480,8 @@ runs it.
 
 ### Step 10 — the editor
 
-Syntax highlighting first (it needs nothing), then the language server on top of
-the manifest. Possibly written in Nest.
+Syntax highlighting first (it needs nothing), then the language server, **in
+Rust**, and **before steps 8 and 9** (see Stage 4).
 
 *Done when*: a `.nest` file is highlighted in VS Code, and the server reports
 diagnostics for an open buffer.

@@ -1,0 +1,59 @@
+// Floating-point numbers as text, for the formats.
+//
+// **Written by C.** `core/fmt` has no float formatting yet, and correct
+// shortest output is Ryū or Grisu — a few hundred lines and a table. Until that
+// exists here, `snprintf` at rising precision finds the shortest text `strtod`
+// reads back to the same bits, which is the same answer by a slower road.
+//
+// Both functions assume the C locale, which is the one a program starts in:
+// nothing in `std` calls `setlocale`.
+
+c    :: import <core/c>
+libc :: import "../libc.nest"
+{ make } :: import <core/mem>
+
+// Whether `v` is a number at all — neither NaN nor an infinity.
+@public is_finite :: func (v: f64) -> bool {
+  return v == v && v - v == 0.0
+}
+
+// The shortest text that reads back as exactly `v`. `v` must be finite: what
+// NaN and infinity are spelled as is the format's decision.
+//
+// The text always says it is a float — `1.0`, never `1` — so a reader that
+// tells integers from floats reads back the kind that was written.
+@public format_f64 :: func (v: f64) -> str {
+  let buf: []mut u8 := make.<[]u8>(40)
+  let at: c.ptr.<c.uchar> := c.from_ptr(&buf[0])
+  let mut n: usize := 0
+  let mut precision: i32 := 1
+  while precision <= 17 {
+    n = cast.<usize>(libc.snprintf(at, 40, c"%.*g", precision, v))
+    if libc.strtod(c.from_ptr(&buf[0]), c.null.<c.cstr>()) == v { break }
+    precision = precision + 1
+  }
+  let mut plain: bool := true
+  let mut i: usize := 0
+  while i < n {
+    let b: u8 := buf[i]
+    if b == 46 || b == 101 || b == 110 || b == 105 { plain = false }
+    i = i + 1
+  }
+  if plain {
+    buf[n] = 46
+    buf[n + 1] = 48
+    n = n + 2
+  }
+  return cast.<str>(cast.<[]u8>(buf[0..<n]))
+}
+
+// `text` as a float, when all of it is one. The caller has already checked the
+// format's own grammar; this is the conversion, not the validation.
+@public parse_f64 :: func (text: str) -> Option.<f64> {
+  if text.len() == 0 { return .none }
+  let s: c.cstr := c.to_cstr(text)
+  let mut end: c.cstr := s
+  let v: f64 := libc.strtod(s, c.from_ptr(&end))
+  if end.addr_of() - s.addr_of() != text.len() { return .none }
+  return .some(v)
+}

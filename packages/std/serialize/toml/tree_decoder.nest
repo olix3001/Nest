@@ -1,0 +1,179 @@
+// A `Value` tree, read one `Decoder` call at a time.
+//
+// The tree is already whole, so there is nothing to scan: the decoder holds the
+// value the next read takes, and one cursor per open array or table saying
+// which element comes after it. An error cannot say where in the text it is —
+// the parser is done by then — so it says where in the document instead, as a
+// key path: `servers[1].port`.
+
+{ Error, error } :: import "../error.nest"
+{ Token, Decoder } :: import "../decode.nest"
+string :: import "../../string.nest"
+{ String } :: import "../../string.nest"
+collections :: import "../../collections.nest"
+{ Vec } :: import "../../collections.nest"
+{ Value, Array, Table, new_table, new_array, describe } :: import "value.nest"
+
+// One open array or table, and how far through it the reads are.
+Cursor :: struct {
+  map: bool,
+  table: *mut Table,
+  array: *mut Array,
+  next: usize,
+}
+
+@public TreeDecoder :: struct {
+  current: Value,
+  cursors: Vec.<Cursor>,
+  // The key path to `current`, one piece per open container.
+  path: Vec.<String>,
+}
+
+@public tree_decoder :: func (root: *mut Table) -> TreeDecoder {
+  return TreeDecoder {
+    current: .table(root),
+    cursors: collections.new.<Cursor>(),
+    path: collections.new.<String>(),
+  }
+}
+
+impl TreeDecoder {
+  mismatch :: func (self: *mut Self, want: str) -> Error {
+    return self.fail(f"expected {want}, found {describe(self.current)}")
+  }
+
+  // The path so far, as it would be written.
+  where :: func (self: *Self) -> str {
+    let mut s: String := string.new()
+    let mut i: usize := 0
+    while i < self.path.len() {
+      let piece: String := self.path.get(i).!
+      if piece.len() > 0 {
+        if s.len() > 0 && piece.as_bytes()[0] != 91 { s.push_byte(46) }
+        s.push_str(piece.as_str())
+      }
+      i = i + 1
+    }
+    return s.as_str()
+  }
+
+  // The cursor on top, moved one along, with `current` its next element and
+  // that element's piece of the path — or `.none` once there is none, and the
+  // cursor closed.
+  step :: func (self: *mut Self) -> Option.<String> {
+    let n: usize := self.cursors.len()
+    let c: Cursor := self.cursors.get(n - 1).!
+    let len: usize := if c.map { c.table.len() } else { c.array.items.len() }
+    if c.next >= len {
+      self.cursors.pop().!
+      self.path.pop().!
+      return .none
+    }
+    let mut piece: String := string.new()
+    if c.map {
+      self.current = c.table.values.get(c.next).!
+      piece.push_str(c.table.keys.get(c.next).!.as_str())
+    } else {
+      self.current = c.array.items.get(c.next).!
+      piece.push_byte(91)
+      piece.append(c.next)
+      piece.push_byte(93)
+    }
+    self.path.set(n - 1, piece)
+    self.cursors.set(n - 1, Cursor { map: c.map, table: c.table, array: c.array, next: c.next + 1 })
+    return .some(piece)
+  }
+}
+
+impl Decoder for TreeDecoder {
+  peek :: func (self: *mut Self) -> Result.<Token, Error> {
+    return .ok(self.current.match {
+      .boolean(_) => .boolean,
+      .integer(_) => .integer,
+      .float(_) => .float,
+      .string(_) => .string,
+      .array(_) => .seq,
+      .table(_) => .map,
+    })
+  }
+
+  read_null :: func (self: *mut Self) -> Result.<void, Error> {
+    return .err(self.fail("TOML has no null"))
+  }
+
+  read_bool :: func (self: *mut Self) -> Result.<bool, Error> {
+    return self.current.match {
+      .boolean(b) => .ok(b),
+      _ => .err(self.mismatch("a boolean")),
+    }
+  }
+
+  read_int :: func (self: *mut Self) -> Result.<i64, Error> {
+    return self.current.match {
+      .integer(n) => .ok(n),
+      _ => .err(self.mismatch("an integer")),
+    }
+  }
+
+  read_uint :: func (self: *mut Self) -> Result.<u64, Error> {
+    let n: i64 := self.current.match {
+      .integer(n) => n,
+      _ => { return .err(self.mismatch("an integer")) },
+    }
+    if n < 0 { return .err(self.fail("expected an integer that is not negative")) }
+    return .ok(cast.<u64>(n))
+  }
+
+  read_float :: func (self: *mut Self) -> Result.<f64, Error> {
+    return self.current.match {
+      .float(f) => .ok(f),
+      .integer(n) => .ok(cast.<f64>(n)),
+      _ => .err(self.mismatch("a float")),
+    }
+  }
+
+  read_str :: func (self: *mut Self) -> Result.<String, Error> {
+    return self.current.match {
+      .string(s) => .ok(s),
+      _ => .err(self.mismatch("a string")),
+    }
+  }
+
+  begin_seq :: func (self: *mut Self) -> Result.<void, Error> {
+    let a: *mut Array := self.current.match {
+      .array(a) => a,
+      _ => { return .err(self.mismatch("an array")) },
+    }
+    self.cursors.push(Cursor { map: false, table: new_table(), array: a, next: 0 })
+    self.path.push(string.new())
+    return .ok(())
+  }
+
+  next_element :: func (self: *mut Self) -> Result.<bool, Error> {
+    return .ok(self.step().match { .some(_) => true, .none => false })
+  }
+
+  begin_map :: func (self: *mut Self) -> Result.<void, Error> {
+    let t: *mut Table := self.current.match {
+      .table(t) => t,
+      _ => { return .err(self.mismatch("a table")) },
+    }
+    self.cursors.push(Cursor { map: true, table: t, array: new_array(false), next: 0 })
+    self.path.push(string.new())
+    return .ok(())
+  }
+
+  next_key :: func (self: *mut Self) -> Result.<Option.<String>, Error> {
+    return .ok(self.step())
+  }
+
+  // The value is already whole; the next `step` moves past it.
+  skip :: func (self: *mut Self) -> Result.<void, Error> {
+    return .ok(())
+  }
+
+  fail :: func (self: *mut Self, message: str) -> Error {
+    if self.where().len() == 0 { return error(message) }
+    return error(f"{self.where()}: {message}")
+  }
+}

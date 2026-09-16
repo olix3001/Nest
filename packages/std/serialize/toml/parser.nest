@@ -1,0 +1,602 @@
+// TOML text into a `Value` tree.
+//
+// What is read: comments; `key = value` with bare, quoted and dotted keys;
+// `[table]` and `[[array.of.tables]]` headers; basic (`"..."`) and literal
+// (`'...'`) strings; integers, including `_` separators and `0x` / `0o` / `0b`;
+// floats, including `inf` and `nan`; booleans; arrays, across lines and with a
+// trailing comma; and inline tables.
+//
+// What is not, and is an error rather than a misreading: multi-line strings
+// and dates and times.
+//
+// Every error carries the line and column it was found at.
+
+{ Error, error_at } :: import "../error.nest"
+float :: import "../float.nest"
+string :: import "../../string.nest"
+{ String } :: import "../../string.nest"
+collections :: import "../../collections.nest"
+{ Vec } :: import "../../collections.nest"
+{ Value, Array, Table, new_table, new_array } :: import "value.nest"
+
+Parser :: struct {
+  text: []u8,
+  pos: usize,
+  line: usize,
+  column: usize,
+}
+
+// The document `text` holds, as its root table.
+@public parse :: func (text: str) -> Result.<*mut Table, Error> {
+  let mut p: Parser := Parser { text: text.as_bytes(), pos: 0, line: 1, column: 1 }
+  let root: *mut Table := new_table()
+  let mut current: *mut Table := root
+  while true {
+    p.skip_blank_lines()
+    if p.at_end() { break }
+    if p.current() == 91 {
+      current = p.header(root).?
+    } else {
+      p.key_value(current).?
+    }
+    p.end_of_line().?
+  }
+  return .ok(root)
+}
+
+is_digit :: func (c: u8) -> bool { return c >= 48 && c <= 57 }
+
+is_bare :: func (c: u8) -> bool {
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || is_digit(c) || c == 95 || c == 45
+}
+
+digit_value :: func (c: u8, radix: u64) -> Option.<u64> {
+  let mut v: u64 := 99
+  if is_digit(c) { v = cast.<u64>(c - 48) }
+  if c >= 97 && c <= 102 { v = cast.<u64>(c - 87) }
+  if c >= 65 && c <= 70 { v = cast.<u64>(c - 55) }
+  if v >= radix { return .none }
+  return .some(v)
+}
+
+impl Parser {
+  at_end :: func (self: *Self) -> bool { return self.pos >= self.text.len() }
+
+  current :: func (self: *Self) -> u8 {
+    if self.pos >= self.text.len() { return 0 }
+    return self.text[self.pos]
+  }
+
+  ahead :: func (self: *Self, n: usize) -> u8 {
+    if self.pos + n >= self.text.len() { return 0 }
+    return self.text[self.pos + n]
+  }
+
+  advance :: func (self: *mut Self) -> void {
+    if self.current() == 10 {
+      self.line = self.line + 1
+      self.column = 1
+    } else {
+      self.column = self.column + 1
+    }
+    self.pos = self.pos + 1
+  }
+
+  fail :: func (self: *Self, message: str) -> Error {
+    return error_at(message, self.line, self.column)
+  }
+
+  found :: func (self: *Self) -> str {
+    if self.at_end() { return "the end of the document" }
+    let c: u8 := self.current()
+    if c == 10 || c == 13 { return "the end of the line" }
+    if c < 32 || c > 126 { return f"byte {c}" }
+    let one: str := cast.<str>(self.text[self.pos..<self.pos + 1])
+    return f"`{one}`"
+  }
+
+  // Spaces and tabs.
+  skip_space :: func (self: *mut Self) -> void {
+    while self.current() == 32 || self.current() == 9 { self.advance() }
+  }
+
+  // A `#` comment, up to the end of the line.
+  skip_comment :: func (self: *mut Self) -> void {
+    if self.current() != 35 { return }
+    while !self.at_end() && self.current() != 10 { self.advance() }
+  }
+
+  // Whitespace, comments and newlines — what may separate two lines of content,
+  // or the elements of an array.
+  skip_blank_lines :: func (self: *mut Self) -> void {
+    while !self.at_end() {
+      self.skip_space()
+      self.skip_comment()
+      let c: u8 := self.current()
+      if c == 10 {
+        self.advance()
+      } else if c == 13 && self.ahead(1) == 10 {
+        self.advance()
+        self.advance()
+      } else {
+        return
+      }
+    }
+  }
+
+  // After a header or a key/value: an optional comment, then the line ends.
+  end_of_line :: func (self: *mut Self) -> Result.<void, Error> {
+    self.skip_space()
+    self.skip_comment()
+    if self.at_end() { return .ok(()) }
+    if self.current() == 13 && self.ahead(1) == 10 { self.advance() }
+    if self.current() != 10 {
+      return .err(self.fail(f"expected the end of the line, found {self.found()}"))
+    }
+    self.advance()
+    return .ok(())
+  }
+
+  expect :: func (self: *mut Self, byte: u8, what: str) -> Result.<void, Error> {
+    if self.current() != byte {
+      return .err(self.fail(f"expected {what}, found {self.found()}"))
+    }
+    self.advance()
+    return .ok(())
+  }
+
+  // ===< Keys >===
+
+  // One key: bare, or a quoted string.
+  simple_key :: func (self: *mut Self) -> Result.<String, Error> {
+    let c: u8 := self.current()
+    if c == 34 { return self.basic_string() }
+    if c == 39 { return self.literal_string() }
+    if !is_bare(c) {
+      return .err(self.fail(f"expected a key, found {self.found()}"))
+    }
+    let mut out: String := string.new()
+    while is_bare(self.current()) {
+      out.push_byte(self.current())
+      self.advance()
+    }
+    return .ok(out)
+  }
+
+  // `a.b."c"`, as its parts.
+  dotted_key :: func (self: *mut Self) -> Result.<Vec.<String>, Error> {
+    let mut parts: Vec.<String> := collections.new.<String>()
+    self.skip_space()
+    parts.push(self.simple_key().?)
+    self.skip_space()
+    while self.current() == 46 {
+      self.advance()
+      self.skip_space()
+      parts.push(self.simple_key().?)
+      self.skip_space()
+    }
+    return .ok(parts)
+  }
+
+  // The table `key` names inside `t`, made if it is not there. `dotted` says a
+  // dotted key is making it, rather than a header on the way to its own name.
+  descend :: func (self: *mut Self, t: *mut Table, key: str, dotted: bool) -> Result.<*mut Table, Error> {
+    return t.get(key).match {
+      .none => {
+        let sub: *mut Table := new_table()
+        sub.dotted = dotted
+        t.add(key, .table(sub))
+        return .ok(sub)
+      },
+      .some(v) => self.into_table(v, key, dotted),
+    }
+  }
+
+  into_table :: func (self: *mut Self, v: Value, key: str, dotted: bool) -> Result.<*mut Table, Error> {
+    return v.match {
+      .table(sub) => self.open_table(sub, key, dotted),
+      .array(a) => self.last_table(a, key, dotted),
+      _ => .err(self.fail(f"`{key}` is already a value, not a table")),
+    }
+  }
+
+  open_table :: func (self: *mut Self, sub: *mut Table, key: str, dotted: bool) -> Result.<*mut Table, Error> {
+    if sub.inline {
+      return .err(self.fail(f"`{key}` is an inline table, which cannot be added to"))
+    }
+    if dotted && sub.header {
+      return .err(self.fail(f"`{key}` was opened by a header, and a dotted key cannot add to it"))
+    }
+    return .ok(sub)
+  }
+
+  // A `[[name]]` array's most recent table, for a header or key below it.
+  last_table :: func (self: *mut Self, a: *mut Array, key: str, dotted: bool) -> Result.<*mut Table, Error> {
+    if !a.of_tables || dotted {
+      return .err(self.fail(f"`{key}` is already an array, not a table"))
+    }
+    return a.items.get(a.items.len() - 1).!.match {
+      .table(t) => .ok(t),
+      _ => .err(self.fail(f"`{key}` is already an array, not a table")),
+    }
+  }
+
+  // ===< Lines >===
+
+  // `[a.b]` or `[[a.b]]`: the table the lines after it add to.
+  header :: func (self: *mut Self, root: *mut Table) -> Result.<*mut Table, Error> {
+    self.advance()
+    let array: bool := self.current() == 91
+    if array { self.advance() }
+    let parts: Vec.<String> := self.dotted_key().?
+    self.expect(93, "`]`").?
+    if array { self.expect(93, "`]]`").? }
+
+    let mut t: *mut Table := root
+    let last: usize := parts.len() - 1
+    let mut i: usize := 0
+    while i < last {
+      t = self.descend(t, parts.get(i).!.as_str(), false).?
+      i = i + 1
+    }
+    let name: String := parts.get(last).!
+    let key: str := name.as_str()
+    let existing: Option.<Value> := t.get(key)
+    if array {
+      let a: *mut Array := existing.match {
+        .none => {
+          let fresh: *mut Array := new_array(true)
+          t.add(key, .array(fresh))
+          fresh
+        },
+        .some(.array(a)) => a,
+        .some(_) => { return .err(self.fail(f"`{key}` is already a value, not an array of tables")) },
+      }
+      if !a.of_tables {
+        return .err(self.fail(f"`{key}` is an array written in place, which `[[{key}]]` cannot add to"))
+      }
+      let fresh: *mut Table := new_table()
+      fresh.header = true
+      a.items.push(.table(fresh))
+      return .ok(fresh)
+    }
+    return existing.match {
+      .none => {
+        let fresh: *mut Table := new_table()
+        fresh.header = true
+        t.add(key, .table(fresh))
+        return .ok(fresh)
+      },
+      .some(.table(sub)) => self.reopen(sub, key),
+      .some(_) => .err(self.fail(f"`{key}` is already a value, not a table")),
+    }
+  }
+
+  // A `[name]` header naming a table that exists: fine once, when only the
+  // tables below it made it.
+  reopen :: func (self: *mut Self, sub: *mut Table, key: str) -> Result.<*mut Table, Error> {
+    if sub.header || sub.dotted || sub.inline {
+      return .err(self.fail(f"the table `{key}` is defined twice"))
+    }
+    sub.header = true
+    return .ok(sub)
+  }
+
+  // `key = value`, into `t`.
+  key_value :: func (self: *mut Self, t: *mut Table) -> Result.<void, Error> {
+    let parts: Vec.<String> := self.dotted_key().?
+    self.expect(61, "`=`").?
+    self.skip_space()
+    let mut into: *mut Table := t
+    let last: usize := parts.len() - 1
+    let mut i: usize := 0
+    while i < last {
+      into = self.descend(into, parts.get(i).!.as_str(), true).?
+      i = i + 1
+    }
+    let name: String := parts.get(last).!
+    if into.find(name.as_str()).match { .some(_) => true, .none => false } {
+      return .err(self.fail(f"the key `{name}` is defined twice"))
+    }
+    let v: Value := self.value().?
+    into.add(name.as_str(), v)
+    return .ok(())
+  }
+
+  // ===< Values >===
+
+  value :: func (self: *mut Self) -> Result.<Value, Error> {
+    let c: u8 := self.current()
+    if c == 34 {
+      if self.ahead(1) == 34 && self.ahead(2) == 34 {
+        return .err(self.fail("multi-line strings are not supported"))
+      }
+      return .ok(.string(self.basic_string().?))
+    }
+    if c == 39 {
+      if self.ahead(1) == 39 && self.ahead(2) == 39 {
+        return .err(self.fail("multi-line strings are not supported"))
+      }
+      return .ok(.string(self.literal_string().?))
+    }
+    if c == 91 { return self.array() }
+    if c == 123 { return self.inline_table() }
+    if self.word("true") { return .ok(.boolean(true)) }
+    if self.word("false") { return .ok(.boolean(false)) }
+    if c == 43 || c == 45 || is_digit(c) || c == 105 || c == 110 { return self.number() }
+    return .err(self.fail(f"expected a value, found {self.found()}"))
+  }
+
+  // Whether `w` is at the reader as a whole word; reads it when it is.
+  word :: func (self: *mut Self, w: str) -> bool {
+    let b: []u8 := w.as_bytes()
+    let mut i: usize := 0
+    while i < b.len() {
+      if self.ahead(i) != b[i] { return false }
+      i = i + 1
+    }
+    if is_bare(self.ahead(b.len())) { return false }
+    i = 0
+    while i < b.len() {
+      self.advance()
+      i = i + 1
+    }
+    return true
+  }
+
+  basic_string :: func (self: *mut Self) -> Result.<String, Error> {
+    self.advance()
+    let mut out: String := string.new()
+    while true {
+      let c: u8 := self.current()
+      if self.at_end() || c == 10 {
+        return .err(self.fail("a string with no closing `\"`"))
+      }
+      if c == 34 {
+        self.advance()
+        break
+      }
+      if (c < 32 && c != 9) || c == 127 {
+        return .err(self.fail("a control character in a string must be escaped"))
+      }
+      if c != 92 {
+        out.push_byte(c)
+        self.advance()
+      } else {
+        self.advance()
+        let e: u8 := self.current()
+        if e == 117 || e == 85 {
+          self.advance()
+          let n: usize := if e == 117 { 4 } else { 8 }
+          out.push(self.hex_char(n).?)
+        } else {
+          let mut byte: u8 := 0
+          if e == 34 || e == 92 { byte = e }
+          if e == 98 { byte = 8 }
+          if e == 116 { byte = 9 }
+          if e == 110 { byte = 10 }
+          if e == 102 { byte = 12 }
+          if e == 114 { byte = 13 }
+          if byte == 0 {
+            return .err(self.fail(f"`\\` followed by {self.found()} is not an escape"))
+          }
+          out.push_byte(byte)
+          self.advance()
+        }
+      }
+    }
+    return .ok(out)
+  }
+
+  // `n` hex digits naming a Unicode scalar value.
+  hex_char :: func (self: *mut Self, n: usize) -> Result.<char, Error> {
+    let mut v: u64 := 0
+    let mut i: usize := 0
+    while i < n {
+      let d: u64 := digit_value(self.current(), 16).match {
+        .some(d) => d,
+        .none => { return .err(self.fail(f"expected a hex digit, found {self.found()}")) },
+      }
+      v = v * 16 + d
+      self.advance()
+      i = i + 1
+    }
+    if v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF) {
+      return .err(self.fail("an escape that is not a Unicode scalar value"))
+    }
+    return .ok(cast.<char>(cast.<u32>(v)))
+  }
+
+  literal_string :: func (self: *mut Self) -> Result.<String, Error> {
+    self.advance()
+    let mut out: String := string.new()
+    while true {
+      let c: u8 := self.current()
+      if self.at_end() || c == 10 {
+        return .err(self.fail("a string with no closing `'`"))
+      }
+      if c == 39 {
+        self.advance()
+        break
+      }
+      if (c < 32 && c != 9) || c == 127 {
+        return .err(self.fail("a control character in a literal string"))
+      }
+      out.push_byte(c)
+      self.advance()
+    }
+    return .ok(out)
+  }
+
+  // `[ v, v, ]`, which may span lines and hold comments.
+  array :: func (self: *mut Self) -> Result.<Value, Error> {
+    self.advance()
+    let a: *mut Array := new_array(false)
+    while true {
+      self.skip_blank_lines()
+      if self.current() == 93 {
+        self.advance()
+        break
+      }
+      a.items.push(self.value().?)
+      self.skip_blank_lines()
+      if self.current() == 44 {
+        self.advance()
+      } else if self.current() != 93 {
+        return .err(self.fail(f"expected `,` or `]`, found {self.found()}"))
+      }
+    }
+    return .ok(.array(a))
+  }
+
+  // `{ k = v, k = v }`, on one line and with no trailing comma.
+  inline_table :: func (self: *mut Self) -> Result.<Value, Error> {
+    self.advance()
+    let t: *mut Table := new_table()
+    self.skip_space()
+    if self.current() == 125 {
+      self.advance()
+      t.inline = true
+      return .ok(.table(t))
+    }
+    while true {
+      self.key_value(t).?
+      self.skip_space()
+      if self.current() == 125 {
+        self.advance()
+        break
+      }
+      self.expect(44, "`,` or `}`").?
+      self.skip_space()
+      if self.current() == 125 {
+        return .err(self.fail("a trailing `,` in an inline table"))
+      }
+    }
+    t.inline = true
+    return .ok(.table(t))
+  }
+
+  // An integer or a float.
+  number :: func (self: *mut Self) -> Result.<Value, Error> {
+    let mut negative: bool := false
+    let mut signed: bool := false
+    if self.current() == 43 || self.current() == 45 {
+      negative = self.current() == 45
+      signed = true
+      self.advance()
+    }
+    if self.word("inf") {
+      return .ok(.float(float.parse_f64(if negative { "-inf" } else { "inf" }).!))
+    }
+    if self.word("nan") { return .ok(.float(float.parse_f64("nan").!)) }
+
+    let c: u8 := self.current()
+    let n: u8 := self.ahead(1)
+    if c == 48 && (n == 120 || n == 111 || n == 98) {
+      if signed { return .err(self.fail("a hex, octal or binary integer may not have a sign")) }
+      self.advance()
+      self.advance()
+      let radix: u64 := if n == 120 { 16 } else if n == 111 { 8 } else { 2 }
+      return .ok(.integer(self.digits(radix).?))
+    }
+
+    // Decimal: the text, without its `_`s, is checked and then converted.
+    let mut clean: String := string.new()
+    if negative { clean.push_byte(45) }
+    let mut is_float: bool := false
+    self.decimal_digits(&mut clean, true).?
+    if self.current() == 46 {
+      is_float = true
+      clean.push_byte(46)
+      self.advance()
+      self.decimal_digits(&mut clean, false).?
+    }
+    if self.current() == 101 || self.current() == 69 {
+      is_float = true
+      clean.push_byte(101)
+      self.advance()
+      if self.current() == 43 || self.current() == 45 {
+        clean.push_byte(self.current())
+        self.advance()
+      }
+      self.decimal_digits(&mut clean, false).?
+    }
+    if is_bare(self.current()) || self.current() == 58 {
+      return .err(self.fail("dates, times and other values are not supported"))
+    }
+    if is_float {
+      return float.parse_f64(clean.as_str()).match {
+        .some(v) => .ok(.float(v)),
+        .none => .err(self.fail("not a float")),
+      }
+    }
+    let b: []u8 := clean.as_bytes()
+    if b.len() > cast.<usize>(if negative { 2 } else { 1 }) && b[if negative { 1 } else { 0 }] == 48 {
+      return .err(self.fail("a decimal integer may not start with a zero"))
+    }
+    let mut mag: u64 := 0
+    let mut i: usize := if negative { 1 } else { 0 }
+    let limit: u64 := if negative { 9223372036854775808 } else { 9223372036854775807 }
+    while i < b.len() {
+      let d: u64 := cast.<u64>(b[i] - 48)
+      if mag > (limit - d) / 10 {
+        return .err(self.fail("an integer too large for an `i64`"))
+      }
+      mag = mag * 10 + d
+      i = i + 1
+    }
+    if negative {
+      if mag == 9223372036854775808 { return .ok(.integer(0 - 9223372036854775807 - 1)) }
+      return .ok(.integer(0 - cast.<i64>(mag)))
+    }
+    return .ok(.integer(cast.<i64>(mag)))
+  }
+
+  // Decimal digits with single `_`s between them, appended to `out` without
+  // the `_`s.
+  decimal_digits :: func (self: *mut Self, out: *mut String, leading: bool) -> Result.<void, Error> {
+    if !is_digit(self.current()) {
+      return .err(self.fail(f"expected a digit, found {self.found()}"))
+    }
+    while true {
+      out.push_byte(self.current())
+      self.advance()
+      if self.current() == 95 {
+        self.advance()
+        if !is_digit(self.current()) {
+          return .err(self.fail("a `_` in a number must be between two digits"))
+        }
+      } else if !is_digit(self.current()) {
+        break
+      }
+    }
+    return .ok(())
+  }
+
+  // Digits in `radix`, with `_`s between them, as a non-negative `i64`.
+  digits :: func (self: *mut Self, radix: u64) -> Result.<i64, Error> {
+    let limit: u64 := 9223372036854775807
+    let mut v: u64 := 0
+    let mut any: bool := false
+    while true {
+      let d: u64 := digit_value(self.current(), radix).match {
+        .some(d) => d,
+        .none => { break },
+      }
+      if v > (limit - d) / radix {
+        return .err(self.fail("an integer too large for an `i64`"))
+      }
+      v = v * radix + d
+      any = true
+      self.advance()
+      if self.current() == 95 {
+        self.advance()
+        if digit_value(self.current(), radix).match { .some(_) => false, .none => true } {
+          return .err(self.fail("a `_` in a number must be between two digits"))
+        }
+      }
+    }
+    if !any { return .err(self.fail(f"expected a digit, found {self.found()}")) }
+    return .ok(cast.<i64>(v))
+  }
+}

@@ -1,0 +1,264 @@
+// Writing a value out, in whatever format is on the other end.
+//
+// Two traits, the way serde has them. `Encoder` is the **format**: it knows
+// what a number or a list looks like in JSON or TOML, and nothing about the
+// program's types. `Encode` is the **type**: it knows which of those calls it
+// is made of, and nothing about any format. A type is written once and every
+// format reads it.
+//
+// ### Every type is already `Encode`
+//
+// The blanket impl at the bottom covers every type, by reading its description
+// (`core/reflect`) at run time: a struct is a map of its members, a tuple is a
+// sequence of its positions. What makes that possible without a derive or a
+// macro is `member_dyn`, which hands each member back as a `*dyn Encode` whose
+// vtable is *that member's* impl — so a member that is a `Vec` is written as a
+// list, and a member that is another struct walks that struct the same way.
+//
+// A concrete impl beats the blanket one, so a type that wants a different shape
+// writes `impl Encode for MyType` and nothing else changes.
+
+{ Error, error } :: import "error.nest"
+{ rename, skip } :: import "attrs.nest"
+{ String } :: import "../string.nest"
+{ Vec, HashMap } :: import "../collections.nest"
+{ TypeInfo, Member, Attr, type_info, type_id, attr_of } :: import <core/reflect>
+{ make } :: import <core/mem>
+
+// ===< The format's side >===
+
+// Somewhere values are written, one call per piece.
+//
+// A sequence is `begin_seq`, its elements, `end_seq`; a map is `begin_map`,
+// then `write_key` before each value, then `end_map`. Separators are the
+// encoder's business: nothing on the `Encode` side ever says "comma".
+@public Encoder :: trait {
+  write_null :: func (self: *mut Self) -> Result.<void, Error>
+  write_bool :: func (self: *mut Self, v: bool) -> Result.<void, Error>
+  write_int :: func (self: *mut Self, v: i64) -> Result.<void, Error>
+  write_uint :: func (self: *mut Self, v: u64) -> Result.<void, Error>
+  write_float :: func (self: *mut Self, v: f64) -> Result.<void, Error>
+  write_str :: func (self: *mut Self, v: str) -> Result.<void, Error>
+  // `len` is how many elements follow, for a format that writes it down.
+  begin_seq :: func (self: *mut Self, len: usize) -> Result.<void, Error>
+  end_seq :: func (self: *mut Self) -> Result.<void, Error>
+  begin_map :: func (self: *mut Self, len: usize) -> Result.<void, Error>
+  write_key :: func (self: *mut Self, key: str) -> Result.<void, Error>
+  end_map :: func (self: *mut Self) -> Result.<void, Error>
+}
+
+// ===< The type's side >===
+
+@public Encode :: trait {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error>
+}
+
+// Member `m` of `v`, as its own `Encode` impl.
+member_encoder :: #intrinsic("member_dyn") func <T> (v: *T, m: Member) -> *dyn Encode
+
+// The key a member is written under: its `@rename`, or its name.
+@public member_name :: func (m: Member) -> str {
+  return attr_of.<rename>(m.attrs).match {
+    .some(r) => r.name,
+    .none => m.name,
+  }
+}
+
+// Whether a member carries `@skip`.
+@public is_skipped :: func (m: Member) -> bool {
+  return attr_of.<skip>(m.attrs).match { .some(_) => true, .none => false }
+}
+
+// The one member a `distinct` type has — its representation, at the start of
+// the value. Its description lists no members, so this is built rather than
+// looked up; `member_dyn` needs only the offset and the index.
+@public representation :: func <T> () -> Member {
+  return Member {
+    name: "",
+    offset: 0,
+    size: 0,
+    kind: .Void,
+    id: type_id.<void>(),
+    attrs: cast.<[]Attr>(make.<[]Attr>(0)),
+    index: 0,
+  }
+}
+
+// ===< Scalars >===
+
+impl <const N: u16> Encode for int.<N> {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return e.write_int(cast.<i64>(self.*))
+  }
+}
+
+impl <const N: u16> Encode for uint.<N> {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return e.write_uint(cast.<u64>(self.*))
+  }
+}
+
+impl Encode for isize {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return e.write_int(cast.<i64>(self.*))
+  }
+}
+
+impl Encode for usize {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return e.write_uint(cast.<u64>(self.*))
+  }
+}
+
+impl Encode for f64 {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return e.write_float(self.*)
+  }
+}
+
+impl Encode for f32 {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return e.write_float(cast.<f64>(self.*))
+  }
+}
+
+impl Encode for bool {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return e.write_bool(self.*)
+  }
+}
+
+// A `char` is text of one character.
+impl Encode for char {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    let c: char := self.*
+    return e.write_str(f"{c}")
+  }
+}
+
+impl Encode for str {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return e.write_str(self.*)
+  }
+}
+
+impl Encode for String {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return e.write_str(self.as_str())
+  }
+}
+
+// ===< Containers >===
+
+// A slice as a sequence of its elements.
+@public encode_seq :: func <T: Encode> (xs: []T, e: *mut dyn Encoder) -> Result.<void, Error> {
+  e.begin_seq(xs.len()).?
+  let mut i: usize := 0
+  while i < xs.len() {
+    let item: T := xs[i]
+    item.encode(e).?
+    i = i + 1
+  }
+  return e.end_seq()
+}
+
+impl <T: Encode> Encode for []T {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return encode_seq.<T>(self.*, e)
+  }
+}
+
+impl <T: Encode> Encode for Vec.<T> {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return encode_seq.<T>(self.as_slice(), e)
+  }
+}
+
+// `.none` is the format's null. A format with no null — TOML — leaves the key
+// out instead.
+impl <T: Encode> Encode for Option.<T> {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    return self.*.match {
+      .some(v) => v.encode(e),
+      .none => e.write_null(),
+    }
+  }
+}
+
+// A map keyed by text is a map in every format. The table does not keep
+// insertion order, so neither does the output.
+impl <V: Encode> Encode for HashMap.<String, V> {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    let keys: []String := self.keys_of()
+    e.begin_map(keys.len()).?
+    let mut i: usize := 0
+    while i < keys.len() {
+      e.write_key(keys[i].as_str()).?
+      let v: V := self.get(keys[i]).!
+      v.encode(e).?
+      i = i + 1
+    }
+    return e.end_map()
+  }
+}
+
+impl <V: Encode> Encode for HashMap.<str, V> {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    let keys: []str := self.keys_of()
+    e.begin_map(keys.len()).?
+    let mut i: usize := 0
+    while i < keys.len() {
+      e.write_key(keys[i]).?
+      let v: V := self.get(keys[i]).!
+      v.encode(e).?
+      i = i + 1
+    }
+    return e.end_map()
+  }
+}
+
+// ===< Everything else, by reflection >===
+
+impl <T> Encode for T {
+  encode :: func (self: *Self, e: *mut dyn Encoder) -> Result.<void, Error> {
+    let t: TypeInfo := type_info.<T>()
+    return t.kind.match {
+      .Struct => encode_struct.<T>(self, t, e),
+      .Tuple => encode_tuple.<T>(self, t, e),
+      .Distinct(_) => member_encoder.<T>(self, representation.<T>()).encode(e),
+      _ => .err(error(f"`{t.name}` has no `Encode` impl, and is not a struct or a tuple")),
+    }
+  }
+}
+
+// A struct is a map of the members it does not skip, under their keys.
+encode_struct :: func <T> (v: *T, t: TypeInfo, e: *mut dyn Encoder) -> Result.<void, Error> {
+  let mut count: usize := 0
+  let mut i: usize := 0
+  while i < t.members.len() {
+    if !is_skipped(t.members[i]) { count = count + 1 }
+    i = i + 1
+  }
+  e.begin_map(count).?
+  i = 0
+  while i < t.members.len() {
+    let m: Member := t.members[i]
+    if !is_skipped(m) {
+      e.write_key(member_name(m)).?
+      member_encoder.<T>(v, m).encode(e).?
+    }
+    i = i + 1
+  }
+  return e.end_map()
+}
+
+// A tuple is a sequence of its positions.
+encode_tuple :: func <T> (v: *T, t: TypeInfo, e: *mut dyn Encoder) -> Result.<void, Error> {
+  e.begin_seq(t.members.len()).?
+  let mut i: usize := 0
+  while i < t.members.len() {
+    member_encoder.<T>(v, t.members[i]).encode(e).?
+    i = i + 1
+  }
+  return e.end_seq()
+}

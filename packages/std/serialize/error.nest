@@ -1,0 +1,37 @@
+// What went wrong, and where.
+//
+// One type for both directions and every format, because a caller of
+// `json.from_str` and of `toml.to_string` handles failure the same way: print
+// it, or give up. A position is only known when there was text to be in, so
+// `line` is zero for an error that came from a value rather than a document.
+
+{ Buf, Display } :: import <core/fmt>
+
+@public Error :: struct {
+  message: str,
+  // 1-based; zero when there is no document position.
+  line: usize,
+  column: usize,
+}
+
+// An error with no position.
+@public error :: func (message: str) -> Error {
+  return Error { message: message, line: 0, column: 0 }
+}
+
+// An error at a place in a document.
+@public error_at :: func (message: str, line: usize, column: usize) -> Error {
+  return Error { message: message, line: line, column: column }
+}
+
+impl Display for Error {
+  display :: func (self: Self, out: *mut Buf) -> void {
+    if self.line > 0 {
+      self.line.display(out)
+      out.byte(58)
+      self.column.display(out)
+      out.bytes(": ".as_bytes())
+    }
+    out.bytes(self.message.as_bytes())
+  }
+}

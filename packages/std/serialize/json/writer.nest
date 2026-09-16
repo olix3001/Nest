@@ -1,0 +1,178 @@
+// A JSON document, written one `Encoder` call at a time.
+//
+// The separators are the only state: whether the value being written is the
+// first in its sequence or map decides whether a comma goes before it, and
+// that is one flag per open bracket. Pretty output is the same writer with a
+// newline and an indent where the compact one writes nothing.
+
+{ Error, error } :: import "../error.nest"
+{ Encoder } :: import "../encode.nest"
+float :: import "../float.nest"
+string :: import "../../string.nest"
+{ String } :: import "../../string.nest"
+collections :: import "../../collections.nest"
+{ Vec } :: import "../../collections.nest"
+
+// One open `[` or `{`.
+Frame :: struct {
+  map: bool,
+  // Nothing has been written inside it yet.
+  first: bool,
+}
+
+@public Writer :: struct {
+  out: String,
+  pretty: bool,
+  stack: Vec.<Frame>,
+}
+
+// A writer with nothing written; `pretty` puts each element on its own line,
+// indented two spaces per level.
+@public writer :: func (pretty: bool) -> Writer {
+  return Writer { out: string.new(), pretty: pretty, stack: collections.new.<Frame>() }
+}
+
+impl Writer {
+  // A newline and the indent for the current depth, when pretty.
+  newline :: func (self: *mut Self) -> void {
+    if !self.pretty { return }
+    self.out.push_byte(10)
+    let mut i: usize := 0
+    while i < self.stack.len() {
+      self.out.push_str("  ")
+      i = i + 1
+    }
+  }
+
+  // What goes before a value: in a sequence, its separator; in a map, nothing,
+  // because the key already wrote it.
+  before_value :: func (self: *mut Self) -> void {
+    let n: usize := self.stack.len()
+    if n == 0 { return }
+    let top: Frame := self.stack.get(n - 1).!
+    if top.map { return }
+    if !top.first { self.out.push_byte(44) }
+    self.stack.set(n - 1, Frame { map: false, first: false })
+    self.newline()
+  }
+
+  open :: func (self: *mut Self, map: bool, bracket: u8) -> void {
+    self.before_value()
+    self.out.push_byte(bracket)
+    self.stack.push(Frame { map: map, first: true })
+  }
+
+  close :: func (self: *mut Self, bracket: u8) -> void {
+    let top: Frame := self.stack.pop().!
+    if !top.first { self.newline() }
+    self.out.push_byte(bracket)
+  }
+
+  // `s` as a JSON string: quoted, with the characters JSON does not allow bare
+  // escaped.
+  quoted :: func (self: *mut Self, s: str) -> void {
+    let hex: str := "0123456789abcdef"
+    self.out.push_byte(34)
+    let b: []u8 := s.as_bytes()
+    let mut i: usize := 0
+    while i < b.len() {
+      let c: u8 := b[i]
+      if c == 34 {
+        self.out.push_str("\\\"")
+      } else if c == 92 {
+        self.out.push_str("\\\\")
+      } else if c == 10 {
+        self.out.push_str("\\n")
+      } else if c == 13 {
+        self.out.push_str("\\r")
+      } else if c == 9 {
+        self.out.push_str("\\t")
+      } else if c == 8 {
+        self.out.push_str("\\b")
+      } else if c == 12 {
+        self.out.push_str("\\f")
+      } else if c < 32 {
+        self.out.push_str("\\u00")
+        self.out.push_byte(hex.as_bytes()[cast.<usize>(c >> 4)])
+        self.out.push_byte(hex.as_bytes()[cast.<usize>(c & 15)])
+      } else {
+        self.out.push_byte(c)
+      }
+      i = i + 1
+    }
+    self.out.push_byte(34)
+  }
+}
+
+impl Encoder for Writer {
+  write_null :: func (self: *mut Self) -> Result.<void, Error> {
+    self.before_value()
+    self.out.push_str("null")
+    return .ok(())
+  }
+
+  write_bool :: func (self: *mut Self, v: bool) -> Result.<void, Error> {
+    self.before_value()
+    self.out.push_str(if v { "true" } else { "false" })
+    return .ok(())
+  }
+
+  write_int :: func (self: *mut Self, v: i64) -> Result.<void, Error> {
+    self.before_value()
+    self.out.append(v)
+    return .ok(())
+  }
+
+  write_uint :: func (self: *mut Self, v: u64) -> Result.<void, Error> {
+    self.before_value()
+    self.out.append(v)
+    return .ok(())
+  }
+
+  write_float :: func (self: *mut Self, v: f64) -> Result.<void, Error> {
+    if !float.is_finite(v) {
+      return .err(error("JSON has no NaN or infinity"))
+    }
+    self.before_value()
+    self.out.push_str(float.format_f64(v))
+    return .ok(())
+  }
+
+  write_str :: func (self: *mut Self, v: str) -> Result.<void, Error> {
+    self.before_value()
+    self.quoted(v)
+    return .ok(())
+  }
+
+  begin_seq :: func (self: *mut Self, len: usize) -> Result.<void, Error> {
+    self.open(false, 91)
+    return .ok(())
+  }
+
+  end_seq :: func (self: *mut Self) -> Result.<void, Error> {
+    self.close(93)
+    return .ok(())
+  }
+
+  begin_map :: func (self: *mut Self, len: usize) -> Result.<void, Error> {
+    self.open(true, 123)
+    return .ok(())
+  }
+
+  write_key :: func (self: *mut Self, key: str) -> Result.<void, Error> {
+    let n: usize := self.stack.len()
+    let top: Frame := self.stack.get(n - 1).!
+    if !top.first { self.out.push_byte(44) }
+    self.stack.set(n - 1, Frame { map: true, first: false })
+    self.newline()
+    self.quoted(key)
+    self.out.push_byte(58)
+    if self.pretty { self.out.push_byte(32) }
+    return .ok(())
+  }
+
+  end_map :: func (self: *mut Self) -> Result.<void, Error> {
+    self.close(125)
+    return .ok(())
+  }
+}

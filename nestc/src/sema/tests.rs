@@ -8344,6 +8344,26 @@ main :: func () { }
     }
 }
 
+/// **`std/serialize` analyzes clean**, formats included, and with a program that
+/// reaches its traits through a struct — which is what instantiates the blanket
+/// impls and every member's.
+#[test]
+fn std_serialize_analyzes() {
+    let src = "\
+{ rename, skip, Encode, Decode } :: import <std/serialize>
+json :: import <std/serialize/json>
+toml :: import <std/serialize/toml>
+P :: struct { @rename(name: \"x-pos\") x: i32, @skip y: f64, name: str, tags: []str, next: Option.<i64> }
+main :: func () {
+  let p: P := json.from_str.<P>(\"{}\").!
+  let a := json.to_string(p).!
+  let b := toml.to_string(toml.from_str.<P>(\"\").!).!
+}
+";
+    let session = crate::sema::analyze_source("std-serialize", src, &[]);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
 /// **`sys` is `std`'s own.** It is the file every other one goes through, and
 /// the swap point for a target with no C library — so nothing outside the
 /// package may name it. That is enforced by the root not re-exporting it, and

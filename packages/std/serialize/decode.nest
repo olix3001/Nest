@@ -1,0 +1,358 @@
+// Reading a value back, from whatever format is on the other end.
+//
+// The mirror of `encode.nest`. `Decoder` is the **format**: it knows what comes
+// next in the document and how to read it. `Decode` is the **type**: it knows
+// which of those reads it is made of. A value is decoded **in place** — into a
+// `*mut Self` that already exists — so a struct's members are each decoded into
+// their own storage and nothing needs a way to build a `T` out of nothing.
+//
+// ### What is strict and what is not
+//
+// A key the type does not have is **skipped**: a document may carry more than
+// one program reads. A member the document does not have is an **error**,
+// unless the member is an `Option`, which reads as `.none`. That is `Decode`'s
+// `missing`, and `Option` is the one impl here that overrides it.
+
+{ Error, error } :: import "error.nest"
+{ member_name, is_skipped, representation } :: import "encode.nest"
+string :: import "../string.nest"
+{ String } :: import "../string.nest"
+collections :: import "../collections.nest"
+{ Vec, HashMap } :: import "../collections.nest"
+{ TypeInfo, Member, type_info } :: import <core/reflect>
+mem :: import <core/mem>
+{ make, size_of } :: import <core/mem>
+
+// ===< The format's side >===
+
+// What the next value in a document is, before it is read.
+@public Token :: enum {
+  null,
+  boolean,
+  integer,
+  float,
+  string,
+  seq,
+  map,
+}
+
+// Somewhere values are read from, one call per piece.
+//
+// A sequence is `begin_seq`, then `next_element` before each element until it
+// says there are no more; a map is `begin_map`, then `next_key` before each
+// value until it gives none. A reader that knows the shape of what is coming
+// reads it directly; one that does not asks `peek` first.
+@public Decoder :: trait {
+  peek :: func (self: *mut Self) -> Result.<Token, Error>
+  read_null :: func (self: *mut Self) -> Result.<void, Error>
+  read_bool :: func (self: *mut Self) -> Result.<bool, Error>
+  read_int :: func (self: *mut Self) -> Result.<i64, Error>
+  read_uint :: func (self: *mut Self) -> Result.<u64, Error>
+  read_float :: func (self: *mut Self) -> Result.<f64, Error>
+  read_str :: func (self: *mut Self) -> Result.<String, Error>
+  begin_seq :: func (self: *mut Self) -> Result.<void, Error>
+  // Whether another element follows; `false` has also read the sequence's end.
+  next_element :: func (self: *mut Self) -> Result.<bool, Error>
+  begin_map :: func (self: *mut Self) -> Result.<void, Error>
+  // The next key, or `.none` once the map has ended.
+  next_key :: func (self: *mut Self) -> Result.<Option.<String>, Error>
+  // Read the next value, whatever it is, and discard it.
+  skip :: func (self: *mut Self) -> Result.<void, Error>
+  // An error at where the decoder is, which is the only place that knows it.
+  fail :: func (self: *mut Self, message: str) -> Error
+}
+
+// ===< The type's side >===
+
+@public Decode :: trait {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error>
+
+  // The document had no value for this member, which was called `name` there.
+  missing :: func (self: *mut Self, d: *mut dyn Decoder, name: str) -> Result.<void, Error> {
+    return .err(d.fail(f"missing key `{name}`"))
+  }
+}
+
+// Member `m` of `v`, as its own `Decode` impl.
+member_decoder :: #intrinsic("member_dyn") func <T> (v: *mut T, m: Member) -> *mut dyn Decode
+
+// ===< Scalars >===
+
+// Whether `v` fits in a signed integer of `bits` bits.
+fits_signed :: func (v: i64, bits: usize) -> bool {
+  if bits >= 64 { return true }
+  let half: i64 := cast.<i64>(1) << cast.<i64>(bits - 1)
+  return v >= 0 - half && v < half
+}
+
+// Whether `v` fits in an unsigned integer of `bits` bits.
+fits_unsigned :: func (v: u64, bits: usize) -> bool {
+  if bits >= 64 { return true }
+  return v < cast.<u64>(1) << cast.<u64>(bits)
+}
+
+impl <const N: u16> Decode for int.<N> {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let v: i64 := d.read_int().?
+    if !fits_signed(v, size_of.<Self>() * 8) {
+      return .err(d.fail(f"{v} does not fit in an `i{size_of.<Self>() * 8}`"))
+    }
+    self.* = cast.<Self>(v)
+    return .ok(())
+  }
+}
+
+impl <const N: u16> Decode for uint.<N> {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let v: u64 := d.read_uint().?
+    if !fits_unsigned(v, size_of.<Self>() * 8) {
+      return .err(d.fail(f"{v} does not fit in a `u{size_of.<Self>() * 8}`"))
+    }
+    self.* = cast.<Self>(v)
+    return .ok(())
+  }
+}
+
+impl Decode for isize {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let v: i64 := d.read_int().?
+    if !fits_signed(v, size_of.<Self>() * 8) {
+      return .err(d.fail(f"{v} does not fit in an `isize`"))
+    }
+    self.* = cast.<isize>(v)
+    return .ok(())
+  }
+}
+
+impl Decode for usize {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let v: u64 := d.read_uint().?
+    if !fits_unsigned(v, size_of.<Self>() * 8) {
+      return .err(d.fail(f"{v} does not fit in a `usize`"))
+    }
+    self.* = cast.<usize>(v)
+    return .ok(())
+  }
+}
+
+impl Decode for f64 {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    self.* = d.read_float().?
+    return .ok(())
+  }
+}
+
+impl Decode for f32 {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    self.* = cast.<f32>(d.read_float().?)
+    return .ok(())
+  }
+}
+
+impl Decode for bool {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    self.* = d.read_bool().?
+    return .ok(())
+  }
+}
+
+// A `char` is text of exactly one character.
+impl Decode for char {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let s: String := d.read_str().?
+    let c: char := only_char(s.as_bytes()).match {
+      .some(c) => c,
+      .none => { return .err(d.fail("expected text of one character")) },
+    }
+    self.* = c
+    return .ok(())
+  }
+}
+
+impl Decode for str {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let s: String := d.read_str().?
+    self.* = s.as_str()
+    return .ok(())
+  }
+}
+
+impl Decode for String {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    self.* = d.read_str().?
+    return .ok(())
+  }
+}
+
+// The one character `b` encodes, when it encodes exactly one.
+only_char :: func (b: []u8) -> Option.<char> {
+  if b.len() == 0 { return .none }
+  let lead: u32 := cast.<u32>(b[0])
+  let mut n: usize := 1
+  let mut v: u32 := lead
+  if lead >= 0xF0 {
+    n = 4
+    v = lead & 0x07
+  } else if lead >= 0xE0 {
+    n = 3
+    v = lead & 0x0F
+  } else if lead >= 0xC0 {
+    n = 2
+    v = lead & 0x1F
+  }
+  if b.len() != n { return .none }
+  let mut i: usize := 1
+  while i < n {
+    v = (v << 6) | (cast.<u32>(b[i]) & 0x3F)
+    i = i + 1
+  }
+  return .some(cast.<char>(v))
+}
+
+// ===< Containers >===
+
+impl <T: Decode> Decode for Vec.<T> {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let mut out: Vec.<T> := collections.new.<T>()
+    d.begin_seq().?
+    while d.next_element().? {
+      let slot: *mut T := mem.new.<T>()
+      slot.decode(d).?
+      out.push(slot.*)
+    }
+    self.* = out
+    return .ok(())
+  }
+}
+
+impl <T: Decode> Decode for []T {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let v: *mut Vec.<T> := mem.new.<Vec.<T>>()
+    v.decode(d).?
+    self.* = v.as_slice()
+    return .ok(())
+  }
+}
+
+// A null is `.none`, and so is a key that is not there at all.
+impl <T: Decode> Decode for Option.<T> {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let is_null: bool := d.peek().?.match { .null => true, _ => false }
+    if is_null {
+      d.read_null().?
+      self.* = .none
+      return .ok(())
+    }
+    let slot: *mut T := mem.new.<T>()
+    slot.decode(d).?
+    self.* = .some(slot.*)
+    return .ok(())
+  }
+
+  missing :: func (self: *mut Self, d: *mut dyn Decoder, name: str) -> Result.<void, Error> {
+    self.* = .none
+    return .ok(())
+  }
+}
+
+impl <V: Decode> Decode for HashMap.<String, V> {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let mut out: HashMap.<String, V> := collections.map.<String, V>()
+    d.begin_map().?
+    while true {
+      let key: String := d.next_key().?.match {
+        .some(k) => k,
+        .none => { break },
+      }
+      let slot: *mut V := mem.new.<V>()
+      slot.decode(d).?
+      out.insert(key, slot.*)
+    }
+    self.* = out
+    return .ok(())
+  }
+}
+
+impl <V: Decode> Decode for HashMap.<str, V> {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let mut out: HashMap.<str, V> := collections.map.<str, V>()
+    d.begin_map().?
+    while true {
+      let key: String := d.next_key().?.match {
+        .some(k) => k,
+        .none => { break },
+      }
+      let slot: *mut V := mem.new.<V>()
+      slot.decode(d).?
+      out.insert(key.as_str(), slot.*)
+    }
+    self.* = out
+    return .ok(())
+  }
+}
+
+// ===< Everything else, by reflection >===
+
+impl <T> Decode for T {
+  decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
+    let t: TypeInfo := type_info.<T>()
+    return t.kind.match {
+      .Struct => decode_struct.<T>(self, t, d),
+      .Tuple => decode_tuple.<T>(self, t, d),
+      .Distinct(_) => member_decoder.<T>(self, representation.<T>()).decode(d),
+      _ => .err(error(f"`{t.name}` has no `Decode` impl, and is not a struct or a tuple")),
+    }
+  }
+}
+
+// A struct is a map: each key names a member, a key naming none is skipped, and
+// a member no key named is `missing`.
+decode_struct :: func <T> (v: *mut T, t: TypeInfo, d: *mut dyn Decoder) -> Result.<void, Error> {
+  let seen: []mut bool := make.<[]mut bool>(t.members.len())
+  d.begin_map().?
+  while true {
+    let key: String := d.next_key().?.match {
+      .some(k) => k,
+      .none => { break },
+    }
+    let mut found: bool := false
+    let mut i: usize := 0
+    while i < t.members.len() {
+      let m: Member := t.members[i]
+      if !found && !is_skipped(m) && member_name(m) == key.as_str() {
+        member_decoder.<T>(v, m).decode(d).?
+        seen[i] = true
+        found = true
+      }
+      i = i + 1
+    }
+    if !found { d.skip().? }
+  }
+  let mut i: usize := 0
+  while i < t.members.len() {
+    let m: Member := t.members[i]
+    if !seen[i] && !is_skipped(m) {
+      member_decoder.<T>(v, m).missing(d, member_name(m)).?
+    }
+    i = i + 1
+  }
+  return .ok(())
+}
+
+// A tuple is a sequence of exactly as many elements as it has positions.
+decode_tuple :: func <T> (v: *mut T, t: TypeInfo, d: *mut dyn Decoder) -> Result.<void, Error> {
+  let n: usize := t.members.len()
+  d.begin_seq().?
+  let mut i: usize := 0
+  while i < n {
+    if !d.next_element().? {
+      return .err(d.fail(f"expected {n} elements, found {i}"))
+    }
+    member_decoder.<T>(v, t.members[i]).decode(d).?
+    i = i + 1
+  }
+  if d.next_element().? {
+    return .err(d.fail(f"expected {n} elements, found more"))
+  }
+  return .ok(())
+}

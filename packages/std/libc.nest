@@ -103,6 +103,16 @@ extern("c") {
   @public strerror :: func (code: c.int) -> c.cstr
 }
 
+// ===< Numbers as text >===
+
+extern("c") {
+  // Shortest round-trip float text is Ryū's job and `core/fmt` does not do it
+  // yet (see the note there), so `std/serialize` asks C: `snprintf` at rising
+  // precision until `strtod` reads the same bits back.
+  @public snprintf :: #c_vararg func (buf: c.ptr.<c.uchar>, n: c.size_t, fmt: c.cstr) -> c.int
+  @public strtod   :: func (s: c.cstr, end: c.ptr.<c.cstr>) -> c.double
+}
+
 // ===< The constants >===
 //
 // Written out rather than read from a header, because there is no header to

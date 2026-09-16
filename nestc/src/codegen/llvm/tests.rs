@@ -1011,3 +1011,253 @@ main :: func () -> i32 {{
     // The program removed it; a leftover means `fs.remove` did nothing.
     assert!(!scratch.exists(), "the scratch file is still there");
 }
+
+/// Build `src` for the host, link it, run it, and hand back what it did.
+///
+/// The host target for the reason [`the_std_floor_reads_writes_spawns_and_reads_its_arguments`]
+/// gives: anything reaching `std/libc` reads `OS` from it.
+fn run_on_host(src: &str) -> std::process::Output {
+    let mut probe = LlvmBackend::default();
+    let info = probe.target_info(None).expect("the host resolves");
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
+    session.options.target = info.target();
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let layouts = crate::ir::layout::Layouts::new(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        session.options.target,
+    );
+    let program = crate::lir::lower(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        &layouts,
+        &session.options,
+        &session.lang_items,
+        &session.sources,
+    );
+
+    let dir = std::env::temp_dir().join("nestc-host-runs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stem = format!("{:x}.{}", hash(src), unique());
+    let object = dir.join(format!("{stem}.o"));
+    let exe = dir.join(&stem);
+    let mut backend = LlvmBackend::default();
+    backend.target_info(None).expect("the host resolves");
+    backend
+        .emit_unit(program.unit(), OutputKind::Object, &object)
+        .unwrap_or_else(|e| panic!("emitting:\n{e}"));
+    crate::codegen::link::link(
+        &[object],
+        &exe,
+        &crate::codegen::link::LinkOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("linking:\n{e}"));
+    std::process::Command::new(&exe).output().expect("it runs")
+}
+
+/// The types `std/serialize`'s tests write and read: every shape the blanket
+/// impl walks by reflection, and every concrete impl beside it.
+const SERIALIZE_TYPES: &str = r##"
+io :: import <std/io>
+string :: import <std/string>
+{ String } :: import <std/string>
+col :: import <std/collections>
+{ Vec } :: import <std/collections>
+{ rename, skip } :: import <std/serialize>
+json :: import <std/serialize/json>
+toml :: import <std/serialize/toml>
+
+Id :: distinct usize
+Server :: struct { host: str, port: u16, ratio: f64 }
+Dep :: struct { name: String, optional: bool }
+Config :: struct {
+  title: String,
+  @rename(name: "max-count") max: i64,
+  @skip cache: i32,
+  tags: Vec.<str>,
+  server: Server,
+  deps: Vec.<Dep>,
+  maybe: Option.<i32>,
+  nothing: Option.<i32>,
+  pair: (i32, bool),
+  id: Id,
+  letter: char,
+}
+
+sample :: func () -> Config {
+  let mut tags: Vec.<str> := col.new.<str>()
+  tags.push("a")
+  tags.push("b \"c\"\n")
+  let mut deps: Vec.<Dep> := col.new.<Dep>()
+  deps.push(Dep { name: string.from("core"), optional: false })
+  deps.push(Dep { name: string.from("é☃"), optional: true })
+  return Config {
+    title: string.from("t"), max: -3, cache: 9, tags: tags,
+    server: Server { host: "localhost", port: 8080, ratio: 0.1 },
+    deps: deps, maybe: .some(4), nothing: .none, pair: (1, true),
+    id: cast.<Id>(42), letter: 'λ',
+  }
+}
+"##;
+
+/// **A struct round-trips through JSON**, a renamed member is written under its
+/// attribute's key and a skipped one not at all, and a malformed document is an
+/// error that says where — not a trap.
+#[test]
+fn a_struct_round_trips_through_json() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let src = format!(
+        "{SERIALIZE_TYPES}{}",
+        r##"
+main :: func () -> i32 {
+  let c: Config := sample()
+  let s: String := json.to_string(c).match { .ok(s) => s, .err(e) => { io.println(f"{e}"); return 1 } }
+  io.println(s.as_str())
+  let back: Config := json.from_str.<Config>(s.as_str()).match { .ok(v) => v, .err(e) => { io.println(f"{e}"); return 2 } }
+  if back.cache != 0 { return 3 }
+  if json.to_string(back).!.as_str() != s.as_str() { return 4 }
+  io.println(json.to_string_pretty(back.server).!.as_str())
+
+  // Unknown keys are skipped, escapes and surrogate pairs decode, an integer
+  // reads as a float, and a missing `Option` is `.none`.
+  let loose: str := "{\"extra\": {\"a\": [1, 2.5e3, null, true, \"x\"]}, \"title\": \"\\u00e9\\ud83d\\ude00\", \"max-count\": 1, \"tags\": [], \"server\": {\"host\": \"h\", \"port\": 1, \"ratio\": 2}, \"deps\": [], \"pair\": [0, false], \"id\": 7, \"letter\": \"x\"}"
+  let l: Config := json.from_str.<Config>(loose).match { .ok(v) => v, .err(e) => { io.println(f"{e}"); return 5 } }
+  io.println(json.to_string(l).!.as_str())
+
+  let bad: []str := .{
+    "{\"title\": \"t\",\n  \"tags\": [\"a\",]}",
+    "{\"title\": \"t\"}",
+    "{\"title\": 5}",
+    "[1, 2",
+  }
+  for b in bad {
+    json.from_str.<Config>(b).match { .ok(_) => { return 6 }, .err(e) => io.println(f"{e}") }
+  }
+  json.from_str.<Vec.<i32>>("[1, 2] x").match { .ok(_) => { return 8 }, .err(e) => io.println(f"{e}") }
+  json.from_str.<Vec.<i32>>("[1, 2").match { .ok(_) => { return 9 }, .err(e) => io.println(f"{e}") }
+  json.from_str.<Server>("{\"host\": \"h\", \"port\": 65536, \"ratio\": 1}").match {
+    .ok(_) => { return 7 },
+    .err(e) => io.println(f"{e}"),
+  }
+  return 0
+}
+"##
+    );
+    let ran = run_on_host(&src);
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    assert_eq!(ran.status.code(), Some(0), "exited {}, stdout:\n{stdout}", ran.status);
+    assert_eq!(
+        stdout,
+        "{\"title\":\"t\",\"max-count\":-3,\"tags\":[\"a\",\"b \\\"c\\\"\\n\"],\"server\":{\"host\":\"localhost\",\"port\":8080,\"ratio\":0.1},\"deps\":[{\"name\":\"core\",\"optional\":false},{\"name\":\"é☃\",\"optional\":true}],\"maybe\":4,\"nothing\":null,\"pair\":[1,true],\"id\":42,\"letter\":\"λ\"}\n\
+         {\n  \"host\": \"localhost\",\n  \"port\": 8080,\n  \"ratio\": 0.1\n}\n\
+         {\"title\":\"é😀\",\"max-count\":1,\"tags\":[],\"server\":{\"host\":\"h\",\"port\":1,\"ratio\":2.0},\"deps\":[],\"maybe\":null,\"nothing\":null,\"pair\":[0,false],\"id\":7,\"letter\":\"x\"}\n\
+         2:16: a trailing `,` in an array\n\
+         1:15: missing key `max-count`\n\
+         1:11: expected a string, found `5`\n\
+         1:1: expected `{`, found `[`\n\
+         1:8: expected the end of the document, found `x`\n\
+         1:6: expected `,` or `]`, found the end of the document\n\
+         1:28: 65536 does not fit in a `u16`\n"
+    );
+}
+
+/// **A struct round-trips through TOML**: plain keys first, then `[tables]`,
+/// then `[[arrays of tables]]`; a `.none` is left out and reads back as one;
+/// and an error in the text says where in it, one in the values says which key.
+#[test]
+fn a_struct_round_trips_through_toml() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let src = format!(
+        "{SERIALIZE_TYPES}{}",
+        r##"
+main :: func () -> i32 {
+  let c: Config := sample()
+  let s: String := toml.to_string(c).match { .ok(s) => s, .err(e) => { io.println(f"{e}"); return 1 } }
+  io.print(s.as_str())
+  let back: Config := toml.from_str.<Config>(s.as_str()).match { .ok(v) => v, .err(e) => { io.println(f"{e}"); return 2 } }
+  if back.cache != 0 { return 3 }
+  if toml.to_string(back).!.as_str() != s.as_str() { return 4 }
+
+  let doc: str := "# comment\ntitle = 'lit'\nmax-count = 0xf_f\ntags = [\n  \"x\", # here\n  \"y\",\n]\npair = [2, false]\nid = 1_000\nletter = \"\\u03BB\"\n\n[server]\nhost = \"h\"\nport = 1\nratio = 3\nextra.dotted = inf\n\n[[deps]]\nname = \"a\"\noptional = false\n"
+  let d: Config := toml.from_str.<Config>(doc).match { .ok(v) => v, .err(e) => { io.println(f"{e}"); return 5 } }
+  io.println("---")
+  io.print(toml.to_string(d).!.as_str())
+  io.println("---")
+
+  let bad: []str := .{
+    "title = \"x\"\ntitle = \"y\"\n",
+    "[a]\nb = 1\n[a]\n",
+    "n = 0x_ff\n",
+    "s = \"open\n",
+    "d = 1979-05-27\n",
+    "title = \"x\"\nmax-count = 1\ntags = []\npair = [1, true]\nid = 1\nletter = \"l\"\n[server]\nhost = \"h\"\nport = 70000\nratio = 1.0\n",
+    "title = \"x\"\nmax-count = 1\ntags = []\npair = [1, true]\nid = 1\nletter = \"l\"\n[server]\nhost = \"h\"\nport = 7\nratio = 1.0\n[[deps]]\nname = 3\n",
+  }
+  for b in bad {
+    toml.from_str.<Config>(b).match { .ok(_) => { return 6 }, .err(e) => io.println(f"{e}") }
+  }
+  toml.to_string(c.tags).match { .ok(_) => { return 7 }, .err(e) => io.println(f"{e}") }
+  return 0
+}
+"##
+    );
+    let ran = run_on_host(&src);
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    assert_eq!(ran.status.code(), Some(0), "exited {}, stdout:\n{stdout}", ran.status);
+    assert_eq!(
+        stdout,
+        "title = \"t\"\n\
+         max-count = -3\n\
+         tags = [\"a\", \"b \\\"c\\\"\\n\"]\n\
+         maybe = 4\n\
+         pair = [1, true]\n\
+         id = 42\n\
+         letter = \"λ\"\n\
+         \n\
+         [server]\n\
+         host = \"localhost\"\n\
+         port = 8080\n\
+         ratio = 0.1\n\
+         \n\
+         [[deps]]\n\
+         name = \"core\"\n\
+         optional = false\n\
+         \n\
+         [[deps]]\n\
+         name = \"é☃\"\n\
+         optional = true\n\
+         ---\n\
+         title = \"lit\"\n\
+         max-count = 255\n\
+         tags = [\"x\", \"y\"]\n\
+         pair = [2, false]\n\
+         id = 1000\n\
+         letter = \"λ\"\n\
+         \n\
+         [server]\n\
+         host = \"h\"\n\
+         port = 1\n\
+         ratio = 3.0\n\
+         \n\
+         [[deps]]\n\
+         name = \"a\"\n\
+         optional = false\n\
+         ---\n\
+         2:9: the key `title` is defined twice\n\
+         3:4: the table `a` is defined twice\n\
+         1:7: expected a digit, found `_`\n\
+         1:10: a string with no closing `\"`\n\
+         1:9: dates, times and other values are not supported\n\
+         server.port: 70000 does not fit in a `u16`\n\
+         deps[0].name: expected a string, found an integer\n\
+         a TOML document is a table, and this is an array\n"
+    );
+}

@@ -1,0 +1,16 @@
+// Turning values into documents and back.
+//
+// `Encode` / `Decode` are the type's half and every type already has them
+// (see `encode.nest`); `Encoder` / `Decoder` are the format's half, and `json`
+// and `toml` below are the two formats. A program usually wants only these:
+//
+//     json :: import <std/serialize/json>
+//     let text: String := json.to_string(user).!
+//     let back: User := json.from_str.<User>(text.as_str()).!
+
+@public { Error, error, error_at } :: import "error.nest"
+@public { rename, skip } :: import "attrs.nest"
+@public { Encoder, Encode, encode_seq, member_name, is_skipped } :: import "encode.nest"
+@public { Token, Decoder, Decode } :: import "decode.nest"
+@public json :: import "json/json.nest"
+@public toml :: import "toml/toml.nest"

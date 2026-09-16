@@ -1,0 +1,337 @@
+// A value into TOML text, by way of the tree.
+//
+// `Builder` is the `Encoder`: it turns each call into a node of a `Value` tree.
+// `write` then prints the tree in the order TOML wants, which is not the order
+// the calls came in — a table's plain keys first, its `[sub.tables]` after them,
+// and its `[[arrays.of.tables]]` last.
+//
+// TOML has no null. An `Option.none` under a key leaves the key out, and one
+// anywhere else is an error.
+
+{ Error, error } :: import "../error.nest"
+{ Encoder } :: import "../encode.nest"
+float :: import "../float.nest"
+string :: import "../../string.nest"
+{ String } :: import "../../string.nest"
+collections :: import "../../collections.nest"
+{ Vec } :: import "../../collections.nest"
+{ Value, Array, Table, new_table, new_array, describe } :: import "value.nest"
+
+// One open sequence or map.
+Frame :: struct {
+  map: bool,
+  table: *mut Table,
+  array: *mut Array,
+  // The key `write_key` gave, waiting for its value.
+  key: Option.<String>,
+}
+
+@public Builder :: struct {
+  root: Option.<Value>,
+  frames: Vec.<Frame>,
+}
+
+@public builder :: func () -> Builder {
+  return Builder { root: .none, frames: collections.new.<Frame>() }
+}
+
+impl Builder {
+  // Place `v` where the next value goes.
+  put :: func (self: *mut Self, v: Value) -> Result.<void, Error> {
+    let n: usize := self.frames.len()
+    if n == 0 {
+      self.root = .some(v)
+      return .ok(())
+    }
+    let top: Frame := self.frames.get(n - 1).!
+    if !top.map {
+      top.array.items.push(v)
+      return .ok(())
+    }
+    let key: String := top.key.match {
+      .some(k) => k,
+      .none => { return .err(error("a value in a map with no key before it")) },
+    }
+    top.table.add(key.as_str(), v)
+    self.frames.set(n - 1, Frame { map: true, table: top.table, array: top.array, key: .none })
+    return .ok(())
+  }
+
+  // The document: the root, which must be a table.
+  @public document :: func (self: *Self) -> Result.<*mut Table, Error> {
+    return self.root.match {
+      .some(.table(t)) => .ok(t),
+      .some(v) => .err(error(f"a TOML document is a table, and this is {describe(v)}")),
+      .none => .err(error("a TOML document is a table, and nothing was written")),
+    }
+  }
+}
+
+impl Encoder for Builder {
+  write_null :: func (self: *mut Self) -> Result.<void, Error> {
+    let n: usize := self.frames.len()
+    if n == 0 { return .err(error("TOML has no null")) }
+    let top: Frame := self.frames.get(n - 1).!
+    if !top.map { return .err(error("TOML has no null, so an array cannot hold one")) }
+    self.frames.set(n - 1, Frame { map: true, table: top.table, array: top.array, key: .none })
+    return .ok(())
+  }
+
+  write_bool :: func (self: *mut Self, v: bool) -> Result.<void, Error> {
+    return self.put(.boolean(v))
+  }
+
+  write_int :: func (self: *mut Self, v: i64) -> Result.<void, Error> {
+    return self.put(.integer(v))
+  }
+
+  write_uint :: func (self: *mut Self, v: u64) -> Result.<void, Error> {
+    if v > 9223372036854775807 {
+      return .err(error(f"{v} is too large for a TOML integer, which is an `i64`"))
+    }
+    return self.put(.integer(cast.<i64>(v)))
+  }
+
+  write_float :: func (self: *mut Self, v: f64) -> Result.<void, Error> {
+    return self.put(.float(v))
+  }
+
+  write_str :: func (self: *mut Self, v: str) -> Result.<void, Error> {
+    return self.put(.string(string.from(v)))
+  }
+
+  begin_seq :: func (self: *mut Self, len: usize) -> Result.<void, Error> {
+    let a: *mut Array := new_array(false)
+    self.put(.array(a)).?
+    self.frames.push(Frame { map: false, table: new_table(), array: a, key: .none })
+    return .ok(())
+  }
+
+  end_seq :: func (self: *mut Self) -> Result.<void, Error> {
+    self.frames.pop().!
+    return .ok(())
+  }
+
+  begin_map :: func (self: *mut Self, len: usize) -> Result.<void, Error> {
+    let t: *mut Table := new_table()
+    self.put(.table(t)).?
+    self.frames.push(Frame { map: true, table: t, array: new_array(false), key: .none })
+    return .ok(())
+  }
+
+  write_key :: func (self: *mut Self, key: str) -> Result.<void, Error> {
+    let n: usize := self.frames.len()
+    let top: Frame := self.frames.get(n - 1).!
+    self.frames.set(n - 1, Frame { map: true, table: top.table, array: top.array, key: .some(string.from(key)) })
+    return .ok(())
+  }
+
+  end_map :: func (self: *mut Self) -> Result.<void, Error> {
+    self.frames.pop().!
+    return .ok(())
+  }
+}
+
+// ===< Text >===
+
+// `root` as a TOML document.
+@public write :: func (root: *mut Table) -> String {
+  let mut out: String := string.new()
+  write_table(&mut out, root, "")
+  return out
+}
+
+// An array every element of which is a table, and which has one: it is
+// written as `[[name]]` sections.
+is_table_array :: func (v: Value) -> bool {
+  let a: *mut Array := v.match {
+    .array(a) => a,
+    _ => { return false },
+  }
+  if a.items.len() == 0 { return false }
+  let mut i: usize := 0
+  while i < a.items.len() {
+    let is_table: bool := a.items.get(i).!.match { .table(_) => true, _ => false }
+    if !is_table { return false }
+    i = i + 1
+  }
+  return true
+}
+
+is_table :: func (v: Value) -> bool {
+  return v.match { .table(_) => true, _ => false }
+}
+
+// Whether `v` is written on its own `key = value` line.
+is_plain :: func (v: Value) -> bool {
+  return !is_table(v) && !is_table_array(v)
+}
+
+has_plain :: func (t: *mut Table) -> bool {
+  let mut i: usize := 0
+  while i < t.len() {
+    if is_plain(t.values.get(i).!) { return true }
+    i = i + 1
+  }
+  return false
+}
+
+// A blank line between sections, but not before the first thing written.
+section :: func (out: *mut String) -> void {
+  if out.len() > 0 { out.push_byte(10) }
+}
+
+write_table :: func (out: *mut String, t: *mut Table, path: str) -> void {
+  let mut i: usize := 0
+  while i < t.len() {
+    let v: Value := t.values.get(i).!
+    if is_plain(v) {
+      write_key(out, t.keys.get(i).!.as_str())
+      out.push_str(" = ")
+      write_inline(out, v)
+      out.push_byte(10)
+    }
+    i = i + 1
+  }
+  i = 0
+  while i < t.len() {
+    let v: Value := t.values.get(i).!
+    v.match {
+      .table(sub) => {
+        let sub_path: str := join(path, t.keys.get(i).!.as_str())
+        if has_plain(sub) || sub.len() == 0 {
+          section(out)
+          out.push_byte(91)
+          out.push_str(sub_path)
+          out.push_str("]\n")
+        }
+        write_table(out, sub, sub_path)
+      },
+      _ => (),
+    }
+    i = i + 1
+  }
+  i = 0
+  while i < t.len() {
+    let v: Value := t.values.get(i).!
+    if is_table_array(v) {
+      let sub_path: str := join(path, t.keys.get(i).!.as_str())
+      let a: *mut Array := v.match { .array(a) => a, _ => { return } }
+      let mut j: usize := 0
+      while j < a.items.len() {
+        a.items.get(j).!.match {
+          .table(item) => {
+            section(out)
+            out.push_str("[[")
+            out.push_str(sub_path)
+            out.push_str("]]\n")
+            write_table(out, item, sub_path)
+          },
+          _ => (),
+        }
+        j = j + 1
+      }
+    }
+    i = i + 1
+  }
+}
+
+// `path.key`, with the key quoted if it has to be.
+join :: func (path: str, key: str) -> str {
+  let mut s: String := string.from(path)
+  if path.len() > 0 { s.push_byte(46) }
+  write_key(&mut s, key)
+  return s.as_str()
+}
+
+write_key :: func (out: *mut String, key: str) -> void {
+  let b: []u8 := key.as_bytes()
+  let mut bare: bool := b.len() > 0
+  let mut i: usize := 0
+  while i < b.len() {
+    let c: u8 := b[i]
+    let ok: bool := (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 45
+    if !ok { bare = false }
+    i = i + 1
+  }
+  if bare {
+    out.push_str(key)
+  } else {
+    write_string(out, key)
+  }
+}
+
+write_string :: func (out: *mut String, s: str) -> void {
+  let hex: str := "0123456789ABCDEF"
+  out.push_byte(34)
+  let b: []u8 := s.as_bytes()
+  let mut i: usize := 0
+  while i < b.len() {
+    let c: u8 := b[i]
+    if c == 34 {
+      out.push_str("\\\"")
+    } else if c == 92 {
+      out.push_str("\\\\")
+    } else if c == 10 {
+      out.push_str("\\n")
+    } else if c == 13 {
+      out.push_str("\\r")
+    } else if c == 9 {
+      out.push_str("\\t")
+    } else if c < 32 || c == 127 {
+      out.push_str("\\u00")
+      out.push_byte(hex.as_bytes()[cast.<usize>(c >> 4)])
+      out.push_byte(hex.as_bytes()[cast.<usize>(c & 15)])
+    } else {
+      out.push_byte(c)
+    }
+    i = i + 1
+  }
+  out.push_byte(34)
+}
+
+// A value where it stands: a scalar, an array in brackets, a table in braces.
+write_inline :: func (out: *mut String, v: Value) -> void {
+  v.match {
+    .boolean(b) => out.push_str(if b { "true" } else { "false" }),
+    .integer(n) => out.append(n),
+    .float(f) => write_float(out, f),
+    .string(s) => write_string(out, s.as_str()),
+    .array(a) => {
+      out.push_byte(91)
+      let mut i: usize := 0
+      while i < a.items.len() {
+        if i > 0 { out.push_str(", ") }
+        write_inline(out, a.items.get(i).!)
+        i = i + 1
+      }
+      out.push_byte(93)
+    },
+    .table(t) => {
+      if t.len() == 0 {
+        out.push_str("{}")
+        return
+      }
+      out.push_str("{ ")
+      let mut i: usize := 0
+      while i < t.len() {
+        if i > 0 { out.push_str(", ") }
+        write_key(out, t.keys.get(i).!.as_str())
+        out.push_str(" = ")
+        write_inline(out, t.values.get(i).!)
+        i = i + 1
+      }
+      out.push_str(" }")
+    },
+  }
+}
+
+write_float :: func (out: *mut String, f: f64) -> void {
+  if f != f {
+    out.push_str("nan")
+  } else if !float.is_finite(f) {
+    out.push_str(if f > 0.0 { "inf" } else { "-inf" })
+  } else {
+    out.push_str(float.format_f64(f))
+  }
+}

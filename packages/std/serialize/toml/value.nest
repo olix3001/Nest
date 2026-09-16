@@ -1,0 +1,100 @@
+// A TOML document as a tree.
+//
+// JSON can be read and written as a stream because a JSON value is written
+// where it sits. A TOML value need not be: `[server]` may come after the keys of
+// the root, and the scalars of a table are written before its sub-tables. So
+// both directions go through this tree — the parser builds it and a decoder
+// walks it; an encoder builds it and the writer walks it.
+//
+// Tables keep their keys in the order they were added, so a document written
+// from a struct lists its members in declaration order.
+
+string :: import "../../string.nest"
+{ String } :: import "../../string.nest"
+collections :: import "../../collections.nest"
+{ Vec } :: import "../../collections.nest"
+mem :: import <core/mem>
+
+@public Value :: enum {
+  boolean(bool),
+  integer(i64),
+  float(f64),
+  string(String),
+  array(*mut Array),
+  table(*mut Table),
+}
+
+@public Array :: struct {
+  items: Vec.<Value>,
+  // Built by `[[name]]` headers, which may add to it; an array written as
+  // `[ ... ]` is complete where it is written.
+  of_tables: bool,
+}
+
+@public Table :: struct {
+  keys: Vec.<String>,
+  values: Vec.<Value>,
+  // Opened by a `[name]` header, which may only happen once.
+  header: bool,
+  // Created by a dotted key (`a.b = 1`), so no header may open it later.
+  dotted: bool,
+  // Written `{ ... }`, which is complete where it is written.
+  inline: bool,
+}
+
+@public new_table :: func () -> *mut Table {
+  let t: *mut Table := mem.new.<Table>()
+  t.* = Table {
+    keys: collections.new.<String>(),
+    values: collections.new.<Value>(),
+    header: false,
+    dotted: false,
+    inline: false,
+  }
+  return t
+}
+
+@public new_array :: func (of_tables: bool) -> *mut Array {
+  let a: *mut Array := mem.new.<Array>()
+  a.* = Array { items: collections.new.<Value>(), of_tables: of_tables }
+  return a
+}
+
+impl Table {
+  // Where `key` is, when it is here.
+  @public find :: func (self: *Self, key: str) -> Option.<usize> {
+    let mut i: usize := 0
+    while i < self.keys.len() {
+      if self.keys.get(i).!.as_str() == key { return .some(i) }
+      i = i + 1
+    }
+    return .none
+  }
+
+  @public get :: func (self: *Self, key: str) -> Option.<Value> {
+    return self.find(key).match {
+      .some(i) => self.values.get(i),
+      .none => .none,
+    }
+  }
+
+  // Add `key`, which the caller has checked is not here yet.
+  @public add :: func (self: *mut Self, key: str, value: Value) -> void {
+    self.keys.push(string.from(key))
+    self.values.push(value)
+  }
+
+  @public len :: func (self: *Self) -> usize { return self.keys.len() }
+}
+
+// What a value is, for a message.
+@public describe :: func (v: Value) -> str {
+  return v.match {
+    .boolean(_) => "a boolean",
+    .integer(_) => "an integer",
+    .float(_) => "a float",
+    .string(_) => "a string",
+    .array(_) => "an array",
+    .table(_) => "a table",
+  }
+}

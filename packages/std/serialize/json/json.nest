@@ -1,0 +1,43 @@
+// JSON, both ways.
+//
+//     json :: import <std/serialize/json>
+//
+//     let text: String := json.to_string(user).!
+//     let back: User := json.from_str.<User>(text.as_str()).!
+//
+// Integers and floats are told apart by how they are written: `1` is an
+// integer and `1.0` a float, and a float is always written with a `.` or an
+// exponent so it reads back as one. JSON has no NaN or infinity, so writing one
+// is an error.
+
+{ Error } :: import "../error.nest"
+{ Encode, Encoder } :: import "../encode.nest"
+{ Decode, Decoder } :: import "../decode.nest"
+{ String } :: import "../../string.nest"
+mem :: import <core/mem>
+
+@public { Writer, writer } :: import "writer.nest"
+@public { Reader, reader } :: import "reader.nest"
+
+// `v` as compact JSON.
+@public to_string :: func <T: Encode> (v: T) -> Result.<String, Error> {
+  let mut w: Writer := writer(false)
+  v.encode(&mut w).?
+  return .ok(w.out)
+}
+
+// `v` as JSON with each element on its own line.
+@public to_string_pretty :: func <T: Encode> (v: T) -> Result.<String, Error> {
+  let mut w: Writer := writer(true)
+  v.encode(&mut w).?
+  return .ok(w.out)
+}
+
+// The `T` that `text` holds. All of `text` must be that one value.
+@public from_str :: func <T: Decode> (text: str) -> Result.<T, Error> {
+  let slot: *mut T := mem.new.<T>()
+  let mut r: Reader := reader(text)
+  slot.decode(&mut r).?
+  r.finish().?
+  return .ok(slot.*)
+}

@@ -1,0 +1,19 @@
+// The attributes a type writes on its members to change how they are encoded.
+//
+// They are format-neutral — a renamed member is renamed in JSON and in TOML —
+// and a program brings them into scope by name, because an attribute is looked
+// up where it is written:
+//
+//     { rename, skip } :: import <std/serialize>
+//
+//     User :: struct {
+//       @rename(name: "user_id") id: i64,
+//       @skip cache: Cache,
+//     }
+
+// The key this member is written under, instead of its own name.
+@public @attribute rename :: struct { name: str }
+
+// Leave this member out: it is not written, and not read — decoding leaves it
+// zeroed.
+@public @attribute skip :: struct {}

@@ -1,0 +1,37 @@
+// TOML, both ways.
+//
+//     toml :: import <std/serialize/toml>
+//
+//     let text: String := toml.to_string(config).!
+//     let back: Config := toml.from_str.<Config>(text.as_str()).!
+//
+// A TOML document is a table, so the value written must encode as a map — a
+// struct, or a map keyed by text. TOML has no null: a member that is `.none`
+// is left out, and reads back as `.none` because it is missing.
+
+{ Error } :: import "../error.nest"
+{ Encode, Encoder } :: import "../encode.nest"
+{ Decode, Decoder } :: import "../decode.nest"
+{ String } :: import "../../string.nest"
+mem :: import <core/mem>
+
+@public { Value, Array, Table } :: import "value.nest"
+@public { parse } :: import "parser.nest"
+@public { Builder, builder, write } :: import "writer.nest"
+@public { TreeDecoder, tree_decoder } :: import "tree_decoder.nest"
+
+// `v` as a TOML document.
+@public to_string :: func <T: Encode> (v: T) -> Result.<String, Error> {
+  let mut b: Builder := builder()
+  v.encode(&mut b).?
+  return .ok(write(b.document().?))
+}
+
+// The `T` that the document `text` holds.
+@public from_str :: func <T: Decode> (text: str) -> Result.<T, Error> {
+  let root: *mut Table := parse(text).?
+  let slot: *mut T := mem.new.<T>()
+  let mut d: TreeDecoder := tree_decoder(root)
+  slot.decode(&mut d).?
+  return .ok(slot.*)
+}

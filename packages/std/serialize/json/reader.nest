@@ -1,0 +1,449 @@
+// A JSON document, read one `Decoder` call at a time.
+//
+// A pull parser: nothing is built but the values asked for, and the only state
+// is where the reader is and, for each open bracket, whether an element has been
+// read in it yet — which is what says whether a comma must come next.
+//
+// Every error carries the line and column it was found at.
+
+{ Error, error_at } :: import "../error.nest"
+{ Token, Decoder } :: import "../decode.nest"
+float :: import "../float.nest"
+string :: import "../../string.nest"
+{ String } :: import "../../string.nest"
+collections :: import "../../collections.nest"
+{ Vec } :: import "../../collections.nest"
+
+@public Reader :: struct {
+  text: []u8,
+  pos: usize,
+  line: usize,
+  column: usize,
+  // One flag per open `[` or `{`: nothing has been read inside it yet.
+  first: Vec.<bool>,
+}
+
+@public reader :: func (text: str) -> Reader {
+  return Reader {
+    text: text.as_bytes(),
+    pos: 0,
+    line: 1,
+    column: 1,
+    first: collections.new.<bool>(),
+  }
+}
+
+// Where a number's text ends, and whether it was written as a float.
+Number :: struct {
+  end: usize,
+  float: bool,
+  negative: bool,
+}
+
+is_digit :: func (c: u8) -> bool { return c >= 48 && c <= 57 }
+
+hex_value :: func (c: u8) -> Option.<u32> {
+  if c >= 48 && c <= 57 { return .some(cast.<u32>(c - 48)) }
+  if c >= 97 && c <= 102 { return .some(cast.<u32>(c - 87)) }
+  if c >= 65 && c <= 70 { return .some(cast.<u32>(c - 55)) }
+  return .none
+}
+
+impl Reader {
+  at_end :: func (self: *Self) -> bool { return self.pos >= self.text.len() }
+
+  // The byte at the reader, or zero past the end — no JSON token starts with one.
+  current :: func (self: *Self) -> u8 {
+    if self.pos >= self.text.len() { return 0 }
+    return self.text[self.pos]
+  }
+
+  advance :: func (self: *mut Self) -> void {
+    if self.current() == 10 {
+      self.line = self.line + 1
+      self.column = 1
+    } else {
+      self.column = self.column + 1
+    }
+    self.pos = self.pos + 1
+  }
+
+  skip_space :: func (self: *mut Self) -> void {
+    while !self.at_end() {
+      let c: u8 := self.current()
+      if c != 32 && c != 9 && c != 10 && c != 13 { return }
+      self.advance()
+    }
+  }
+
+  // What the text at the reader is, as a message.
+  found :: func (self: *Self) -> str {
+    if self.at_end() { return "the end of the document" }
+    let c: u8 := self.current()
+    let one: str := cast.<str>(self.text[self.pos..<self.pos + 1])
+    if c < 32 || c > 126 { return f"byte {c}" }
+    return f"`{one}`"
+  }
+
+  expect :: func (self: *mut Self, byte: u8, what: str) -> Result.<void, Error> {
+    self.skip_space()
+    if self.current() != byte {
+      return .err(self.fail(f"expected {what}, found {self.found()}"))
+    }
+    self.advance()
+    return .ok(())
+  }
+
+  // The literal `word`, which the caller has seen the first byte of.
+  literal :: func (self: *mut Self, word: str) -> Result.<void, Error> {
+    self.skip_space()
+    let w: []u8 := word.as_bytes()
+    let mut i: usize := 0
+    while i < w.len() {
+      if self.current() != w[i] {
+        return .err(self.fail(f"expected `{word}`, found {self.found()}"))
+      }
+      self.advance()
+      i = i + 1
+    }
+    return .ok(())
+  }
+
+  // Check a number's grammar from the reader without moving it:
+  // `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`.
+  scan_number :: func (self: *mut Self) -> Result.<Number, Error> {
+    let t: []u8 := self.text
+    let mut i: usize := self.pos
+    let negative: bool := i < t.len() && t[i] == 45
+    if negative { i = i + 1 }
+    if i >= t.len() || !is_digit(t[i]) {
+      return .err(self.fail(f"expected a number, found {self.found()}"))
+    }
+    if t[i] == 48 {
+      i = i + 1
+      if i < t.len() && is_digit(t[i]) {
+        return .err(self.fail("a number may not start with a zero"))
+      }
+    } else {
+      while i < t.len() && is_digit(t[i]) { i = i + 1 }
+    }
+    let mut is_float: bool := false
+    if i < t.len() && t[i] == 46 {
+      is_float = true
+      i = i + 1
+      if i >= t.len() || !is_digit(t[i]) {
+        return .err(self.fail("expected a digit after the decimal point"))
+      }
+      while i < t.len() && is_digit(t[i]) { i = i + 1 }
+    }
+    if i < t.len() && (t[i] == 101 || t[i] == 69) {
+      is_float = true
+      i = i + 1
+      if i < t.len() && (t[i] == 43 || t[i] == 45) { i = i + 1 }
+      if i >= t.len() || !is_digit(t[i]) {
+        return .err(self.fail("expected a digit in the exponent"))
+      }
+      while i < t.len() && is_digit(t[i]) { i = i + 1 }
+    }
+    return .ok(Number { end: i, float: is_float, negative: negative })
+  }
+
+  // Move past a number `scan_number` has checked.
+  consume :: func (self: *mut Self, end: usize) -> void {
+    while self.pos < end { self.advance() }
+  }
+
+  // The magnitude of an integer's digits, from the reader to `end`, or an error
+  // when it does not fit in 64 bits.
+  magnitude :: func (self: *mut Self, end: usize) -> Result.<u64, Error> {
+    let mut i: usize := self.pos
+    if self.text[i] == 45 { i = i + 1 }
+    let mut v: u64 := 0
+    let max: u64 := 18446744073709551615
+    while i < end {
+      let digit: u64 := cast.<u64>(self.text[i] - 48)
+      if v > (max - digit) / 10 {
+        return .err(self.fail("an integer too large for 64 bits"))
+      }
+      v = v * 10 + digit
+      i = i + 1
+    }
+    return .ok(v)
+  }
+
+  // The four hex digits of a `\u` escape, the `\u` already read.
+  hex4 :: func (self: *mut Self) -> Result.<u32, Error> {
+    let mut v: u32 := 0
+    let mut i: usize := 0
+    while i < 4 {
+      let digit: u32 := hex_value(self.current()).match {
+        .some(d) => d,
+        .none => { return .err(self.fail(f"expected a hex digit, found {self.found()}")) },
+      }
+      v = (v << 4) | digit
+      self.advance()
+      i = i + 1
+    }
+    return .ok(v)
+  }
+
+  // The rest of a `\u` escape: one code unit, or a surrogate pair of two.
+  unicode_escape :: func (self: *mut Self) -> Result.<char, Error> {
+    let high: u32 := self.hex4().?
+    if high >= 0xDC00 && high <= 0xDFFF {
+      return .err(self.fail("a low surrogate with no high surrogate before it"))
+    }
+    if high < 0xD800 || high > 0xDBFF { return .ok(cast.<char>(high)) }
+    if self.current() != 92 {
+      return .err(self.fail("a high surrogate with no low surrogate after it"))
+    }
+    self.advance()
+    if self.current() != 117 {
+      return .err(self.fail("a high surrogate with no low surrogate after it"))
+    }
+    self.advance()
+    let low: u32 := self.hex4().?
+    if low < 0xDC00 || low > 0xDFFF {
+      return .err(self.fail("a high surrogate with no low surrogate after it"))
+    }
+    return .ok(cast.<char>(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)))
+  }
+
+  // An open bracket was read: push its flag.
+  enter :: func (self: *mut Self) -> void { self.first.push(true) }
+
+  // Before an element or a key: `close` ends the container (and gives `false`),
+  // otherwise a comma must separate this one from the last.
+  another :: func (self: *mut Self, close: u8, what: str) -> Result.<bool, Error> {
+    let bracket: str := if close == 93 { "`]`" } else { "`}`" }
+    self.skip_space()
+    let n: usize := self.first.len()
+    let first: bool := self.first.get(n - 1).!
+    if self.current() == close {
+      self.advance()
+      self.first.pop().!
+      return .ok(false)
+    }
+    if !first {
+      if self.current() != 44 {
+        return .err(self.fail(f"expected `,` or {bracket}, found {self.found()}"))
+      }
+      self.advance()
+      self.skip_space()
+      if self.current() == close {
+        return .err(self.fail(f"a trailing `,` in an {what}"))
+      }
+    }
+    self.first.set(n - 1, false)
+    return .ok(true)
+  }
+
+  // Everything after the value must be whitespace.
+  @public finish :: func (self: *mut Self) -> Result.<void, Error> {
+    self.skip_space()
+    if !self.at_end() {
+      return .err(self.fail(f"expected the end of the document, found {self.found()}"))
+    }
+    return .ok(())
+  }
+}
+
+impl Decoder for Reader {
+  peek :: func (self: *mut Self) -> Result.<Token, Error> {
+    self.skip_space()
+    let c: u8 := self.current()
+    if c == 110 { return .ok(.null) }
+    if c == 116 || c == 102 { return .ok(.boolean) }
+    if c == 34 { return .ok(.string) }
+    if c == 91 { return .ok(.seq) }
+    if c == 123 { return .ok(.map) }
+    if c == 45 || is_digit(c) {
+      let n: Number := self.scan_number().?
+      if n.float { return .ok(.float) }
+      return .ok(.integer)
+    }
+    return .err(self.fail(f"expected a value, found {self.found()}"))
+  }
+
+  read_null :: func (self: *mut Self) -> Result.<void, Error> {
+    return self.literal("null")
+  }
+
+  read_bool :: func (self: *mut Self) -> Result.<bool, Error> {
+    self.skip_space()
+    if self.current() == 116 {
+      self.literal("true").?
+      return .ok(true)
+    }
+    if self.current() == 102 {
+      self.literal("false").?
+      return .ok(false)
+    }
+    return .err(self.fail(f"expected `true` or `false`, found {self.found()}"))
+  }
+
+  read_int :: func (self: *mut Self) -> Result.<i64, Error> {
+    self.skip_space()
+    let n: Number := self.scan_number().?
+    if n.float { return .err(self.fail("expected an integer, found a float")) }
+    let m: u64 := self.magnitude(n.end).?
+    let limit: u64 := 9223372036854775807
+    let mut v: i64 := 0
+    if n.negative {
+      if m > limit + 1 { return .err(self.fail("an integer too small for an `i64`")) }
+      if m == limit + 1 {
+        v = 0 - cast.<i64>(limit) - 1
+      } else {
+        v = 0 - cast.<i64>(m)
+      }
+    } else {
+      if m > limit { return .err(self.fail("an integer too large for an `i64`")) }
+      v = cast.<i64>(m)
+    }
+    self.consume(n.end)
+    return .ok(v)
+  }
+
+  read_uint :: func (self: *mut Self) -> Result.<u64, Error> {
+    self.skip_space()
+    let n: Number := self.scan_number().?
+    if n.float { return .err(self.fail("expected an integer, found a float")) }
+    if n.negative { return .err(self.fail("expected an integer that is not negative")) }
+    let m: u64 := self.magnitude(n.end).?
+    self.consume(n.end)
+    return .ok(m)
+  }
+
+  read_float :: func (self: *mut Self) -> Result.<f64, Error> {
+    self.skip_space()
+    let n: Number := self.scan_number().?
+    let text: str := cast.<str>(self.text[self.pos..<n.end])
+    let v: f64 := float.parse_f64(text).match {
+      .some(v) => v,
+      .none => { return .err(self.fail(f"`{text}` is not a number")) },
+    }
+    self.consume(n.end)
+    return .ok(v)
+  }
+
+  read_str :: func (self: *mut Self) -> Result.<String, Error> {
+    self.expect(34, "a string").?
+    let mut out: String := string.new()
+    while true {
+      if self.at_end() { return .err(self.fail("a string with no closing `\"`")) }
+      let c: u8 := self.current()
+      if c == 34 {
+        self.advance()
+        break
+      }
+      if c < 32 {
+        return .err(self.fail("a control character in a string must be escaped"))
+      }
+      if c != 92 {
+        out.push_byte(c)
+        self.advance()
+      } else {
+        self.advance()
+        let e: u8 := self.current()
+        if e == 117 {
+          self.advance()
+          out.push(self.unicode_escape().?)
+        } else {
+          let mut byte: u8 := 0
+          if e == 34 || e == 92 || e == 47 { byte = e }
+          if e == 98 { byte = 8 }
+          if e == 102 { byte = 12 }
+          if e == 110 { byte = 10 }
+          if e == 114 { byte = 13 }
+          if e == 116 { byte = 9 }
+          if byte == 0 {
+            return .err(self.fail(f"`\\` followed by {self.found()} is not an escape"))
+          }
+          out.push_byte(byte)
+          self.advance()
+        }
+      }
+    }
+    return .ok(out)
+  }
+
+  begin_seq :: func (self: *mut Self) -> Result.<void, Error> {
+    self.expect(91, "`[`").?
+    self.enter()
+    return .ok(())
+  }
+
+  next_element :: func (self: *mut Self) -> Result.<bool, Error> {
+    return self.another(93, "array")
+  }
+
+  begin_map :: func (self: *mut Self) -> Result.<void, Error> {
+    self.expect(123, "`{`").?
+    self.enter()
+    return .ok(())
+  }
+
+  next_key :: func (self: *mut Self) -> Result.<Option.<String>, Error> {
+    if !self.another(125, "object").? { return .ok(.none) }
+    self.skip_space()
+    if self.current() != 34 {
+      return .err(self.fail(f"expected a key, found {self.found()}"))
+    }
+    let key: String := self.read_str().?
+    self.expect(58, "`:`").?
+    return .ok(.some(key))
+  }
+
+  skip :: func (self: *mut Self) -> Result.<void, Error> {
+    let t: Token := self.peek().?
+    return t.match {
+      .null => self.read_null(),
+      .boolean => self.skip_bool(),
+      .integer => self.skip_number(),
+      .float => self.skip_number(),
+      .string => self.skip_str(),
+      .seq => self.skip_seq(),
+      .map => self.skip_map(),
+    }
+  }
+
+  fail :: func (self: *mut Self, message: str) -> Error {
+    return error_at(message, self.line, self.column)
+  }
+}
+
+// What `skip` does with each kind of value — here rather than in the match,
+// because each discards a different result.
+impl Reader {
+  skip_bool :: func (self: *mut Self) -> Result.<void, Error> {
+    self.read_bool().?
+    return .ok(())
+  }
+
+  skip_number :: func (self: *mut Self) -> Result.<void, Error> {
+    let n: Number := self.scan_number().?
+    self.consume(n.end)
+    return .ok(())
+  }
+
+  skip_str :: func (self: *mut Self) -> Result.<void, Error> {
+    self.read_str().?
+    return .ok(())
+  }
+
+  skip_seq :: func (self: *mut Self) -> Result.<void, Error> {
+    self.begin_seq().?
+    while self.next_element().? { self.skip().? }
+    return .ok(())
+  }
+
+  skip_map :: func (self: *mut Self) -> Result.<void, Error> {
+    self.begin_map().?
+    while true {
+      let more: bool := self.next_key().?.match { .some(_) => true, .none => false }
+      if !more { break }
+      self.skip().?
+    }
+    return .ok(())
+  }
+}
