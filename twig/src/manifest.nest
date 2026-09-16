@@ -1,0 +1,216 @@
+// `nest.toml`: what a package says about itself.
+//
+//     [package]
+//     name = "hello"
+//     version = "0.1.0"
+//
+//     [lib]
+//     path = "src/package.nest"
+//
+//     [[bin]]
+//     name = "hello"
+//     path = "src/main.nest"
+//
+//     [dependencies]
+//     util = { path = "../util" }
+//
+//     [profile.release]
+//     overflow = "trap"
+//     codegen-units = 4
+//
+// **Targets are explicit.** Nothing is inferred from which files exist: a
+// package with no `[lib]` cannot be depended on, and one with no `[[bin]]` has
+// nothing to run. Every path is relative to the directory the manifest is in.
+//
+// A dependency is a `path` for now. The table is a table rather than a string so
+// that `version` and `git` have somewhere to go when there is a registry.
+
+fs :: import <std/fs>
+toml :: import <std/serialize/toml>
+{ rename } :: import <std/serialize>
+{ HashMap } :: import <std/collections>
+{ make } :: import <core/mem>
+path :: import "path.nest"
+
+@public FILE_NAME: str :: "nest.toml"
+
+@public Manifest :: struct {
+  package: Package,
+  lib: Option.<Lib>,
+  bin: Option.<[]Bin>,
+  dependencies: Option.<HashMap.<str, Dependency>>,
+  profile: Option.<Profiles>,
+}
+
+@public Package :: struct {
+  name: str,
+  version: str,
+}
+
+@public Lib :: struct {
+  path: str,
+}
+
+@public Bin :: struct {
+  name: str,
+  path: str,
+}
+
+@public Dependency :: struct {
+  path: Option.<str>,
+}
+
+@public Profiles :: struct {
+  debug: Option.<ProfileSettings>,
+  release: Option.<ProfileSettings>,
+}
+
+// What a manifest may change about a built-in profile. Anything left out keeps
+// the profile's own value.
+@public ProfileSettings :: struct {
+  overflow: Option.<str>,
+  @rename(name: "codegen-units") codegen_units: Option.<usize>,
+}
+
+impl Manifest {
+  @public bins :: func (self: *Self) -> []Bin {
+    return self.bin.match { .some(b) => b, .none => cast.<[]Bin>(make.<[]Bin>(0)) }
+  }
+
+  // The dependency names, sorted, so that everything built from them comes out
+  // in the same order on every run.
+  @public dependency_names :: func (self: *Self) -> []str {
+    return self.dependencies.match {
+      .some(d) => sorted(d.keys_of()),
+      .none => cast.<[]str>(make.<[]str>(0)),
+    }
+  }
+
+  @public dependency :: func (self: *Self, name: str) -> Dependency {
+    return self.dependencies.!.get(name).!
+  }
+}
+
+// The manifest in directory `dir`, read and checked.
+@public load :: func (dir: str) -> Result.<Manifest, str> {
+  let file: str := path.join(dir, FILE_NAME)
+  let text: str := fs.read_to_string(file).match {
+    .ok(t) => t,
+    .err(e) => {
+      if e.not_found() { return .err(f"no `{FILE_NAME}` in `{dir}`") }
+      return .err(f"cannot read `{file}`: {e.describe()}")
+    },
+  }
+  let m: Manifest := toml.from_str.<Manifest>(text).match {
+    .ok(m) => m,
+    .err(e) => { return .err(f"`{file}`: {e}") },
+  }
+  check(&m).match {
+    .ok(_) => (),
+    .err(why) => { return .err(f"`{file}`: {why}") },
+  }
+  return .ok(m)
+}
+
+// What decoding cannot say: that names are names, and targets are there.
+check :: func (m: *Manifest) -> Result.<void, str> {
+  valid_name(m.package.name).?
+  let bins: []Bin := m.bins()
+  let has_lib: bool := m.lib.match { .some(_) => true, .none => false }
+  if has_lib == false && bins.len() == 0 {
+    return .err("the package has no targets: add a `[lib]` or a `[[bin]]`")
+  }
+  for i in 0..<bins.len() {
+    valid_name(bins[i].name).?
+    for j in 0..<i {
+      if bins[j].name == bins[i].name {
+        return .err(f"two binaries are named `{bins[i].name}`")
+      }
+    }
+  }
+  for name in m.dependency_names() {
+    valid_name(name).?
+    if name == "std" || name == "core" {
+      return .err(f"`{name}` ships with the compiler and is not a dependency")
+    }
+    if name == m.package.name {
+      return .err(f"the package depends on itself")
+    }
+    m.dependency(name).path.match {
+      .some(_) => (),
+      .none => { return .err(f"dependency `{name}` has no `path`, which is the only kind there is yet") },
+    }
+  }
+  m.profile.match {
+    .some(p) => {
+      check_settings("debug", p.debug).?
+      check_settings("release", p.release).?
+    },
+    .none => (),
+  }
+  return .ok(())
+}
+
+check_settings :: func (profile: str, settings: Option.<ProfileSettings>) -> Result.<void, str> {
+  let set: ProfileSettings := settings.match {
+    .some(set) => set,
+    .none => { return .ok(()) },
+  }
+  set.overflow.match {
+    .some(o) => {
+      if o != "trap" && o != "wrap" {
+        return .err(f"`profile.{profile}.overflow` is `{o}`; it is `trap` or `wrap`")
+      }
+    },
+    .none => (),
+  }
+  set.codegen_units.match {
+    .some(n) => {
+      if n == 0 { return .err(f"`profile.{profile}.codegen-units` must be at least 1") }
+    },
+    .none => (),
+  }
+  return .ok(())
+}
+
+// A package or binary name: what an `import <name>` can say, which is an
+// identifier — ASCII letters, digits and `_`, not starting with a digit.
+@public valid_name :: func (name: str) -> Result.<void, str> {
+  let b: []u8 := name.as_bytes()
+  if b.len() == 0 { return .err("a name cannot be empty") }
+  for i in 0..<b.len() {
+    let c: u8 := b[i]
+    let letter: bool := (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95
+    let digit: bool := c >= 48 && c <= 57
+    if letter == false && (digit == false || i == 0) {
+      return .err(f"`{name}` is not a valid name: use letters, digits and `_`, not starting with a digit")
+    }
+  }
+  return .ok(())
+}
+
+// `xs` in byte order. An insertion sort: a manifest has a handful of names.
+@public sorted :: func (xs: []str) -> []str {
+  let out: []mut str := make.<[]str>(xs.len())
+  for i in 0..<xs.len() {
+    let mut j: usize := i
+    while j > 0 && before(xs[i], out[j - 1]) {
+      out[j] = out[j - 1]
+      j = j - 1
+    }
+    out[j] = xs[i]
+  }
+  return cast.<[]str>(out)
+}
+
+// Whether `a` sorts before `b`, byte by byte.
+before :: func (a: str, b: str) -> bool {
+  let x: []u8 := a.as_bytes()
+  let y: []u8 := b.as_bytes()
+  let mut i: usize := 0
+  while i < x.len() && i < y.len() {
+    if x[i] != y[i] { return x[i] < y[i] }
+    i = i + 1
+  }
+  return x.len() < y.len()
+}

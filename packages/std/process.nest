@@ -112,6 +112,24 @@ index_of_eq :: func (s: str) -> usize {
 
 EQUALS: u8 :: 61
 
+// ===< Where it is >===
+
+// The working directory, as an absolute path.
+//
+// `getcwd` wants a buffer and answers `ERANGE` when the path does not fit in
+// it, so the buffer starts at a size most paths fit in and doubles until this
+// one does.
+@public current_dir :: func () -> Result.<str, io.Error> {
+  let mut cap: usize := 256
+  loop {
+    let buf: []mut u8 := make.<[]u8>(cap)
+    let r: sys.Res := sys.getcwd(buf)
+    if r.failed() == false { return .ok(cast.<str>(buf[0..<cast.<usize>(r.n)])) }
+    if r.err != libc.ERANGE { return .err(io.error_of("current directory", "", r)) }
+    cap = cap * 2
+  }
+}
+
 // ===< Ending >===
 
 // Stop with this status, now.

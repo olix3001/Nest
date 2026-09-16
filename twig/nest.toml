@@ -1,0 +1,7 @@
+[package]
+name = "twig"
+version = "0.1.0"
+
+[[bin]]
+name = "twig"
+path = "src/main.nest"

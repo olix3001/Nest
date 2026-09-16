@@ -1,0 +1,115 @@
+// The packages a build involves: the one being built, and everything it depends
+// on, directly or not.
+//
+// ### One package per name
+//
+// `nestc` is handed every package at once, as `--package name=root`, and a
+// name means one root. So the graph is **flat**: two dependencies that both
+// depend on `util` must mean the same `util` — the same directory — and two
+// different directories claiming one name is an error here rather than a
+// question for the compiler.
+
+fs :: import <std/fs>
+collections :: import <std/collections>
+{ Vec } :: import <std/collections>
+{ make } :: import <core/mem>
+path :: import "path.nest"
+manifest :: import "manifest.nest"
+{ Manifest } :: import "manifest.nest"
+
+// A package, where it is, and what its manifest says.
+@public Member :: struct {
+  name: str,
+  // Absolute and normalized, which is what makes two of them comparable.
+  dir: str,
+  manifest: Manifest,
+}
+
+impl Member {
+  // The file `nestc` should be given as this package's root.
+  @public lib_root :: func (self: *Self) -> Option.<str> {
+    return self.manifest.lib.match {
+      .some(l) => .some(path.normalize(path.join(self.dir, l.path))),
+      .none => .none,
+    }
+  }
+}
+
+@public Workspace :: struct {
+  root: Member,
+  // Every other package in the graph, sorted by name.
+  deps: []Member,
+}
+
+// The directory holding the manifest `start` is under: `start` itself, or the
+// nearest parent with a `nest.toml` in it.
+@public find_root :: func (start: str) -> Result.<str, str> {
+  let mut dir: str := path.normalize(start)
+  loop {
+    if fs.exists(path.join(dir, manifest.FILE_NAME)) { return .ok(dir) }
+    if dir == "/" || dir == "." {
+      return .err(f"could not find `{manifest.FILE_NAME}` in `{start}` or any parent directory")
+    }
+    dir = path.parent(dir)
+  }
+}
+
+// The package in `root_dir` and everything it reaches.
+@public resolve :: func (root_dir: str) -> Result.<Workspace, str> {
+  let root: Member := member(root_dir, manifest.load(root_dir).?)
+  let mut all: Vec.<Member> := collections.new.<Member>()
+  all.push(root)
+
+  // Breadth first; `all` is the queue as well as the answer.
+  let mut next: usize := 0
+  while next < all.len() {
+    let from: Member := all.get(next).!
+    next = next + 1
+    for name in from.manifest.dependency_names() {
+      let rel: str := from.manifest.dependency(name).path.!
+      let dir: str := path.normalize(path.join(from.dir, rel))
+      let seen: Option.<Member> := find(all.as_slice(), name)
+      let again: bool := seen.match {
+        .some(m) => {
+          if m.dir != dir {
+            return .err(f"two packages are named `{name}`: `{m.dir}` and `{dir}` (from `{from.name}`)")
+          }
+          true
+        },
+        .none => false,
+      }
+      if again { continue }
+
+      let m: Manifest := manifest.load(dir).match {
+        .ok(m) => m,
+        .err(why) => { return .err(f"dependency `{name}` of `{from.name}`: {why}") },
+      }
+      if m.package.name != name {
+        return .err(f"`{from.name}` depends on `{name}`, but the package at `{dir}` is `{m.package.name}`")
+      }
+      let has_lib: bool := m.lib.match { .some(_) => true, .none => false }
+      if has_lib == false {
+        return .err(f"`{from.name}` depends on `{name}`, which has no `[lib]`")
+      }
+      all.push(member(dir, m))
+    }
+  }
+
+  let names: []mut str := make.<[]str>(all.len() - 1)
+  for i in 1..<all.len() { names[i - 1] = all.get(i).!.name }
+  let order: []str := manifest.sorted(cast.<[]str>(names))
+  let deps: []mut Member := make.<[]Member>(order.len())
+  for i in 0..<order.len() { deps[i] = find(all.as_slice(), order[i]).! }
+  return .ok(Workspace { root: root, deps: cast.<[]Member>(deps) })
+}
+
+member :: func (dir: str, m: Manifest) -> Member {
+  return Member { name: m.package.name, dir: dir, manifest: m }
+}
+
+find :: func (members: []Member, name: str) -> Option.<Member> {
+  for m in members {
+    if m.name == name { return .some(m) }
+  }
+  return .none
+}

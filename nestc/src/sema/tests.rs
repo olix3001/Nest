@@ -2554,6 +2554,18 @@ fn the_two_package_example_analyzes_cleanly() {
     }
 }
 
+#[test]
+fn twig_analyzes_cleanly() {
+    // twig is the largest program written in Nest and the one that uses the most
+    // of `std`, so a change to either that breaks it should fail here rather
+    // than the next time someone builds it.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../twig/src/main.nest");
+    let mut session = Session::new();
+    let file = session.load_entry(path).expect("twig's entry loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
 /// Build a two-package program in memory: `shapes` owns a type, `render` owns a
 /// trait, and `main` is the program that imports both.
 fn two_packages(program: &str) -> Session {

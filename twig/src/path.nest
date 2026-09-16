@@ -1,0 +1,79 @@
+// Paths as text.
+//
+// Everything twig does with a path is lexical: join two, cut one down to its
+// directory, and fold `.` and `..` out of one so that a package reached through
+// two spellings of its directory is recognised as one package. Nothing here
+// touches the filesystem, so a symlink is a different path from its target.
+
+s :: import <std/str>
+collections :: import <std/collections>
+{ Vec } :: import <std/collections>
+
+SLASH: u8 :: 47
+
+// Whether `p` starts at the root.
+@public is_absolute :: func (p: str) -> bool {
+  return p.len() > 0 && p.as_bytes()[0] == SLASH
+}
+
+// `rel` read from inside `base`. An absolute `rel` is already where it is.
+@public join :: func (base: str, rel: str) -> str {
+  if is_absolute(rel) || base.len() == 0 { return rel }
+  if rel.len() == 0 { return base }
+  if s.ends_with(base, "/") { return f"{base}{rel}" }
+  return f"{base}/{rel}"
+}
+
+// `p` with `.`, `..` and repeated slashes folded out.
+//
+// A `..` at the top of a relative path has nothing to cancel and is kept; one
+// at the root of an absolute path is dropped, because the root is its own
+// parent.
+@public normalize :: func (p: str) -> str {
+  let absolute: bool := is_absolute(p)
+  let mut kept: Vec.<str> := collections.new.<str>()
+  for part in s.split(p, "/") {
+    if part == "" || part == "." { continue }
+    if part == ".." {
+      let top: str := if kept.len() > 0 { kept.get(kept.len() - 1).! } else { ".." }
+      if top != ".." {
+        kept.pop().match { .some(_) => (), .none => () }
+      } else if absolute == false {
+        kept.push(part)
+      }
+      continue
+    }
+    kept.push(part)
+  }
+  let body: str := s.join(kept.as_slice(), "/")
+  if absolute { return f"/{body}" }
+  if body.len() == 0 { return "." }
+  return body
+}
+
+// The directory `p` is in: everything before its last slash. The root's parent
+// is the root, and a name with no slash is in `.`. `p` is normalized, so it has
+// no trailing slash to cut at instead.
+@public parent :: func (p: str) -> str {
+  return s.rfind(p, "/").match {
+    .some(0) => "/",
+    .some(at) => s.slice(p, 0, at),
+    .none => ".",
+  }
+}
+
+// `p` as seen from `base`, when it is inside it; otherwise `p` as it is.
+@public relative_to :: func (p: str, base: str) -> str {
+  if p == base { return "." }
+  let prefix: str := if s.ends_with(base, "/") { base } else { f"{base}/" }
+  if s.starts_with(p, prefix) { return s.slice(p, prefix.len(), p.len()) }
+  return p
+}
+
+// The last component of `p`, which is normalized.
+@public file_name :: func (p: str) -> str {
+  return s.rfind(p, "/").match {
+    .some(at) => s.slice(p, at + 1, p.len()),
+    .none => p,
+  }
+}

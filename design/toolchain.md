@@ -467,7 +467,7 @@ through TOML too — `a_struct_round_trips_through_json` and
 its `.nmeta` without reading its source, and the two link into a program.
 **Commit. Stop.**
 
-### Step 9 — `twig`
+### Step 9 — `twig` — **done** (the build half)
 
 The package tool, **written in Nest**: `nest.toml`, dependency resolution, the
 target directory, and `nestc` invoked per package with `--package`, `-C` and
@@ -475,6 +475,36 @@ target directory, and `nestc` invoked per package with `--package`, `-C` and
 
 *Done when*: `twig build` builds a package with a dependency, and `twig run`
 runs it.
+
+It was built **before step 8**, on the user's call: dependencies are source, so
+nothing needs a library format yet. What it is, as built (`twig/`):
+
+- **The manifest.** `[package]` is `name` and `version`. **Targets are
+  explicit** — `[lib] path` and `[[bin]] name`, `path` — and nothing is inferred
+  from which files exist. A dependency is `name = { path = "..." }`; it is a
+  table so `version`/`git` have somewhere to go when the package-manager half
+  arrives. `[profile.debug]` / `[profile.release]` may override `overflow` and
+  `codegen-units`; only the root package's profile is read.
+- **The graph is flat**: one directory per package name across the whole graph,
+  and a dependency must have a `[lib]` whose package name matches its key.
+  `std` and `core` are not dependencies.
+- **Commands**: `new <path>`, `init` (both `--lib`), `build`, `run [-- args]`,
+  with `--release` and `--bin`. Output goes to `build/<profile>/`: a binary by
+  its name, a library as `<name>.o`.
+- **One `nestc` run per target**, over the whole program, with every package in
+  the graph (the root's own `[lib]` included) as `--package`. `build::command`
+  is the one function that writes that command line; a `twig metadata` should
+  read it rather than repeat it.
+- **`nestc`** is `$NESTC`, else `nestc` on `PATH`.
+- **No lockfile** yet: path dependencies have nothing to lock.
+
+What it does not do yet:
+
+- **`--error-format=json`.** `std/process` cannot capture a child's output, so
+  `nestc` writes human diagnostics straight to the inherited stderr.
+- **Up-to-date checks.** Every build recompiles: there is no `stat`, so no
+  modification times (the `struct stat` layout problem in `std/fs`).
+- `check`, `clean`, `test`, `metadata`.
 
 **Commit. Stop.**
 

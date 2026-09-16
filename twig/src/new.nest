@@ -1,0 +1,47 @@
+// `twig new` and `twig init`: a package with one target, ready to build.
+
+fs :: import <std/fs>
+path :: import "path.nest"
+manifest :: import "manifest.nest"
+
+// Lay a package called `name` out in `dir`, which must exist. Nothing already
+// there is overwritten: a manifest in the way is an error, and a source file or
+// `.gitignore` in the way is kept.
+@public create :: func (dir: str, name: str, lib: bool) -> Result.<void, str> {
+  manifest.valid_name(name).?
+  let toml: str := path.join(dir, manifest.FILE_NAME)
+  if fs.exists(toml) { return .err(f"`{toml}` already exists") }
+
+  let src: str := path.join(dir, "src")
+  fs.create_dir_all(src).match {
+    .ok(_) => (),
+    .err(e) => { return .err(e.describe()) },
+  }
+
+  let target: str := if lib {
+    "[lib]\npath = \"src/package.nest\"\n"
+  } else {
+    f"[[bin]]\nname = \"{name}\"\npath = \"src/main.nest\"\n"
+  }
+  write(toml, f"[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n{target}\n[dependencies]\n").?
+
+  if lib {
+    keep_or_write(path.join(src, "package.nest"), f"// The `{name}` package root.\n\n@public add :: func (a: i32, b: i32) -> i32 {{ return a + b }}\n").?
+  } else {
+    keep_or_write(path.join(src, "main.nest"), "io :: import <std/io>\n\nmain :: func () -> i32 {\n  io.println(\"Hello, world!\")\n  return 0\n}\n").?
+  }
+  keep_or_write(path.join(dir, ".gitignore"), "/build\n").?
+  return .ok(())
+}
+
+keep_or_write :: func (file: str, text: str) -> Result.<void, str> {
+  if fs.exists(file) { return .ok(()) }
+  return write(file, text)
+}
+
+write :: func (file: str, text: str) -> Result.<void, str> {
+  return fs.write(file, text.as_bytes()).match {
+    .ok(_) => .ok(()),
+    .err(e) => .err(e.describe()),
+  }
+}

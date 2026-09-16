@@ -70,6 +70,7 @@ extern("c") {
   @public mkdir  :: func (path: c.cstr, mode: c.uint) -> c.int
   @public rmdir  :: func (path: c.cstr) -> c.int
   @public access :: func (path: c.cstr, mode: c.int) -> c.int
+  @public getcwd :: func (buf: c.ptr.<c.uchar>, n: c.size_t) -> c.cstr
 }
 
 // `lseek`'s offset is `off_t`, which is 64 bits on both targets here — macOS
@@ -204,3 +205,7 @@ bsd_flags :: #inline func () -> bool {
 @public EINTR:  c.int :: 4
 @public EEXIST: c.int :: 17
 @public EISDIR: c.int :: 21
+
+// What `getcwd` answers when the buffer is too small for the path. Also the
+// same number on both.
+@public ERANGE: c.int :: 34

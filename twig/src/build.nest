@@ -1,0 +1,163 @@
+// Turning a workspace into `nestc` invocations, and running them.
+//
+// ### One function decides the command line
+//
+// `command` is the only place that knows which flags a build passes. Anything
+// else that needs to know how a package is compiled — a `twig metadata` for an
+// editor, when there is one — asks it, so the answer it gives and the build
+// that runs cannot drift apart.
+//
+// ### Dependencies are source
+//
+// There is no library format yet, so a dependency is not compiled on its own:
+// every target is one `nestc` run over the whole program, from the target's
+// entry file, with every package in the graph registered by `--package`.
+
+io :: import <std/io>
+fs :: import <std/fs>
+process :: import <std/process>
+collections :: import <std/collections>
+{ Vec } :: import <std/collections>
+path :: import "path.nest"
+{ Manifest, ProfileSettings } :: import "manifest.nest"
+{ Workspace, Member } :: import "workspace.nest"
+
+// The settings one build is made with.
+@public Profile :: struct {
+  name: str,
+  overflow: str,
+  codegen_units: usize,
+}
+
+// `debug` or `release`, with whatever the root manifest changed about it.
+// A dependency's `[profile]` is not read: how a program is built is the
+// program's decision.
+@public profile :: func (m: *Manifest, release: bool) -> Profile {
+  let mut p: Profile := if release {
+    Profile { name: "release", overflow: "wrap", codegen_units: 1 }
+  } else {
+    Profile { name: "debug", overflow: "trap", codegen_units: 1 }
+  }
+  let settings: Option.<ProfileSettings> := m.profile.match {
+    .some(ps) => if release { ps.release } else { ps.debug },
+    .none => .none,
+  }
+  settings.match {
+    .some(s) => {
+      s.overflow.match { .some(o) => { p.overflow = o }, .none => () }
+      s.codegen_units.match { .some(n) => { p.codegen_units = n }, .none => () }
+    },
+    .none => (),
+  }
+  return p
+}
+
+// What one target compiles from, and to.
+@public Target :: struct {
+  // What the output is called: the binary's name, or the package's for `[lib]`.
+  name: str,
+  entry: str,
+  lib: bool,
+}
+
+// The root package's targets: its library first, then its binaries.
+@public targets :: func (ws: *Workspace) -> []Target {
+  let root: *Member := &ws.root
+  let mut out: Vec.<Target> := collections.new.<Target>()
+  root.lib_root().match {
+    .some(entry) => out.push(Target { name: root.name, entry: entry, lib: true }),
+    .none => (),
+  }
+  for b in root.manifest.bins() {
+    out.push(Target { name: b.name, entry: path.normalize(path.join(root.dir, b.path)), lib: false })
+  }
+  return out.as_slice()
+}
+
+// Where a build with `p` writes.
+@public out_dir :: func (ws: *Workspace, p: Profile) -> str {
+  return path.join(path.join(ws.root.dir, "build"), p.name)
+}
+
+// The file `t` produces.
+@public output :: func (ws: *Workspace, p: Profile, t: Target) -> str {
+  let dir: str := out_dir(ws, p)
+  if t.lib { return path.join(dir, f"{t.name}.o") }
+  return path.join(dir, t.name)
+}
+
+@public Command :: struct {
+  program: str,
+  args: []str,
+}
+
+// The compiler: `$NESTC` when it is set, otherwise `nestc` from `PATH`.
+@public nestc :: func () -> str {
+  return process.env("NESTC").match {
+    .some(p) => if p.len() > 0 { p } else { "nestc" },
+    .none => "nestc",
+  }
+}
+
+// The `nestc` run that builds `t`.
+@public command :: func (ws: *Workspace, p: Profile, t: Target) -> Command {
+  let mut args: Vec.<str> := collections.new.<str>()
+  args.push(t.entry)
+  args.push("--emit")
+  args.push(if t.lib { "obj" } else { "link" })
+  args.push("-o")
+  args.push(output(ws, p, t))
+  // The root's own library is a package too, so its binaries can import it by
+  // name.
+  ws.root.lib_root().match {
+    .some(r) => package(&mut args, ws.root.name, r),
+    .none => (),
+  }
+  for d in ws.deps { package(&mut args, d.name, d.lib_root().!) }
+  setting(&mut args, f"profile={p.name}")
+  setting(&mut args, f"overflow={p.overflow}")
+  setting(&mut args, f"codegen-units={p.codegen_units}")
+  return Command { program: nestc(), args: args.as_slice() }
+}
+
+package :: func (args: *mut Vec.<str>, name: str, root: str) -> void {
+  args.push("--package")
+  args.push(f"{name}={root}")
+}
+
+setting :: func (args: *mut Vec.<str>, value: str) -> void {
+  args.push("-C")
+  args.push(value)
+}
+
+// Build `t`, with the compiler's diagnostics going straight to this process's
+// stderr.
+@public compile :: func (ws: *Workspace, p: Profile, t: Target) -> Result.<void, str> {
+  let dir: str := out_dir(ws, p)
+  fs.create_dir_all(dir).match {
+    .ok(_) => (),
+    .err(e) => { return .err(e.describe()) },
+  }
+  let c: Command := command(ws, p, t)
+  let status: process.Status := process.run(c.program, c.args).match {
+    .ok(s) => s,
+    .err(e) => { return .err(f"could not run `{c.program}`: {e.describe()}") },
+  }
+  return status.match {
+    .exited(0) => .ok(()),
+    // What a child that could not `exec` exits with (`process.spawn`).
+    .exited(127) => .err(f"could not run `{c.program}`: put `nestc` on `PATH`, or set `NESTC` to it"),
+    _ => .err(f"could not compile `{t.name}`"),
+  }
+}
+
+// A status line, in the shape of cargo's: the verb right-aligned, then the rest.
+@public status :: func (verb: str, rest: str) -> void {
+  let pad: usize := if verb.len() < 12 { 12 - verb.len() } else { 0 }
+  let mut i: usize := 0
+  while i < pad {
+    io.eprint(" ")
+    i = i + 1
+  }
+  io.eprintln(f"{verb} {rest}")
+}

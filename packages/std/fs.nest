@@ -153,6 +153,35 @@ put :: func (path: str, bytes: []u8, mode: Mode) -> Result.<void, io.Error> {
   return .ok(())
 }
 
+// Make a directory and every parent of it that is missing.
+//
+// Something already at one of those paths is **not** an error, which is the
+// point of asking for this rather than `create_dir`: a program making sure a
+// directory is there does not care who made it. A *file* in the way is still
+// an error, from the `mkdir` below it that fails with `ENOTDIR`.
+//
+// A failure is only reported when nothing is at the path afterwards, rather than
+// only on `EEXIST`: `mkdir` on a directory that exists answers `EROFS` or
+// `EACCES` instead on some filesystems, when the check it trips first is that
+// it could not create one.
+@public create_dir_all :: func (path: str) -> Result.<void, io.Error> {
+  let raw: []u8 := path.as_bytes()
+  let mut i: usize := 1
+  while i <= raw.len() {
+    if i == raw.len() || raw[i] == SLASH {
+      let prefix: str := cast.<str>(raw[0..<i])
+      let r: sys.Res := sys.mkdir(prefix, libc.MODE_DIR)
+      if r.failed() && r.err != libc.EEXIST && exists(prefix) == false {
+        return .err(io.error_of("create directory", prefix, r))
+      }
+    }
+    i = i + 1
+  }
+  return .ok(())
+}
+
+SLASH: u8 :: 47
+
 // Remove an empty directory.
 @public remove_dir :: func (path: str) -> Result.<void, io.Error> {
   let r: sys.Res := sys.rmdir(path)

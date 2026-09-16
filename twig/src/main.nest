@@ -1,0 +1,223 @@
+// twig: builds Nest packages.
+//
+// The command line is read by hand. It is small, and a second program that
+// needs the same parsing is what would earn a parser a place in `std`.
+
+io :: import <std/io>
+fs :: import <std/fs>
+s :: import <std/str>
+process :: import <std/process>
+collections :: import <std/collections>
+{ Vec } :: import <std/collections>
+path :: import "path.nest"
+build :: import "build.nest"
+{ Profile, Target } :: import "build.nest"
+workspace :: import "workspace.nest"
+{ Workspace } :: import "workspace.nest"
+new :: import "new.nest"
+
+usage :: func () -> str {
+  return s.join(.{
+    "usage: twig <command> [options]",
+    "",
+    "commands:",
+    "  new <path>       create a package in a new directory",
+    "  init             create a package in the current directory",
+    "  build            compile the package's targets",
+    "  run [-- <args>]  build a binary, then run it with <args>",
+    "",
+    "options:",
+    "  --release        build with the release profile (default: debug)",
+    "  --bin <name>     build or run only this binary",
+    "  --lib            new, init: a library rather than a binary",
+    "  -h, --help       this",
+    "",
+  }, "\n")
+}
+
+Options :: struct {
+  command: str,
+  release: bool,
+  bin: Option.<str>,
+  lib: bool,
+  positional: Vec.<str>,
+  // Everything after `--`, for `run` to pass on.
+  rest: []str,
+}
+
+main :: func () -> i32 {
+  let opts: Options := parse(process.args()).match {
+    .ok(o) => o,
+    .err(why) => {
+      io.eprintln(f"error: {why}")
+      io.eprint(usage())
+      return 2
+    },
+  }
+  let done: Result.<i32, str> := if opts.command == "help" {
+    run_help()
+  } else if opts.command == "new" {
+    run_new(&opts)
+  } else if opts.command == "init" {
+    run_init(&opts)
+  } else if opts.command == "build" {
+    run_build(&opts)
+  } else if opts.command == "run" {
+    run_run(&opts)
+  } else {
+    .err(f"no command `{opts.command}`; see `twig --help`")
+  }
+  return done.match {
+    .ok(code) => code,
+    .err(why) => {
+      io.eprintln(f"error: {why}")
+      1
+    },
+  }
+}
+
+run_help :: func () -> Result.<i32, str> {
+  io.print(usage())
+  return .ok(0)
+}
+
+parse :: func (args: []str) -> Result.<Options, str> {
+  let mut o: Options := Options {
+    command: "",
+    release: false,
+    bin: .none,
+    lib: false,
+    positional: collections.new.<str>(),
+    rest: args[args.len()..<args.len()],
+  }
+  let mut i: usize := 1
+  while i < args.len() {
+    let a: str := args[i]
+    if a == "--" {
+      o.rest = args[i + 1..<args.len()]
+      break
+    } else if a == "-h" || a == "--help" {
+      o.command = "help"
+      return .ok(o)
+    } else if a == "--release" {
+      o.release = true
+    } else if a == "--lib" {
+      o.lib = true
+    } else if a == "--bin" {
+      if i + 1 == args.len() { return .err("`--bin` needs a name") }
+      o.bin = .some(args[i + 1])
+      i = i + 1
+    } else if a.len() > 0 && a.as_bytes()[0] == 45 {
+      return .err(f"no option `{a}`")
+    } else if o.command == "" {
+      o.command = a
+    } else {
+      o.positional.push(a)
+    }
+    i = i + 1
+  }
+  if o.command == "" { o.command = "help" }
+  return .ok(o)
+}
+
+cwd :: func () -> Result.<str, str> {
+  return process.current_dir().match {
+    .ok(d) => .ok(d),
+    .err(e) => .err(e.describe()),
+  }
+}
+
+run_new :: func (o: *Options) -> Result.<i32, str> {
+  if o.positional.len() != 1 { return .err("`twig new` takes one path") }
+  let given: str := o.positional.get(0).!
+  let dir: str := path.normalize(path.join(cwd().?, given))
+  let name: str := path.file_name(dir)
+  if fs.exists(dir) { return .err(f"`{given}` already exists") }
+  new.create(dir, name, o.lib).?
+  build.status("Created", f"{kind(o.lib)} `{name}`")
+  return .ok(0)
+}
+
+run_init :: func (o: *Options) -> Result.<i32, str> {
+  if o.positional.len() != 0 { return .err("`twig init` takes no path; it uses the current directory") }
+  let dir: str := cwd().?
+  let name: str := path.file_name(dir)
+  new.create(dir, name, o.lib).?
+  build.status("Created", f"{kind(o.lib)} `{name}`")
+  return .ok(0)
+}
+
+kind :: func (lib: bool) -> str { return if lib { "library" } else { "binary" } }
+
+// The workspace the current directory is in.
+open :: func () -> Result.<Workspace, str> {
+  let root: str := workspace.find_root(cwd().?).?
+  return workspace.resolve(root)
+}
+
+run_build :: func (o: *Options) -> Result.<i32, str> {
+  if o.positional.len() != 0 { return .err("`twig build` takes no arguments") }
+  let ws: Workspace := open().?
+  let p: Profile := build.profile(&ws.root.manifest, o.release)
+  let all: []Target := build.targets(&ws)
+  let chosen: []Target := o.bin.match {
+    .some(name) => select(all, name).?,
+    .none => all,
+  }
+  compile_all(&ws, p, chosen).?
+  return .ok(0)
+}
+
+run_run :: func (o: *Options) -> Result.<i32, str> {
+  if o.positional.len() != 0 { return .err("arguments for the program go after `--`") }
+  let ws: Workspace := open().?
+  let p: Profile := build.profile(&ws.root.manifest, o.release)
+  let bins: Vec.<Target> := binaries(build.targets(&ws))
+  let t: Target := o.bin.match {
+    .some(name) => select(bins.as_slice(), name).?[0],
+    .none => {
+      if bins.len() == 0 { return .err(f"`{ws.root.name}` has no `[[bin]]` to run") }
+      if bins.len() > 1 { return .err(f"`{ws.root.name}` has several binaries; say which with `--bin`") }
+      bins.get(0).!
+    },
+  }
+  let one: Vec.<Target> := collections.from_slice.<Target>(.{ t })
+  compile_all(&ws, p, one.as_slice()).?
+
+  let exe: str := build.output(&ws, p, t)
+  build.status("Running", f"`{shown(&ws, exe)}`")
+  let status: process.Status := process.run(exe, o.rest).match {
+    .ok(s) => s,
+    .err(e) => { return .err(f"could not run `{exe}`: {e.describe()}") },
+  }
+  return .ok(status.code())
+}
+
+compile_all :: func (ws: *Workspace, p: Profile, targets: []Target) -> Result.<void, str> {
+  build.status("Compiling", f"{ws.root.name} v{ws.root.manifest.package.version} ({ws.root.dir})")
+  for t in targets { build.compile(ws, p, t).? }
+  build.status("Finished", f"`{p.name}` profile, in `{shown(ws, build.out_dir(ws, p))}`")
+  return .ok(())
+}
+
+// A path under the package, written from the package's directory.
+shown :: func (ws: *Workspace, p: str) -> str { return path.relative_to(p, ws.root.dir) }
+
+binaries :: func (all: []Target) -> Vec.<Target> {
+  let mut out: Vec.<Target> := collections.new.<Target>()
+  for t in all {
+    if t.lib == false { out.push(t) }
+  }
+  return out
+}
+
+// The binary called `name`, as a list of one.
+select :: func (all: []Target, name: str) -> Result.<[]Target, str> {
+  for t in all {
+    if t.lib == false && t.name == name {
+      let one: Vec.<Target> := collections.from_slice.<Target>(.{ t })
+      return .ok(one.as_slice())
+    }
+  }
+  return .err(f"no binary named `{name}`")
+}

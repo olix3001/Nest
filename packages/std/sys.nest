@@ -143,6 +143,21 @@ impl Res {
   return ok(0)
 }
 
+// The working directory, written into `into` with a NUL after it. `n` is the
+// path's length, not counting the NUL.
+//
+// The length is found by scanning `into` rather than by reading the pointer
+// `getcwd` returns: that pointer is an address, and a `str` made from one would
+// be an integer the collector does not follow into a buffer it does.
+@public getcwd :: func (into: []mut u8) -> Res {
+  if into.len() == 0 { return Res { n: -1, err: libc.ERANGE } }
+  let got: c.cstr := libc.getcwd(c.from_ptr.<u8>(&into[0]), into.len())
+  if got.is_null() { return failed() }
+  let mut n: usize := 0
+  while n < into.len() && into[n] != 0 { n = n + 1 }
+  return ok(cast.<isize>(n))
+}
+
 // ===< Processes >===
 
 // Duplicate this process. `0` in the child, the child's id in the parent.
