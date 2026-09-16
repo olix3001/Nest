@@ -9,7 +9,7 @@ func wl(n: i32) -> i32 {
       break 
     }
     <if: void>
-    i: i32 = #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(i: i32, $cast(1: comptime_int): i32): i32
+    i: i32 = #builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(i: i32, $cast(1: comptime_int): i32): i32
   }
   <loop: void>
   return i: i32

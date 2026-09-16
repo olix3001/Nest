@@ -1,7 +1,7 @@
-// shapes.nest — the root of package `shapes`, imported as `import <shapes>`.
+// package.nest — the root of package `shapes`, imported as `import <shapes>`.
 //
 // This package owns a type. It is one half of the two-package coherence example:
-// see `render/render.nest` for the other, and `use_packages.nest` for what a
+// see `render/package.nest` for the other, and `use_packages.nest` for what a
 // program may and may not write about both of them.
 
 @public

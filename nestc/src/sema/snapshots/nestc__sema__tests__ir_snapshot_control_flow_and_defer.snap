@@ -9,15 +9,15 @@ struct Point {
 func cleanup() -> void {
 }
 func dist(p: *Point, n: i32) -> i32 {
-  let acc: i32 = #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(((p: *Point.*): Point.x): i32, ((p: *Point.*): Point.y): i32): i32
+  let acc: i32 = #builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(((p: *Point.*): Point.x): i32, ((p: *Point.*): Point.y): i32): i32
   let i: i32 = $cast(0: comptime_int): i32
   loop {
     if (Not (i: i32 Lt n: i32): bool): bool {
       break 
     }
     <if: void>
-    acc: i32 = #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(acc: i32, i: i32): i32
-    i: i32 = #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(i: i32, $cast(1: comptime_int): i32): i32
+    acc: i32 = #builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(acc: i32, i: i32): i32
+    i: i32 = #builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(i: i32, $cast(1: comptime_int): i32): i32
   }
   <loop: void>
   defer (cleanup: func() -> void)(): void

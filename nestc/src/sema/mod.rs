@@ -406,13 +406,19 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
             .file(file)
             .map(|f| f.name.clone())
             .unwrap_or_default();
+        // A file is a namespace of its own, named by where it sits in its
+        // package — so two files declaring `Error` declare two types.
         let canonical = session
             .pkg_of
             .get(&file)
-            .map(|n| vec![Symbol::new(n)])
+            .map(|n| {
+                let mut path = vec![Symbol::new(n)];
+                path.extend(session.module_path(n, &name));
+                path
+            })
             .unwrap_or_default();
         let ns_name = canonical
-            .first()
+            .last()
             .cloned()
             .unwrap_or_else(|| Symbol::new("<file>"));
         let ns = session.defs.alloc(

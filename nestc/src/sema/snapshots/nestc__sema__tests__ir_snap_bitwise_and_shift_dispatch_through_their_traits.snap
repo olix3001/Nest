@@ -3,10 +3,10 @@ source: src/sema/tests.rs
 expression: "ir_text(\"bits :: func (a: i32, b: i32) -> i32 {\\n  let an := a & b\\n  let orr := a | b\\n  let xr := a ^ b\\n  let sl := a << b\\n  let sr := a >> b\\n  return an\\n}\\n\")"
 ---
 func bits(a: i32, b: i32) -> i32 {
-  let an: i32 = #builtin(BitAnd) (core.BitAnd.bitand: func(i32, i32) -> i32)(a: i32, b: i32): i32
-  let orr: i32 = #builtin(BitOr) (core.BitOr.bitor: func(i32, i32) -> i32)(a: i32, b: i32): i32
-  let xr: i32 = #builtin(BitXor) (core.BitXor.bitxor: func(i32, i32) -> i32)(a: i32, b: i32): i32
-  let sl: i32 = #builtin(Shl) (core.Shl.shl: func(i32, i32) -> i32)(a: i32, b: i32): i32
-  let sr: i32 = #builtin(Shr) (core.Shr.shr: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  let an: i32 = #builtin(BitAnd) (core.ops.BitAnd.bitand: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  let orr: i32 = #builtin(BitOr) (core.ops.BitOr.bitor: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  let xr: i32 = #builtin(BitXor) (core.ops.BitXor.bitxor: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  let sl: i32 = #builtin(Shl) (core.ops.Shl.shl: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  let sr: i32 = #builtin(Shr) (core.ops.Shr.shr: func(i32, i32) -> i32)(a: i32, b: i32): i32
   return an: i32
 }

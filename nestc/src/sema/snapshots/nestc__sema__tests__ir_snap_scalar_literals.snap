@@ -7,5 +7,5 @@ func lits() -> void {
   let f: f64 = $cast(2.5: comptime_float): f64
   let b: bool = true: bool
   let c: char = 'z': char
-  let s: core.str = $cast("hi": comptime_str): core.str
+  let s: core.str.str = $cast("hi": comptime_str): core.str.str
 }

@@ -39,7 +39,7 @@ options:
                            ast, ir, mono, lir   the compiler's own dumps, to stdout
                            obj, asm, backend-ir what the backend writes, to files
   -L <dir>               a directory to search for packages; `<foo/...>` is
-                         <dir>/foo/foo.nest. Repeatable, in order
+                         <dir>/foo/package.nest. Repeatable, in order
   --error-format <form>  human (default) or json — one JSON object per line,
                          on stderr, for a tool that consumes them
   --package <name>=<path>

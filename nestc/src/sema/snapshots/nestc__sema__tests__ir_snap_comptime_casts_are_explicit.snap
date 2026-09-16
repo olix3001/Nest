@@ -8,5 +8,5 @@ struct P {
 func cc(n: i32) -> i32 {
   let a: i8 = $cast(5: comptime_int): i8
   let p: P = P { x: $cast(1: comptime_int): i32 }: P
-  return #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(n: i32, $cast(2: comptime_int): i32): i32
+  return #builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(n: i32, $cast(2: comptime_int): i32): i32
 }

@@ -19,5 +19,5 @@ func area(self: *Box2) -> i32 #self(*) {
   return ((self: *Box2.*): Box2.w): i32
 }
 func scale(self: *mut Box2, k: i32) -> void #self(*mut) #mutating {
-  ((self: *mut Box2.*): Box2.w): i32 = #builtin(Mul) (core.Mul.mul: func(i32, i32) -> i32)(((self: *mut Box2.*): Box2.w): i32, k: i32): i32
+  ((self: *mut Box2.*): Box2.w): i32 = #builtin(Mul) (core.ops.Mul.mul: func(i32, i32) -> i32)(((self: *mut Box2.*): Box2.w): i32, k: i32): i32
 }

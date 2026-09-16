@@ -5,16 +5,16 @@ expression: ir_text(src)
 struct Router {
   port: i32
 }  // size 4, align 4
-func mk(host: core.str, port: i32, backlog: i32) -> i32 {
+func mk(host: core.str.str, port: i32, backlog: i32) -> i32 {
   return port: i32
 }
 func f(r: *Router) -> i32 {
-  let a: i32 = (mk: func(core.str, i32, i32) -> i32)($cast("h": comptime_str): core.str, $cast(8080: comptime_int): i32, $cast(5: comptime_int): i32): i32
-  let b: i32 = (mk: func(core.str, i32, i32) -> i32)($cast("h": comptime_str): core.str, $cast(8080: comptime_int): i32, $cast(5: comptime_int): i32): i32
-  let c: i32 = (mk: func(core.str, i32, i32) -> i32)($cast("h": comptime_str): core.str, $cast(8080: comptime_int): i32, $cast(5: comptime_int): i32): i32
-  let d: i32 = (Router.listen: func(*Router, core.str, i32) -> i32)(r: *Router, $cast("h": comptime_str): core.str, $cast(80: comptime_int): i32): i32
-  return #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.Add.add: func(i32, i32) -> i32)(a: i32, b: i32): i32, c: i32): i32, d: i32): i32
+  let a: i32 = (mk: func(core.str.str, i32, i32) -> i32)($cast("h": comptime_str): core.str.str, $cast(8080: comptime_int): i32, $cast(5: comptime_int): i32): i32
+  let b: i32 = (mk: func(core.str.str, i32, i32) -> i32)($cast("h": comptime_str): core.str.str, $cast(8080: comptime_int): i32, $cast(5: comptime_int): i32): i32
+  let c: i32 = (mk: func(core.str.str, i32, i32) -> i32)($cast("h": comptime_str): core.str.str, $cast(8080: comptime_int): i32, $cast(5: comptime_int): i32): i32
+  let d: i32 = (Router.listen: func(*Router, core.str.str, i32) -> i32)(r: *Router, $cast("h": comptime_str): core.str.str, $cast(80: comptime_int): i32): i32
+  return #builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(#builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(a: i32, b: i32): i32, c: i32): i32, d: i32): i32
 }
-func listen(self: *Router, host: core.str, port: i32) -> i32 #self(*) {
+func listen(self: *Router, host: core.str.str, port: i32) -> i32 #self(*) {
   return port: i32
 }

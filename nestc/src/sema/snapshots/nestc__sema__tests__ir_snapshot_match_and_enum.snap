@@ -15,10 +15,10 @@ func pick(c: Color) -> i32 {
   }
   return <match: i32>
 }
-func maybe(b: bool) -> core.Option.<i32> {
+func maybe(b: bool) -> core.option.Option.<i32> {
   if b: bool {
-    return .some($cast(5: comptime_int): i32): core.Option.<i32>
+    return .some($cast(5: comptime_int): i32): core.option.Option.<i32>
   }
   <if: void>
-  return .none: core.Option.<i32>
+  return .none: core.option.Option.<i32>
 }

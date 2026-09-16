@@ -12,10 +12,10 @@ struct Base {
 distinct Inherits = Base  // size 8, align 8
 distinct Overrides = Base  // size 8, align 8
 func f(a: Meters, b: Meters) -> Meters {
-  return #builtin(Add) (core.Add.add: func(Meters, Meters) -> Meters)(a: Meters, b: Meters): Meters
+  return #builtin(Add) (core.ops.Add.add: func(Meters, Meters) -> Meters)(a: Meters, b: Meters): Meters
 }
 func g(a: Inherits, b: Overrides) -> usize {
-  return #builtin(Add) (core.Add.add: func(usize, usize) -> usize)((Base.show: func(Base) -> usize)($cast(a: Inherits): Base): usize, (<impl Overrides>.show: func(Overrides) -> usize)(b: Overrides): usize): usize
+  return #builtin(Add) (core.ops.Add.add: func(usize, usize) -> usize)((Base.show: func(Base) -> usize)($cast(a: Inherits): Base): usize, (<impl Overrides>.show: func(Overrides) -> usize)(b: Overrides): usize): usize
 }
 func show(self: Base) -> usize #self {
   return $cast(1: comptime_int): usize

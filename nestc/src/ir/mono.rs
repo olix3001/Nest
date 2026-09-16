@@ -165,7 +165,17 @@ pub fn run(
             .filter(|(_, imp)| imp.trait_def.is_some())
             .flat_map(|(i, imp)| imp.members.values().map(move |&m| (m, i)))
             .collect(),
+        impl_ns: HashMap::new(),
     };
+    for (i, imp) in impls.impls.iter().enumerate() {
+        for &m in imp.members.values() {
+            if let Some(ns) = mono.defs.get(m).parent
+                && mono.defs.get(ns).name.as_str().starts_with('<')
+            {
+                mono.impl_ns.insert(ns, i);
+            }
+        }
+    }
 
     for root in roots(mono.defs, mono.meta, linked) {
         mono.reach(linked, root, Vec::new(), 0);
@@ -311,6 +321,11 @@ struct Mono<'a> {
     /// the symbol they would share a symbol too, which is the one thing a
     /// mangled name may not do.
     member_impl: HashMap<DefId, usize>,
+    /// The anonymous namespace each structural `impl` parks its members in
+    /// (`<impl []T>`), mapped to that impl. The namespace's name is a label for
+    /// a dump, and not something a symbol may contain, so a member's symbol
+    /// encodes the impl's self type in its place.
+    impl_ns: HashMap<DefId, usize>,
 }
 
 impl Mono<'_> {
@@ -363,6 +378,14 @@ impl Mono<'_> {
         })
     }
 
+    /// The self type of the anonymous `impl` namespace `def` is declared in, if
+    /// it is declared in one.
+    fn impl_self(&self, def: DefId) -> Option<&Ty> {
+        let ns = self.defs.get(def).parent?;
+        let &i = self.impl_ns.get(&ns)?;
+        self.targets.get(i).map(|t| &t.self_ty)
+    }
+
     /// How many of `def`'s generic parameters it declared itself (the rest being
     /// the enclosing impl's) — see [`Generics::own`].
     fn own_count(&self, linked: &Linked, def: DefId) -> usize {
@@ -409,7 +432,15 @@ impl Mono<'_> {
 
         let own = self.own_count(linked, origin);
         let qual = self.trait_qualifier(linked, origin, &args);
-        let symbol = mangle(self.defs, &self.externs, origin, &args, own, qual.as_ref());
+        let symbol = mangle(
+            self.defs,
+            &self.externs,
+            origin,
+            &args,
+            own,
+            qual.as_ref(),
+            self.impl_self(origin),
+        );
         if let Some(&d) = self.emitted.get(&symbol) {
             return d;
         }
@@ -486,7 +517,15 @@ impl Mono<'_> {
         own: usize,
         qual: Option<&Ty>,
     ) {
-        let symbol = mangle(self.defs, &self.externs, origin, &args, own, qual);
+        let symbol = mangle(
+            self.defs,
+            &self.externs,
+            origin,
+            &args,
+            own,
+            qual,
+            self.impl_self(origin),
+        );
         let name = display_name(self.defs, origin, &args, own, qual);
         self.meta.set(
             id,
@@ -1045,8 +1084,13 @@ fn member_types(linked: &Linked, meta: &Meta, ty: &Ty) -> Vec<(String, Ty)> {
             let Some(t) = linked.ty(*def) else {
                 return Vec::new();
             };
-            let super::TypeDefKind::Struct { members } = &t.kind else {
-                return Vec::new();
+            // A `distinct` has one member at index 0, its representation — the
+            // one a `member_dyn` over it reaches, since the description lists
+            // no members to select it by.
+            let members = match &t.kind {
+                super::TypeDefKind::Struct { members } => members.as_slice(),
+                super::TypeDefKind::Distinct { repr } => std::slice::from_ref(repr),
+                _ => return Vec::new(),
             };
             let mut subst = Subst::default();
             if let Some(Ty::Nominal { args: params, .. }) = meta.ty(t.id) {
@@ -1498,6 +1542,10 @@ fn const_lit(k: &Const) -> Option<Lit> {
 /// The arguments are split where [`Generics::own`] says: the enclosing impl's go
 /// on the type the impl is for, the function's own on the function, so
 /// `core.Vec.<i32>.push` mangles the way `design/lir.md` §7 writes it.
+///
+/// `impl_self` is the self type of the anonymous impl namespace `origin` is
+/// declared in, when it is declared in one: that component is written `M` + the
+/// type rather than as its `<impl []T>` label.
 fn mangle(
     defs: &DefTable,
     externs: &HashSet<DefId>,
@@ -1505,6 +1553,7 @@ fn mangle(
     args: &[GenericArg],
     own: usize,
     qual: Option<&Ty>,
+    impl_self: Option<&Ty>,
 ) -> Symbol {
     let d = defs.get(origin);
     if let Some(link) = d.directives.iter().find(|x| x.is("link_name"))
@@ -1531,7 +1580,17 @@ fn mangle(
     // member itself, and the trait qualifier goes between them.
     let (head, member) = path.split_at(path.len() - 1);
     for (i, seg) in head.iter().enumerate() {
-        push_len(&mut s, seg.as_str());
+        // `M` + the self type for a structural impl's namespace. It stands where
+        // a component stands, and a component starts with a digit, so the letter
+        // is enough to tell them apart; a type's encoding is prefix-free, so
+        // nothing is needed to end it.
+        match impl_self {
+            Some(t) if i + 1 == head.len() => {
+                s.push('M');
+                push_ty(&mut s, defs, t);
+            }
+            _ => push_len(&mut s, seg.as_str()),
+        }
         // The impl's arguments belong to the type the impl is for, which is the
         // component before the member.
         if i + 1 == head.len() && !inherited.is_empty() {
@@ -1606,9 +1665,34 @@ pub fn type_key(defs: &DefTable, ty: &Ty) -> String {
     s
 }
 
+/// One length-prefixed path component.
+///
+/// A component that is not an identifier — an `<impl []T>` label reached some
+/// way [`mangle`] could not replace with its type — is written `L` + the
+/// length-prefixed text with every byte outside `[A-Za-z0-9]` escaped as `_` and
+/// two hex digits. The escape is injective and uses only characters every
+/// object format accepts, and the `L` keeps `a_5f` written as an identifier
+/// apart from `a_` escaped.
 fn push_len(s: &mut String, text: &str) {
-    s.push_str(&text.len().to_string());
-    s.push_str(text);
+    let plain = text
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80);
+    if plain {
+        s.push_str(&text.len().to_string());
+        s.push_str(text);
+        return;
+    }
+    let mut escaped = String::with_capacity(text.len());
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() {
+            escaped.push(b as char);
+        } else {
+            escaped.push_str(&format!("_{b:02x}"));
+        }
+    }
+    s.push('L');
+    s.push_str(&escaped.len().to_string());
+    s.push_str(&escaped);
 }
 
 fn push_args(s: &mut String, defs: &DefTable, args: &[GenericArg]) {
@@ -1732,6 +1816,16 @@ fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
         //   because the list is what tells a reader where the path stops.
         //   Without it `N4core6OptionN4core6Option` could be one four-component
         //   path or two two-component ones.
+        // A type parameter is only ever reached through an impl's self type (see
+        // [`mangle`]); everything instantiated is concrete by then. `G` + its
+        // name keeps it from reading as the declaration's canonical path, which
+        // passes through the impl's namespace again.
+        Ty::Nominal { def, args }
+            if args.is_empty() && defs.get(*def).kind == DefKind::TypeParam =>
+        {
+            s.push('G');
+            push_len(s, defs.get(*def).name.as_str());
+        }
         Ty::Nominal { def, args } => {
             s.push('N');
             let d = defs.get(*def);

@@ -10,7 +10,7 @@ func ops(a: Bits, b: Bits, g: *mut Bits) -> bool #mutating {
   let c: Bits = (Bits.bitnot: func(Bits) -> Bits)(a: Bits): Bits
   let s: Bits = (Bits.shl: func(Bits, i32) -> Bits)(a: Bits, $cast(2: comptime_int): i32): Bits
   let ne: bool = (Not (Bits.eq: func(Bits, Bits) -> bool)(a: Bits, b: Bits): bool): bool
-  match (Bits.cmp: func(Bits, Bits) -> core.Ordering)(a: Bits, b: Bits): core.Ordering {
+  match (Bits.cmp: func(Bits, Bits) -> core.cmp.Ordering)(a: Bits, b: Bits): core.cmp.Ordering {
     .less => true: bool
     _ => false: bool
   }
@@ -31,8 +31,8 @@ func shl(self: Bits, rhs: i32) -> Bits #self {
 func eq(self: Bits, rhs: Bits) -> bool #self {
   return true: bool
 }
-func cmp(self: Bits, rhs: Bits) -> core.Ordering #self {
-  return .equal: core.Ordering
+func cmp(self: Bits, rhs: Bits) -> core.cmp.Ordering #self {
+  return .equal: core.cmp.Ordering
 }
 func index(self: *Bits, i: i32) -> *i32 #self(*) {
   return (&((self: *Bits.*): Bits.w): i32): *i32

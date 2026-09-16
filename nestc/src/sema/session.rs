@@ -39,7 +39,7 @@ pub fn default_core_path() -> String {
     }
     // `nestc/` sits next to `packages/` in the repository, which is where
     // every shipped package (`core`, and later `std`, `c`, ...) lives.
-    format!("{}/../packages/core/core.nest", env!("CARGO_MANIFEST_DIR"))
+    format!("{}/../packages/core/package.nest", env!("CARGO_MANIFEST_DIR"))
 }
 
 /// Where to find the `std` package when nothing says otherwise.
@@ -57,7 +57,7 @@ pub fn default_std_path() -> String {
     if let Ok(p) = std::env::var("NEST_STD") {
         return p;
     }
-    format!("{}/../packages/std/std.nest", env!("CARGO_MANIFEST_DIR"))
+    format!("{}/../packages/std/package.nest", env!("CARGO_MANIFEST_DIR"))
 }
 
 /// The fixed-name primitive types the prelude makes available without an import
@@ -119,12 +119,34 @@ impl FileLoader for FsLoader {
     }
 }
 
+/// `path` with its `.` and `..` components folded away, lexically.
+///
+/// The path is a file's identity, so `json/../encode.nest` and `encode.nest`
+/// beside it must spell one key — otherwise a file reached two ways is loaded
+/// twice and every type in it is declared twice.
+fn normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Resolve `spec` against `from`'s directory and read it. Shared by [`FsLoader`]
 /// and by [`MemLoader`]'s fallback.
 fn load_from_fs(from: &str, spec: &str) -> Result<(String, String), String> {
     use std::path::Path;
     let base = Path::new(from).parent().unwrap_or_else(|| Path::new(""));
-    let mut path = base.join(spec);
+    let mut path = normalize(&base.join(spec));
     if path.extension().is_none() {
         path.set_extension("nest");
     }
@@ -272,6 +294,9 @@ pub struct Session {
     /// Which loaded files are package roots, and under what package name — used
     /// to give a package's members a `pkg.member` canonical path.
     pub pkg_of: HashMap<FileId, String>,
+    /// Each loaded package's directory, by name: what a file's path inside the
+    /// package — and so its canonical path — is measured from.
+    pkg_dir: HashMap<String, String>,
     /// Cache: source key → the [`FileId`] it was parsed into (parse-once).
     cache: HashMap<String, FileId>,
     loader: Box<dyn FileLoader>,
@@ -343,6 +368,7 @@ impl Session {
             packages: HashMap::new(),
             search_paths: Vec::new(),
             pkg_of: HashMap::new(),
+            pkg_dir: HashMap::new(),
             cache: HashMap::new(),
             loader,
         };
@@ -404,7 +430,7 @@ impl Session {
     fn search_for_package(&self, name: &str) -> Option<String> {
         use std::path::Path;
         self.search_paths.iter().find_map(|dir| {
-            let root = Path::new(dir).join(name).join(format!("{name}.nest"));
+            let root = Path::new(dir).join(name).join("package.nest");
             root.exists().then(|| root.to_string_lossy().into_owned())
         })
     }
@@ -471,7 +497,38 @@ impl Session {
         };
         let file = self.parse_cached(&key, &path, &src);
         self.pkg_of.insert(file, pkg.name.clone());
+        if let Some(dir) = parent_of(&path) {
+            self.pkg_dir.insert(pkg.name.clone(), dir.to_string());
+        }
         Some(file)
+    }
+
+    /// Where a file of package `pkg` sits inside it, as namespace segments —
+    /// the part of its canonical path after the package's own name.
+    ///
+    /// Every file is a namespace of its own, the way a Rust module is, so the
+    /// path is the file's: `std/serialize/json/writer.nest` is
+    /// `std.serialize.json.writer`. The root `package.nest` is the package
+    /// itself, and a directory's file of the same name (`serialize/serialize.nest`)
+    /// is the directory, so neither adds a segment.
+    pub fn module_path(&self, pkg: &str, file_name: &str) -> Vec<Symbol> {
+        let Some(rel) = self
+            .pkg_dir
+            .get(pkg)
+            .and_then(|dir| file_name.strip_prefix(dir.as_str()))
+            .map(|r| r.trim_start_matches('/'))
+        else {
+            return Vec::new();
+        };
+        let mut segments: Vec<&str> = rel.split('/').collect();
+        if let Some(last) = segments.pop() {
+            let stem = last.strip_suffix(".nest").unwrap_or(last);
+            let is_dir_root = segments.last() == Some(&stem);
+            if !(segments.is_empty() && stem == "package") && !is_dir_root {
+                segments.push(stem);
+            }
+        }
+        segments.into_iter().map(Symbol::new).collect()
     }
 
     /// Whether `from` is a file of the `core` package, so a `target.nest` beside
@@ -483,7 +540,8 @@ impl Session {
         let Some(core) = self.package("core") else {
             return false;
         };
-        match (parent_of(&core.root_path), parent_of(from)) {
+        let root = normalize(std::path::Path::new(&core.root_path));
+        match (parent_of(&root.to_string_lossy()), parent_of(from)) {
             (Some(a), Some(b)) => a == b,
             _ => false,
         }

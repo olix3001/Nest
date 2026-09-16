@@ -11,11 +11,11 @@ func g(x: i32, p: i32, c: Cfg, w: u8) -> i32 {
   return x: i32
 }
 func h(x: usize, y: usize) -> usize {
-  return #builtin(Add) (core.Add.add: func(usize, usize) -> usize)(x: usize, y: usize): usize
+  return #builtin(Add) (core.ops.Add.add: func(usize, usize) -> usize)(x: usize, y: usize): usize
 }
 func f() -> i32 {
   let a: i32 = (g: func(i32, i32, Cfg, u8) -> i32)($cast(1: comptime_int): i32, PORT: i32, Cfg { a: $cast(1: comptime_int): i32, b: $cast(2: comptime_int): i32 }: Cfg, $cast($cast(3: comptime_int): isize): u8): i32
   let b: i32 = (g: func(i32, i32, Cfg, u8) -> i32)($cast(1: comptime_int): i32, PORT: i32, Cfg { a: $cast(1: comptime_int): i32, b: $cast(2: comptime_int): i32 }: Cfg, $cast($cast(3: comptime_int): isize): u8): i32
   let c: usize = (h: func(usize, usize) -> usize)($cast(1: comptime_int): usize, const N: usize): usize
-  return #builtin(Add) (core.Add.add: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  return #builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(a: i32, b: i32): i32
 }

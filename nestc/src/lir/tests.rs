@@ -149,7 +149,7 @@ fn holds_text(lir: &str, text: &str) -> bool {
 /// Whether the dump panics with this message: the bytes are in the data, and a
 /// call to `core.panic` reads them.
 fn panics_with(lir: &str, message: &str) -> bool {
-    holds_text(lir, message) && lir.contains("call core.panic(")
+    holds_text(lir, message) && lir.contains("call core.fail.panic(")
 }
 
 /// `while` is a `loop` with a guard by the time the IR has it (§ the IR's
@@ -1738,14 +1738,14 @@ fn one_program_holds_core_and_every_instantiation() {
     let unit = program.unit();
     let named = |n: &str| unit.funcs.iter().any(|f| f.name == n);
     assert!(named("main"), "the entry file's function");
-    assert!(named("core.panic"), "`core`'s, in the same program");
+    assert!(named("core.fail.panic"), "`core`'s, in the same program");
     assert!(named("f.<i32>"), "and the instantiation, which no file wrote");
     // Bodies and all: `core.panic` is a definition here, not a declaration.
     let panic = unit
         .funcs
         .iter()
-        .find(|f| f.name == "core.panic")
-        .expect("core.panic");
+        .find(|f| f.name == "core.fail.panic")
+        .expect("core.fail.panic");
     assert!(!panic.blocks.is_empty(), "core.panic has a body");
 }
 
@@ -2830,7 +2830,7 @@ fn a_string_literal_pattern_calls_cores_byte_equality() {
     // this level (§9), so the argument is the slice itself rather than a
     // member read out of a wrapper.
     assert!(holds_text(&lir, "hi"), "{lir}");
-    assert!(lir.contains("call core.bytes_eq(s_0, _"), "{lir}");
+    assert!(lir.contains("call core.slice.bytes_eq(s_0, _"), "{lir}");
 }
 
 /// `==` on two `str`s now resolves at all — it did not before, because nothing
@@ -2841,7 +2841,7 @@ fn str_equality_goes_through_the_eq_impl_to_the_same_function() {
     let src = "eq :: func (a: str, b: str) -> bool { return a == b }\n@public main :: func () {}\n";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
     assert!(
-        lir_text(src).contains("call core.<impl str>.<as core.Eq>.eq"),
+        lir_text(src).contains("call core.str.<impl str>.<as core.cmp.Eq>.eq"),
         "{}",
         lir_text(src)
     );
@@ -2864,7 +2864,45 @@ fn str_equality_goes_through_the_eq_impl_to_the_same_function() {
             _ => None,
         })
         .collect();
-    assert!(calls.contains(&"core.bytes_eq"), "{calls:?}");
+    assert!(calls.contains(&"core.slice.bytes_eq"), "{calls:?}");
+}
+
+/// A structural impl's namespace is named `<impl []T>` for a dump, and a space
+/// or an angle bracket is not something every object format accepts in a
+/// symbol. The symbol writes the impl's self type in its place, so two impls
+/// on different structural types stay apart and every symbol is plain.
+#[test]
+fn a_structural_impl_is_mangled_by_its_self_type_not_its_label() {
+    let src = "eq :: func (a: str, b: str) -> bool { return a == b }\n\
+               sum :: func (xs: []i32, ys: []bool) -> i32 {\n\
+                 let mut n := 0\n\
+                 for x in xs { n = n + x }\n\
+                 for y in ys { if y { n = n + 1 } }\n\
+                 return n\n\
+               }\n\
+               @public main :: func () {}\n";
+    assert!(messages(src).is_empty(), "{:#?}", messages(src));
+    let whole = lir_unit(src);
+    for f in &whole.funcs {
+        assert!(
+            f.symbol
+                .as_str()
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "{} mangles to {}",
+            f.name,
+            f.symbol
+        );
+    }
+    let into_iter: Vec<&str> = whole
+        .funcs
+        .iter()
+        .filter(|f| f.name.contains("<impl []T>") && f.name.ends_with(".into_iter"))
+        .map(|f| f.symbol.as_str())
+        .collect();
+    assert_eq!(into_iter.len(), 2, "{into_iter:?}");
+    assert!(into_iter.iter().all(|s| s.contains("MSG1TI")), "{into_iter:?}");
+    assert_ne!(into_iter[0], into_iter[1]);
 }
 
 /// A byte-string literal is the same question one level down: `[]u8` needs no
@@ -2873,7 +2911,7 @@ fn str_equality_goes_through_the_eq_impl_to_the_same_function() {
 fn a_byte_string_pattern_compares_bytes_directly() {
     let lir = lir_text("f :: func (b: []u8) -> i32 { return b.match { b\"hi\" => 1, _ => 0 } }\n");
     assert!(holds_text(&lir, "hi"), "{lir}");
-    assert!(lir.contains("call core.bytes_eq(b_0, _"), "{lir}");
+    assert!(lir.contains("call core.slice.bytes_eq(b_0, _"), "{lir}");
 }
 
 /// The empty pattern is a length test and nothing else, which is what the
@@ -2882,7 +2920,7 @@ fn a_byte_string_pattern_compares_bytes_directly() {
 fn an_empty_string_pattern_is_the_same_call() {
     let lir = lir_text("f :: func (s: str) -> i32 { return s.match { \"\" => 1, _ => 0 } }\n");
     assert!(holds_text(&lir, ""), "{lir}");
-    assert!(lir.contains("call core.bytes_eq(s_0, _"), "{lir}");
+    assert!(lir.contains("call core.slice.bytes_eq(s_0, _"), "{lir}");
 }
 
 // ===< Safepoints, the cases the first pass got wrong >===

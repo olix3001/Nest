@@ -636,6 +636,7 @@ _NC 4core 3Vec I i32 E 4push
 | nominal | `N` + length-prefixed canonical path + args in `I ... E` | `N4core6OptionIi32E` |
 | `dyn Trait` | `D` + the trait's path + `E` | `D4core8ToJsonE` |
 | `const` argument | `K` + the value's type + sign + the value | `Kusp3`, `Kb1`, `Ki32n5` |
+| type parameter (in an impl's self type only) | `G` + the length-prefixed name | `G1T` |
 
 Four details earn their place:
 
@@ -681,6 +682,20 @@ same canonical path in both. Without the trait they would have the same symbol,
 which is the one thing a mangled name may not allow. An **inherent** impl's
 member takes no qualifier: there is no trait, and the path already names it
 uniquely.
+
+A member of a **structural** impl (`impl <T> []T`) lives in an anonymous
+namespace labelled `<impl []T>` for dumps. A space and an angle bracket are not
+something every object format accepts, so that component is written `M` + the
+impl's self type instead, its parameters as `G` + name. A component starts with
+a digit and a type's encoding is prefix-free, so the letter is all it takes:
+
+```
+_NC 4core 4iter M SG1T I i32 E X N4core4iter12IntoIteratorIE 9into_iter   // core.iter.<impl []T>.<i32>.into_iter
+```
+
+A component that is still not an identifier where no impl is at hand is written
+`L` + its length-prefixed text with every byte outside `[A-Za-z0-9]` escaped as
+`_` and two hex digits.
 
 Nothing outside monomorphization may construct a symbol. A pass that needs one
 asks the instantiation it already holds.

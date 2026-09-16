@@ -2,8 +2,8 @@
 source: src/sema/tests.rs
 expression: "ir_text(\"mo :: func (o: Option.<i32>) -> i32 {\\n  return o.match {\\n    .some(v) => v,\\n    .none => 0,\\n  }\\n}\\n\")"
 ---
-func mo(o: core.Option.<i32>) -> i32 {
-  match o: core.Option.<i32> {
+func mo(o: core.option.Option.<i32>) -> i32 {
+  match o: core.option.Option.<i32> {
     .some(v) => v: i32
     .none => $cast(0: comptime_int): i32
   }

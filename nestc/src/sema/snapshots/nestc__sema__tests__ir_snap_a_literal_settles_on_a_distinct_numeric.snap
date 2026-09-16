@@ -12,5 +12,5 @@ func g() -> Meters {
   return 1.5: Meters
 }
 func h(p: HttpPort) -> HttpPort {
-  return #builtin(Add) (core.Add.add: func(HttpPort, HttpPort) -> HttpPort)(p: HttpPort, 1: HttpPort): HttpPort
+  return #builtin(Add) (core.ops.Add.add: func(HttpPort, HttpPort) -> HttpPort)(p: HttpPort, 1: HttpPort): HttpPort
 }

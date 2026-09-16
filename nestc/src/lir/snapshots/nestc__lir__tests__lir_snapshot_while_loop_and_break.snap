@@ -7,7 +7,7 @@ unit mem:main {
     ptr: *u8                    // +0
     len: u64                    // +8
   }
-  type core.Location = struct {           // was a struct; size 24, align 8
+  type core.loc.Location = struct {           // was a struct; size 24, align 8
     file: []u8                    // +0
     line: u32                    // +16
     column: u32                    // +20
@@ -30,11 +30,11 @@ unit mem:main {
     let _8: (i32, bool)
     let _9: []u8
     let _10: []u8
-    let _11: core.Location
+    let _11: core.loc.Location
     let _12: (i32, bool)
     let _13: []u8
     let _14: []u8
-    let _15: core.Location
+    let _15: core.loc.Location
   bb0:                    // entry
     _1 := 0
     acc_2 := _1
@@ -64,8 +64,8 @@ unit mem:main {
   bb9:                    // overflow
     _9 := []u8(&const.str.0, 16)
     _10 := []u8(&const.str.1, 8)
-    _11 := core.Location(_10, 6, 11)
-    call core.panic(_9, _11)
+    _11 := core.loc.Location(_10, 6, 11)
+    call core.fail.panic(_9, _11)
       @safepoint { live: [_9, _11]
         _9 := reloc _9
         _11 := reloc _11
@@ -78,8 +78,8 @@ unit mem:main {
   bb11:                    // overflow
     _13 := []u8(&const.str.0, 16)
     _14 := []u8(&const.str.1, 8)
-    _15 := core.Location(_14, 7, 9)
-    call core.panic(_13, _15)
+    _15 := core.loc.Location(_14, 7, 9)
+    call core.fail.panic(_13, _15)
       @safepoint { live: [_13, _15]
         _13 := reloc _13
         _15 := reloc _15
@@ -90,5 +90,5 @@ unit mem:main {
     goto bb1
       @safepoint { live: [] }
 
-  declare func core.panic(msg_0: []u8, loc_1: core.Location) -> never @public  // _NC4core5panic
+  declare func core.fail.panic(msg_0: []u8, loc_1: core.loc.Location) -> never @public  // _NC4core4fail5panic
 }

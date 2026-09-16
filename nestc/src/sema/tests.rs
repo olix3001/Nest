@@ -67,7 +67,7 @@ fn prelude_types_resolve_to_core() {
     .expect("an `Option` path");
     match resolution(&session, file, path) {
         Resolution::Def(d) => {
-            assert_eq!(session.defs.canonical_string(d), "core.Option");
+            assert_eq!(session.defs.canonical_string(d), "core.option.Option");
             assert_eq!(session.defs.get(d).kind, DefKind::Enum);
         }
         other => panic!("Option did not resolve to a def: {other:?}"),
@@ -2523,8 +2523,8 @@ fn a_layout_directive_on_a_function_is_rejected() {
 fn analyze_example_packages() -> Session {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/packages");
     let mut session = Session::new();
-    session.register_package("shapes", &format!("{dir}/shapes/shapes.nest"));
-    session.register_package("render", &format!("{dir}/render/render.nest"));
+    session.register_package("shapes", &format!("{dir}/shapes/package.nest"));
+    session.register_package("render", &format!("{dir}/render/package.nest"));
     let path = format!("{dir}/use_packages.nest");
     let src = std::fs::read_to_string(&path).expect("the example exists");
     let file = session.sources.add(path, src.clone());
@@ -3519,7 +3519,7 @@ impl Shl.<i32> for Bits { Output :: Bits  shl :: func (self: Bits, rhs: i32) -> 
 f :: func (a: Bits, b: Bits) -> Bits { return a << b }
 ";
     assert!(
-        first_error(src).contains("does not implement `core.Shl.<Bits>`"),
+        first_error(src).contains("does not implement `core.ops.Shl.<Bits>`"),
         "{src}"
     );
 }
@@ -5693,7 +5693,7 @@ fn try_propagate_works_on_an_option() {
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
-    assert!(ir.contains("core.Option.from_residual"), "{ir}");
+    assert!(ir.contains("core.option.Option.from_residual"), "{ir}");
 }
 
 #[test]
@@ -5712,7 +5712,7 @@ fn try_propagate_across_unrelated_residuals_is_reported() {
     let msg = first_error(
         "read :: func () -> Result.<i32, str> { return .ok(1) }\nf :: func () -> Option.<i32> {\n  const v := read().?\n  return .some(v)\n}\n",
     );
-    assert!(msg.contains("core.FromResidual.<core.str>"), "{msg}");
+    assert!(msg.contains("core.control.FromResidual.<core.str.str>"), "{msg}");
 }
 
 #[test]
@@ -6119,7 +6119,7 @@ main :: func () {
     let ir = ir_text(src);
     assert!(ir.contains("const A: comptime_str"), "{ir}");
     assert!(ir.contains("(A: []u8)"), "{ir}");
-    assert!(ir.contains("(A: core.str)"), "{ir}");
+    assert!(ir.contains("(A: core.str.str)"), "{ir}");
 }
 
 /// The `[]char` case is a real transcoding, and §1.5 says it happens at compile
@@ -6155,7 +6155,7 @@ fn a_byte_string_is_a_byte_slice() {
     assert!(ir.contains("// = b\"\\x00\\xffok\""), "{ir}");
     // It is not a `str`, and no conversion makes it one implicitly.
     let msg = first_error("f :: func (s: str) {}\nmain :: func () { f(b\"hi\") }\n");
-    assert!(msg.contains("expected `core.str`, found `[]u8`"), "{msg}");
+    assert!(msg.contains("expected `core.str.str`, found `[]u8`"), "{msg}");
 }
 
 // ===< What a conversion promises (§6.5) >===
@@ -7361,8 +7361,8 @@ fn an_operator_on_a_generic_impl_instantiates_per_argument() {
          }\n",
     );
     let names = instances(&session);
-    assert!(names.contains(&"Vec2.<i32>.<as core.Add.<Vec2.<i32>>>.add".to_string()), "{names:?}");
-    assert!(names.contains(&"Vec2.<u8>.<as core.Add.<Vec2.<u8>>>.add".to_string()), "{names:?}");
+    assert!(names.contains(&"Vec2.<i32>.<as core.ops.Add.<Vec2.<i32>>>.add".to_string()), "{names:?}");
+    assert!(names.contains(&"Vec2.<u8>.<as core.ops.Add.<Vec2.<u8>>>.add".to_string()), "{names:?}");
 }
 
 /// The invariant that keeps not-eliminating-dead-code honest: a generic
@@ -7407,7 +7407,7 @@ fn every_call_names_a_function_the_program_still_has() {
     // forwarding to a separate intrinsic.
     let names = instances(&session);
     assert!(
-        names.contains(&"core.<impl str>.as_bytes".to_string()),
+        names.contains(&"core.str.<impl str>.as_bytes".to_string()),
         "{names:?}"
     );
     assert!(
@@ -8174,7 +8174,7 @@ fn search_path_fixture(name: &str, package: &str, entry: &str) -> (std::path::Pa
     ));
     let dir = root.join("libs").join("greet");
     std::fs::create_dir_all(&dir).expect("a temp package directory");
-    std::fs::write(dir.join("greet.nest"), package).expect("the package's root file");
+    std::fs::write(dir.join("package.nest"), package).expect("the package's root file");
     let main = root.join("main.nest");
     std::fs::write(&main, entry).expect("the entry file");
     (root.join("libs"), main.to_string_lossy().into_owned())
@@ -8208,6 +8208,51 @@ fn a_search_path_finds_a_package() {
     let file = session.load_entry(&main).expect("entry loads");
     analyze(&mut session, file);
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
+/// **Every file is a namespace of its own.** Two files of one package may each
+/// declare an `Error`, and they are two types: a declaration's canonical path is
+/// the file it is written in, not the package. And a file re-exported from the
+/// root is the same namespace whether a program selects it out of the package
+/// (`{ io } :: import <greet>`) or walks to it (`io :: import <greet/io>`).
+#[test]
+fn every_file_of_a_package_is_its_own_namespace() {
+    let (libs, main) = search_path_fixture(
+        "per-file",
+        "@public io :: import \"io.nest\"\n@public wire :: import \"wire/wire.nest\"\n",
+        "{ io } :: import <greet>\n\
+         walked :: import <greet/io>\n\
+         wire :: import <greet/wire>\n\
+         same :: func (e: *io.Error) -> *walked.Error { return e }\n\
+         differ :: func (e: *io.Error) -> *wire.Error { return e }\n\
+         main :: func () { }\n",
+    );
+    let pkg = libs.join("greet");
+    std::fs::write(pkg.join("io.nest"), "@public Error :: struct { code: i32 }\n")
+        .expect("io.nest");
+    std::fs::create_dir_all(pkg.join("wire")).expect("wire/");
+    std::fs::write(
+        pkg.join("wire").join("wire.nest"),
+        "@public Error :: struct { code: i64 }\n",
+    )
+    .expect("wire/wire.nest");
+
+    let mut session = Session::new();
+    session.add_search_path(&libs.to_string_lossy());
+    let file = session.load_entry(&main).expect("entry loads");
+    analyze(&mut session, file);
+    let errors: Vec<&String> = session
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::common::diagnostic::Severity::Error)
+        .map(|d| &d.message)
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(
+        errors[0].contains("expected `greet.wire.Error`, found `greet.io.Error`"),
+        "{}",
+        errors[0]
+    );
 }
 
 /// An **explicit** registration is a path something already resolved, so a
@@ -8248,7 +8293,7 @@ fn an_explicit_registration_beats_a_search_path() {
         "the pinned root was not read: {read:#?}"
     );
     assert!(
-        !read.iter().any(|n| n.ends_with("greet.nest")),
+        !read.iter().any(|n| n.ends_with("greet/package.nest")),
         "the search path's copy was read anyway: {read:#?}"
     );
 }
@@ -8284,7 +8329,7 @@ main :: func () { }
     // The files really were read, rather than the imports resolving to nothing.
     let read: Vec<&str> = session.sources.files().map(|f| f.name.as_str()).collect();
     for want in [
-        "std.nest",
+        "package.nest",
         "libc.nest",
         "io.nest",
         "fs.nest",

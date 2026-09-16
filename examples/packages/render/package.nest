@@ -1,7 +1,7 @@
-// render.nest — the root of package `render`, imported as `import <render>`.
+// package.nest — the root of package `render`, imported as `import <render>`.
 //
 // This package owns a *trait*. It is the other half of the two-package coherence
-// example; see `shapes/shapes.nest`.
+// example; see `shapes/package.nest`.
 
 @public
 Describe :: trait {
