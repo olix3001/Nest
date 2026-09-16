@@ -377,16 +377,47 @@ impl Parser {
         let start = self.cur_span();
         let pattern = self.parse_pattern();
         // `NAME: T :: value` — a **typed constant** (§2.5) — and
-        // `#static NAME: T [:: value]` — a **region** (§2.6). The type comes
-        // before the `::`, and that is the whole point: it leaves `NAME :: T`
-        // meaning a type alias in every case, with no second rule for when a
-        // `:=` happens to follow.
+        // `#static NAME: T [:= value]` — a **region** (§2.6). The type comes
+        // before either operator, and that is the whole point: it leaves
+        // `NAME :: T` meaning a type alias in every case.
+        //
+        // **The two operators are not interchangeable.** `::` binds a name to a
+        // value the compiler knows, and `:=` initializes storage a program can
+        // write to — which is the same split `let x: T := v` already makes
+        // inside a function body. A `#static` is storage, so it takes `:=`.
         if self.eat(&TokenKind::Colon) {
             let ty = self.parse_type();
             let mut end = self.node_span(ty);
-            let value = if self.eat(&TokenKind::ColonColon) {
+            let want = if static_storage {
+                TokenKind::ColonEq
+            } else {
+                TokenKind::ColonColon
+            };
+            let value = if self.eat(&want) {
                 let v = self.parse_expr();
                 end = self.node_span(v);
+                Some(v)
+            } else if self.at(&TokenKind::ColonColon) || self.at(&TokenKind::ColonEq) {
+                // The other operator. It parses, because what follows it is an
+                // expression either way, and saying which one this declaration
+                // wanted is more use than "unexpected token".
+                let op = self.cur_span();
+                self.bump();
+                let v = self.parse_expr();
+                end = self.node_span(v);
+                if static_storage {
+                    self.error(
+                        op,
+                        "a `#static` is a region, not a constant: write \
+                         `#static NAME: T := value`",
+                    );
+                } else {
+                    self.error(
+                        op,
+                        "a constant is bound with `::`; `:=` initializes a region, which needs \
+                         `#static`",
+                    );
+                }
                 Some(v)
             } else {
                 // A static is storage, and storage is zeroed; every other
@@ -415,7 +446,7 @@ impl Parser {
             let span = start.to(self.cur_span());
             self.error(
                 span,
-                "a `#static` needs an explicit type: write `#static NAME: T :: value`, \
+                "a `#static` needs an explicit type: write `#static NAME: T := value`, \
                  or `#static NAME: T` for a zeroed region",
             );
         }
@@ -438,18 +469,18 @@ impl Parser {
 
     /// `#static` decorates a `::` binding, never a `let` (§2.6).
     ///
-    /// A static declares a **region**, not a binding: its RHS is a type and its
-    /// value, if any, follows `:=`. That is the `::` shape, and it is the same
-    /// one everywhere — at namespace scope, where `let` has no home at all, and
-    /// inside a function, where `#static let` was once the only form that
-    /// spelled a program-lifetime local differently from the global it behaves
-    /// exactly like.
+    /// A static declares a **region**, not a binding: its type comes before the
+    /// operator and its value, if any, follows `:=`. What `#static` adds to a
+    /// `let` is **lifetime**, not mutability — the region outlives the frame —
+    /// and that is the whole of the difference between the two spellings, at
+    /// namespace scope where `let` has no home at all and inside a function
+    /// where it does.
     fn reject_static_let(&mut self, directives: &[NodeId], start: Span) {
         if self.has_directive(directives, "static") {
             self.error(
                 start,
-                "`#static` decorates a `::` binding, not a `let`: write \
-                 `#static name: T :: value`",
+                "`#static` is not a `let`: write `#static name: T := value`. The two \
+                 differ in lifetime — a `#static` region outlives the frame",
             );
         }
     }

@@ -4737,21 +4737,37 @@ fn an_using_field_must_be_a_struct() {
 #[test]
 fn a_namespace_scope_let_is_rejected() {
     assert!(first_error("let G: i32 := 0\n").contains("no meaning at namespace scope"));
-    analyze_clean("#static G: i32 :: 0\n");
+    analyze_clean("#static G: i32 := 0\n");
 }
 
-/// `#static` decorates a `::` binding, not a `let` — the one form works at
-/// namespace scope and inside a function alike (§2.6).
+/// `#static` is not a `let`, and the difference between them is **lifetime**:
+/// one form works at namespace scope and inside a function alike (§2.6).
 #[test]
-fn static_decorates_a_const_binding_not_a_let() {
-    assert!(
-        first_error("#static let G: i32 := 0\n").contains("decorates a `::` binding, not a `let`")
-    );
+fn static_is_not_a_let() {
+    assert!(first_error("#static let G: i32 := 0\n").contains("`#static` is not a `let`"));
     assert!(
         first_error("f :: func () {\n  #static let n: i32 := 0\n}\n")
-            .contains("decorates a `::` binding, not a `let`")
+            .contains("`#static` is not a `let`")
     );
-    analyze_clean("f :: func () {\n  #static n: i32 :: 0\n  n = n + 1\n}\n");
+    analyze_clean("f :: func () {\n  #static n: i32 := 0\n  n = n + 1\n}\n");
+}
+
+/// The two operators are not interchangeable, and each mistake says which one
+/// the declaration wanted rather than "unexpected token".
+///
+/// `::` binds a name to a value the compiler knows; `:=` initializes storage a
+/// program can write to. A `#static` is storage, so it takes `:=` — and a
+/// constant written with `:=` has asked for a region without saying so.
+#[test]
+fn a_static_takes_the_runtime_operator_and_a_constant_does_not() {
+    assert!(
+        first_error("#static G: i32 :: 0\n").contains("a `#static` is a region, not a constant")
+    );
+    assert!(
+        first_error("G: i32 := 0\n")
+            .contains("a constant is bound with `::`")
+    );
+    analyze_clean("#static G: i32 := 0\nK: i32 :: 0\n");
 }
 
 /// The directive is what decides how a `::` RHS reads. Without it `[4]u8` is a
@@ -4759,7 +4775,7 @@ fn static_decorates_a_const_binding_not_a_let() {
 #[test]
 fn a_static_rhs_is_a_type_not_a_value() {
     analyze_clean("#static scratch: [4]u8\n");
-    analyze_clean("#static count: u32 :: 0\n");
+    analyze_clean("#static count: u32 := 0\n");
 }
 
 #[test]
@@ -5775,7 +5791,7 @@ main :: func () {}
 #[test]
 fn a_static_initializer_is_evaluated_and_a_missing_one_is_zeroed() {
     let src = "\
-#static count: u32 :: 6 * 7
+#static count: u32 := 6 * 7
 #static scratch: [4]u8
 main :: func () {}
 ";
@@ -5806,7 +5822,7 @@ main :: func () {}
 #[test]
 fn a_constant_may_not_read_a_static_region() {
     let src = "\
-#static count: u32 :: 1
+#static count: u32 := 1
 A: u32 :: count
 main :: func () {}
 ";
@@ -5964,14 +5980,14 @@ fn a_constants_type_goes_before_the_binder() {
 /// depended on who read it would be no region at all.
 #[test]
 fn a_static_names_a_region_and_must_say_how_wide() {
-    analyze_clean("#static COUNT: usize :: 0\nf :: func () { COUNT = COUNT + 1 }\n");
+    analyze_clean("#static COUNT: usize := 0\nf :: func () { COUNT = COUNT + 1 }\n");
     analyze_clean("#static SCRATCH: [8]u8\nf :: func () {}\n");
     // Inside a function, this is the only way to name a region: `let` and
     // `const` are run-time bindings and cannot outlive the call. It is a
     // **global** that happens to be named inside a block — C's `static` local —
     // so it is emitted as one, and only its visibility is the block's.
     let s = analyze_clean(
-        "f :: func () -> usize {\n  #static CALLS: usize :: 0\n  CALLS = CALLS + 1\n  return CALLS\n}\n",
+        "f :: func () -> usize {\n  #static CALLS: usize := 0\n  CALLS = CALLS + 1\n  return CALLS\n}\n",
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
@@ -5988,10 +6004,7 @@ fn a_static_names_a_region_and_must_say_how_wide() {
     assert!(
         first_error("#static COUNT :: 0\n").contains("a `#static` needs an explicit type")
     );
-    assert!(
-        first_error("#static let G: i32 := 0\n")
-            .contains("decorates a `::` binding, not a `let`")
-    );
+    assert!(first_error("#static let G: i32 := 0\n").contains("`#static` is not a `let`"));
 }
 
 /// §3.4: a trait declares an associated constant with its type; an impl supplies

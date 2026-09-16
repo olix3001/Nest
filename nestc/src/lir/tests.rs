@@ -431,7 +431,7 @@ call :: func (d: *Dog) -> i32 { return heard.<Dog>(d) }
 fn lir_snapshot_a_static_is_a_place_and_a_constant_is_a_value() {
     let src = "\
 LIMIT :: 10
-#static counter: u32 :: 0
+#static counter: u32 := 0
 bump :: func () -> u32 {
   counter = counter + 1
   return counter
@@ -2229,8 +2229,8 @@ take :: func (v: void, n: i32) -> i32 { return n }
 #[test]
 fn two_function_local_statics_do_not_share_a_symbol() {
     let src = "\
-a :: func () -> u32 { #static n: u32 :: 0 n = n + 1 return n }
-b :: func () -> u32 { #static n: u32 :: 5 n = n + 2 return n }
+a :: func () -> u32 { #static n: u32 := 0 n = n + 1 return n }
+b :: func () -> u32 { #static n: u32 := 5 n = n + 2 return n }
 @public main :: func () { let x := a() + b() }
 ";
     let unit = lir_unit(src);
@@ -2323,7 +2323,7 @@ fn a_split_defines_every_symbol_exactly_once() {
 #[test]
 fn a_split_defines_every_global_exactly_once() {
     let src = "\
-#static counter: i32 :: 7
+#static counter: i32 := 7
 bump :: func () -> i32 { counter = counter + 1 return counter }
 @public main :: func () { let n := bump() }
 ";

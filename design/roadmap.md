@@ -279,7 +279,8 @@ Not a phase: four questions the user answered and the work that followed, in
 |---|---|
 | `#caller_location` is an expression, legal only as a **default argument** | `func (loc: Location := #caller_location)`, `Location` a `#lang("location")` struct in `core/loc.nest` |
 | No struct field defaults; `Default` and `..` instead | `P { x: 5, ..Default.default() }` and `.{ x: 5, ..rest }`; the temporary is bound in desugaring, the field reads expanded in lowering |
-| A constant's type goes **before** the binder | `NAME: T :: value`, `#static NAME: T [:: value]`, `MAX: i32 [:: default]` — so `NAME :: type` is a type alias always |
+| A constant's type goes **before** the binder | `NAME: T :: value`, `#static NAME: T [:= value]`, `MAX: i32 [:: default]` — so `NAME :: type` is a type alias always |
+| `::` is comptime, `:=` is runtime | `::` binds a name to a value the compiler knows — a function, a type, an import, a constant. `:=` initializes storage a program can write to, which at namespace scope means a `#static` and inside a function means a `let`. A `#static` written with `::` and a constant written with `:=` are each reported with the one they wanted. **`:=` marks the storage as mutable, not the initializer as run-time computed**: a region's initializer is still baked into the program's data, so there is no initialization order to get wrong |
 | An impl's members are checked against the trait's **types**, not just their presence | `Inferer::check_impl_conformance` |
 
 Two bugs fixed on the way: a struct-field default **hung the parser** (it had,

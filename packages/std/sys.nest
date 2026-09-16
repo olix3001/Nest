@@ -207,8 +207,8 @@ impl Res {
 // The strings belong to the startup and outlive the program, so a `str` cut out
 // of one borrows rather than copies.
 
-#static started_argc: usize :: 0
-#static started_argv: c.ptr.<c.cstr> :: c.ptr.<c.cstr> { addr: 0 }
+#static started_argc: usize := 0
+#static started_argv: c.ptr.<c.cstr> := c.ptr.<c.cstr> { addr: 0 }
 
 // The program's entry point, in `std` rather than in the compiler.
 //
