@@ -317,6 +317,23 @@ impl Parser {
             let ty = self.parse_type();
             span = span.to(self.node_span(ty));
             Some(ty)
+        } else if name.as_str() == "self" {
+            // A bare `self` is `self: Self`, spelled out here so the body and
+            // the signature read one type node. The synthesized node shares the
+            // name's span, which is how resolution tells it from a written one.
+            let path = self.alloc(
+                start,
+                NodeKind::Path {
+                    segments: vec![Symbol::new("Self")],
+                },
+            );
+            Some(self.alloc(
+                start,
+                NodeKind::TypePath {
+                    path,
+                    generic_args: Vec::new(),
+                },
+            ))
         } else {
             None
         };

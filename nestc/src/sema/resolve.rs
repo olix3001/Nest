@@ -225,6 +225,15 @@ impl Resolver<'_> {
                     self.resolve_node(*g);
                 }
                 for p in &params {
+                    if self.self_ty.is_empty() && self.is_bare_self(*p) {
+                        self.report(
+                            *p,
+                            "a bare `self` is a receiver and has no `Self` outside an `impl` \
+                             or a `trait`; write its type",
+                        );
+                        self.bind_param(*p);
+                        continue;
+                    }
                     self.resolve_node(*p);
                     self.bind_param(*p);
                 }
@@ -753,6 +762,18 @@ impl Resolver<'_> {
                 _ => continue,
             };
             self.introduce(name, kind, g);
+        }
+    }
+
+    /// Whether `param` is a `self` written without a type, whose `Self` the
+    /// parser supplied at the name's own span.
+    fn is_bare_self(&self, param: NodeId) -> bool {
+        let node = self.ast.node(param);
+        match &node.kind {
+            NodeKind::Param {
+                name, ty: Some(t), ..
+            } => name.as_str() == "self" && self.ast.node(*t).span == node.span,
+            _ => false,
         }
     }
 

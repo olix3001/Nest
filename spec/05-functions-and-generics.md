@@ -140,7 +140,9 @@ site overrides it, and a method may declare one.
 
 A parameter named `self` marks the function as a **method** of the type its
 `impl` namespace targets. Its type is `*T` (read-only receiver), `*mut T`
-(mutating receiver), or `T` (by-value receiver):
+(mutating receiver), or `T` (by-value receiver). A bare `self` with no type is
+`self: Self`, the by-value receiver; outside an `impl` or a `trait` there is no
+`Self` for it to mean, and it is an error:
 
 ```
 impl Router {

@@ -8308,3 +8308,45 @@ fn std_sys_is_not_reachable_from_outside() {
     let session = crate::sema::analyze_source("std-sys", "sys :: import <std/sys>\n", &[]);
     assert!(session.has_errors(), "`<std/sys>` resolved");
 }
+
+/// A bare `self` is `self: Self` — in an inherent impl, a generic one, a trait
+/// impl and a trait's own declaration — and a call binds the receiver through
+/// the signature exactly as it does for the written form.
+#[test]
+fn a_bare_self_is_self_by_value() {
+    for src in [
+        "P :: struct { x: i32 }\n\
+         impl P { bare :: func (self) -> i32 { return self.x } }\n\
+         f :: func (p: P) -> i32 { return p.bare() }\n",
+        "Box :: struct <T> { item: T }\n\
+         impl <T> Box.<T> { get :: func (self) -> T { return self.item } }\n\
+         f :: func (b: Box.<i32>) -> i32 { return b.get() }\n",
+        "T :: trait { f :: func (self) -> i32 }\n\
+         S :: struct { n: i32 }\n\
+         impl T for S { f :: func (self) -> i32 { return self.n } }\n\
+         g :: func (s: S) -> i32 { return s.f() }\n",
+        "T :: trait { f :: func (self: Self) -> i32 }\n\
+         S :: struct { n: i32 }\n\
+         impl T for S { f :: func (self) -> i32 { return self.n } }\n",
+        "P :: struct { x: i32 }\n\
+         impl P {\n\
+           a :: func (self: Self) -> i32 { return self.x }\n\
+           b :: func (self: *Self) -> i32 { return self.x }\n\
+           c :: func (self: *mut Self) { self.x = 1 }\n\
+         }\n",
+    ] {
+        let msgs = messages(src);
+        assert!(msgs.is_empty(), "unexpected diagnostics for {src:?}: {msgs:#?}");
+    }
+}
+
+#[test]
+fn a_bare_self_needs_an_impl_or_a_trait() {
+    let msgs = messages("f :: func (self) -> i32 { return 1 }\n");
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(
+        msgs[0].contains("a bare `self` is a receiver"),
+        "wrong diagnostic: {}",
+        msgs[0]
+    );
+}
