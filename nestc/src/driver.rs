@@ -41,6 +41,8 @@ options:
                                                 compiling against it
                            nlib                 the package compiled: its
                                                 objects and its metadata
+                         a dump or a backend output written `kind=path` goes
+                         to that file instead
   -L <dir>               a directory to search for packages; `<foo/...>` is
                          <dir>/foo/package.nest. Repeatable, in order
   --color <when>         auto (default), always or never: colour in human
@@ -114,6 +116,8 @@ struct Emit {
     nmeta: bool,
     /// The entry package as a library: objects and metadata in one archive.
     nlib: bool,
+    /// The outputs named with a path, `kind=path`, and where each goes.
+    paths: Vec<(String, PathBuf)>,
 }
 
 impl Default for Emit {
@@ -140,12 +144,30 @@ impl Emit {
             link: false,
             nmeta: false,
             nlib: false,
+            paths: Vec::new(),
         }
+    }
+
+    /// Where the output `name` was asked to go, when a path was given.
+    fn path(&self, name: &str) -> Option<&Path> {
+        self.paths.iter().find(|(n, _)| n == name).map(|(_, p)| p.as_path())
     }
 
     fn parse(list: &str) -> Result<Emit, String> {
         let mut e = Emit::nothing();
-        for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            // `kind=path`, rustc's spelling: for a dump or a file the backend
+            // writes. A link, a library and metadata already follow `-o`.
+            let name = match item.split_once('=') {
+                Some((name, path)) => {
+                    if !matches!(name, "ast" | "ir" | "mono" | "lir" | "obj" | "asm" | "backend-ir") {
+                        return Err(format!("`--emit {name}` takes no path; it follows `-o`"));
+                    }
+                    e.paths.push((name.to_string(), PathBuf::from(path)));
+                    name
+                }
+                None => item,
+            };
             match name {
                 "ast" => e.ast = true,
                 "ir" => e.ir = true,
@@ -521,16 +543,18 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
 
     if emit.ast {
         // The resolved, annotated tree, plus the whole-program def table.
-        print!("{}", sema::pretty::tree_to_string(&session, file));
-        print!("\n{}", sema::pretty::defs_to_string(&session));
+        let text = format!(
+            "{}\n{}",
+            sema::pretty::tree_to_string(&session, file),
+            sema::pretty::defs_to_string(&session)
+        );
+        dump(&emit, "ast", "", &text)?;
     }
 
     // The lowered IR of the entry file.
     if emit.ir && let Some(program) = session.ir.get(&file) {
-        print!(
-            "\n===< IR >===\n{}",
-            ir::pretty::program_to_string(&session.defs, &session.ir_meta, program)
-        );
+        let text = ir::pretty::program_to_string(&session.defs, &session.ir_meta, program);
+        dump(&emit, "ir", "\n===< IR >===\n", &text)?;
     }
 
     // The monomorphized whole program: every function concrete, every call with
@@ -539,10 +563,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
     // type-check.
     let type_checked = !session.linked.is_empty() && !session.has_errors();
     if emit.mono && type_checked {
-        print!(
-            "\n===< MONO >===\n{}",
-            ir::pretty::mono_to_string(&session.defs, &session.ir_meta, &session.linked)
-        );
+        let text = ir::pretty::mono_to_string(&session.defs, &session.ir_meta, &session.linked);
+        dump(&emit, "mono", "\n===< MONO >===\n", &text)?;
     }
 
     // The LIR: the same program as a graph. Locals up front, basic blocks,
@@ -571,16 +593,22 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
             &|def| session.is_foreign_def(def),
         );
         if emit.lir {
-            print!(
-                "\n===< LIR >===\n{}",
-                lir::pretty::program_to_string(Some(&session.sources), &program)
-            );
+            let text = lir::pretty::program_to_string(Some(&session.sources), &program);
+            dump(&emit, "lir", "\n===< LIR >===\n", &text)?;
         }
         for kind in &emit.backend {
             // When a program is also being produced, `-o` names *it*: the
             // object and the executable would otherwise be written to one path,
             // and the second one would win silently.
-            let exact = !emit.link;
+            let named = emit.path(match kind {
+                OutputKind::Object => "obj",
+                OutputKind::Assembly => "asm",
+                OutputKind::Ir => "backend-ir",
+            });
+            let (out, exact) = match named {
+                Some(p) => (Some(p.to_path_buf()), true),
+                None => (out.clone(), !emit.link),
+            };
             match kind {
                 // **One object, always.** How many codegen units a program was
                 // split into is a fact about how it was *compiled*, not about
@@ -1026,6 +1054,22 @@ fn write_library(
     Ok(())
 }
 
+/// A dump: to the file `--emit name=path` named, or to stdout after `header`.
+fn dump(emit: &Emit, name: &str, header: &str, text: &str) -> Result<(), String> {
+    match emit.path(name) {
+        Some(path) => {
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            }
+            std::fs::write(path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))
+        }
+        None => {
+            print!("{header}{text}");
+            Ok(())
+        }
+    }
+}
+
 /// Where a link or a library writes the objects it is made from: the directory
 /// `--obj-dir` named, kept, or one of this process's own, removed when done.
 struct Scratch {
@@ -1142,6 +1186,17 @@ mod tests {
     /// An unknown name is an **error**, for the same reason an unknown `-C` key
     /// is: it arrives from a build tool, and a typo would otherwise silently
     /// produce nothing.
+    #[test]
+    fn an_emit_kind_may_name_its_file() {
+        let e = Emit::parse("link,ir=build/a.ir,backend-ir=build/a.ll").expect("a list");
+        assert!(e.link && e.ir);
+        assert_eq!(e.backend, vec![OutputKind::Ir]);
+        assert_eq!(e.path("ir"), Some(Path::new("build/a.ir")));
+        assert_eq!(e.path("backend-ir"), Some(Path::new("build/a.ll")));
+        let err = Emit::parse("link=a").expect_err("a link follows `-o`");
+        assert!(err.contains("takes no path"), "{err}");
+    }
+
     #[test]
     fn an_unknown_emit_name_is_refused() {
         let err = Emit::parse("obj,exe").expect_err("`exe` is not a name here");

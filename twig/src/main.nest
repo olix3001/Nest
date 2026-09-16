@@ -34,6 +34,9 @@ usage :: func () -> str {
     "  --release        build with the release profile (default: debug)",
     "  --bin <name>     build or run only this binary",
     "  --deps           build: only the libraries the package depends on",
+    "  --emit <list>    build, run: also write the compiler's dumps for the",
+    "                   package's own targets beside their objects, in",
+    "                   build/<profile>/obj: ast, ir, mono, lir, llvm-ir, asm",
     "  --lib            new, init: a library rather than a binary",
     "  -h, --help       this",
     "",
@@ -46,6 +49,7 @@ Options :: struct {
   bin: Option.<str>,
   lib: bool,
   deps: bool,
+  emit: Vec.<str>,
   positional: Vec.<str>,
   // Everything after `--`, for `run` to pass on.
   rest: []str,
@@ -96,6 +100,7 @@ parse :: func (args: []str) -> Result.<Options, str> {
     bin: .none,
     lib: false,
     deps: false,
+    emit: collections.new.<str>(),
     positional: collections.new.<str>(),
     rest: args[args.len()..<args.len()],
   }
@@ -114,6 +119,16 @@ parse :: func (args: []str) -> Result.<Options, str> {
       o.lib = true
     } else if a == "--deps" {
       o.deps = true
+    } else if a == "--emit" {
+      if i + 1 == args.len() { return .err("`--emit` needs a list") }
+      for e in s.split(args[i + 1], ",") {
+        if e.len() == 0 { continue }
+        if build.known_emit(e) == false {
+          return .err(f"`--emit` does not know `{e}`; it takes {build.EMITS}")
+        }
+        o.emit.push(e)
+      }
+      i = i + 1
     } else if a == "--bin" {
       if i + 1 == args.len() { return .err("`--bin` needs a name") }
       o.bin = .some(args[i + 1])
@@ -169,7 +184,8 @@ open :: func () -> Result.<Workspace, str> {
 run_build :: func (o: *Options) -> Result.<i32, str> {
   if o.positional.len() != 0 { return .err("`twig build` takes no arguments") }
   let ws: Workspace := open().?
-  let p: Profile := build.profile(&ws.root.manifest, o.release)
+  let mut p: Profile := build.profile(&ws.root.manifest, o.release)
+  p.emit = o.emit.as_slice()
   if o.deps {
     compile_deps(&ws, p).?
     return .ok(0)
@@ -186,7 +202,8 @@ run_build :: func (o: *Options) -> Result.<i32, str> {
 run_run :: func (o: *Options) -> Result.<i32, str> {
   if o.positional.len() != 0 { return .err("arguments for the program go after `--`") }
   let ws: Workspace := open().?
-  let p: Profile := build.profile(&ws.root.manifest, o.release)
+  let mut p: Profile := build.profile(&ws.root.manifest, o.release)
+  p.emit = o.emit.as_slice()
   let bins: []Target := build.binaries(&ws)
   let t: Target := o.bin.match {
     .some(name) => select(bins, name).?[0],
@@ -212,7 +229,10 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
 compile_all :: func (ws: *Workspace, p: Profile, bins: []Target) -> Result.<void, str> {
   let mut root_done: bool := false
   for t in build.libraries(ws) {
-    if build.fresh(ws, p, t).? { continue }
+    // A dump is written when the root's library is compiled, so asking for one
+    // compiles it.
+    let dumps: bool := p.emit.len() > 0 && t.name == ws.root.name
+    if dumps == false && build.fresh(ws, p, t).? { continue }
     let m: Member := ws.member(t.name)
     compiling(&m)
     if t.name == ws.root.name { root_done = true }
@@ -240,7 +260,8 @@ compile_deps :: func (ws: *Workspace, p: Profile) -> Result.<void, str> {
 run_metadata :: func (o: *Options) -> Result.<i32, str> {
   if o.positional.len() != 0 { return .err("`twig metadata` takes no arguments") }
   let ws: Workspace := open().?
-  let p: Profile := build.profile(&ws.root.manifest, o.release)
+  let mut p: Profile := build.profile(&ws.root.manifest, o.release)
+  p.emit = o.emit.as_slice()
   let text: String := metadata.describe(&ws, p).?
   io.print(text.as_str())
   io.print("\n")

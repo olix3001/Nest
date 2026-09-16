@@ -45,6 +45,9 @@ toolchain :: import "toolchain.nest"
   codegen_units: usize,
   // `0`, `1`, `2`, `3`, `s` or `z`, as `nestc -C opt-level` takes it.
   opt_level: str,
+  // The compiler's dumps to write for the root package's targets, beside their
+  // objects: any of `ast`, `ir`, `mono`, `lir`, `llvm-ir` and `asm`.
+  emit: []str,
 }
 
 // `debug` or `release`, with whatever the root manifest changed about it.
@@ -52,9 +55,9 @@ toolchain :: import "toolchain.nest"
 // program's decision.
 @public profile :: func (m: *Manifest, release: bool) -> Profile {
   let mut p: Profile := if release {
-    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3" }
+    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3", emit: .{} }
   } else {
-    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0" }
+    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0", emit: .{} }
   }
   let settings: Option.<ProfileSettings> := m.profile.match {
     .some(ps) => if release { ps.release } else { ps.debug },
@@ -117,6 +120,27 @@ library :: func (m: *Member) -> Target {
   return path.join(out_dir(ws, p), t.name)
 }
 
+// The dumps `--emit` accepts, for a message.
+@public EMITS: str :: "ast, ir, mono, lir, llvm-ir, asm"
+
+// Whether `--emit` accepts `e`.
+@public known_emit :: func (e: str) -> bool {
+  return e == "ast" || e == "ir" || e == "mono" || e == "lir" || e == "llvm-ir" || e == "asm"
+}
+
+// What `nestc --emit` calls the dump twig calls `e`.
+emit_kind :: func (e: str) -> str {
+  if e == "llvm-ir" { return "backend-ir" }
+  return e
+}
+
+// The file extension of the dump `e`.
+extension :: func (e: str) -> str {
+  if e == "llvm-ir" { return "ll" }
+  if e == "asm" { return "s" }
+  return e
+}
+
 // Where the objects `t` is made from are kept: apart for a library and a binary,
 // which may share a name.
 @public objects :: func (ws: *Workspace, p: Profile, t: Target) -> str {
@@ -145,7 +169,14 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
     args.push(f"{t.name}={t.entry}")
   }
   args.push("--emit")
-  args.push(if t.lib { "nlib" } else { "link" })
+  let mut emit: str := if t.lib { "nlib" } else { "link" }
+  if t.lib == false || t.name == ws.root.name {
+    for e in p.emit {
+      let file: str := path.join(objects(ws, p, t), f"{t.name}.{extension(e)}")
+      emit = f"{emit},{emit_kind(e)}={file}"
+    }
+  }
+  args.push(emit)
   args.push("-o")
   args.push(output(ws, p, t))
   args.push("--obj-dir")
