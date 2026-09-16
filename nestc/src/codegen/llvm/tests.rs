@@ -606,6 +606,27 @@ fn a_program_links_and_runs() {
              }\n",
             42,
         ),
+        // A trait's default body calling another method of the trait on
+        // `self`: instantiated once per implementing type, so `self.put` is
+        // that type's `put` — through a static call (10) and through a vtable
+        // slot the default fills (5 + 5 + 1 more on the same accumulator).
+        (
+            "Sink :: trait {\n\
+            \x20 put :: func (self: *mut Self, n: i64) -> i64\n\
+            \x20 twice :: func (self: *mut Self, n: i64) -> i64 { self.put(n)  return self.put(n) }\n\
+             }\n\
+             Acc :: struct { total: i64 }\n\
+             impl Sink for Acc {\n\
+            \x20 put :: func (self: *mut Self, n: i64) -> i64 { self.total = self.total + n  return self.total }\n\
+             }\n\
+             main :: func () -> i32 {\n\
+            \x20 let mut acc: Acc := Acc { total: 0 }\n\
+            \x20 let a: i64 := acc.twice(5)\n\
+            \x20 let d: *mut dyn Sink := &mut acc\n\
+            \x20 return cast.<i32>(a + d.twice(5) + d.put(1))\n\
+             }\n",
+            51,
+        ),
         // `member_dyn`: a blanket impl that walks a type's members at run time
         // and hands each one to *its own* impl through a trait object — a
         // concrete one for `i32` and `u8`, the blanket one again for a nested

@@ -167,7 +167,7 @@ pub fn run(
             .collect(),
     };
 
-    for root in roots(mono.meta, linked) {
+    for root in roots(mono.defs, mono.meta, linked) {
         mono.reach(linked, root, Vec::new(), 0);
     }
     while let Some(job) = mono.queue.pop_front() {
@@ -189,9 +189,15 @@ pub fn run(
     // the promise checkable: **no `Dispatch::Generic` survives**, and the only
     // place one could still be hiding is the body of a function that was never
     // going to be compiled.
+    // A trait's default body is the same: generic over `Self`, and emitted
+    // only as the instantiations that bind it.
+    let instances: HashSet<DefId> = mono.emitted.values().copied().collect();
     let generic: Vec<DefId> = linked
         .defs()
-        .filter(|&d| !mono.generics_of(linked, d).is_empty())
+        .filter(|&d| {
+            !mono.generics_of(linked, d).is_empty()
+                || (mono.default_body_of(d).is_some() && !instances.contains(&d))
+        })
         .collect();
     for def in generic {
         linked.remove(def);
@@ -220,12 +226,19 @@ pub fn run(
 /// emit, and which ones exist is a question about its callers — for a `@public`
 /// generic in a library, about a consumer this compilation cannot see. Cross
 /// compilation-unit generics are a separate problem and this is the shape of it.
-fn roots(meta: &Meta, linked: &Linked) -> Vec<DefId> {
+fn roots(defs: &DefTable, meta: &Meta, linked: &Linked) -> Vec<DefId> {
     linked
         .funcs()
         .filter(|f| {
             meta.get::<Generics>(f.id)
                 .is_none_or(|g| g.params.is_empty())
+        })
+        // A trait's default body is generic over `Self` without saying so, and
+        // is instantiated once per type that takes it.
+        .filter(|f| {
+            defs.get(f.def)
+                .parent
+                .is_none_or(|p| defs.get(p).kind != DefKind::Trait)
         })
         .map(|f| f.def)
         .collect()
@@ -525,6 +538,12 @@ impl Mono<'_> {
                 }
             }
         }
+        // A default body's `Self` is the argument past its declared ones.
+        if let (Some(trait_def), Some(GenericArg::Ty(t))) =
+            (self.default_body_of(original.def), args.get(params.len()))
+        {
+            subst.tys.insert(trait_def, t.clone());
+        }
 
         let mut func = original.clone();
         func.def = def;
@@ -606,6 +625,39 @@ impl Mono<'_> {
                 let ExprKind::Global(target) = callee.kind else {
                     return;
                 };
+                // A method of a trait called directly on a receiver whose type
+                // is now concrete: the call a default body makes on `self`,
+                // written against the trait's own `Self` and meaningful only
+                // once an instantiation said what that is.
+                if let Some(trait_def) = self.default_body_of(target) {
+                    let has_receiver = match linked.ty(trait_def).map(|t| &t.kind) {
+                        Some(super::TypeDefKind::Trait { methods, .. }) => methods
+                            .iter()
+                            .any(|m| m.def == target && m.recv != super::Recv::None),
+                        _ => false,
+                    };
+                    let receiver = has_receiver
+                        .then_some(callee_ty.as_ref())
+                        .flatten()
+                        .and_then(|t| match t {
+                            Ty::Func { params, .. } => params.first().map(strip_ptr),
+                            _ => None,
+                        })
+                        .filter(|t| {
+                            !matches!(t, Ty::Dyn(_))
+                                && !matches!(t, Ty::Nominal { def, .. } if *def == trait_def)
+                        });
+                    if let Some(self_ty) = receiver {
+                        let call_args = recorded.clone().unwrap_or_default();
+                        if let Some((to, targs)) =
+                            self.select(linked, trait_def, target, &self_ty, &[], &call_args)
+                        {
+                            let def = self.reach(linked, to, targs, depth);
+                            callee.kind = ExprKind::Global(def);
+                            return;
+                        }
+                    }
+                }
                 if !linked.contains(target) {
                     return;
                 }
@@ -723,7 +775,10 @@ impl Mono<'_> {
             }
             // A vtable slot takes no generic arguments of its own — that is what
             // object safety guarantees — so the impl's are the whole list.
-            let args = self.inherited_args(linked, target, &bindings);
+            let mut args = self.inherited_args(linked, target, &bindings);
+            if target == decl {
+                args.push(GenericArg::Ty(concrete.clone()));
+            }
             slots.push(Some(self.reach(linked, target, args, depth)));
         }
         Some(VtableSlots {
@@ -806,7 +861,21 @@ impl Mono<'_> {
         let own = self.own_count(linked, target);
         let mut args: Vec<GenericArg> = call_args.iter().take(own).cloned().collect();
         args.extend(self.inherited_args(linked, target, &bindings));
+        if target == method && self.default_body_of(target).is_some() {
+            args.push(GenericArg::Ty(strip_ptr(self_ty)));
+        }
         Some((target, args))
+    }
+
+    /// The trait `def` is a default method body of, if it is one.
+    ///
+    /// A default body is written once and means something different for every
+    /// implementing type: its `Self` is the trait's own nominal type until an
+    /// instantiation binds it. So it is instantiated per `Self`, with that type
+    /// as one argument past the ones it declares.
+    fn default_body_of(&self, def: DefId) -> Option<DefId> {
+        let parent = self.defs.get(def).parent?;
+        (self.defs.get(parent).kind == DefKind::Trait).then_some(parent)
     }
 
     /// The arguments `target` inherits from the impl it belongs to, read out of
