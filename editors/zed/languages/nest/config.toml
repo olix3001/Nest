@@ -1,0 +1,16 @@
+name = "Nest"
+grammar = "nest"
+path_suffixes = ["nest"]
+line_comments = ["// "]
+block_comment = { start = "/*", prefix = "", end = "*/", tab_size = 2 }
+tab_size = 2
+autoclose_before = ";:.,=}])> \n\t\""
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = true },
+    { start = "(", end = ")", close = true, newline = true },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string", "comment"] },
+    { start = "'", end = "'", close = true, newline = false, not_in = ["string", "comment"] },
+    { start = "/*", end = " */", close = true, newline = false, not_in = ["string", "comment"] },
+]
+collapsed_placeholder = " /* ... */ "

@@ -16,7 +16,7 @@ Every `.nest` file in the repository should parse with no `ERROR` or `MISSING`
 node:
 
 ```sh
-npx tree-sitter parse --quiet --stat $(git ls-files '../../*.nest' | sed 's|^|../../|')
+npx tree-sitter parse --quiet --stat $(git -C ../.. ls-files '*.nest' | sed 's|^|../../|')
 ```
 
 `queries/highlights.scm` is the source of truth. `zed/languages/nest/highlights.scm`
