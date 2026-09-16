@@ -161,6 +161,13 @@ pub fn lower(
         .mains(defs)
         .next()
         .and_then(|f| cx.func_of.get(&f.def).copied());
+    // The program's own start sequence, if a library claimed the tag. A program
+    // built without one — without `std` — has nowhere to hand its arguments and
+    // the entry calls `main` directly (`super::entry`).
+    let start = lang
+        .get("start")
+        .map(|d| defs.resolve_alias(d))
+        .and_then(|d| cx.func_of.get(&d).copied());
 
     // Safepoints after everything, and they have to be: what is live at a call
     // is a property of the finished graph, and which types hold references is a
@@ -178,7 +185,7 @@ pub fn lower(
     if options.entry == crate::common::options::EntryMode::Auto
         && let Some(id) = main
     {
-        super::entry::synthesize(&mut unit, id, options.target);
+        super::entry::synthesize(&mut unit, id, start, options.target);
     }
     super::safepoint::annotate(&mut unit);
     super::unit::split(unit, options.codegen_units, sources)

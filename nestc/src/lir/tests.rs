@@ -622,6 +622,28 @@ total :: func (a: V, b: V) -> V { return a + b }
 /// A function with no body is a **declaration**: no blocks, no locals, and a
 /// call to it is an ordinary direct call. A backend emits the reference and
 /// lets the linker find it.
+/// A program that claims `#lang("start")` starts itself.
+///
+/// The entry point becomes two calls and a return — the collector's
+/// initializer, then the claimant, with the program's `main` as a function
+/// pointer and the two arguments the operating system passed. Everything about
+/// starting a Nest program that is a *decision* rather than a fact about the
+/// machine has left the compiler at that point.
+///
+/// `main` here returns nothing, which is the case that shows the wrapper:
+/// `#lang("start")` takes a `func () -> i32`, and "returned nothing" becoming
+/// "exited successfully" is the conversion the entry used to do inline.
+#[test]
+fn lir_snapshot_a_start_lang_item_takes_over_the_entry_point() {
+    let src = "\
+start :: #lang(\"start\") func (m: func () -> i32, argc: i32, argv: usize) -> i32 {
+  return m()
+}
+main :: func () { }
+";
+    insta::assert_snapshot!(lir_text(src));
+}
+
 #[test]
 fn lir_snapshot_an_extern_function_has_no_blocks() {
     let src = "\

@@ -106,35 +106,22 @@ void nest_gc_collect(void) {
  * The pointers are the startup's own and are not copied: they outlive every
  * Nest value that borrows them, which is what makes a `str` cut out of `argv`
  * safe to hold. */
-static int nest_stored_argc = 0;
-static char **nest_stored_argv = 0;
-
-/* Prepare the collector, and keep what the process was started with.
+/* Prepare the collector.
  *
  * Boehm wants `GC_INIT()` on the main thread before the first allocation on
  * some platforms, and it is harmless everywhere else. The synthesized entry
- * point (`nestc/src/lir/entry.rs`) calls this first, before the program's own
- * `main`, and passes on the two arguments it was given. */
-void nest_init(int argc, char **argv) {
-    nest_stored_argc = argc;
-    nest_stored_argv = argv;
+ * point (`nestc/src/lir/entry.rs`) calls this first, before any of the
+ * program's own code.
+ *
+ * It takes **nothing**. It used to be handed `argc` and `argv` and keep them,
+ * which put a decision about what a Nest program does with its arguments in the
+ * one file that is supposed to know only about machines. They go to whoever
+ * claims `#lang("start")` now — `std/sys` — and this prepares the collector,
+ * which is a fact about the machine and is all of what belongs here. */
+void nest_init(void) {
 #ifdef NEST_GC_BOEHM
     GC_INIT();
 #endif
-}
-
-/* How many arguments the process was started with, `argv[0]` included. */
-int nest_argc(void) {
-    return nest_stored_argc;
-}
-
-/* The arguments, as the NULL-terminated `char **` the startup built.
- *
- * The walk over it is in Nest (`std/process`) rather than here: it is an index
- * and a NUL scan, and doing it there is what keeps this file three accessors
- * instead of a string library. */
-char **nest_argv(void) {
-    return nest_stored_argv;
 }
 
 /* The environment, `NAME=value` per entry and NULL-terminated.

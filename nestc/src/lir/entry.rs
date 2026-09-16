@@ -19,19 +19,30 @@
 //! status rather than nothing. The shim stays a handful of functions that know
 //! no names.
 //!
-//! **It takes `argc` and `argv`**, and hands them straight to the runtime's
-//! initializer. A program's arguments arrive exactly once, in the frame the
-//! operating system built, and nothing in C or POSIX hands them back to a
-//! running program afterwards — so the one function that is *given* them is the
-//! one that stores them, and `std/process` reads them back from there.
+//! **It takes `argc` and `argv`**, because the call to `main` is the only
+//! portable moment they exist: a program's arguments arrive once, in the frame
+//! the operating system built, and nothing in C or POSIX hands them back to a
+//! running program afterwards.
+//!
+//! What happens to them is **not** decided here. A library that claims
+//! `#lang("start")` gets them, along with the program's own `main` as a function
+//! pointer, and the whole of starting a Nest program is that library's from
+//! there — `std/sys` is what claims it. This function is then two calls and a
+//! return, and the part of it that is a *decision* rather than a fact about the
+//! machine has left the compiler.
+//!
+//! **With no `#lang("start")` there is nothing to hand them to**, and the entry
+//! calls the program's `main` directly. That is not a fallback so much as the
+//! only thing left to do: a program built without `std` has no way to ask what
+//! its arguments were, so there is nothing to keep them for.
 //!
 //! The environment is **not** passed, though `main` receives one: `envp` is a
 //! snapshot, and `setenv` may replace the table under it. The runtime reads
 //! `environ` instead, which is the live one.
 
 use super::{
-    Block, BlockId, CastKind, Callee, FuncId, Function, FunctionAttrs, Local, LocalId, Operand,
-    Place, Rvalue, Stmt, StmtKind, Terminator, TermKind, Ty, Unit,
+    Block, BlockId, CastKind, Callee, Constant, FuncId, Function, FunctionAttrs, Local, LocalId,
+    Operand, Place, Rvalue, Stmt, StmtKind, Terminator, TermKind, Ty, Unit,
 };
 use crate::common::options::Target;
 use crate::common::source::FileSpan;
@@ -51,8 +62,18 @@ const SYMBOL: &str = "main";
 const NAME: &str = "entry";
 
 /// The runtime's initializer (`runtime/nest_runtime.c`). Called once, first,
-/// with the two arguments this function was given.
+/// and given nothing: what it prepares is the collector, and what the process
+/// was started with belongs to whoever claims `#lang("start")`.
 const INIT: &str = "nest_init";
+
+/// The wrapper that turns the program's `main` into the `func () -> i32` a
+/// `#lang("start")` takes a pointer to. Named, like `entry`, for a dump.
+const STATUS_NAME: &str = "entry.status";
+
+/// Its symbol. Not mangled — there is no path to mangle, because there is no
+/// declaration in any source — and prefixed so nothing a program can write
+/// collides with it.
+const STATUS_SYMBOL: &str = "_NEstatus";
 
 /// `argc`. C's `int`, which is what the startup passes and what `argv` is
 /// counted in.
@@ -93,12 +114,12 @@ fn status_ty() -> Ty {
 /// The synthesized function takes the program `main`'s **span**, so the codegen
 /// unit split (§11) puts it in the same unit as the function it calls rather
 /// than in a unit of its own.
-pub fn synthesize(unit: &mut Unit, entry: FuncId, target: Target) {
+pub fn synthesize(unit: &mut Unit, entry: FuncId, start: Option<FuncId>, target: Target) {
     let called = &unit.funcs[entry.0 as usize];
     let span = called.span;
     let ret = called.ret.clone();
 
-    let init = declare_init(unit, target);
+    let init = declare_init(unit);
 
     // The parameters come first, because LIR's parameters *are* the leading
     // locals (§7). The two are C's own, in C's own order.
@@ -106,17 +127,45 @@ pub fn synthesize(unit: &mut Unit, entry: FuncId, target: Target) {
     let argc = push_local(&mut locals, argc_ty(), span);
     let argv = push_local(&mut locals, argv_ty(target), span);
 
+    // The collector first, and before any of the program's code: `GC_INIT()` has
+    // to happen on the main thread before the first allocation, and the call to
+    // `#lang("start")` below is already the program's code.
     let mut stmts = vec![Stmt::new(
         StmtKind::Call {
             dest: None,
             callee: Callee::Static(init),
-            args: vec![
-                Operand::Copy(Place::local(argc)),
-                Operand::Copy(Place::local(argv)),
-            ],
+            args: Vec::new(),
         },
         span,
     )];
+
+    // A program that claims `#lang("start")` starts itself: everything from here
+    // is one call, with the program's `main` as a function pointer and the two
+    // arguments the operating system passed.
+    if let Some(start) = start {
+        let status = push_local(&mut locals, status_ty(), span);
+        let main = status_fn(unit, entry, span);
+        stmts.push(Stmt::new(
+            StmtKind::Call {
+                dest: Some(Place::local(status)),
+                callee: Callee::Static(start),
+                args: vec![
+                    Operand::Const(Constant::Func(main)),
+                    Operand::Copy(Place::local(argc)),
+                    Operand::Copy(Place::local(argv)),
+                ],
+            },
+            span,
+        ));
+        push_entry(
+            unit,
+            locals,
+            stmts,
+            Terminator::new(TermKind::Return(Some(Operand::Copy(Place::local(status)))), span),
+            span,
+        );
+        return;
+    }
 
     // `main` may return nothing, a status, or not at all (§5.6, and
     // `ir::check::declarations` is what refuses everything else). The three
@@ -187,6 +236,17 @@ pub fn synthesize(unit: &mut Unit, entry: FuncId, target: Target) {
         }
     };
 
+    push_entry(unit, locals, stmts, term, span);
+}
+
+/// The entry point itself, once its body is built.
+fn push_entry(
+    unit: &mut Unit,
+    locals: Vec<Local>,
+    stmts: Vec<Stmt>,
+    term: Terminator,
+    span: Option<FileSpan>,
+) {
     unit.funcs.push(Function {
         name: NAME.to_string(),
         symbol: Symbol::new(SYMBOL),
@@ -211,6 +271,99 @@ pub fn synthesize(unit: &mut Unit, entry: FuncId, target: Target) {
     });
 }
 
+/// The program's `main` as a `func () -> i32`, which is the one shape
+/// `#lang("start")` can take a pointer to.
+///
+/// A `main` that already returns a status **is** that function, and is passed
+/// as it stands. The other two shapes §5.6 allows get a wrapper, because the
+/// difference between them is exactly the conversion the entry used to do
+/// inline: nothing returned is a successful exit, and `never` does not come
+/// back at all. The wrapper is where that conversion goes once the entry stops
+/// performing it.
+fn status_fn(unit: &mut Unit, entry: FuncId, span: Option<FileSpan>) -> FuncId {
+    let ret = unit.funcs[entry.0 as usize].ret.clone();
+    if ret == status_ty() {
+        return entry;
+    }
+    let id = FuncId(unit.funcs.len() as u32);
+    let mut locals: Vec<Local> = Vec::new();
+    let mut stmts = Vec::new();
+    let term = match &ret {
+        // `-> never`: the call does not come back, so there is nothing after it.
+        Ty::Never => {
+            stmts.push(Stmt::new(
+                StmtKind::Call {
+                    dest: None,
+                    callee: Callee::Static(entry),
+                    args: Vec::new(),
+                },
+                span,
+            ));
+            Terminator::new(TermKind::Unreachable, span)
+        }
+        // A status of another width, converted — `CastKind` names the conversion
+        // rather than leaving it to a backend.
+        Ty::Int { .. } => {
+            let raw = push_local(&mut locals, ret.clone(), span);
+            let converted = push_local(&mut locals, status_ty(), span);
+            stmts.push(Stmt::new(
+                StmtKind::Call {
+                    dest: Some(Place::local(raw)),
+                    callee: Callee::Static(entry),
+                    args: Vec::new(),
+                },
+                span,
+            ));
+            stmts.push(Stmt::new(
+                StmtKind::Assign {
+                    place: Place::local(converted),
+                    value: Rvalue::Cast {
+                        value: Operand::Copy(Place::local(raw)),
+                        kind: CastKind::of(&ret, &status_ty()),
+                        from: ret.clone(),
+                        to: status_ty(),
+                    },
+                },
+                span,
+            ));
+            Terminator::new(
+                TermKind::Return(Some(Operand::Copy(Place::local(converted)))),
+                span,
+            )
+        }
+        // Nothing, which is a successful exit: a program that says nothing about
+        // its status has not failed.
+        _ => {
+            stmts.push(Stmt::new(
+                StmtKind::Call {
+                    dest: None,
+                    callee: Callee::Static(entry),
+                    args: Vec::new(),
+                },
+                span,
+            ));
+            Terminator::new(TermKind::Return(Some(Operand::int(0))), span)
+        }
+    };
+    unit.funcs.push(Function {
+        name: STATUS_NAME.to_string(),
+        symbol: Symbol::new(STATUS_SYMBOL),
+        locals,
+        params: 0,
+        ret: status_ty(),
+        blocks: vec![Block {
+            id: BlockId(0),
+            stmts,
+            term,
+            label: Some("status".to_string()),
+        }],
+        extern_abi: None,
+        span,
+        attrs: FunctionAttrs::default(),
+    });
+    id
+}
+
 /// The declaration of `nest_init`, reusing one the program already has.
 ///
 /// A program is free to declare `extern("c") nest_init :: func (...)` itself —
@@ -218,19 +371,16 @@ pub fn synthesize(unit: &mut Unit, entry: FuncId, target: Target) {
 /// a backend would have to resolve or reject. A program that declares it with a
 /// *different* signature has declared a different function under one symbol,
 /// which is the ordinary C hazard and not one this can see.
-fn declare_init(unit: &mut Unit, target: Target) -> FuncId {
+fn declare_init(unit: &mut Unit) -> FuncId {
     if let Some(i) = unit.funcs.iter().position(|f| f.symbol.as_str() == INIT) {
         return FuncId(i as u32);
     }
     let id = FuncId(unit.funcs.len() as u32);
-    let mut locals: Vec<Local> = Vec::new();
-    push_local(&mut locals, argc_ty(), None);
-    push_local(&mut locals, argv_ty(target), None);
     unit.funcs.push(Function {
         name: INIT.to_string(),
         symbol: Symbol::new(INIT),
-        locals,
-        params: 2,
+        locals: Vec::new(),
+        params: 0,
         ret: Ty::Void,
         blocks: Vec::new(),
         extern_abi: Some(Symbol::new("c")),

@@ -45,10 +45,11 @@ extern("c") {
   // `errno`, which cannot be declared: see `nest_errno` in the runtime.
   @public nest_errno :: func () -> c.int
 
-  // What the process was started with, kept by the entry point
-  // (`nestc/src/lir/entry.rs`). There is no other portable way to ask.
-  @public nest_argc :: func () -> c.int
-  @public nest_argv :: func () -> c.ptr.<c.cstr>
+  // The **live** environment table. Not `envp`, which is a snapshot `setenv`
+  // replaces from under a program: this reads `environ`, which macOS hides
+  // behind a feature macro that keeps a dynamic executable from linking against
+  // it directly. `argc` and `argv` are not here — the entry point hands those
+  // to `#lang("start")`, which is `sys.start`.
   @public nest_envp :: func () -> c.ptr.<c.cstr>
 }
 

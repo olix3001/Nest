@@ -197,15 +197,41 @@ impl Res {
 
 // ===< What the process was started with >===
 //
-// Both come from the entry point by way of the runtime — see `nest_argv` in
-// `runtime/nest_runtime.c`. The strings belong to the startup and outlive the
-// program, so a `str` cut out of one borrows rather than copies.
+// Both come from the entry point, and they are kept **here** rather than in the
+// C runtime. The compiler synthesizes a `main` whose only job is to call
+// whatever claims `#lang("start")` — `start` below — with the program's own
+// `main` as a function pointer; these two are the first thing it writes. That is
+// the only portable moment they exist: nothing in C or POSIX hands a running
+// program its arguments back afterwards.
+//
+// The strings belong to the startup and outlive the program, so a `str` cut out
+// of one borrows rather than copies.
 
-@public argc :: func () -> usize { return cast.<usize>(libc.nest_argc()) }
+#static started_argc: usize :: 0
+#static started_argv: c.ptr.<c.cstr> :: c.ptr.<c.cstr> { addr: 0 }
+
+// The program's entry point, in `std` rather than in the compiler.
+//
+// The compiler's synthesized `main` is two calls and a return: the runtime's
+// initializer, then this. **Everything about starting a Nest program that is a
+// decision rather than a fact about the machine lives here** — what is kept
+// from `argv`, and what a status of the program's `main` means — which is why
+// it is a `#lang` item and not a name the compiler knows.
+//
+// `argv` arrives as a `usize`, not a pointer: it addresses memory the C startup
+// owns and the collector has never heard of, so a traced pointer would put a
+// root in a stack frame no collector can walk (`nestc/src/lir/entry.rs`).
+@public start :: #lang("start") func (main: func () -> i32, argc: c.int, argv: usize) -> c.int {
+  started_argc = cast.<usize>(argc)
+  started_argv = c.ptr.<c.cstr> { addr: argv }
+  return main()
+}
+
+@public argc :: func () -> usize { return started_argc }
 
 // Argument `i`, which the caller has already checked is below `argc()`.
 @public arg :: func (i: usize) -> str {
-  return c.from_cstr(libc.nest_argv().offset(i).read())
+  return c.from_cstr(started_argv.offset(i).read())
 }
 
 // Environment entry `i` as its raw `NAME=value`, or `.none` at the end of the

@@ -1110,12 +1110,40 @@ like every other function in it. So LIR adds a second function — named `entry`
 symbol `main`, returning C's `int` — whose whole body is:
 
 ```
+extern("c") func entry(_0: i32, _1: u64) -> i32      // main
+bb0:                                                 // entry point
+  call nest_init()
+  _2 := call start(&entry.status, _0, _1)
+  return _2
+```
+
+**What that second call is, is the point.** `nest_init` prepares the collector,
+which is a fact about the machine; everything after it is a *decision* — what a
+program keeps from `argv`, what a status means — and none of those belong to a
+compiler. So they are handed to whoever claims `#lang("start")`, which gets the
+program's own `main` as a function pointer and the two arguments the operating
+system passed. `std/sys` is what claims it.
+
+`#lang("start")` takes a `func () -> i32`, which is one shape, and §5.6 allows
+three. A `main` that already returns a status **is** that function and is passed
+as it stands; the other two get `entry.status`, a wrapper whose body is the
+conversion the entry used to perform inline. That wrapper is the only thing the
+compiler still decides about a program's exit, and it decides it the way it
+always did.
+
+**With no `#lang("start")` the entry calls `main` directly**, as it always has:
+
+```
 func entry() -> i32                          // main
 bb0:                                         // entry point
   call nest_init()
   call main()
   return 0
 ```
+
+That is not a fallback so much as the only thing left to do. A program built
+without a library that claims the tag — without `std` — has no way to ask what
+its arguments were, so there is nothing to keep them for.
 
 It is built **here**, in `lir::entry`, and the two places it could have gone
 instead are the reasons why:
@@ -1126,7 +1154,9 @@ instead are the reasons why:
 - **Not in the C runtime.** A `main` in `nest_runtime.c` would have to name the
   program's entry symbol — encoding this compiler's mangling scheme in C — and
   would have to encode it twice over, because `main` may return nothing or a
-  status. The shim stays six functions that know no names.
+  status. The shim stays a handful of functions that know no names. The function
+  pointer is what makes `#lang("start")` able to do in Nest what C could not: it
+  is handed the symbol rather than having to spell it.
 
 The three legal shapes of `main` differ only in what happens after the call:
 `void` returns zero (a program that says nothing about its status has not

@@ -377,11 +377,15 @@ reaches it without that import.
 What it turned out to need, none of which was library code:
 
 - **The entry point had no arguments.** `main` took none, so `argv` existed for
-  exactly one frame and was gone. It now takes `argc` / `argv` and hands them to
-  `nest_init`, which keeps them — and the parameters are pointer-sized
+  exactly one frame and was gone. It takes `argc` / `argv` now — as pointer-sized
   *integers*, not `Ptr`, so the collector does not treat C's stack as a root.
-  The environment is read from `environ` instead, because `envp` is a snapshot
-  and `setenv` replaces the table under it.
+  They went to `nest_init` at first, which kept them; they go to whoever claims
+  `#lang("start")` now, which is `std/sys.start`, and `nest_init` is back to
+  preparing the collector and nothing else. **The entry point is `std`'s** from
+  that call on: it is handed the program's own `main` as a function pointer, so
+  nothing outside the compiler has to spell a mangled symbol. The environment is
+  read from `environ` instead, because `envp` is a snapshot and `setenv`
+  replaces the table under it.
 - **Two C things Nest cannot say.** `errno` is a macro, and `environ` is a
   symbol macOS hides behind a feature macro. Each is one line in
   `runtime/nest_runtime.c`. **`open` was a third** and is not any more:
