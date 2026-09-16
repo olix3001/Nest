@@ -55,6 +55,9 @@ options:
   --indirect <name>=<path>
                          a library a dependency was compiled against: read, and
                          linked, but not importable. Repeatable
+  --obj-dir <dir>        keep the objects a link or a library is made from in
+                         <dir>, rather than in a temporary directory removed
+                         afterwards
   --up-to-date           compile nothing: exit 0 when the library at `-o` was
                          compiled from these files, settings and libraries as
                          they are now, and 1 when it would be compiled again
@@ -247,6 +250,8 @@ pub struct Invocation {
     print_options: bool,
     print_packages: bool,
     up_to_date: bool,
+    /// Where a link's or a library's objects are kept, when they are.
+    obj_dir: Option<PathBuf>,
     format: ErrorFormat,
     color: ColorChoice,
     help: bool,
@@ -269,6 +274,7 @@ impl Invocation {
         let mut print_options = false;
         let mut print_packages = false;
         let mut up_to_date = false;
+        let mut obj_dir: Option<PathBuf> = None;
         let mut format = ErrorFormat::default();
         let mut color = ColorChoice::default();
         // Where to look for a package nothing registered. The driver holds them
@@ -334,6 +340,9 @@ impl Invocation {
                         .ok_or_else(|| format!("`{flag} {spec}` is not a `name=path` pair"))?;
                     externs.push((name.to_string(), PathBuf::from(lib), flag == "--extern"));
                 }
+                a if a == "--obj-dir" || a.starts_with("--obj-dir=") => {
+                    obj_dir = Some(PathBuf::from(value("--obj-dir", &mut args)?));
+                }
                 "--up-to-date" => up_to_date = true,
                 a if a == "--color" || a.starts_with("--color=") => {
                     color = ColorChoice::parse(&value("--color", &mut args)?)?;
@@ -387,6 +396,7 @@ impl Invocation {
             print_options,
             print_packages,
             up_to_date,
+            obj_dir,
             format,
             color,
             help,
@@ -601,6 +611,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
                 out.as_deref(),
                 &path,
                 &emit,
+                inv.obj_dir.as_deref(),
             )?;
         }
         if emit.link {
@@ -613,6 +624,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
                 &path,
                 link_options,
                 &libraries,
+                inv.obj_dir.as_deref(),
             )?;
         }
     }
@@ -788,7 +800,10 @@ fn artifact_path(out: Option<&Path>, entry: &str, exact: bool, ext: &str) -> Pat
 /// The objects go to a **temporary** directory and are deleted afterwards,
 /// because they are not what was asked for: `--emit link,obj` is how a person
 /// says they want to keep them, and it writes them where `-o` points like any
-/// other emission. A build tool that wants to cache them asks for them.
+/// other emission. A build tool that wants to keep them passes `--obj-dir`, and
+/// every object the link read stays there: the program's units, and each
+/// library's, named after the library.
+#[allow(clippy::too_many_arguments)]
 fn link_program(
     backend: &mut dyn Codegen,
     program: &lir::Program,
@@ -796,6 +811,7 @@ fn link_program(
     entry: &str,
     options: &codegen::link::LinkOptions,
     libraries: &[PathBuf],
+    obj_dir: Option<&Path>,
 ) -> Result<(), String> {
     // A program starts at `main`, and without one the link fails deep inside the
     // C runtime's startup with a message about a symbol nobody wrote. The
@@ -817,26 +833,28 @@ fn link_program(
         None => PathBuf::from(Path::new(entry).file_stem().unwrap_or_default()),
     };
 
-    let scratch = temp_dir(entry)?;
+    let scratch = Scratch::new(obj_dir, entry)?;
     let objects = write_units(
         backend,
         program,
         OutputKind::Object,
-        Some(&scratch.join(
+        Some(&scratch.dir.join(
             program_path
                 .file_name()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("out")),
         )),
         entry,
-        true,
+        // With the extension, since the objects may be kept beside others.
+        false,
     );
     // Every library's objects join the program's: the code a library's
     // declarations here call is in them.
     let objects = objects.and_then(|mut objects| {
-        for (i, lib) in libraries.iter().enumerate() {
+        for lib in libraries {
+            let stem = lib.file_stem().unwrap_or_default().to_string_lossy();
             for (name, bytes) in library::archive::objects_of(lib)? {
-                let path = scratch.join(format!("lib{i}.{name}"));
+                let path = scratch.dir.join(format!("{stem}.{name}"));
                 std::fs::write(&path, bytes)
                     .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
                 objects.push(path);
@@ -845,10 +863,7 @@ fn link_program(
         Ok(objects)
     });
     let result = objects.and_then(|objects| codegen::link::link(&objects, &program_path, options));
-    // The scratch directory goes whether the link worked or not, and a failure
-    // to remove it is not a failure of the compilation: the object files are
-    // already written or already not.
-    let _ = std::fs::remove_dir_all(&scratch);
+    scratch.finish();
     result
 }
 
@@ -950,6 +965,7 @@ fn load_libraries(session: &mut Session, externs: &[(String, PathBuf, bool)]) ->
 /// `-o` names the archive when one is asked for, and the metadata otherwise;
 /// with both, the metadata is the archive's path with `.nmeta` for its
 /// extension.
+#[allow(clippy::too_many_arguments)]
 fn write_library(
     session: &Session,
     entry_file: common::source::FileId,
@@ -958,6 +974,7 @@ fn write_library(
     out: Option<&Path>,
     entry: &str,
     emit: &Emit,
+    obj_dir: Option<&Path>,
 ) -> Result<(), String> {
     let Some(package) = session.pkg_of.get(&entry_file) else {
         return Err(format!(
@@ -983,12 +1000,12 @@ fn write_library(
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
     if emit.nlib {
-        let scratch = temp_dir(entry)?;
+        let scratch = Scratch::new(obj_dir, entry)?;
         let objects = write_units(
             backend,
             program,
             OutputKind::Object,
-            Some(&scratch.join("unit")),
+            Some(&scratch.dir.join(package)),
             entry,
             false,
         );
@@ -1001,12 +1018,41 @@ fn write_library(
             }
             library::archive::write(&members)
         });
-        let _ = std::fs::remove_dir_all(&scratch);
+        scratch.finish();
         let path = with_ext("nlib");
         std::fs::write(&path, archive?)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+/// Where a link or a library writes the objects it is made from: the directory
+/// `--obj-dir` named, kept, or one of this process's own, removed when done.
+struct Scratch {
+    dir: PathBuf,
+    keep: bool,
+}
+
+impl Scratch {
+    fn new(obj_dir: Option<&Path>, entry: &str) -> Result<Scratch, String> {
+        match obj_dir {
+            Some(dir) => {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+                Ok(Scratch { dir: dir.to_path_buf(), keep: true })
+            }
+            None => Ok(Scratch { dir: temp_dir(entry)?, keep: false }),
+        }
+    }
+
+    /// Done with the objects. A temporary directory goes whether the work
+    /// succeeded or not, and a failure to remove it is not a failure of the
+    /// compilation: the objects are already written or already not.
+    fn finish(self) {
+        if !self.keep {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
 }
 
 /// A directory of this process's own to put intermediate objects in.

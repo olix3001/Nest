@@ -76,7 +76,8 @@ impl Twig {
         }
         let out = command
             .output()
-            .map_err(|e| format!("could not run `{}`: {e}", self.program))?;
+            .map_err(|e| format!("could not run `{}` in `{}`: {e}", self.program, root.display()))?;
+        eprintln!("nest-lsp: `{} {}` in `{}`: {}", self.program, args.join(" "), root.display(), out.status);
         if !out.status.success() {
             return Err(format!(
                 "`twig {}` failed:\n{}",

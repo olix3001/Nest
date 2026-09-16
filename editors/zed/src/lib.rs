@@ -24,7 +24,7 @@ impl zed::Extension for Nest {
             let path = settings.settings.as_ref().and_then(|s| s.get(name)).and_then(|v| v.as_str());
             if let Some(path) = path {
                 flags.push(format!("--{name}"));
-                flags.push(path.to_string());
+                flags.push(absolute(path, worktree));
             }
         }
         let binary = settings.binary;
@@ -52,6 +52,21 @@ impl zed::Extension for Nest {
             .ok()
             .and_then(|s| s.initialization_options))
     }
+}
+
+/// A path from the settings, as the server has to be given it: `~/` is the home
+/// directory, and a relative path is relative to the worktree.
+fn absolute(path: &str, worktree: &Worktree) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = worktree.shell_env().into_iter().find(|(k, _)| k == "HOME").map(|(_, v)| v);
+        if let Some(home) = home {
+            return format!("{home}/{rest}");
+        }
+    }
+    if path.starts_with('/') || path.starts_with('~') {
+        return path.to_string();
+    }
+    format!("{}/{path}", worktree.root_path())
 }
 
 zed::register_extension!(Nest);

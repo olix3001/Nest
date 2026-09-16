@@ -18,6 +18,12 @@
 //     build/<profile>/deps/<name>.nlib    a dependency
 //     build/<profile>/<name>.nlib         the root's own `[lib]`
 //     build/<profile>/<bin>               a binary
+//     build/<profile>/obj/lib/<name>/     the objects a library is made of
+//     build/<profile>/obj/bin/<bin>/      the objects a binary was linked from,
+//                                         its libraries' included
+//
+// The objects are kept, always: they are what a debugger, a profiler or a
+// person reading a symbol table wants, and what a link can be run again from.
 //
 // A library whose inputs have not changed is not compiled again; `nestc` decides
 // that, from a fingerprint in the library itself. A binary is always linked
@@ -111,6 +117,13 @@ library :: func (m: *Member) -> Target {
   return path.join(out_dir(ws, p), t.name)
 }
 
+// Where the objects `t` is made from are kept: apart for a library and a binary,
+// which may share a name.
+@public objects :: func (ws: *Workspace, p: Profile, t: Target) -> str {
+  let kind: str := if t.lib { "lib" } else { "bin" }
+  return path.join(path.join(path.join(out_dir(ws, p), "obj"), kind), t.name)
+}
+
 // The `.nlib` of the package called `name`.
 library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
   let dir: str := out_dir(ws, p)
@@ -135,6 +148,8 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
   args.push(if t.lib { "nlib" } else { "link" })
   args.push("-o")
   args.push(output(ws, p, t))
+  args.push("--obj-dir")
+  args.push(objects(ws, p, t))
 
   // A library may import what its package depends on. A binary may import
   // that too, and the root's own library as well, by name.

@@ -28,7 +28,17 @@ options:
   -h, --help      this
 ";
 
+/// `path` with a leading `~/` written as the home directory, which nothing
+/// between a settings file and `exec` would do otherwise.
+fn expand_home(path: &str) -> String {
+    match (path.strip_prefix("~/"), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
+        _ => path.to_string(),
+    }
+}
+
 fn main() -> ExitCode {
+    eprintln!("nest-lsp: started with {:?}", std::env::args().skip(1).collect::<Vec<_>>());
     let mut twig: Option<String> = None;
     let mut nestc: Option<String> = None;
     let mut args = std::env::args().skip(1);
@@ -61,7 +71,11 @@ fn main() -> ExitCode {
             .or_else(|| option("twig"))
             .or_else(|| std::env::var("NEST_TWIG").ok().filter(|p| !p.is_empty()))
             .unwrap_or_else(|| "twig".to_string());
-        Arc::new(Twig { program, nestc: nestc.or_else(|| option("nestc")) })
+        let nestc = nestc.or_else(|| option("nestc")).map(|p| expand_home(&p));
+        let program = expand_home(&program);
+        // Stderr is where an editor's language server log shows it.
+        eprintln!("nest-lsp: twig is `{program}`, nestc is `{}`", nestc.as_deref().unwrap_or("twig's own"));
+        Arc::new(Twig { program, nestc })
     });
     drop(conn);
     let joined = io.join();
