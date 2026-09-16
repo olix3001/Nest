@@ -36,12 +36,16 @@ use std::hash::Hash;
 /// ```
 pub struct MetaStore<K> {
     tables: RefCell<HashMap<TypeId, HashMap<K, Box<dyn Any>>>>,
+    /// Each table's Rust type name, for a store enumerated by type
+    /// ([`MetaStore::kinds`]) to say which one it does not know.
+    names: RefCell<HashMap<TypeId, &'static str>>,
 }
 
 impl<K> Default for MetaStore<K> {
     fn default() -> Self {
         Self {
             tables: RefCell::new(HashMap::new()),
+            names: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -68,6 +72,10 @@ impl<K: Eq + Hash> MetaStore<K> {
 
     /// Attach a `T` to `key`, replacing and returning any previous `T`.
     pub fn set<T: Any>(&self, key: K, value: T) -> Option<T> {
+        self.names
+            .borrow_mut()
+            .entry(TypeId::of::<T>())
+            .or_insert_with(std::any::type_name::<T>);
         self.tables
             .borrow_mut()
             .entry(TypeId::of::<T>())
@@ -108,6 +116,36 @@ impl<K: Eq + Hash> MetaStore<K> {
             .get_mut(&TypeId::of::<T>())?
             .remove(key)
             .and_then(|b| b.downcast::<T>().ok().map(|b| *b))
+    }
+}
+
+/// Enumeration, for writing a store out: what a library's metadata does with
+/// the facts the passes left on a tree.
+impl<K: Eq + Hash + Clone> MetaStore<K> {
+    /// Every `T` in the store, with its key, in no particular order.
+    pub fn entries<T: Any + Clone>(&self) -> Vec<(K, T)> {
+        let tables = self.tables.borrow();
+        let Some(table) = tables.get(&TypeId::of::<T>()) else {
+            return Vec::new();
+        };
+        table
+            .iter()
+            .map(|(k, v)| {
+                let v = v.downcast_ref::<T>().expect("TypeId keys the value type");
+                (k.clone(), v.clone())
+            })
+            .collect()
+    }
+
+    /// Every type the store holds a non-empty table of, with its name.
+    pub fn kinds(&self) -> Vec<(TypeId, &'static str)> {
+        let tables = self.tables.borrow();
+        let names = self.names.borrow();
+        tables
+            .iter()
+            .filter(|(_, table)| !table.is_empty())
+            .map(|(id, _)| (*id, names.get(id).copied().unwrap_or("?")))
+            .collect()
     }
 }
 

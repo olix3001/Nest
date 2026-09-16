@@ -25,7 +25,7 @@ pub struct DefId(pub u32);
 
 /// Whether a def is exported from its enclosing namespace (§4.4). Only `@public`
 /// items are reachable through `import` / qualified access from the outside.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Visibility {
     Public,
     Private,
@@ -39,7 +39,7 @@ impl Visibility {
 
 /// What a [`Def`] denotes. Drives both diagnostics and how member lookup treats
 /// the def (namespace-like kinds own a populated [`Namespace`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DefKind {
     /// A namespace value: a whole file, an inline `namespace { ... }`, or a
     /// package root. Owns members.
@@ -116,7 +116,7 @@ impl DefKind {
 
 /// The members a namespace-like [`Def`] exposes, split by how they got there so
 /// resolution can honor the §4.6 search order and diagnose glob conflicts.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Namespace {
     /// Members declared directly in this namespace, `name → def`.
     pub members: HashMap<Symbol, DefId>,
@@ -144,7 +144,7 @@ impl Namespace {
 /// `#link_name("printf")`. Nothing here interprets them; a directive this
 /// front end has no opinion about still travels, so adding one later is a
 /// matter of reading it where it matters rather than re-plumbing it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Directive {
     pub name: Symbol,
     pub args: Vec<DirectiveArg>,
@@ -158,7 +158,7 @@ impl Directive {
 }
 
 /// One argument of a [`Directive`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DirectiveArg {
     /// An integer literal: `#align(16)`.
     Int(i128),
@@ -180,7 +180,7 @@ pub enum DirectiveArg {
 /// resolution does not. What resolution does check is that every name is a
 /// member and that the count is right, so by the time this travels the only
 /// work left is putting the values in order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AttrValue {
     /// The `@attribute` struct this is a value of.
     pub def: DefId,
@@ -190,7 +190,7 @@ pub struct AttrValue {
 
 /// One definition. Leaf defs (locals, params, fields) leave `ns` empty; the
 /// namespace-like kinds populate it during collection and import wiring.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Def {
     pub id: DefId,
     pub name: Symbol,
@@ -360,6 +360,40 @@ impl DefTable {
         id
     }
 
+    /// Append a def read from a library's metadata, whose id was translated to
+    /// the slot it lands in (`crate::library::codec`) — so it must be that slot.
+    pub fn push(&mut self, def: Def) -> Result<DefId, String> {
+        let id = DefId(self.defs.len() as u32);
+        if def.id != id {
+            return Err(format!(
+                "`{}` was numbered {} but lands at {}",
+                def.name, def.id.0, id.0
+            ));
+        }
+        self.defs.push(def);
+        Ok(id)
+    }
+
+    /// The primitive `name` in the builtins namespace `builtins`, made the first
+    /// time it is asked for: `u65536` is a type, and there is no list of them.
+    pub fn intern_primitive(&mut self, builtins: DefId, name: &Symbol) -> DefId {
+        if let Some(&existing) = self.get(builtins).ns.members.get(name) {
+            return existing;
+        }
+        let id = self.alloc(
+            name.clone(),
+            DefKind::Primitive,
+            Visibility::Public,
+            Some(builtins),
+            None,
+            None,
+            None,
+            vec![name.clone()],
+        );
+        self.get_mut(builtins).ns.members.insert(name.clone(), id);
+        id
+    }
+
     pub fn get(&self, id: DefId) -> &Def {
         &self.defs[id.0 as usize]
     }
@@ -423,7 +457,7 @@ pub struct LangItems {
 }
 
 /// One `#lang` claim: which def, and whether it came from `core`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Claim {
     def: DefId,
     from_core: bool,
@@ -466,5 +500,11 @@ impl LangItems {
 
     pub fn iter(&self) -> impl Iterator<Item = (&Symbol, DefId)> {
         self.map.iter().map(|(t, c)| (t, c.def))
+    }
+
+    /// Every claim with whether `core` made it, which is what setting it again
+    /// in another session needs (`crate::library`).
+    pub fn claims(&self) -> impl Iterator<Item = (&Symbol, DefId, bool)> {
+        self.map.iter().map(|(t, c)| (t, c.def, c.from_core))
     }
 }

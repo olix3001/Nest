@@ -553,25 +553,7 @@ impl Resolver<'_> {
         }
         // Intern once: a second use of `i32` must resolve to the same def so the
         // two are the same nominal type.
-        if let Some(&existing) = self.defs.get(self.builtins).ns.members.get(name) {
-            return Some(existing);
-        }
-        let id = self.defs.alloc(
-            name.clone(),
-            DefKind::Primitive,
-            Visibility::Public,
-            Some(self.builtins),
-            None,
-            None,
-            None,
-            vec![name.clone()],
-        );
-        self.defs
-            .get_mut(self.builtins)
-            .ns
-            .members
-            .insert(name.clone(), id);
-        Some(id)
+        Some(self.defs.intern_primitive(self.builtins, name))
     }
 
     /// A `base.name` hop where `base` is a name path: if `base` resolved to a

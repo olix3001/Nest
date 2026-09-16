@@ -17,8 +17,10 @@ use super::span::Span;
 /// Identifies the source file a node originates from. Because `import` splices
 /// members from other files into a namespace, a node's file is tracked
 /// independently of the arena it ends up in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+///
+/// Its `Serialize` is [`crate::library::codec`]'s: written into a library's
+/// metadata it is translated, and anywhere else it is its number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileId(pub u32);
 
 /// A [`Span`] paired with the [`FileId`] it lives in — enough to locate a range
@@ -155,6 +157,11 @@ impl SourceMap {
     /// Borrow a loaded file, or `None` if `id` was never added.
     pub fn file(&self, id: FileId) -> Option<&SourceFile> {
         self.files.get(id.0 as usize)
+    }
+
+    /// How many files are loaded, which is the [`FileId`] the next one gets.
+    pub fn len(&self) -> usize {
+        self.files.len()
     }
 
     /// Every file loaded, in the order they were added.

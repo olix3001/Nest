@@ -84,6 +84,20 @@ impl Meta {
         Self::default()
     }
 
+    /// Set aside `n` ids in one run and answer where it starts: the ids of a
+    /// library read in from its metadata, which were numbered from zero where
+    /// they were allocated (`crate::library`).
+    pub fn reserve(&self, n: u32) -> u32 {
+        let base = self.next.get();
+        self.next.set(base + n);
+        base
+    }
+
+    /// The side table itself, for writing it out and reading it back.
+    pub fn store(&self) -> &MetaStore<IrId> {
+        &self.store
+    }
+
     /// Allocate the next unused [`IrId`].
     pub fn fresh(&self) -> IrId {
         let id = IrId(self.next.get());

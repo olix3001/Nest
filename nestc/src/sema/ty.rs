@@ -31,7 +31,7 @@ use crate::parser::ast::NodeId;
 use super::def::DefId;
 
 /// The five legal float widths (§3.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FloatWidth {
     F16,
     F32,
@@ -41,11 +41,11 @@ pub enum FloatWidth {
 }
 
 /// An inference variable: an index into [`InferCtxt::subst`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct TyVar(pub u32);
 
 /// What a fresh [`TyVar`] may unify with, and how it defaults if left unsolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TyVarKind {
     /// Any type; an unsolved one is a "type annotations needed" error.
     General,
@@ -68,7 +68,7 @@ pub enum TyVarKind {
 
 /// A **const-generic** inference variable: an index into
 /// [`InferCtxt::const_subst`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct ConstVar(pub u32);
 
 /// A compile-time *value* appearing inside a type — an array length (§3.2
@@ -86,7 +86,7 @@ pub struct ConstVar(pub u32);
 /// signedness does not — it chooses which of the two families the type belongs
 /// to, not what it is applied to. That is also why [`Const::Width`] is a case of
 /// its own rather than a value at a type; see its own note.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Const {
     /// A known value, at the type it was written at (see [`ConstArg`]).
     Value(Box<ConstArg>),
@@ -123,7 +123,7 @@ pub enum Const {
 /// The value is [`ConstValue`], the const evaluator's own representation, rather
 /// than a second one invented here: the evaluator already produces exactly these
 /// and a `const` argument is the same kind of thing a `::` binding holds.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConstArg {
     pub ty: Ty,
     pub value: ConstValue,
@@ -203,7 +203,7 @@ impl Const {
 }
 
 /// A type. Cheap to clone; nested types are boxed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Ty {
     /// An unsolved inference variable.
     Var(TyVar),

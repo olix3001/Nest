@@ -3,6 +3,7 @@
 pub(crate) mod common;
 mod codegen;
 mod ir;
+mod library;
 mod lir;
 mod parser;
 mod sema;
@@ -38,6 +39,10 @@ options:
                            link                 an executable, linked (default)
                            ast, ir, mono, lir   the compiler's own dumps, to stdout
                            obj, asm, backend-ir what the backend writes, to files
+                           nmeta                the package's metadata, for
+                                                compiling against it
+                           nlib                 the package compiled: its
+                                                objects and its metadata
   -L <dir>               a directory to search for packages; `<foo/...>` is
                          <dir>/foo/package.nest. Repeatable, in order
   --color <when>         auto (default), always or never: colour in human
@@ -47,6 +52,14 @@ options:
                          on stderr, for a tool that consumes them
   --package <name>=<path>
                          a package pinned to a root file, beating any -L search
+  --extern <name>=<path> a compiled library (.nlib or .nmeta) this compilation
+                         depends on and may import. Repeatable
+  --indirect <name>=<path>
+                         a library a dependency was compiled against: read, and
+                         linked, but not importable. Repeatable
+  --up-to-date           compile nothing: exit 0 when the library at `-o` was
+                         compiled from these files, settings and libraries as
+                         they are now, and 1 when it would be compiled again
   -C <key>=<value>       a build setting; see below
   -h, --help             this
 
@@ -93,6 +106,10 @@ struct Emit {
     backend: Vec<OutputKind>,
     /// An executable: objects, and then the linker over them.
     link: bool,
+    /// The entry package's metadata alone.
+    nmeta: bool,
+    /// The entry package as a library: objects and metadata in one archive.
+    nlib: bool,
 }
 
 impl Default for Emit {
@@ -117,6 +134,8 @@ impl Emit {
             lir: false,
             backend: Vec::new(),
             link: false,
+            nmeta: false,
+            nlib: false,
         }
     }
 
@@ -132,9 +151,11 @@ impl Emit {
                 "asm" => e.backend.push(OutputKind::Assembly),
                 "backend-ir" => e.backend.push(OutputKind::Ir),
                 "link" => e.link = true,
+                "nmeta" => e.nmeta = true,
+                "nlib" => e.nlib = true,
                 other => {
                     return Err(format!(
-                        "`--emit` does not know `{other}`; it takes link, ast, ir, mono, lir, obj, asm, backend-ir"
+                        "`--emit` does not know `{other}`; it takes link, ast, ir, mono, lir, obj, asm, backend-ir, nmeta, nlib"
                     ));
                 }
             }
@@ -265,6 +286,7 @@ fn run() -> Result<ExitCode, String> {
     let mut emit: Option<Emit> = None;
     let mut print_options = false;
     let mut print_packages = false;
+    let mut up_to_date = false;
     let mut format = ErrorFormat::default();
     let mut color = ColorChoice::default();
     // Where to look for a package nothing registered. The driver holds them
@@ -274,6 +296,9 @@ fn run() -> Result<ExitCode, String> {
     // Packages pinned by name, which is how a build tool that has already
     // resolved a dependency hands the answer over rather than a place to look.
     let mut packages: Vec<(String, String)> = Vec::new();
+    // Compiled libraries, and whether this compilation may import each: what a
+    // build tool passes once it compiles one package at a time.
+    let mut externs: Vec<(String, PathBuf, bool)> = Vec::new();
     // The link's settings, which are the driver's for the same reason `backend`
     // is: no pass reads them, and what is compiled does not change because a
     // different linker will run afterwards.
@@ -319,6 +344,15 @@ fn run() -> Result<ExitCode, String> {
                     .ok_or_else(|| format!("`--package {spec}` is not a `name=path` pair"))?;
                 packages.push((name.to_string(), root.to_string()));
             }
+            a if a == "--extern" || a.starts_with("--extern=") || a == "--indirect" || a.starts_with("--indirect=") => {
+                let flag = if a.starts_with("--extern") { "--extern" } else { "--indirect" };
+                let spec = value(flag, &mut args)?;
+                let (name, lib) = spec
+                    .split_once('=')
+                    .ok_or_else(|| format!("`{flag} {spec}` is not a `name=path` pair"))?;
+                externs.push((name.to_string(), PathBuf::from(lib), flag == "--extern"));
+            }
+            "--up-to-date" => up_to_date = true,
             a if a == "--color" || a.starts_with("--color=") => {
                 color = ColorChoice::parse(&value("--color", &mut args)?)?;
             }
@@ -397,6 +431,17 @@ fn run() -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    if up_to_date {
+        let out = out.ok_or("`--up-to-date` asks about the library at `-o`, and there is no `-o`")?;
+        let mut probe = Session::new();
+        probe.options = options;
+        return Ok(if library_is_fresh(&probe, &out, &externs) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        });
+    }
+
     let emit = emit.unwrap_or_default();
     let Some(path) = path else {
         eprint!("{USAGE}");
@@ -418,6 +463,9 @@ fn run() -> Result<ExitCode, String> {
     for (name, root) in &packages {
         session.register_package(name, root);
     }
+    // Libraries before the entry is read: they are packages already analyzed,
+    // and the analysis of this one resolves against them.
+    load_libraries(&mut session, &externs)?;
     let file = session.sources.add(path.clone(), source.clone());
     let (ast, parse_errors) = parser::parse::Parser::parse_file(&source, file);
     for err in parse_errors {
@@ -457,14 +505,17 @@ fn run() -> Result<ExitCode, String> {
     // decided (`design/lir.md` §1). Like the mono dump it is empty when
     // analysis reported an error, for the same reason — and so, for the same
     // reason, is everything a backend would have been handed.
-    if (emit.lir || emit.link || !emit.backend.is_empty()) && type_checked {
+    if (emit.nmeta || emit.nlib) && !type_checked && !session.has_errors() {
+        return Err(format!("{path} declares nothing to make a library of"));
+    }
+    if (emit.lir || emit.link || emit.nlib || emit.nmeta || !emit.backend.is_empty()) && type_checked {
         let layouts = ir::layout::Layouts::new(
             &session.defs,
             &session.ir_meta,
             &session.linked,
             session.options.target,
         );
-        let program = lir::lower(
+        let program = lir::lower::lower_against_libraries(
             &session.defs,
             &session.ir_meta,
             &session.linked,
@@ -472,6 +523,7 @@ fn run() -> Result<ExitCode, String> {
             &session.options,
             &session.lang_items,
             &session.sources,
+            &|def| session.is_foreign_def(def),
         );
         if emit.lir {
             print!(
@@ -505,13 +557,27 @@ fn run() -> Result<ExitCode, String> {
                 }
             }
         }
+        if emit.nmeta || emit.nlib {
+            write_library(
+                &session,
+                file,
+                backend.as_mut(),
+                &program,
+                out.as_deref(),
+                &path,
+                &emit,
+            )?;
+        }
         if emit.link {
+            let libraries: Vec<PathBuf> =
+                session.libraries.iter().map(|l| l.path.clone()).collect();
             link_program(
                 backend.as_mut(),
                 &program,
                 out.as_deref(),
                 &path,
                 &link_options,
+                &libraries,
             )?;
         }
     }
@@ -694,6 +760,7 @@ fn link_program(
     out: Option<&Path>,
     entry: &str,
     options: &codegen::link::LinkOptions,
+    libraries: &[PathBuf],
 ) -> Result<(), String> {
     // A program starts at `main`, and without one the link fails deep inside the
     // C runtime's startup with a message about a symbol nobody wrote. The
@@ -729,12 +796,182 @@ fn link_program(
         entry,
         true,
     );
+    // Every library's objects join the program's: the code a library's
+    // declarations here call is in them.
+    let objects = objects.and_then(|mut objects| {
+        for (i, lib) in libraries.iter().enumerate() {
+            for (name, bytes) in library::archive::objects_of(lib)? {
+                let path = scratch.join(format!("lib{i}.{name}"));
+                std::fs::write(&path, bytes)
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                objects.push(path);
+            }
+        }
+        Ok(objects)
+    });
     let result = objects.and_then(|objects| codegen::link::link(&objects, &program_path, options));
     // The scratch directory goes whether the link worked or not, and a failure
     // to remove it is not a failure of the compilation: the object files are
     // already written or already not.
     let _ = std::fs::remove_dir_all(&scratch);
     result
+}
+
+/// Whether the library at `out` is what compiling it again would produce: its
+/// fingerprint, computed from the files it names and the libraries given as
+/// they are now (`library::fingerprint`). Anything unreadable is stale.
+fn library_is_fresh(session: &Session, out: &Path, externs: &[(String, PathBuf, bool)]) -> bool {
+    let Ok(bytes) = library::archive::metadata_of(out) else {
+        return false;
+    };
+    let Ok((header, _)) = library::read::header(&bytes) else {
+        return false;
+    };
+    let settings = session.options.render();
+    if header.settings != settings {
+        return false;
+    }
+    let mut contents = Vec::with_capacity(header.inputs.len());
+    for name in &header.inputs {
+        match std::fs::read(name) {
+            Ok(bytes) => contents.push((name.as_str(), bytes)),
+            Err(_) => return false,
+        }
+    }
+    let mut libraries: Vec<(String, u64, bool)> = Vec::new();
+    for (_, path, importable) in externs {
+        let Ok(bytes) = library::archive::metadata_of(path) else {
+            return false;
+        };
+        let Ok((lib, _)) = library::read::header(&bytes) else {
+            return false;
+        };
+        match libraries.iter_mut().find(|(n, ..)| *n == lib.name) {
+            Some(existing) => existing.2 |= importable,
+            None => libraries.push((lib.name, lib.fingerprint, *importable)),
+        }
+    }
+    let target = session.target_module_source();
+    let fingerprint = library::fingerprint::compute(&library::fingerprint::Inputs {
+        compiler: &library::compiler_id(),
+        target: &target,
+        settings: &settings,
+        package: &header.name,
+        files: contents.iter().map(|(n, b)| (*n, b.as_slice())).collect(),
+        libraries: libraries.iter().map(|(n, f, i)| (n.as_str(), *f, *i)).collect(),
+    });
+    fingerprint == header.fingerprint
+}
+
+/// Read every library given on the command line into `session`, each after the
+/// libraries it was compiled against.
+///
+/// The order on the command line is not that order and does not have to be: the
+/// headers say which packages each one names, and that is sorted here.
+fn load_libraries(session: &mut Session, externs: &[(String, PathBuf, bool)]) -> Result<(), String> {
+    let mut pending = Vec::with_capacity(externs.len());
+    for (name, path, importable) in externs {
+        let bytes = library::archive::metadata_of(path)?;
+        let (header, _) = library::read::header(&bytes)
+            .map_err(|e| format!("`{}`: {e}", path.display()))?;
+        if &header.name != name {
+            return Err(format!(
+                "`{}` is the library `{}`, not `{name}`",
+                path.display(),
+                header.name
+            ));
+        }
+        pending.push((header.packages, bytes, path, *importable));
+    }
+    while !pending.is_empty() {
+        let ready = pending.iter().position(|(packages, ..)| {
+            packages[1..]
+                .iter()
+                .all(|p| session.libraries.iter().any(|l| &l.name == p))
+        });
+        let Some(i) = ready else {
+            let (packages, _, path, _) = &pending[0];
+            let missing: Vec<&String> = packages[1..]
+                .iter()
+                .filter(|p| !session.libraries.iter().any(|l| &l.name == *p))
+                .collect();
+            return Err(format!(
+                "`{}` was compiled against {}, which {} not given (with --extern or --indirect)",
+                path.display(),
+                missing.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", "),
+                if missing.len() == 1 { "was" } else { "were" }
+            ));
+        };
+        let (_, bytes, path, importable) = pending.remove(i);
+        library::read::load(session, &bytes, path, importable)
+            .map_err(|e| format!("`{}`: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Write the entry package as a library: its metadata, and with `nlib` its
+/// objects beside it in one archive.
+///
+/// `-o` names the archive when one is asked for, and the metadata otherwise;
+/// with both, the metadata is the archive's path with `.nmeta` for its
+/// extension.
+fn write_library(
+    session: &Session,
+    entry_file: common::source::FileId,
+    backend: &mut dyn Codegen,
+    program: &lir::Program,
+    out: Option<&Path>,
+    entry: &str,
+    emit: &Emit,
+) -> Result<(), String> {
+    let Some(package) = session.pkg_of.get(&entry_file) else {
+        return Err(format!(
+            "{entry} is not a package's root, so there is no package to make a library of; \
+             name it with `--package <name>={entry}`"
+        ));
+    };
+    let metadata = library::write::metadata(session, package, entry_file)?;
+    let base = match out {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from(package),
+    };
+    let with_ext = |ext: &str| {
+        if out.is_some() && (ext == "nlib" || !emit.nlib) {
+            base.clone()
+        } else {
+            base.with_extension(ext)
+        }
+    };
+    if emit.nmeta {
+        let path = with_ext("nmeta");
+        std::fs::write(&path, &metadata)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    if emit.nlib {
+        let scratch = temp_dir(entry)?;
+        let objects = write_units(
+            backend,
+            program,
+            OutputKind::Object,
+            Some(&scratch.join("unit")),
+            entry,
+            false,
+        );
+        let archive = objects.and_then(|objects| {
+            let mut members = vec![(library::archive::METADATA.to_string(), metadata)];
+            for (i, object) in objects.iter().enumerate() {
+                let bytes = std::fs::read(object)
+                    .map_err(|e| format!("cannot read {}: {e}", object.display()))?;
+                members.push((format!("u{i}.o"), bytes));
+            }
+            library::archive::write(&members)
+        });
+        let _ = std::fs::remove_dir_all(&scratch);
+        let path = with_ext("nlib");
+        std::fs::write(&path, archive?)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// A directory of this process's own to put intermediate objects in.

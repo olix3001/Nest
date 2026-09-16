@@ -103,7 +103,7 @@ enum CastMode {
 /// says which shape it was. This is the same flattening `design/lir.md` §7b
 /// applies to aggregates, for the same reason: each shape that keeps its own
 /// case is one more case every consumer must learn.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ConstValue {
     Int(BigInt),
     Float(f64),

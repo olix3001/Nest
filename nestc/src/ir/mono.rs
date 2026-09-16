@@ -142,6 +142,7 @@ pub fn run(
     linked: &mut Linked,
     impls: &ImplTable,
     targets: &[ImplTarget],
+    compiled_elsewhere: &dyn Fn(DefId) -> bool,
 ) -> Vec<Diagnostic> {
     let mut mono = Mono {
         defs,
@@ -177,7 +178,21 @@ pub fn run(
         }
     }
 
+    // A function a library defines was compiled with the library, and so was
+    // everything it instantiates: it is declared here, not emitted, so it asks
+    // for nothing. It is still named — the declaration needs its symbol — and
+    // marked done, so a call to it from here does not walk its body either.
     for root in roots(mono.defs, mono.meta, linked) {
+        if compiled_elsewhere(root) {
+            if mono.done.insert(root)
+                && let Some(f) = linked.get(root)
+            {
+                let id = f.id;
+                let qual = mono.trait_qualifier(linked, root, &[]);
+                mono.stamp(id, root, Vec::new(), 0, qual.as_ref());
+            }
+            continue;
+        }
         mono.reach(linked, root, Vec::new(), 0);
     }
     while let Some(job) = mono.queue.pop_front() {

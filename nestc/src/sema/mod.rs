@@ -72,7 +72,7 @@ use session::{FileMeta, Session};
 /// multi-segment [`Path`](crate::parser::ast::NodeKind::Path)s, the namespace
 /// hops of a [`FieldAccess`](crate::parser::ast::NodeKind::FieldAccess), a
 /// [`TypePath`](crate::parser::ast::NodeKind::TypePath)) by the resolver.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Resolution {
     /// Resolved to a unique definition.
     Def(DefId),
@@ -82,13 +82,13 @@ pub enum Resolution {
 
 /// Marks the temporary a `..` spread was bound to, so desugaring can tell its
 /// own output from a spread the program wrote (see `desugar::lower_spread`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SpreadBase;
 
 /// Marks a node that *introduces* a definition, linking it to its [`DefId`] (and
 /// thus its canonical name). Attached by collection and by the resolver's local
 /// binding introduction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DefMeta(pub DefId);
 
 /// A **declared** function's whole signature, stamped on its `FuncExpr` by
@@ -100,12 +100,12 @@ pub struct DefMeta(pub DefId);
 /// object-safety rules, are questions about the parameters as much as the result
 /// — and a method with a default body would otherwise have its signature
 /// overwritten by the per-function pass that runs afterwards.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Signature(pub ty::Ty);
 
 /// The per-segment resolution of a multi-segment [`Path`], so every name in a
 /// dotted path (e.g. `Self.Output`) is linked, not just the final one.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PathRes(pub Vec<Resolution>);
 
 // ===< Pipeline entry points >===
@@ -237,6 +237,9 @@ pub fn analyze_source(name: &str, src: &str, packages: &[(&str, &str)]) -> Sessi
 /// every file it transitively imports.
 pub fn analyze(session: &mut Session, entry: FileId) {
     session.claim_entry(entry);
+    // Everything lowered from here on is this compilation's; below it are the
+    // libraries' (see `crate::library`).
+    session.own_ir_base = session.ir_meta.allocated();
     // The prelude is globbed into every scope, so `core` must be collected
     // before anything resolves against it.
     if let Some(core_root) = session.load_package("core") {
@@ -246,8 +249,15 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // Collect the entry file and its transitive imports.
     collect_reachable(session, vec![entry]);
 
-    // The remaining stages run over every collected file (core included).
-    let files: Vec<FileId> = session.files.keys().copied().collect();
+    // The remaining stages run over every collected file (core included) —
+    // except a library's, which were analyzed where the library was compiled,
+    // and arrived with everything these stages would have worked out.
+    let all_files: Vec<FileId> = session.files.keys().copied().collect();
+    let files: Vec<FileId> = all_files
+        .iter()
+        .copied()
+        .filter(|&f| !session.is_foreign_file(f))
+        .collect();
     for file in wire_order(session, &files) {
         imports::wire(session, file);
     }
@@ -279,7 +289,7 @@ pub fn analyze(session: &mut Session, entry: FileId) {
             diagnostics,
             ..
         } = &mut *session;
-        impls::build(defs, asts, pkg_of, diagnostics, &files)
+        impls::build(defs, asts, pkg_of, diagnostics, &all_files)
     };
     for &file in &files {
         infer_one(session, &impls, file);
@@ -365,6 +375,8 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // describes a program that does not type-check, so walking it would at best
     // find nothing new and at worst report a defect in this pass for a defect in
     // the program.
+    session.ir_before_mono = session.ir_meta.allocated();
+    session.defs_before_mono = session.defs.len() as u32;
     if !session.has_errors() {
         monomorphize(session);
     }
@@ -380,9 +392,11 @@ fn monomorphize(session: &mut Session) {
         linked,
         impls,
         impl_targets,
+        libraries,
         ..
     } = &mut *session;
-    let mut diags = crate::ir::mono::run(defs, ir_meta, linked, impls, impl_targets);
+    let foreign = |def: DefId| libraries.iter().any(|l| l.owns_def(def));
+    let mut diags = crate::ir::mono::run(defs, ir_meta, linked, impls, impl_targets, &foreign);
 
     // The `#const` check defers every call in a generic body: which function it
     // reaches is a question about the instantiation, and there were none. Now
@@ -569,6 +583,23 @@ fn load_target(
         }
         RawTarget::Package(segs) => {
             let pkg = segs[0].as_str();
+            // A library that is here only because a dependency was compiled
+            // against it: the package being compiled did not say it depends on
+            // it, and a package imports what it depends on.
+            if session
+                .libraries
+                .iter()
+                .any(|l| l.name == pkg && !l.importable)
+            {
+                session.error(
+                    from,
+                    raw.span,
+                    format!(
+                        "`{pkg}` is not a dependency of this package, only of one it depends on; depend on it directly to import it"
+                    ),
+                );
+                return (ImportTarget::Broken, None);
+            }
             match session.load_package(pkg) {
                 Some(root) => (
                     ImportTarget::PackageMember(root, segs[1..].to_vec()),

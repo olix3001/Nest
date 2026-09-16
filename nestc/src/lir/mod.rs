@@ -354,6 +354,11 @@ pub struct FunctionAttrs {
     /// Everything else may be given internal linkage, which is the whole reason
     /// a backend is told: a symbol only one unit uses can be made local to it.
     pub public: bool,
+    /// An instantiation of a generic: any compilation that calls it at the same
+    /// arguments emits the same function under the same symbol, so several
+    /// objects linked into one program may each define it. A backend has the
+    /// linker keep one (`weak_odr`) instead of reporting a duplicate.
+    pub shared: bool,
     /// `#unsafe` — the checks this body was compiled without. A backend does not
     /// act on it; it is carried because a profiler and a debugger both want to
     /// say so (§9).

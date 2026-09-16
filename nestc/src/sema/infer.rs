@@ -67,7 +67,7 @@ struct LoopFrame {
 /// [`builtin`](OpResolution::builtin) is `Some` iff the resolved impl was a
 /// builtin primitive op (see [`super::builtins`]); codegen keys on it to emit
 /// the machine instruction in O(1) rather than a real call.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct OpResolution {
     /// The trait method the operator dispatches to (the `#lang` trait's method
     /// for a builtin, the impl's method for a user type).
@@ -92,7 +92,7 @@ pub struct OpResolution {
 /// method, a vtable slot, a bound awaiting monomorphization — and only this
 /// stage knows which. Rather than leave lowering to re-derive it from the
 /// receiver's type, the answer is recorded here in the form the IR wants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MethodRes {
     /// The function the call targets: an impl's member for a statically
     /// resolved call, the trait's own declaration for a virtual or generic one.
@@ -108,7 +108,7 @@ pub struct MethodRes {
 
 /// The dispatch kind of a resolved [`MethodRes`], mirroring
 /// [`crate::ir::Dispatch`] without the IR's already-substituted types.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MethodDispatch {
     /// A direct call to a known function.
     Static,
@@ -134,7 +134,7 @@ pub enum MethodDispatch {
 /// parameter (§3.4). Nest has no implicit reference-taking in the type system —
 /// the adjustment is decided here and *written out* in the IR, so `x.m()` on a
 /// `*mut Self` method is an `&mut x` the later mutability check can see.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecvAdjust {
     /// The receiver already has the `self` parameter's type.
     None,
@@ -163,7 +163,7 @@ pub enum RecvAdjust {
 ///
 /// Set on the AST node by inference and copied onto the lowered `$cast` by
 /// [`super::lower`], because the evaluator reports against the cast.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct RangeReported;
 
 /// A **compile-time value slot** this pass has already complained about: the
@@ -178,7 +178,7 @@ pub struct RangeReported;
 /// Set on the node in the *type*, which is what makes it the right key: two
 /// separate `[A - 10]i32`s written out are two nodes and two mistakes, and one
 /// alias used twice is one node and one.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ConstSlotReported;
 
 /// A type-position path that named something that is not a type, already
@@ -188,7 +188,7 @@ pub struct ConstSlotReported;
 /// **once per use**, so the sentence below would otherwise be said once for the
 /// signature, once for the body's check and once more per alias expansion. One
 /// written name is one mistake.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct TyPathReported;
 
 /// An `a[i]` that is the **place of an assignment** rather than a value.
@@ -201,10 +201,10 @@ pub struct TyPathReported;
 ///
 /// Set by [`Inferer::infer_index_place`], which is called for exactly the nodes
 /// that are places.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct IndexWrite;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Coercion {
     /// The type the value is converted to.
     pub to: Ty,
@@ -216,7 +216,7 @@ pub struct Coercion {
 /// lowering emits the `$slice` that spells, with the `.full` range. Keeping it
 /// distinct from [`Coercion`] is what stops a `(ptr, len)` view from looking
 /// like a reinterpretation of the array's bits.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SliceCoerce {
     /// The `[]T` produced.
     pub to: Ty,
@@ -231,7 +231,7 @@ pub struct SliceCoerce {
 ///
 /// The concrete pointee is kept so a later stage can pick the right vtable —
 /// that choice is exactly what the coercion erases from the type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DynCoerce {
     /// The trait the object is typed as.
     pub trait_def: DefId,
@@ -245,7 +245,7 @@ pub struct DynCoerce {
 ///
 /// A value upcast copies the sub-object; a pointer upcast takes its address, so
 /// [`through_ptr`](Upcast::through_ptr) picks which of the two lowering emits.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Upcast {
     /// The `@using` field the coercion goes through.
     pub field: DefId,
@@ -264,7 +264,7 @@ pub struct Upcast {
 /// a reinterpretation and nothing more — but the method's `self` is typed `T`,
 /// not the distinct type, so the receiver has to be spelled as `T` before the
 /// usual `&` / `.*` adjustment happens. `repr` is that type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DistinctRecv {
     pub repr: Ty,
 }
@@ -279,7 +279,7 @@ pub struct DistinctRecv {
 /// this is the one stage that has both the written arguments and the callee's
 /// parameter *names*; every later stage then talks about arguments by position
 /// alone.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ArgOrder {
     /// One entry per parameter, in declaration order. A `None` is a parameter
     /// the call left out and whose **default** fills the slot; lowering supplies
@@ -303,7 +303,7 @@ pub struct ArgOrder {
 /// in the **body** (`func <T> () -> usize { return $size_of.<T>() }`) is listed
 /// too — it is declared, so it is in the first half — which is why this is
 /// recorded rather than recomputed from the signature later.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Generics {
     /// Every parameter, declared ones first.
     pub params: Vec<DefId>,
@@ -326,7 +326,7 @@ pub struct Generics {
 /// `<const N: u16>` takes a value — stay apart here because they are different
 /// things to substitute into and because a mangled symbol encodes them
 /// differently (`design/lir.md` §7).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GenericArg {
     Ty(Ty),
     Const(Const),
@@ -346,7 +346,7 @@ pub enum GenericArg {
 /// result, but that answer is wrong wherever the signature does not mention a
 /// parameter (`$size_of.<T>()`), and it re-derives — with a second
 /// implementation, free to disagree — something inference computed exactly once.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Instantiation(pub Vec<GenericArg>);
 
 /// What binding a call's arguments to its parameters produced.

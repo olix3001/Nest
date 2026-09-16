@@ -88,6 +88,28 @@ pub fn lower(
     lang: &LangItems,
     sources: &SourceMap,
 ) -> Program {
+    lower_against_libraries(defs, meta, linked, layouts, options, lang, sources, &|_| false)
+}
+
+/// [`lower`], for a program some of whose definitions came from libraries.
+///
+/// `foreign` says which: a function a library defines was compiled there, so
+/// here it is **declared** and not lowered, and a library's `#static` is
+/// imported rather than defined. What monomorphization instantiated here is this
+/// compilation's own, whoever wrote the generic — and the library may have
+/// instantiated the same one at the same arguments, so an instantiation is
+/// marked [`FunctionAttrs::shared`] and the linker keeps one of the copies.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_against_libraries(
+    defs: &DefTable,
+    meta: &Meta,
+    linked: &Linked,
+    layouts: &Layouts,
+    options: &Options,
+    lang: &LangItems,
+    sources: &SourceMap,
+    foreign: &dyn Fn(DefId) -> bool,
+) -> Program {
     let mut cx = Cx {
         defs,
         meta,
@@ -128,9 +150,12 @@ pub fn lower(
         }
         let ty = meta.ty_or_error(g.id);
         let lty = cx.lir(&ty);
-        let init = meta
-            .get::<ConstValue>(g.id)
-            .map(|v| cx.const_data(&v, &ty));
+        let imported = foreign(g.def);
+        let init = if imported {
+            None
+        } else {
+            meta.get::<ConstValue>(g.id).map(|v| cx.const_data(&v, &ty))
+        };
         let id = GlobalId(cx.globals.len() as u32);
         cx.globals.push(Global {
             name: defs.canonical_string(g.def),
@@ -140,13 +165,22 @@ pub fn lower(
             mutable: true,
             // A `#static` is one region for the whole program, wherever it is
             // read from, so the linker has to see the name (§11).
-            linkage: super::Linkage::External,
+            linkage: if imported {
+                super::Linkage::Imported
+            } else {
+                super::Linkage::External
+            },
             span: meta.span(g.id),
         });
         cx.global_of.insert(g.def, id);
     }
 
     for f in irfuncs {
+        // Compiled where it was defined; the declaration reserved above is all
+        // a call from here needs.
+        if foreign(f.def) {
+            continue;
+        }
         let func = Lowerer::new(&mut cx, f).run();
         let id = cx.func_of[&f.def];
         cx.funcs[id.0 as usize] = func;
@@ -370,6 +404,19 @@ impl Cx<'_> {
     // ===< Functions >===
 
     /// Give a function its slot, before any body is lowered.
+    /// What `f`'s directives and visibility decide, and whether it is an
+    /// instantiation — the one fact here monomorphization decided rather than
+    /// the source.
+    fn func_attrs(&self, f: &ir::Function) -> FunctionAttrs {
+        FunctionAttrs {
+            shared: self
+                .meta
+                .with::<crate::ir::mono::Instance, _>(f.id, |i| !i.args.is_empty())
+                .unwrap_or(false),
+            ..attrs_of(&self.meta.directives(f.id), self.defs.get(f.def).vis.is_public())
+        }
+    }
+
     fn reserve_func(&mut self, f: &ir::Function) {
         if self.func_of.contains_key(&f.def) {
             return;
@@ -404,10 +451,7 @@ impl Cx<'_> {
             blocks: Vec::new(),
             extern_abi: f.extern_abi.clone(),
             span: self.meta.span(f.id),
-            attrs: attrs_of(
-                &self.meta.directives(f.id),
-                self.defs.get(f.def).vis.is_public(),
-            ),
+            attrs: self.func_attrs(f),
         });
         self.func_of.insert(f.def, id);
     }
@@ -1554,10 +1598,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             blocks,
             extern_abi: self.f.extern_abi.clone(),
             span: self.cx.meta.span(self.f.id),
-            attrs: attrs_of(
-                &self.cx.meta.directives(self.f.id),
-                self.cx.defs.get(self.f.def).vis.is_public(),
-            ),
+            attrs: self.cx.func_attrs(self.f),
         }
     }
 

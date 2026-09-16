@@ -1065,6 +1065,12 @@ impl Ast {
         self.meta.set(id, value)
     }
 
+    /// The side table itself, for writing it out and reading it back
+    /// (`crate::library`).
+    pub fn meta_store(&self) -> &crate::common::meta::MetaStore<NodeId> {
+        &self.meta
+    }
+
     /// Clone out the `T` metadata attached to `id`, if present. Convenient for
     /// small `Copy`/`Clone` payloads; use [`Ast::with_meta`] to avoid a clone.
     pub fn meta<T: Any + Clone>(&self, id: NodeId) -> Option<T> {

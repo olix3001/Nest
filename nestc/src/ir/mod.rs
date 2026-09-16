@@ -115,7 +115,7 @@ pub use meta::{IrId, Meta};
 /// everything the side table holds about a default: its span, its type and its
 /// const-safety are properties of the one expression that was written, not of
 /// the places it was pasted.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DefaultValue(pub Expr);
 
 /// Marks a `$cast` the **compiler** inserted, rather than one the program wrote
@@ -133,12 +133,12 @@ pub struct DefaultValue(pub Expr);
 /// It is a side-table fact rather than a distinct [`ExprKind`] because the
 /// distinction is spent by the time the check has run: to everything downstream
 /// of the const evaluator a cast is a cast.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ImplicitCast;
 
 /// A whole lowered program: the type definitions it declares, the constants and
 /// static regions it declares, and every function that had a body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Program {
     pub types: Vec<TypeDef>,
     pub globals: Vec<Global>,
@@ -158,7 +158,7 @@ pub struct Program {
 /// The type is `meta.ty(id)`; the span and the directives are read the same way
 /// as on every other node. Its evaluated value, once the const evaluator has
 /// run, is `meta.get::<ConstValue>(id)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Global {
     pub id: IrId,
     pub def: DefId,
@@ -192,7 +192,7 @@ pub struct Global {
 /// types are `meta.ty(member.id)`, and are **definition-relative** — a field of
 /// `Pair.<T>` declared `T` is the type parameter, not anything a use site
 /// substituted, because substituting is monomorphization's job.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeDef {
     pub id: IrId,
     pub def: DefId,
@@ -201,7 +201,7 @@ pub struct TypeDef {
 }
 
 /// What a [`TypeDef`] defines.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TypeDefKind {
     /// `struct { a: T, b: U }`, and a tuple struct alike — a tuple struct's
     /// members are named by position (`"0"`, `"1"`, …), which is what they
@@ -232,7 +232,7 @@ pub enum TypeDefKind {
 /// is `meta.get::<DefaultValue>(id)` — the same place a parameter's default
 /// lives, for the same reason. An impl may omit a constant exactly when the
 /// trait gave it one, which is how a default method body already works.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AssocConst {
     pub id: IrId,
     pub def: DefId,
@@ -244,7 +244,7 @@ pub struct AssocConst {
 /// Its signature is `meta.ty(id)`, a [`Ty::Func`] in which `Self` appears as the
 /// trait's own [`Ty::Nominal`] — which is how "takes or returns `Self` by value"
 /// is recognized without any name matching.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TraitMethod {
     pub id: IrId,
     pub def: DefId,
@@ -263,7 +263,7 @@ pub struct TraitMethod {
 
 /// One member of a struct, of a variant's payload, or the representation of a
 /// `distinct` type. Its type is `meta.ty(id)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Member {
     pub id: IrId,
     /// The member's own definition, or `None` where the front end gives it none
@@ -275,7 +275,7 @@ pub struct Member {
 }
 
 /// One `enum` variant.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Variant {
     pub id: IrId,
     pub def: DefId,
@@ -290,7 +290,7 @@ pub struct Variant {
 }
 
 /// One lowered function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Function {
     pub id: IrId,
     /// The function's definition id (its canonical name lives in the def table).
@@ -327,7 +327,7 @@ pub struct Function {
 /// the receiver's shape — value, pointer, mutable pointer — is what decides
 /// whether a call site must own or may only borrow, and what a vtable slot's
 /// first argument is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Recv {
     /// Not a method: no `self` parameter.
     None,
@@ -355,7 +355,7 @@ impl Recv {
 /// to the IR → LIR lowering, and picking the impl for a generic belongs to
 /// monomorphization. What this stage owes them is the *inputs* to those choices,
 /// which is exactly what each variant carries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Dispatch {
     /// A direct call: [`callee`](ExprKind::Call::callee) is the function itself
     /// — a [`ExprKind::Global`] naming it, or any expression of function type.
@@ -388,7 +388,7 @@ pub enum Dispatch {
 }
 
 /// A bound function parameter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Param {
     pub id: IrId,
     pub def: DefId,
@@ -397,7 +397,7 @@ pub struct Param {
 
 /// A sequence of statements and an optional trailing value expression. The
 /// block's type — its tail's, or `void` — is `meta.ty(block.id)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Block {
     pub id: IrId,
     pub stmts: Vec<Stmt>,
@@ -405,14 +405,14 @@ pub struct Block {
 }
 
 /// A statement: an effect with no value contribution to its block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Stmt {
     pub id: IrId,
     pub kind: StmtKind,
 }
 
 /// What a [`Stmt`] does.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum StmtKind {
     /// A `let` / `const` binding. The bound name is a [`PatternKind::Binding`]
     /// in the common case; a destructuring `let (a, b) := p` keeps its whole
@@ -444,7 +444,7 @@ pub enum StmtKind {
 }
 
 /// One `match` arm; patterns stay structured (no decision tree yet).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Arm {
     pub id: IrId,
     pub pattern: Pattern,
@@ -454,14 +454,14 @@ pub struct Arm {
 
 /// A (simplified) pattern. Field/slice-rest details the AST carried are dropped;
 /// what remains is enough for a later decision-tree pass and for binding.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Pattern {
     pub id: IrId,
     pub kind: PatternKind,
 }
 
 /// What a [`Pattern`] tests and binds.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PatternKind {
     /// `_`, and any pattern that binds and tests nothing.
     Wildcard,
@@ -517,7 +517,7 @@ pub enum PatternKind {
 }
 
 /// A name a pattern binds, and the definition it introduces.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
     pub id: IrId,
     pub def: DefId,
@@ -525,14 +525,14 @@ pub struct Binding {
 }
 
 /// An expression: its identity, and what it does. Its type is `meta.ty(id)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Expr {
     pub id: IrId,
     pub kind: ExprKind,
 }
 
 /// What an [`Expr`] computes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ExprKind {
     /// A scalar literal.
     Lit(Lit),

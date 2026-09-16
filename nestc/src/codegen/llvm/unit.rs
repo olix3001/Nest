@@ -355,9 +355,17 @@ impl<'ctx> Cx<'ctx, '_> {
             // exactly that call. What keeps this sound is the invariant the
             // split already guarantees: every symbol is defined in exactly one
             // unit.
-            let value = self
-                .module
-                .add_function(f.symbol.as_str(), sig, Some(LlvmLinkage::External));
+            // An instantiation may be defined by every object that needed it,
+            // and they are the same function (`FunctionAttrs::shared`). `weak_odr`
+            // rather than `linkonce_odr`: the one copy the split put in this unit
+            // may be the one another unit calls, and a `linkonce` definition
+            // nothing in its own module uses is one LLVM is free to drop.
+            let linkage = if f.attrs.shared && !f.blocks.is_empty() {
+                LlvmLinkage::WeakODR
+            } else {
+                LlvmLinkage::External
+            };
+            let value = self.module.add_function(f.symbol.as_str(), sig, Some(linkage));
             if f.blocks.is_empty() {
                 // A declaration. Nothing more to say about it.
             } else {
