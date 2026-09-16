@@ -114,6 +114,13 @@ pub struct Instance {
 /// should have made impossible. It is recorded as a hole rather than filled with
 /// a guess, so that a defect shows up as a hole rather than as a call to the
 /// wrong function.
+/// One vtable per member of the type a `member_dyn` intrinsic was
+/// instantiated at, in declaration order — the table `Member.index` selects
+/// from. A `None` entry is a member whose type has no impl of the trait,
+/// already reported.
+#[derive(Debug, Clone)]
+pub struct MemberVtables(pub Vec<Option<VtableSlots>>);
+
 #[derive(Debug, Clone)]
 pub struct VtableSlots {
     pub trait_def: DefId,
@@ -676,12 +683,23 @@ impl Mono<'_> {
         depth: u32,
         at: IrId,
     ) {
+        if let Some(slots) = self.vtable_slots(linked, trait_def, concrete, depth) {
+            self.meta.set(at, slots);
+        }
+    }
+
+    /// [`Mono::reach_vtable`] without recording the answer anywhere.
+    fn vtable_slots(
+        &mut self,
+        linked: &Linked,
+        trait_def: DefId,
+        concrete: &Ty,
+        depth: u32,
+    ) -> Option<VtableSlots> {
         // A vtable is built for a trait as a *type* (`*dyn Trait`), which has no
         // arguments to give — `dyn Add.<f64>` would carry them in the type
         // itself, and object safety is a separate question. Nothing to match.
-        let Some((i, bindings)) = self.match_impl(trait_def, concrete, &[]) else {
-            return;
-        };
+        let (i, bindings) = self.match_impl(trait_def, concrete, &[])?;
         let methods: Vec<(Symbol, DefId)> = match linked.ty(trait_def).map(|t| &t.kind) {
             Some(super::TypeDefKind::Trait { methods, .. }) => {
                 methods.iter().map(|m| (m.name.clone(), m.def)).collect()
@@ -708,14 +726,45 @@ impl Mono<'_> {
             let args = self.inherited_args(linked, target, &bindings);
             slots.push(Some(self.reach(linked, target, args, depth)));
         }
-        self.meta.set(
-            at,
-            VtableSlots {
-                trait_def,
-                concrete: concrete.clone(),
-                slots,
-            },
-        );
+        Some(VtableSlots {
+            trait_def,
+            concrete: concrete.clone(),
+            slots,
+        })
+    }
+
+    /// Every vtable a `member_dyn.<T>` can hand out: one per member of `T`, for
+    /// the trait its result type names.
+    ///
+    /// This is the call-graph edge the intrinsic is. Nothing else in the
+    /// program names the members' impls, so without it they would never be
+    /// instantiated — the same reason a `DynCast` reaches its vtable.
+    fn reach_member_vtables(
+        &mut self,
+        linked: &Linked,
+        trait_def: DefId,
+        owner: &Ty,
+        depth: u32,
+        at: IrId,
+    ) {
+        let mut tables = Vec::new();
+        for (name, member) in member_types(linked, self.meta, owner) {
+            let slots = self.vtable_slots(linked, trait_def, &member, depth);
+            if slots.is_none() {
+                let mut d = Diagnostic::error(format!(
+                    "member `{name}` of `{}` is a `{}`, which does not implement `{}`",
+                    owner.display(self.defs),
+                    member.display(self.defs),
+                    self.defs.canonical_string(trait_def),
+                ));
+                if let Some(span) = self.meta.span(at) {
+                    d = d.with_primary(span, "a trait object is made for every member here");
+                }
+                self.out.push(d);
+            }
+            tables.push(slots);
+        }
+        self.meta.set(at, MemberVtables(tables));
     }
 
     // ===< Selecting the impl a bound stood for >===
@@ -881,6 +930,21 @@ impl VisitorMut for Rewriter<'_, '_> {
     fn visit_expr(&mut self, expr: &mut Expr) {
         match &expr.kind {
             ExprKind::Call { .. } => self.mono.rewrite_call(self.linked, expr, self.depth + 1),
+            // `member_dyn.<T>` makes a trait object for whichever member it is
+            // handed, so every member's vtable is an edge from here.
+            ExprKind::Intrinsic { name, .. } if name.as_str() == "member_dyn" => {
+                let owner = match self.mono.meta.get::<Instantiation>(expr.id) {
+                    Some(Instantiation(args)) => match args.first() {
+                        Some(GenericArg::Ty(t)) => Some(t.clone()),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                if let (Some(owner), Some(t)) = (owner, dyn_trait(self.mono.meta, expr.id)) {
+                    self.mono
+                        .reach_member_vtables(self.linked, t, &owner, self.depth + 1, expr.id);
+                }
+            }
             // A `*T` unsized to `*dyn Trait` is a call-graph edge with no call
             // in it: the vtable built for `concrete` holds that impl's methods,
             // and something will later jump through one of them. Nothing else in
@@ -896,6 +960,41 @@ impl VisitorMut for Rewriter<'_, '_> {
             _ => {}
         }
         walk_expr_mut(self, expr);
+    }
+}
+
+/// The members of a struct or a tuple, as the concrete types an instantiation
+/// gives them, in declaration order — the order `Member.index` counts in.
+fn member_types(linked: &Linked, meta: &Meta, ty: &Ty) -> Vec<(String, Ty)> {
+    match ty {
+        Ty::Tuple(elems) => elems
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i.to_string(), t.clone()))
+            .collect(),
+        Ty::Nominal { def, args } => {
+            let Some(t) = linked.ty(*def) else {
+                return Vec::new();
+            };
+            let super::TypeDefKind::Struct { members } = &t.kind else {
+                return Vec::new();
+            };
+            let mut subst = Subst::default();
+            if let Some(Ty::Nominal { args: params, .. }) = meta.ty(t.id) {
+                for (p, a) in params.iter().zip(args) {
+                    if let Ty::Nominal { def: pd, args } = p
+                        && args.is_empty()
+                    {
+                        subst.tys.insert(*pd, a.clone());
+                    }
+                }
+            }
+            members
+                .iter()
+                .map(|m| (m.name.to_string(), subst_ty(&subst, &meta.ty_or_error(m.id))))
+                .collect()
+        }
+        _ => Vec::new(),
     }
 }
 

@@ -335,6 +335,25 @@ impl Collector<'_> {
                 let msg = format!("unknown intrinsic `{tag}`");
                 self.report(rhs, msg);
             }
+            // `member_dyn` takes its trait from the result type, so a result
+            // that names none leaves it nothing to build.
+            if tag.as_str() == "member_dyn" {
+                let dyn_result = match rhs_kind {
+                    NodeKind::FuncExpr { ret: Some(r), .. } => matches!(
+                        &self.ast.node(*r).kind,
+                        NodeKind::PtrType { inner, .. }
+                            if matches!(self.ast.node(*inner).kind, NodeKind::DynType { .. })
+                    ),
+                    _ => false,
+                };
+                if !dyn_result || generics.len() != 1 || params.len() != 2 {
+                    self.report(
+                        rhs,
+                        "`member_dyn` is declared `func <T> (v: *T, m: Member) -> *dyn Trait`, \
+                         and the trait object it returns is what names the trait",
+                    );
+                }
+            }
         }
         if body.is_none() && tag.is_none() && extern_abi.is_none() {
             self.report(

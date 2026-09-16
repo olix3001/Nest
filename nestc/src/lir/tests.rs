@@ -2002,6 +2002,8 @@ fn every_declared_intrinsic_has_a_lir_case() {
         "type_info",
         "type_id",
         "member_ptr",
+        // An offset and a table read, paired into a trait object.
+        "member_dyn",
     ];
     for row in crate::sema::intrinsics::INTRINSICS {
         if lowered.contains(&row.tag) {

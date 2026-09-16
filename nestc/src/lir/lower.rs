@@ -3093,6 +3093,72 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     stride: 1,
                 })
             }
+            // A member as a trait object: the data half is `member_ptr`, and the
+            // vtable is read out of a table monomorphization filled with one
+            // vtable per member, at the index the descriptor carries. The table
+            // is what lets a run-time selector reach a statically chosen impl.
+            "member_dyn" if args.len() == 2 => {
+                let owner = self.type_argument(e.id)?;
+                let tables = self.cx.meta.get::<crate::ir::mono::MemberVtables>(e.id)?;
+                let base = self.eval(&args[0]);
+                let m = self.place_of(&args[1])?;
+                let offset = Operand::Copy(m.clone().then(Projection::Field {
+                    index: 1,
+                    name: Symbol::new("offset"),
+                }));
+                let address = Ty::Ptr {
+                    mutable: true,
+                    inner: Box::new(Ty::u8()),
+                };
+                let data = self.into_temp(
+                    Rvalue::Offset {
+                        ptr: base,
+                        index: offset,
+                        stride: 1,
+                    },
+                    address.clone(),
+                    span,
+                );
+                let entries: Vec<Constant> = tables
+                    .0
+                    .iter()
+                    .map(|slots| match slots {
+                        Some(slots) => Constant::Global(self.cx.vtable(slots)),
+                        // Already reported by monomorphization.
+                        None => Constant::Undef,
+                    })
+                    .collect();
+                let trait_key = tables
+                    .0
+                    .iter()
+                    .flatten()
+                    .next()
+                    .map(|s| self.cx.defs.canonical_string(s.trait_def))
+                    .unwrap_or_default();
+                let elem = self.cx.lir(&address);
+                let table = self.cx.data_global(
+                    "member_vtables",
+                    LirTy::Array {
+                        len: entries.len() as u64,
+                        elem: Box::new(elem),
+                    },
+                    Constant::Aggregate(entries),
+                    format!(
+                        "member_dyn:{trait_key}:{}",
+                        crate::ir::mono::type_key(self.cx.defs, &owner)
+                    ),
+                );
+                let index = Operand::Copy(m.then(Projection::Field {
+                    index: 6,
+                    name: Symbol::new("index"),
+                }));
+                let vt = Operand::Copy(Place::global(table).then(Projection::Index(index)));
+                let ty = self.cx.lir(&ty);
+                Some(Rvalue::Aggregate {
+                    kind: self.struct_kind(&ty),
+                    fields: vec![data, vt],
+                })
+            }
             // An explicit release (§6.9). It is the *same* instruction escape
             // analysis emits on its own (§5) — a pointer and a free — so there
             // is one thing for a backend to implement rather than two, and the

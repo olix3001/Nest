@@ -128,6 +128,10 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     plain("type_info"),
     plain("type_id"),
     plain("member_ptr"),
+    // A member as a `*dyn Trait`, the trait named by the declared result type.
+    // It is declared by whatever library owns the trait, which is why the row
+    // is not tied to one: `core` cannot name a trait `std` has not written.
+    plain("member_dyn"),
     // The collector (§6.4.1). All three yield `void`.
     plain("gc_collect"),
     plain("gc_keep_alive"),

@@ -8363,3 +8363,38 @@ fn a_trait_named_in_a_dyn_is_selectable() {
     );
     assert!(msgs.is_empty(), "{msgs:#?}");
 }
+
+/// `member_dyn` names its trait through its result type, so a declaration
+/// whose result is not a trait object is refused where it is written.
+#[test]
+fn member_dyn_is_declared_returning_a_trait_object() {
+    let msgs = messages(
+        "r :: import <core/reflect>\n\
+         f :: #intrinsic(\"member_dyn\") func <T> (v: *T, m: r.Member) -> *u8\n",
+    );
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(msgs[0].contains("`member_dyn` is declared"), "{}", msgs[0]);
+}
+
+/// Every member gets a vtable, so a member whose type has no impl is an error
+/// at the instantiation — not a hole in a table that traps when read.
+#[test]
+fn member_dyn_needs_an_impl_for_every_member() {
+    let msgs = messages(
+        "r :: import <core/reflect>\n\
+         Sum :: trait { sum :: func (self: *Self) -> i64 }\n\
+         member_sum :: #intrinsic(\"member_dyn\") func <T> (v: *T, m: r.Member) -> *dyn Sum\n\
+         impl Sum for i32 { sum :: func (self: *Self) -> i64 { return cast.<i64>(self.*) } }\n\
+         P :: struct { a: i32, b: bool }\n\
+         main :: func () -> i32 {\n\
+         \x20 let p: P := P { a: 1, b: true }\n\
+         \x20 return cast.<i32>(member_sum.<P>(&p, r.type_info.<P>().members[0]).sum())\n\
+         }\n",
+    );
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(
+        msgs[0].contains("member `b` of `P` is a `bool`, which does not implement `Sum`"),
+        "{}",
+        msgs[0]
+    );
+}

@@ -606,6 +606,36 @@ fn a_program_links_and_runs() {
              }\n",
             42,
         ),
+        // `member_dyn`: a blanket impl that walks a type's members at run time
+        // and hands each one to *its own* impl through a trait object — a
+        // concrete one for `i32` and `u8`, the blanket one again for a nested
+        // struct and a tuple. 1 + 20 + 3·10 + 40 + 5·10.
+        (
+            "r :: import <core/reflect>\n\
+             Sum :: trait { sum :: func (self: *Self) -> i64 }\n\
+             member_sum :: #intrinsic(\"member_dyn\") func <T> (v: *T, m: r.Member) -> *dyn Sum\n\
+             impl Sum for i32 { sum :: func (self: *Self) -> i64 { return cast.<i64>(self.*) } }\n\
+             impl Sum for u8 { sum :: func (self: *Self) -> i64 { return cast.<i64>(self.*) * 10 } }\n\
+             impl <T> Sum for T {\n\
+            \x20 sum :: func (self: *Self) -> i64 {\n\
+            \x20   let t: r.TypeInfo := r.type_info.<T>()\n\
+            \x20   let mut total: i64 := 0\n\
+            \x20   let mut i: usize := 0\n\
+            \x20   while i < t.members.len() {\n\
+            \x20     total = total + member_sum.<T>(self, t.members[i]).sum()\n\
+            \x20     i = i + 1\n\
+            \x20   }\n\
+            \x20   return total\n\
+            \x20 }\n\
+             }\n\
+             Inner :: struct { a: i32, b: u8 }\n\
+             Outer :: struct { x: i32, inner: Inner, y: (i32, u8) }\n\
+             main :: func () -> i32 {\n\
+            \x20 let o: Outer := Outer { x: 1, inner: Inner { a: 20, b: 3 }, y: .{ 40, 5 } }\n\
+            \x20 return cast.<i32>(o.sum())\n\
+             }\n",
+            141,
+        ),
         // The write half of the checked read, `member_of`, an `@attribute` on
         // the *type* rather than a member, and a `*dyn reflect.Any` whose trait
         // is named only through the namespace. 40 + 2.
