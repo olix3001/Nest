@@ -13,6 +13,16 @@
 //! walking every importable package's public members from its root, the
 //! shortest path winning; a file of the program being edited that no package
 //! reaches is imported by its path from the file being edited.
+//!
+//! ### Without analyzing again
+//!
+//! Analyzing takes long enough to be felt between two keys, so a session
+//! analyzed a few edits ago answers when it can. The edits since say where the
+//! cursor was in the text it analyzed, unless the cursor is inside one of them:
+//! the word being typed and a `.` before it are left out of that, and what the
+//! `.` follows is the expression that ends there, which has to read the same.
+//! Anything else — what is completed edited, a `.` whose meaning is the type
+//! expected there — is analyzed with the placeholder.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
@@ -44,16 +54,126 @@ pub fn complete(s: &Session, file: FileId, text: &str, offset: usize, placeholde
     let Some(ast) = s.asts.get(&file) else {
         return Vec::new();
     };
-    let cx = Cx { s, file, ast, text, offset, placeholder, visible: visible(s, file) };
+    // What follows the placeholder is where it would be without it.
+    let edits = Edits(vec![Edit { at: offset, removed: placeholder.len(), inserted: 0 }]);
+    let cx = Cx { s, file, ast, text, cursor: offset, offset, edits: &edits, placeholder, visible: visible(s, file) };
     cx.run()
+}
+
+/// What could be written at `cursor` of `text`, the document as the editor has
+/// it, answered from `s`, which analyzed the text `edits` made it into `text`.
+/// `None` when the edits touch what is completed.
+pub fn from_analysis(s: &Session, file: FileId, text: &str, cursor: usize, edits: &Edits) -> Option<Vec<CompletionItem>> {
+    let ast = s.asts.get(&file)?;
+    let analyzed = ide::source(s, file)?;
+    let cursor = text.floor_char_boundary(cursor.min(text.len()));
+    let before = &text[..cursor];
+    let start = before.trim_end_matches(|c: char| c == '_' || c.is_alphanumeric()).len();
+    // After a `.`, what it follows ends where the text before it does, which may
+    // be on the line above.
+    let base = before[..start].strip_suffix('.').map(|rest| rest.trim_end().len());
+    let from = base.unwrap_or(start);
+    let offset = edits.back(from)?;
+
+    let cx = Cx { s, file, ast, text, cursor, offset, edits, placeholder: "", visible: visible(s, file) };
+    let Some(end) = base else {
+        return Some(cx.scope());
+    };
+    // The expression reads the same, and so does the byte before it, so that
+    // `p` is not taken for the end of `sop`.
+    let same = |start: usize| {
+        let len = offset - start + usize::from(start > 0);
+        let old = analyzed.as_bytes().get(offset - len..offset);
+        old.is_some() && old == end.checked_sub(len).and_then(|at| text.as_bytes().get(at..end))
+    };
+    let mut nodes: Vec<NodeId> = ast
+        .ids()
+        .filter(|&id| {
+            let n = ast.node(id);
+            n.file == file
+                && n.span.start < offset
+                && n.span.end == offset
+                && same(n.span.start)
+        })
+        .collect();
+    nodes.sort_by_key(|&id| {
+        let span = ast.node(id).span;
+        span.end - span.start
+    });
+    nodes.into_iter().find_map(|id| cx.after_dot(id))
+}
+
+/// How the editor's text was made from an analyzed one, oldest edit first.
+#[derive(Debug, Clone, Default)]
+pub struct Edits(pub Vec<Edit>);
+
+/// A range of a text replaced: `removed` bytes at `at` became `inserted` bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edit {
+    pub at: usize,
+    pub removed: usize,
+    pub inserted: usize,
+}
+
+impl Edit {
+    /// The one range `new` replaced in `old`.
+    pub fn between(old: &str, new: &str) -> Edit {
+        let (a, b) = (old.as_bytes(), new.as_bytes());
+        let mut at = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+        while !old.is_char_boundary(at) || !new.is_char_boundary(at) {
+            at -= 1;
+        }
+        let most = a.len().min(b.len()) - at;
+        let mut same = a.iter().rev().zip(b.iter().rev()).take(most).take_while(|(x, y)| x == y).count();
+        while !old.is_char_boundary(a.len() - same) || !new.is_char_boundary(b.len() - same) {
+            same -= 1;
+        }
+        Edit { at, removed: a.len() - same - at, inserted: b.len() - same - at }
+    }
+}
+
+impl Edits {
+    /// Where `offset` in the edited text was before the edits, or `None` when an
+    /// edit wrote it.
+    pub fn back(&self, offset: usize) -> Option<usize> {
+        let mut offset = offset;
+        for e in self.0.iter().rev() {
+            if offset <= e.at {
+                continue;
+            }
+            if offset < e.at + e.inserted {
+                return None;
+            }
+            offset = offset - e.inserted + e.removed;
+        }
+        Some(offset)
+    }
+
+    /// Where `offset` before the edits is after them; inside a range an edit
+    /// replaced, its end.
+    pub fn forward(&self, offset: usize) -> usize {
+        let mut offset = offset;
+        for e in &self.0 {
+            if offset <= e.at {
+                continue;
+            }
+            offset = if offset < e.at + e.removed { e.at + e.inserted } else { offset + e.inserted - e.removed };
+        }
+        offset
+    }
 }
 
 struct Cx<'a> {
     s: &'a Session,
     file: FileId,
     ast: &'a Ast,
+    /// The document as the editor has it, and the cursor in it.
     text: &'a str,
+    cursor: usize,
+    /// The cursor in the text the session analyzed.
     offset: usize,
+    /// How the analyzed text became `text`.
+    edits: &'a Edits,
     placeholder: &'a str,
     /// Every definition the file can name without another import.
     visible: HashSet<DefId>,
@@ -132,16 +252,7 @@ impl Cx<'_> {
             let kind = ast.node(id).kind.clone();
             match kind {
                 NodeKind::FieldAccess { base, name } if ends(name.as_str()) => {
-                    if let Some(Resolution::Def(d)) = ast.meta::<Resolution>(base) {
-                        let d = target(self.s, d);
-                        if self.s.defs.get(d).kind.is_namespace_like() {
-                            return self.plain(members(self.s, d));
-                        }
-                    }
-                    return match ast.meta::<Ty>(base) {
-                        Some(ty) => self.methods(&ty),
-                        None => Vec::new(),
-                    };
+                    return self.after_dot(base).unwrap_or_default();
                 }
                 NodeKind::Path { segments } if segments.last().is_some_and(|l| ends(l.as_str())) => {
                     if segments.len() == 1 {
@@ -157,6 +268,23 @@ impl Cx<'_> {
             }
         }
         self.scope()
+    }
+
+    /// What a `.` after `base` reaches: a namespace's or a type's members when it
+    /// names one, and otherwise what its value's type has. `None` when it is
+    /// neither, or its type is not known.
+    fn after_dot(&self, base: NodeId) -> Option<Vec<CompletionItem>> {
+        let ast = self.ast;
+        if let Some(Resolution::Def(d)) = ast.meta::<Resolution>(base) {
+            let d = target(self.s, d);
+            if self.s.defs.get(d).kind.is_namespace_like() {
+                return Some(self.plain(members(self.s, d)));
+            }
+        }
+        match ast.meta::<Ty>(base)? {
+            Ty::Error | Ty::Var(_) => None,
+            ty => Some(self.methods(&ty)),
+        }
     }
 
     /// The type a variant pattern at `pat` is matched against.
@@ -194,8 +322,9 @@ impl Cx<'_> {
         self.plain(variants)
     }
 
-    /// What a value of type `ty` has after a `.`: its fields, and the methods of
-    /// every impl for it, through any number of pointers and through a
+    /// What a value of type `ty` has after a `.`: its fields, the methods its
+    /// bounds declare when it is a generic parameter, and the methods of every
+    /// impl for it, through any number of pointers and through a
     /// `distinct` type to what it stands over. A method of a trait the file has
     /// not imported imports it.
     fn methods(&self, ty: &Ty) -> Vec<CompletionItem> {
@@ -206,6 +335,13 @@ impl Cx<'_> {
             if let Ty::Nominal { def, .. } = &ty {
                 let fields = s.defs.get(*def).ns.members.values().copied();
                 found.extend(fields.filter(|&m| s.defs.get(m).kind == DefKind::Field).map(|m| (m, None)));
+                // A generic parameter has what its bounds declare.
+                if s.defs.get(*def).kind == DefKind::TypeParam {
+                    for t in bounds(s, *def) {
+                        let declared = s.defs.get(t).ns.members.values().copied();
+                        found.extend(declared.filter(|&m| s.defs.get(m).kind == DefKind::Func && takes_self(s, m)).map(|m| (m, Some(t))));
+                    }
+                }
             }
             for (i, imp) in s.impls.impls.iter().enumerate() {
                 if !self.applies(i, &ty, 0) {
@@ -382,7 +518,7 @@ impl Cx<'_> {
 
     /// The identifier typed before the cursor.
     fn typed(&self) -> String {
-        let before = &self.text[..self.offset.min(self.text.len())];
+        let before = &self.text[..self.cursor.min(self.text.len())];
         let start = before
             .char_indices()
             .rev()
@@ -448,7 +584,7 @@ impl Cx<'_> {
                 _ => None,
             })
             .max();
-        // Offsets into the analyzed text, which has the placeholder in it.
+        // Offsets into the analyzed text, which is not quite the editor's.
         let analyzed = ide::source(self.s, self.file).unwrap_or_default();
         let at = match last {
             Some(end) => analyzed[end..].find('\n').map_or(analyzed.len(), |i| end + i + 1),
@@ -463,7 +599,7 @@ impl Cx<'_> {
                 at
             }
         };
-        let at = if at > self.offset { at - self.placeholder.len() } else { at };
+        let at = self.edits.forward(at);
         let position = analysis::position(self.text, at);
         let prefix = if at > 0 && !self.text[..at].ends_with('\n') { "\n" } else { "" };
         TextEdit::new(Range::new(position, position), format!("{prefix}{line}\n"))
@@ -740,7 +876,147 @@ fn item(s: &Session, def: DefId) -> CompletionItem {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+
+    const PROGRAM: &str = "\
+Reader :: struct { at: i32 }
+
+Decode :: trait {
+  decode :: func (self: *mut Self, r: *mut Reader) -> void
+}
+
+Point :: struct { x: i32, y: i32 }
+
+impl Point {
+  sum :: func (self: *Self) -> i32 { return self.x + self.y }
+}
+
+Color :: enum { red, green }
+
+geo :: namespace {
+  @public origin :: func () -> Point { return Point { x: 0, y: 0 } }
+}
+
+from :: func <T: Decode> (slot: *mut T, r: *mut Reader) -> void {
+  slot.decode(r)
+}
+
+add :: func (a: i32, b: i32) -> i32 { return a + b }
+
+main :: func () -> i32 {
+  let p: Point := geo.origin()
+  let q: i32 := p.x
+  return add(q, p
+    .sum())
+}
+";
+
+    /// `PROGRAM` analyzed, then edited into each of `after` in turn, each with a
+    /// `‸` where the cursor is: what completion at the cursor in the last says
+    /// from that one analysis, sorted.
+    fn stale(after: &[&str]) -> Option<Vec<String>> {
+        let path = std::env::temp_dir().join("nest-lsp-stale").join("main.nest");
+        let buffers = Arc::new(HashMap::from([(path.clone(), PROGRAM.to_string())]));
+        let o = analysis::analyze(&[path.display().to_string()], buffers).unwrap();
+        assert!(o.diagnostics.is_empty(), "{:#?}", o.diagnostics);
+        let file = ide::file_of(&o.session, &path).unwrap();
+
+        let mut texts = vec![PROGRAM.to_string()];
+        texts.extend(after.iter().map(|t| t.replace('‸', "")));
+        let edits = Edits(texts.windows(2).map(|w| Edit::between(&w[0], &w[1])).collect());
+        let cursor = after.last()?.find('‸')?;
+        let items = from_analysis(&o.session, file, texts.last()?, cursor, &edits)?;
+        let mut labels: Vec<String> = items.into_iter().map(|i| i.label).collect();
+        labels.sort();
+        Some(labels)
+    }
+
+    fn has(labels: &Option<Vec<String>>, want: &[&str]) {
+        let labels = labels.as_ref().expect("answered from the analysis");
+        for w in want {
+            assert!(labels.iter().any(|l| l == w), "`{w}` in {labels:?}");
+        }
+    }
+
+    /// The editor's scenario: `.decode` deleted a key at a time, which stops
+    /// parsing on the way, then a `.` typed after `slot`.
+    #[test]
+    fn a_method_is_offered_after_its_name_was_deleted() {
+        let mut steps: Vec<String> = Vec::new();
+        for n in (0..".decode".len()).rev() {
+            steps.push(PROGRAM.replace("slot.decode(r)", &format!("slot{}(r)", &".decode"[..n])));
+        }
+        steps.push(PROGRAM.replace("slot.decode(r)", "slot.‸(r)"));
+        let steps: Vec<&str> = steps.iter().map(String::as_str).collect();
+        let labels = stale(&steps);
+        has(&labels, &["decode"]);
+        assert!(!labels.unwrap().contains(&"sum".to_string()), "a `T` is not a `Point`");
+    }
+
+    /// Lines added and removed elsewhere move the cursor, not what it completes.
+    #[test]
+    fn edits_elsewhere_are_looked_through() {
+        let above = PROGRAM.replace("main :: func", "// żółw, a comment\n\nmain :: func");
+        let below = above.clone() + "\nlater :: func () -> void {}\n";
+        let typed = below.replace("let q: i32 := p.x", "let q: i32 := p.‸");
+        has(&stale(&[&above, &below, &typed]), &["x", "y", "sum"]);
+
+        // What was typed after the `.` so far does not matter either.
+        let word = below.replace("let q: i32 := p.x", "let q: i32 := p.s‸");
+        has(&stale(&[&above, &below, &word]), &["sum"]);
+    }
+
+    /// A `.` at the start of a line continues the expression on the line above.
+    #[test]
+    fn a_dot_on_the_next_line_completes_the_line_above() {
+        has(&stale(&[&PROGRAM.replace("    .sum())", "    .‸)")]), &["x", "sum"]);
+    }
+
+    #[test]
+    fn a_namespace_offers_its_public_members() {
+        has(&stale(&[&PROGRAM.replace("geo.origin()", "geo.‸()")]), &["origin"]);
+    }
+
+    /// A word typed where a name goes: what is in scope there.
+    #[test]
+    fn a_name_is_offered_from_the_analysis() {
+        let labels = stale(&[&PROGRAM.replace("  return add(q, p", "  ad‸\n  return add(q, p")]);
+        has(&labels, &["add", "p", "q", "Point", "main", "return"]);
+        assert!(!labels.unwrap().contains(&"a".to_string()), "`a` is `add`'s parameter");
+    }
+
+    /// When what is completed was itself edited, or a `.` has nothing before it,
+    /// the analysis cannot say, and the caller analyzes again.
+    #[test]
+    fn what_the_analysis_cannot_say_is_left_to_analyzing() {
+        // `p` became `pp`, which the analysis never saw.
+        assert_eq!(stale(&[&PROGRAM.replace("let q: i32 := p.x", "let q: i32 := pp.‸")]), None);
+        // A variant, whose enum is what the context expects.
+        assert_eq!(stale(&[&PROGRAM.replace("let q: i32 := p.x", "let c: Color := .‸")]), None);
+        // A name that only ends the way one the analysis had does.
+        let longer = PROGRAM.replace("return add(q, p", "return add(q, sop");
+        assert_eq!(stale(&[&longer, &longer.replace("add(q, sop", "add(q, sop.‸")]), None);
+    }
+
+    #[test]
+    fn an_offset_maps_back_through_the_edits_around_it() {
+        // `slot.decode(r)` → `slot(r)` → `slot.(r)`, and a line added above.
+        let texts = ["x\nslot.decode(r)", "x\nslot(r)", "x\nslot.(r)", "x\ny\nslot.(r)"];
+        let edits = Edits(texts.windows(2).map(|w| Edit::between(w[0], w[1])).collect());
+        assert_eq!(edits.0[0], Edit { at: 6, removed: 7, inserted: 0 });
+        assert_eq!(edits.0[2], Edit { at: 2, removed: 0, inserted: 2 });
+        // The end of `slot` is where it was; inside the added line is nowhere.
+        assert_eq!(edits.back(8), Some(6));
+        assert_eq!(edits.back(3), None);
+        // `r` came from the analyzed text, after `decode`, and goes back there.
+        assert_eq!(edits.back(10), Some(14));
+        assert_eq!(edits.forward(14), 10);
+        assert_eq!(edits.forward(0), 0);
+        // Inside what was removed is where the removal ended.
+        assert_eq!(edits.forward(9), 8);
+    }
 
     #[test]
     fn a_relative_path_climbs_to_the_common_directory() {

@@ -3314,7 +3314,13 @@ impl Inferer<'_> {
                 *ret
             }
             // Unknown callee type: don't cascade (and don't dangle a variable).
-            _ => Ty::Error,
+            Ty::Error => Ty::Error,
+            other if is_var(&other) => Ty::Error,
+            // A value that is not a function, which nothing else reports.
+            other => {
+                self.report(callee, format!("`{}` is not a function, so it cannot be called", other.display(self.defs)));
+                Ty::Error
+            }
         }
     }
 

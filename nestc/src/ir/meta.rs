@@ -115,7 +115,7 @@ impl Meta {
     // ===< The type-indexed table >===
 
     /// Attach a `T` to `id`, replacing and returning any previous `T`.
-    pub fn set<T: Any>(&self, id: IrId, value: T) -> Option<T> {
+    pub fn set<T: Any + Send>(&self, id: IrId, value: T) -> Option<T> {
         self.store.set(id, value)
     }
 

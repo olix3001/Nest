@@ -1061,7 +1061,7 @@ impl Ast {
     /// ast.set_meta(node, Resolution::Local(binding));   // in name resolution
     /// ast.set_meta(node, ty);                           // in the type checker
     /// ```
-    pub fn set_meta<T: Any>(&self, id: NodeId, value: T) -> Option<T> {
+    pub fn set_meta<T: Any + Send>(&self, id: NodeId, value: T) -> Option<T> {
         self.meta.set(id, value)
     }
 

@@ -35,7 +35,7 @@ use std::hash::Hash;
 /// let ty: Option<Ty> = store.get(node);    // in lowering
 /// ```
 pub struct MetaStore<K> {
-    tables: RefCell<HashMap<TypeId, HashMap<K, Box<dyn Any>>>>,
+    tables: RefCell<HashMap<TypeId, HashMap<K, Box<dyn Any + Send>>>>,
     /// Each table's Rust type name, for a store enumerated by type
     /// ([`MetaStore::kinds`]) to say which one it does not know.
     names: RefCell<HashMap<TypeId, &'static str>>,
@@ -71,7 +71,7 @@ impl<K: Eq + Hash> MetaStore<K> {
     }
 
     /// Attach a `T` to `key`, replacing and returning any previous `T`.
-    pub fn set<T: Any>(&self, key: K, value: T) -> Option<T> {
+    pub fn set<T: Any + Send>(&self, key: K, value: T) -> Option<T> {
         self.names
             .borrow_mut()
             .entry(TypeId::of::<T>())

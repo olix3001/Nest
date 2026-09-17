@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use lsp_types::{
     DiagnosticRelatedInformation, DiagnosticSeverity, Location, NumberOrString, Position, Range,
@@ -13,11 +13,12 @@ use lsp_types::{
 use nestc::common::diagnostic::{Diagnostic, Severity};
 use nestc::common::source::{FileId, FileSpan, SourceMap};
 use nestc::driver::Invocation;
+use nestc::parser::parse::Parser;
 use nestc::sema;
 use nestc::sema::session::{FileLoader, FsLoader, Session, resolve_import};
 
 /// The open documents' text, by path.
-pub type Buffers = Rc<HashMap<PathBuf, String>>;
+pub type Buffers = Arc<HashMap<PathBuf, String>>;
 
 /// The filesystem, with every open document read from its buffer instead.
 struct Overlay {
@@ -40,6 +41,10 @@ pub struct Outcome {
     /// about it: the files whose diagnostics it is the authority on.
     pub files: HashSet<PathBuf>,
     pub diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// The open documents among `files` that parsed without an error. What a
+    /// parser could not make sense of is left out of the tree, and nothing in
+    /// it has a type.
+    pub parsed: HashSet<PathBuf>,
     /// The analyzed session itself, for the questions asked about it later.
     pub session: Session,
 }
@@ -50,7 +55,7 @@ pub struct Outcome {
 pub fn analyze(args: &[String], buffers: Buffers) -> Result<Outcome, String> {
     let inv = Invocation::parse(args.iter().cloned())?;
     let entry = inv.path.clone().ok_or("the command line names no file")?;
-    let mut session = inv.session(Box::new(Overlay { buffers }))?;
+    let mut session = inv.session(Box::new(Overlay { buffers: buffers.clone() }))?;
     if let Some(file) = session.load_entry(&entry) {
         sema::analyze(&mut session, file);
     }
@@ -71,7 +76,12 @@ pub fn analyze(args: &[String], buffers: Buffers) -> Result<Outcome, String> {
         let (path, lsp) = convert(diag, &session.sources, &entry);
         diagnostics.entry(path).or_default().push(lsp);
     }
-    Ok(Outcome { files, diagnostics, session })
+    let parsed = buffers
+        .iter()
+        .filter(|(path, text)| files.contains(*path) && Parser::parse_file(text, FileId(0)).1.is_empty())
+        .map(|(path, _)| path.clone())
+        .collect();
+    Ok(Outcome { files, diagnostics, parsed, session })
 }
 
 /// `diag` as the protocol has it, and the file it belongs in: its primary

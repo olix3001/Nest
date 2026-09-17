@@ -101,7 +101,7 @@ pub const PRIMITIVES: &[&str] = &["bool", "char", "int", "never", "uint", "void"
 /// Injecting this is what lets the analyzer run against an in-memory file set in
 /// tests (and, later, an editor's unsaved buffers) instead of only the real
 /// filesystem.
-pub trait FileLoader {
+pub trait FileLoader: Send {
     /// Resolve `spec` — exactly as written in `import "spec"` — relative to the
     /// importing file `from`. Returns `(key, source)` where `key` is a stable
     /// identity used for the parse-once cache, or an error message.

@@ -6555,6 +6555,20 @@ fn a_namespace_or_a_trait_is_not_a_value() {
     );
 }
 
+/// Calling a value that is not a function is reported, rather than giving the
+/// call an error type nothing was said about.
+#[test]
+fn a_value_that_is_not_a_function_cannot_be_called() {
+    assert_eq!(
+        first_error("f :: func (p: *mut i32) { p(3) }\n"),
+        "`*mut i32` is not a function, so it cannot be called"
+    );
+    assert_eq!(
+        first_error("f :: func <T> (slot: *mut T) { slot(1) }\n"),
+        "`*mut T` is not a function, so it cannot be called"
+    );
+}
+
 /// `int.<N>` and `uint.<N>` are the integer **families** (§3.1), and the `i<N>` /
 /// `u<N>` spellings are sugar for members of them — the *same* types, not two
 /// that convert.

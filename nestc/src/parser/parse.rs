@@ -97,7 +97,7 @@ impl Parser {
     }
 
     /// Attach metadata to an already-allocated node.
-    pub(crate) fn set_meta<T: std::any::Any>(&mut self, id: NodeId, value: T) {
+    pub(crate) fn set_meta<T: std::any::Any + Send>(&mut self, id: NodeId, value: T) {
         self.ast.set_meta(id, value);
     }
 

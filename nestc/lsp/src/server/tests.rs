@@ -56,6 +56,8 @@ struct Client {
     conn: Connection,
     server: Option<JoinHandle<Result<(), String>>>,
     version: i32,
+    /// Every set of diagnostics published while waiting for an answer.
+    published: Vec<PublishDiagnosticsParams>,
 }
 
 impl Client {
@@ -63,7 +65,7 @@ impl Client {
         let (server, conn) = Connection::memory();
         let toolchain: Arc<dyn Toolchain> = Arc::new(toolchain);
         let handle = std::thread::spawn(move || run(&server, |_| toolchain));
-        let client = Client { conn, server: Some(handle), version: 0 };
+        let client = Client { conn, server: Some(handle), version: 0, published: Vec::new() };
         client.request(1, Initialize::METHOD, InitializeParams::default());
         client.expect_response(1);
         client.notify(Initialized::METHOD, serde_json::json!({}));
@@ -100,9 +102,15 @@ impl Client {
         let id = 1000 + self.version;
         self.request(id, method, params);
         loop {
-            if let Message::Response(r) = self.recv() {
-                assert_eq!(r.id, RequestId::from(id));
-                return r.response_result.expect("an answer");
+            match self.recv() {
+                Message::Response(r) => {
+                    assert_eq!(r.id, RequestId::from(id));
+                    return r.response_result.expect("an answer");
+                }
+                Message::Notification(n) if n.method == PublishDiagnostics::METHOD => {
+                    self.published.push(serde_json::from_value(n.params).unwrap());
+                }
+                _ => {}
             }
         }
     }
@@ -152,6 +160,27 @@ impl Client {
                 }
             }
         }
+    }
+}
+
+impl Client {
+    /// Wait until what was sent is analyzed, by asking a question that waits
+    /// for it.
+    fn settle(&mut self, path: &Path) {
+        self.at(HoverRequest::METHOD, path, Position::new(0, 0));
+    }
+
+    /// What `path`'s diagnostics are now: the last ones published, since only a
+    /// change is.
+    fn current(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
+        let uri = path_to_uri(path).unwrap();
+        self.published.iter().rev().find(|p| p.uri == uri).map(|p| p.diagnostics.clone()).unwrap_or_default()
+    }
+
+    /// Every message published for `path` so far.
+    fn messages(&self, path: &Path) -> Vec<String> {
+        let uri = path_to_uri(path).unwrap();
+        self.published.iter().filter(|p| p.uri == uri).flat_map(|p| p.diagnostics.iter().map(|d| d.message.clone())).collect()
     }
 }
 
@@ -362,6 +391,8 @@ fn a_file_changed_on_disk_is_analyzed_again() {
         lsp_types::DidChangeWatchedFilesParams { changes: vec![change] },
     );
     assert_eq!(client.diagnostics(&other), Vec::new());
+    // And analyzing it once is enough: a question waits for nothing more.
+    client.settle(&main);
 }
 
 /// After a `.` on a primitive, a slice or a string literal, their impls'
@@ -441,4 +472,133 @@ impl Shape for Square {
     let point = labels(&client.at(Completion::METHOD, &file, position(&text, "p.\n", 0, 2)));
     assert!(point.contains(&"sum".to_string()), "{point:?}");
     assert!(!point.contains(&"describe".to_string()), "`Point` is not a `Shape`: {point:?}");
+}
+
+const GENERIC: &str = "\
+Reader :: struct { at: i32 }
+
+Decode :: trait {
+  decode :: func (self: *mut Self, r: *mut Reader) -> void
+}
+
+Point :: struct { x: i32, y: i32 }
+
+from :: func <T: Decode> (slot: *mut T, r: *mut Reader) -> void {
+  slot.decode(r)
+}
+
+main :: func () -> i32 {
+  let p: Point := Point { x: 1, y: 2 }
+  let q: i32 := p.x
+  return q + p.y
+}
+";
+
+/// A file with no manifest, open and analyzed.
+fn generic() -> (Scratch, PathBuf, Client) {
+    let dir = Scratch::new();
+    let file = dir.0.join("main.nest");
+    let mut client = Client::start(Fake(Err("no workspace here".to_string())));
+    client.open(&file, GENERIC);
+    client.settle(&file);
+    assert_eq!(client.current(&file), Vec::new());
+    (dir, file, client)
+}
+
+/// What an editor sends when `.decode` is deleted a key at a time and a `.`
+/// typed in its place, without waiting between keys: the `.` offers the method
+/// again, although the line has stopped parsing.
+#[test]
+fn a_method_deleted_key_by_key_is_offered_after_a_dot() {
+    let (_dir, file, mut client) = generic();
+    let mut text = GENERIC.to_string();
+    for n in (0..".decode".len()).rev() {
+        text = GENERIC.replace("slot.decode(r)", &format!("slot{}(r)", &".decode"[..n]));
+        client.change(&file, &text);
+    }
+    text = GENERIC.replace("slot.decode(r)", "slot.(r)");
+    client.change(&file, &text);
+    let offered = labels(&client.at(Completion::METHOD, &file, position(&text, "slot.", 0, 5)));
+    assert!(offered.contains(&"decode".to_string()), "{offered:?}");
+
+    // And once the text catches up, typing on after the `.` narrows nothing
+    // away on the server's side.
+    client.settle(&file);
+    let typed = GENERIC.replace("slot.decode(r)", "slot.de(r)");
+    client.change(&file, &typed);
+    let offered = labels(&client.at(Completion::METHOD, &file, position(&typed, "slot.de", 0, 7)));
+    assert!(offered.contains(&"decode".to_string()), "{offered:?}");
+}
+
+/// Calling what is not a function says so, where it used to say a compiler
+/// defect had let an error type through.
+#[test]
+fn a_half_deleted_call_says_what_is_wrong_with_it() {
+    let (_dir, file, mut client) = generic();
+    client.change(&file, &GENERIC.replace("slot.decode(r)", "slot(r)"));
+    client.settle(&file);
+    let messages = client.messages(&file);
+    assert!(messages.iter().any(|m| m.contains("`*mut T` is not a function")), "{messages:?}");
+    assert!(!messages.iter().any(|m| m.contains("internal")), "{messages:?}");
+}
+
+/// A line that does not parse elsewhere in the function does not stop the
+/// members after a `.` being offered.
+#[test]
+fn completion_answers_while_another_line_does_not_parse() {
+    let (_dir, file, mut client) = generic();
+    let broken = GENERIC.replace("  return q + p.y", "  let = \n  return q + p.y");
+    client.change(&file, &broken);
+    client.settle(&file);
+    assert!(!client.current(&file).is_empty(), "the broken line is reported");
+
+    let typed = broken.replace("let q: i32 := p.x", "let q: i32 := p.");
+    client.change(&file, &typed);
+    let offered = labels(&client.at(Completion::METHOD, &file, position(&typed, "p.\n", 0, 2)));
+    for want in ["x", "y"] {
+        assert!(offered.contains(&want.to_string()), "{want} in {offered:?}");
+    }
+}
+
+/// Hover waits for the edits sent before it, so what it finds is where the
+/// text has it now.
+#[test]
+fn a_hover_after_edits_sees_them() {
+    let (_dir, file, mut client) = generic();
+    let text = GENERIC.replace("main :: func", "// one\n// two\n\nadd :: func (a: i32) -> i32 { return a }\n\nmain :: func")
+        .replace("return q + p.y", "return add(q) + p.y");
+    client.change(&file, &text);
+    let hover = hover_text(&client.at(HoverRequest::METHOD, &file, position(&text, "add(q)", 0, 1)));
+    assert!(hover.contains("add :: func (a: i32) -> i32"), "{hover}");
+}
+
+/// Completion asked before anything was analyzed analyzes first.
+#[test]
+fn completion_right_after_opening_is_answered() {
+    let dir = Scratch::new();
+    let file = dir.0.join("main.nest");
+    let mut client = Client::start(Fake(Err("no workspace here".to_string())));
+    let text = GENERIC.replace("let q: i32 := p.x", "let q: i32 := p.");
+    client.open(&file, &text);
+    let offered = labels(&client.at(Completion::METHOD, &file, position(&text, "p.\n", 0, 2)));
+    assert!(offered.contains(&"x".to_string()), "{offered:?}");
+}
+
+/// Many edits in a row are analyzed as the last of them, whichever came
+/// before.
+#[test]
+fn a_burst_of_edits_ends_in_the_last_one_s_diagnostics() {
+    let (_dir, file, mut client) = generic();
+    let wrong = GENERIC.replace("return q + p.y", "return q < p.y");
+    for i in 0..41 {
+        client.change(&file, if i % 2 == 0 { &wrong } else { GENERIC });
+    }
+    client.settle(&file);
+    assert!(!client.current(&file).is_empty(), "the last edit is wrong");
+
+    for i in 0..41 {
+        client.change(&file, if i % 2 == 0 { GENERIC } else { &wrong });
+    }
+    client.settle(&file);
+    assert_eq!(client.current(&file), Vec::new());
 }

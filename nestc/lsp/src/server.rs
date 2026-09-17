@@ -8,6 +8,16 @@
 //! or when its workspace was prepared again. A file's diagnostics are those of
 //! every unit that read it.
 //!
+//! ### Analyzing on a thread
+//!
+//! Analyzing a unit takes long enough to be felt between two keys, so it runs on
+//! a thread of its own, one unit at a time, and the loop goes on answering. A
+//! unit keeps what it found until the next analysis of it is done: completion
+//! answers from that as a key is typed, while hover and go-to-definition wait
+//! for an analysis of the text as it is. A unit is stale when a file it read
+//! changed since, which each file's version says, or when its workspace was
+//! prepared again since, which the workspace's generation says.
+//!
 //! ### Preparing a workspace
 //!
 //! twig runs on a thread of its own, because building a dependency can take
@@ -17,23 +27,23 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
-use crossbeam_channel::{Sender, select};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, select};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
-    DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
+    Cancel, DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{Completion, GotoDefinition, HoverRequest, RegisterCapability, Request as _};
 use lsp_types::{
-    CompletionList, CompletionOptions, CompletionParams, DidChangeWatchedFilesParams,
+    CancelParams, CompletionList, CompletionOptions, CompletionParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, FileChangeType, FileSystemWatcher, GlobPattern,
     Registration, RegistrationParams, CompletionResponse, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, Location, MarkupContent, MarkupKind, OneOf, Position,
+    HoverProviderCapability, Location, MarkupContent, MarkupKind, NumberOrString, OneOf, Position,
     PublishDiagnosticsParams, Range, SaveOptions, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
 };
@@ -93,44 +103,120 @@ pub fn run(
     }
 
     let (prepared_tx, prepared) = crossbeam_channel::unbounded();
+    let (jobs, jobs_rx) = crossbeam_channel::unbounded::<Job>();
+    let (analyzed_tx, analyzed) = crossbeam_channel::unbounded();
+    std::thread::spawn(move || {
+        for job in jobs_rx {
+            let outcome = analysis::analyze(&job.key.args, job.buffers.clone());
+            if analyzed_tx.send((job, outcome)).is_err() {
+                break;
+            }
+        }
+    });
     let mut server = Server {
         sender: conn.sender.clone(),
         toolchain: toolchain(&options),
         docs: HashMap::new(),
+        versions: HashMap::new(),
+        edits: HashMap::new(),
         workspaces: HashMap::new(),
         prepared_tx,
         units: HashMap::new(),
-        changed: HashSet::new(),
+        jobs,
+        analyzed,
+        busy: false,
         published: HashMap::new(),
     };
     loop {
+        let mut batch = Vec::new();
         select! {
             recv(conn.receiver) -> msg => {
                 let Ok(msg) = msg else { return Ok(()) };
-                if server.handle(conn, msg)? == Flow::Exit {
-                    return Ok(());
-                }
+                batch.push(msg);
             }
             recv(prepared) -> done => {
                 let (root, result) = done.expect("the server holds a sender");
                 server.prepared(root, result);
             }
+            recv(server.analyzed) -> done => {
+                let (job, outcome) = done.expect("the analyzing thread runs while the server does");
+                server.finished(job, outcome);
+            }
         }
-        // Everything already waiting is taken before analyzing, so that a burst
-        // of edits is analyzed once.
+        // Everything arriving within a moment is taken before analyzing, so
+        // that a burst of edits is analyzed once. The client's messages come
+        // through a channel with no room in it, so nothing is ever already
+        // waiting; a moment of quiet is how a burst ends.
         loop {
-            if let Ok(msg) = conn.receiver.try_recv() {
-                if server.handle(conn, msg)? == Flow::Exit {
-                    return Ok(());
-                }
-            } else if let Ok((root, result)) = prepared.try_recv() {
+            if let Ok((root, result)) = prepared.try_recv() {
                 server.prepared(root, result);
-            } else {
-                break;
+                continue;
+            }
+            if let Ok((job, outcome)) = server.analyzed.try_recv() {
+                server.finished(job, outcome);
+                continue;
+            }
+            match conn.receiver.recv_timeout(QUIET) {
+                Ok(msg) => batch.push(msg),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            }
+        }
+        // A request the client gave up on while it waited is not answered.
+        let cancelled: HashSet<RequestId> = batch
+            .iter()
+            .filter_map(|msg| match msg {
+                Message::Notification(n) if n.method == Cancel::METHOD => {
+                    let p = serde_json::from_value::<CancelParams>(n.params.clone()).ok()?;
+                    Some(match p.id {
+                        NumberOrString::Number(n) => RequestId::from(n),
+                        NumberOrString::String(s) => RequestId::from(s),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        for msg in batch {
+            if let Message::Request(req) = &msg
+                && cancelled.contains(&req.id)
+            {
+                let response = Response::new_err(req.id.clone(), ErrorCode::RequestCanceled as i32, "cancelled".to_string());
+                server.send(response.into());
+                continue;
+            }
+            if server.handle(conn, msg)? == Flow::Exit {
+                return Ok(());
             }
         }
         server.analyze();
     }
+}
+
+/// How many edits of a document are remembered.
+const EDITS: usize = 256;
+
+/// How long the client is quiet before what it sent is acted on.
+const QUIET: Duration = Duration::from_millis(15);
+
+/// A unit to analyze, with the text it is analyzed over and what that text was.
+struct Job {
+    key: UnitKey,
+    buffers: analysis::Buffers,
+    /// Each file's version when the job was made.
+    versions: HashMap<PathBuf, u64>,
+    /// Its workspace's generation, when it has one.
+    generation: u64,
+}
+
+/// What a unit found, and what it was found over.
+struct Unit {
+    outcome: Result<Outcome, String>,
+    /// The last outcome before it in which every open document parsed, while
+    /// this one's did not, and the versions it was found over: what completion
+    /// asks while a line is half typed.
+    parsed: Option<(Outcome, HashMap<PathBuf, u64>)>,
+    versions: HashMap<PathBuf, u64>,
+    generation: u64,
 }
 
 /// What completion writes at the cursor before analyzing: a name nothing
@@ -156,6 +242,9 @@ struct Workspace {
     /// Whether it has to run again once it finishes, because something was
     /// saved while it ran.
     again: bool,
+    /// How many answers it has had, which the units analyzed with the last one
+    /// remember.
+    generation: u64,
 }
 
 /// A command line, and the workspace it came from.
@@ -181,12 +270,19 @@ struct Server {
     toolchain: Arc<dyn Toolchain>,
     /// The open documents' text.
     docs: HashMap<PathBuf, String>,
+    /// How many times each file changed, open or on disk, which says whether a
+    /// unit that read it is out of date.
+    versions: HashMap<PathBuf, u64>,
+    /// The last edits of each open document, by the version each made.
+    edits: HashMap<PathBuf, Vec<(u64, complete::Edit)>>,
     workspaces: HashMap<PathBuf, Workspace>,
     prepared_tx: Sender<(PathBuf, Result<Metadata, String>)>,
-    /// What each unit found, or why it could not be analyzed.
-    units: HashMap<UnitKey, Result<Outcome, String>>,
-    /// Files edited since the last analysis.
-    changed: HashSet<PathBuf>,
+    /// What each unit last found, or why it could not be analyzed.
+    units: HashMap<UnitKey, Unit>,
+    jobs: Sender<Job>,
+    analyzed: Receiver<(Job, Result<Outcome, String>)>,
+    /// Whether the analyzing thread has a job.
+    busy: bool,
     /// What was last published, by file.
     published: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
 }
@@ -212,9 +308,13 @@ impl Server {
     }
 
     fn request(&mut self, req: Request) {
-        // A question is about the text as it is now, so an edit still waiting
-        // is analyzed first.
-        self.analyze();
+        // A question is about the text as it is now, so it waits for the
+        // analysis of it. Completion is asked as a key is typed, and answers from
+        // the analysis before that key, unless the file is in none yet.
+        let path = req.params.pointer("/textDocument/uri").and_then(|u| u.as_str()?.parse::<Uri>().ok()).and_then(|u| uri_to_path(&u));
+        if req.method != Completion::METHOD || path.is_none_or(|p| !self.covers(&p)) {
+            self.settle();
+        }
         let result = match req.method.as_str() {
             HoverRequest::METHOD => serde_json::from_value::<HoverParams>(req.params)
                 .map(|p| to_value(self.hover(&p.text_document_position_params.text_document.uri, p.text_document_position_params.position))),
@@ -241,11 +341,40 @@ impl Server {
 
     /// The unit that read `path`, and the file it is there.
     fn unit_for(&self, path: &Path) -> Option<(&UnitKey, &Outcome, nestc::common::source::FileId)> {
-        self.units.iter().find_map(|(key, outcome)| {
-            let o = outcome.as_ref().ok()?;
+        self.units.iter().find_map(|(key, unit)| {
+            let o = unit.outcome.as_ref().ok()?;
             let file = ide::file_of(&o.session, path)?;
             Some((key, o, file))
         })
+    }
+
+    /// What completion in `path` asks: the unit that read it, and its last
+    /// outcome in which `path` parsed.
+    fn parsed_for(&self, path: &Path) -> Option<(&Outcome, nestc::common::source::FileId, complete::Edits)> {
+        self.units.values().find_map(|unit| {
+            let latest = unit.outcome.as_ref().ok()?;
+            ide::file_of(&latest.session, path)?;
+            let (o, versions) = match latest.parsed.contains(path) {
+                true => (latest, &unit.versions),
+                false => unit.parsed.as_ref().map(|(o, v)| (o, v))?,
+            };
+            let edits = self.edits_since(path, versions.get(path).copied()?)?;
+            Some((o, ide::file_of(&o.session, path)?, edits))
+        })
+    }
+
+    /// The edits that made `path`'s version `since` what the editor has now,
+    /// when every one of them is still remembered.
+    fn edits_since(&self, path: &Path, since: u64) -> Option<complete::Edits> {
+        let now = self.versions.get(path).copied()?;
+        let edits: Vec<complete::Edit> = self
+            .edits
+            .get(path)?
+            .iter()
+            .filter(|(v, _)| *v > since)
+            .map(|(_, e)| *e)
+            .collect();
+        (edits.len() as u64 == now - since).then_some(complete::Edits(edits))
     }
 
     fn hover(&self, uri: &Uri, position: Position) -> Option<Hover> {
@@ -286,6 +415,14 @@ impl Server {
         let (key, _, _) = self.unit_for(&path)?;
         let text = self.docs.get(&path)?;
         let offset = analysis::offset(text, position);
+        // Incomplete, because what an import would bring in is offered by what
+        // is typed so far.
+        let list = |items| Some(CompletionResponse::List(CompletionList { is_incomplete: true, items }));
+        if let Some((o, file, edits)) = self.parsed_for(&path)
+            && let Some(items) = complete::from_analysis(&o.session, file, text, offset, &edits)
+        {
+            return list(items);
+        }
         // Analyzed again with a name written where the cursor is, so that
         // `p.` is a member access rather than a syntax error, and the tree
         // says what `p` is.
@@ -293,14 +430,9 @@ impl Server {
         let mut written = text.clone();
         written.insert_str(offset, PLACEHOLDER);
         buffers.insert(path.clone(), written);
-        let o = analysis::analyze(&key.args, Rc::new(buffers)).ok()?;
+        let o = analysis::analyze(&key.args, Arc::new(buffers)).ok()?;
         let file = ide::file_of(&o.session, &path)?;
-        // Incomplete, because what an import would bring in is offered by what
-        // is typed so far.
-        Some(CompletionResponse::List(CompletionList {
-            is_incomplete: true,
-            items: complete::complete(&o.session, file, text, offset, PLACEHOLDER),
-        }))
+        list(complete::complete(&o.session, file, text, offset, PLACEHOLDER))
     }
 
     fn notification(&mut self, n: Notification) {
@@ -352,7 +484,7 @@ impl Server {
             if change.typ != FileChangeType::CHANGED {
                 self.units.retain(|key, _| !key.root.as_ref().is_some_and(|root| path.starts_with(root)));
             }
-            self.changed.insert(path);
+            *self.versions.entry(path).or_default() += 1;
         }
         if any {
             let roots: Vec<PathBuf> = self.workspaces.keys().cloned().collect();
@@ -365,12 +497,27 @@ impl Server {
     /// The document at `uri` is now `text`, or closed.
     fn set(&mut self, uri: &Uri, text: Option<String>) {
         let Some(path) = uri_to_path(uri) else { return };
+        let version = self.versions.entry(path.clone()).or_default();
+        *version += 1;
+        let version = *version;
         match text {
-            Some(text) => self.docs.insert(path.clone(), text),
+            Some(text) => {
+                let edits = self.edits.entry(path.clone()).or_default();
+                match self.docs.get(&path) {
+                    Some(old) => edits.push((version, complete::Edit::between(old, &text))),
+                    None => edits.clear(),
+                }
+                if edits.len() > EDITS {
+                    edits.drain(..edits.len() - EDITS);
+                }
+                self.docs.insert(path, text);
+            }
             // A closed document is read from disk again, which may be different.
-            None => self.docs.remove(&path),
-        };
-        self.changed.insert(path);
+            None => {
+                self.docs.remove(&path);
+                self.edits.remove(&path);
+            }
+        }
     }
 
     /// Start preparing the workspace at `root`, or ask for it to run again when
@@ -395,35 +542,88 @@ impl Server {
         let ws = self.workspaces.entry(root.clone()).or_default();
         ws.meta = Some(result);
         ws.running = false;
+        ws.generation += 1;
         if std::mem::take(&mut ws.again) {
             self.prepare(&root);
         }
-        self.units.retain(|key, _| key.root.as_ref() != Some(&root));
     }
 
-    /// Analyze whatever is out of date, and publish what changed.
-    fn analyze(&mut self) {
-        let changed = std::mem::take(&mut self.changed);
-        let docs = &self.docs;
-        self.units.retain(|_, outcome| match outcome {
-            Ok(o) => o.files.iter().any(|f| docs.contains_key(f)) && o.files.is_disjoint(&changed),
-            // An error is about the setup, which an edit does not change; it
-            // goes when no open document is in its workspace any more.
-            Err(_) => true,
-        });
+    /// What `root`'s workspace was last prepared as, and how many times it was.
+    fn generation(&self, root: Option<&PathBuf>) -> u64 {
+        root.and_then(|r| self.workspaces.get(r)).map_or(0, |ws| ws.generation)
+    }
 
-        let buffers: analysis::Buffers = Rc::new(self.docs.clone());
+    /// Whether `unit`, analyzed as `key`, was analyzed over text that changed
+    /// since, or with a workspace prepared again since.
+    fn is_stale(&self, key: &UnitKey, unit: &Unit) -> bool {
+        if unit.generation != self.generation(key.root.as_ref()) {
+            return true;
+        }
+        let Ok(o) = &unit.outcome else { return false };
+        o.files.iter().any(|f| self.versions.get(f) != unit.versions.get(f))
+    }
+
+    /// Analyze whatever is out of date and wait for it, publishing as it goes.
+    fn settle(&mut self) {
+        self.analyze();
+        while self.busy {
+            let (job, outcome) = self.analyzed.recv().expect("the analyzing thread runs while the server does");
+            self.finished(job, outcome);
+        }
+    }
+
+    /// An analysis is done.
+    fn finished(&mut self, job: Job, outcome: Result<Outcome, String>) {
+        self.busy = false;
+        let clean = |o: &Result<Outcome, String>| o.as_ref().is_ok_and(|o| o.files.iter().filter(|f| self.docs.contains_key(*f)).all(|f| o.parsed.contains(f)));
+        let parsed = match self.units.remove(&job.key) {
+            _ if clean(&outcome) => None,
+            Some(old) if clean(&old.outcome) => old.outcome.ok().map(|o| (o, old.versions)),
+            Some(old) => old.parsed,
+            None => None,
+        };
+        let unit = Unit { outcome, parsed, versions: job.versions, generation: job.generation };
+        self.units.insert(job.key, unit);
+        self.analyze();
+    }
+
+    /// Start analyzing what is out of date, when nothing is being analyzed, and
+    /// publish what changed.
+    fn analyze(&mut self) {
+        let docs = &self.docs;
+        self.units.retain(|key, unit| match &unit.outcome {
+            Ok(o) => o.files.iter().any(|f| docs.contains_key(f)),
+            // An error is about the setup; it goes when no open document is in
+            // its workspace any more.
+            Err(_) => docs.keys().any(|d| key.is_about(d)),
+        });
+        if !self.busy
+            && let Some(key) = self.next()
+        {
+            let versions = self.versions.clone();
+            let generation = self.generation(key.root.as_ref());
+            let job = Job { key, buffers: Arc::new(self.docs.clone()), versions, generation };
+            self.busy = self.jobs.send(job).is_ok();
+        }
+        self.publish();
+    }
+
+    /// The unit to analyze next: one an open document needs and no unit read
+    /// yet, then one that is stale. A stale unit its workspace no longer has
+    /// goes, and a setup error is found out here rather than analyzed.
+    fn next(&mut self) -> Option<UnitKey> {
         let mut paths: Vec<PathBuf> = self.docs.keys().cloned().collect();
         paths.sort();
-        for path in paths {
-            if self.covers(&path) {
+        for path in &paths {
+            if self.covers(path) {
                 continue;
             }
-            let Some(root) = workspace::find_root(&path) else {
+            let Some(root) = workspace::find_root(path) else {
                 let key = UnitKey { root: None, args: vec![path.display().to_string()] };
-                let outcome = analysis::analyze(&key.args, buffers.clone());
-                self.units.insert(key, outcome);
-                continue;
+                if self.units.contains_key(&key) {
+                    continue;
+                }
+                return Some(key);
             };
             let meta = match self.workspaces.get(&root).and_then(|ws| ws.meta.as_ref()) {
                 None => {
@@ -433,40 +633,57 @@ impl Server {
                     continue;
                 }
                 Some(Err(why)) => {
-                    let key = UnitKey { root: Some(root), args: Vec::new() };
-                    self.units.insert(key, Err(why.clone()));
+                    let key = UnitKey { root: Some(root.clone()), args: Vec::new() };
+                    let unit = Unit { outcome: Err(why.clone()), parsed: None, versions: HashMap::new(), generation: self.generation(Some(&root)) };
+                    self.units.insert(key, unit);
                     continue;
                 }
                 Some(Ok(meta)) => meta.clone(),
             };
-            for args in workspace::candidates(&meta, &path) {
+            // The first of its candidates not analyzed yet; one that was, and
+            // did not read it, is not the one.
+            for args in workspace::candidates(&meta, path) {
                 let key = UnitKey { root: Some(root.clone()), args };
                 if !self.units.contains_key(&key) {
-                    let outcome = analysis::analyze(&key.args, buffers.clone());
-                    self.units.insert(key.clone(), outcome);
-                }
-                if self.units[&key].as_ref().is_ok_and(|o| o.files.contains(&path)) {
-                    break;
+                    return Some(key);
                 }
             }
         }
-        // A setup error stays while a document it is about is open.
-        let docs = &self.docs;
-        self.units.retain(|key, outcome| outcome.is_ok() || docs.keys().any(|d| key.is_about(d)));
-        self.publish();
+
+        let mut stale: Vec<UnitKey> = self.units.iter().filter(|(k, u)| self.is_stale(k, u)).map(|(k, _)| k.clone()).collect();
+        stale.sort_by(|a, b| (&a.root, &a.args).cmp(&(&b.root, &b.args)));
+        for key in stale {
+            let Some(root) = &key.root else { return Some(key) };
+            let still = match self.workspaces.get(root).and_then(|ws| ws.meta.as_ref()) {
+                // Being prepared: it is analyzed once that is done.
+                None => continue,
+                Some(Err(_)) => false,
+                Some(Ok(meta)) => match &self.units[&key].outcome {
+                    Ok(o) => paths.iter().any(|p| o.files.contains(p) && workspace::candidates(meta, p).contains(&key.args)),
+                    Err(_) => false,
+                },
+            };
+            if still {
+                return Some(key);
+            }
+            // What replaces it is found on the next look.
+            self.units.remove(&key);
+            return self.next();
+        }
+        None
     }
 
     /// Whether some unit already read `path`.
     fn covers(&self, path: &Path) -> bool {
-        self.units.values().any(|o| o.as_ref().is_ok_and(|o| o.files.contains(path)))
+        self.units.values().any(|u| u.outcome.as_ref().is_ok_and(|o| o.files.contains(path)))
     }
 
     /// Publish every file's diagnostics that changed, and clear the ones that
     /// have none now.
     fn publish(&mut self) {
         let mut all: HashMap<PathBuf, Vec<lsp_types::Diagnostic>> = HashMap::new();
-        for (key, outcome) in &self.units {
-            match outcome {
+        for (key, unit) in &self.units {
+            match &unit.outcome {
                 Ok(o) => {
                     for (path, diags) in &o.diagnostics {
                         all.entry(path.clone()).or_default().extend(diags.iter().cloned());
