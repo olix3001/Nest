@@ -18,20 +18,20 @@ use serde::Deserialize;
 pub const MANIFEST: &str = "nest.toml";
 
 /// What `twig metadata` prints.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Metadata {
     pub root: PathBuf,
     pub packages: Vec<Package>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Package {
     pub name: String,
     pub dir: PathBuf,
     pub targets: Vec<Target>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Target {
     pub entry: PathBuf,
     pub lib: bool,

@@ -599,7 +599,10 @@ impl Cx<'_> {
                 at
             }
         };
-        let at = self.edits.forward(at);
+        // Into the editor's text, which the analyzed one may reach past: the
+        // edits since can have made it shorter.
+        let at = self.edits.forward(at).min(self.text.len());
+        let at = (0..=at).rev().find(|&i| self.text.is_char_boundary(i)).unwrap_or(0);
         let position = analysis::position(self.text, at);
         let prefix = if at > 0 && !self.text[..at].ends_with('\n') { "\n" } else { "" };
         TextEdit::new(Range::new(position, position), format!("{prefix}{line}\n"))

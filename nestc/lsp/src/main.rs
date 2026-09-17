@@ -1,5 +1,8 @@
 //! The Nest language server, over stdin and stdout.
 //!
+//! `NEST_LSP_LOG=<path>` writes what the server was asked and what it did there
+//! (`log.rs`), which is how a session inside an editor is read afterwards.
+//!
 //! twig is found at `--twig`, then where the `twig` initialization option or
 //! `NEST_TWIG` says, then on `PATH`. `--nestc` (or the `nestc` option) is the
 //! compiler twig runs, which otherwise it finds the way it always does.
@@ -7,6 +10,7 @@
 mod analysis;
 mod complete;
 mod ide;
+mod log;
 mod server;
 mod workspace;
 

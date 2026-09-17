@@ -28,7 +28,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, select};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -49,6 +49,7 @@ use lsp_types::{
 };
 
 use crate::analysis::{self, Outcome, path_to_uri, uri_to_path};
+use crate::log;
 use crate::{complete, ide};
 use crate::workspace::{self, Metadata, Toolchain};
 
@@ -58,6 +59,7 @@ pub fn run(
     conn: &Connection,
     toolchain: impl FnOnce(&serde_json::Value) -> Arc<dyn Toolchain>,
 ) -> Result<(), String> {
+    log::open();
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
             open_close: Some(true),
@@ -121,19 +123,25 @@ pub fn run(
         edits: HashMap::new(),
         workspaces: HashMap::new(),
         prepared_tx,
+        prepared_rx: prepared.clone(),
         units: HashMap::new(),
         jobs,
         analyzed,
         busy: false,
         published: HashMap::new(),
+        touched: HashMap::new(),
     };
     loop {
         let mut batch = Vec::new();
+        // A document that was typed in a moment ago is analyzed once it is
+        // quiet, and nothing else may arrive to notice that it is.
+        let idle = server.hot().unwrap_or(Duration::from_secs(3600));
         select! {
             recv(conn.receiver) -> msg => {
                 let Ok(msg) = msg else { return Ok(()) };
                 batch.push(msg);
             }
+            default(idle) => {}
             recv(prepared) -> done => {
                 let (root, result) = done.expect("the server holds a sender");
                 server.prepared(root, result);
@@ -198,6 +206,15 @@ const EDITS: usize = 256;
 /// How long the client is quiet before what it sent is acted on.
 const QUIET: Duration = Duration::from_millis(15);
 
+/// How long a document is quiet before it is analyzed.
+///
+/// Analyzing what is half typed costs an analysis and produces diagnostics about
+/// text the person is in the middle of writing — "no field `d` on `*mut T`"
+/// while `decode` is being typed. Completion does not wait for any of it
+/// (`from_analysis`), so the only thing this delays is the diagnostics, which
+/// are worth having only once a thought is finished.
+const IDLE: Duration = Duration::from_millis(400);
+
 /// A unit to analyze, with the text it is analyzed over and what that text was.
 struct Job {
     key: UnitKey,
@@ -217,6 +234,33 @@ struct Unit {
     parsed: Option<(Outcome, HashMap<PathBuf, u64>)>,
     versions: HashMap<PathBuf, u64>,
     generation: u64,
+}
+
+/// A unit named as the file it is rooted at, which is what a log is read by.
+fn unit_name(key: &UnitKey) -> String {
+    let entry = key.args.first().map(String::as_str).unwrap_or("?");
+    Path::new(entry).file_name().map_or(entry.to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// A message's parameters as one short line: what it is about, not all of it. A
+/// `didChange` carries the whole document, which is not what a log is for.
+fn brief(params: &serde_json::Value) -> String {
+    let file = params
+        .pointer("/textDocument/uri")
+        .and_then(|u| u.as_str())
+        .and_then(|u| u.rsplit('/').next())
+        .unwrap_or("");
+    let version = params.pointer("/textDocument/version").and_then(|v| v.as_u64());
+    let line = params.pointer("/position/line").and_then(|v| v.as_u64());
+    let column = params.pointer("/position/character").and_then(|v| v.as_u64());
+    let mut out = file.to_string();
+    if let Some(v) = version {
+        out.push_str(&format!(" v{v}"));
+    }
+    if let (Some(l), Some(c)) = (line, column) {
+        out.push_str(&format!(" at {}:{}", l + 1, c + 1));
+    }
+    out
 }
 
 /// What completion writes at the cursor before analyzing: a name nothing
@@ -277,6 +321,9 @@ struct Server {
     edits: HashMap<PathBuf, Vec<(u64, complete::Edit)>>,
     workspaces: HashMap<PathBuf, Workspace>,
     prepared_tx: Sender<(PathBuf, Result<Metadata, String>)>,
+    /// The same answers the main loop waits for, so that a question asked
+    /// before a workspace is ready can wait for it too.
+    prepared_rx: Receiver<(PathBuf, Result<Metadata, String>)>,
     /// What each unit last found, or why it could not be analyzed.
     units: HashMap<UnitKey, Unit>,
     jobs: Sender<Job>,
@@ -285,10 +332,18 @@ struct Server {
     busy: bool,
     /// What was last published, by file.
     published: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// When each open document was last edited, so that analysis waits for the
+    /// typing to stop.
+    touched: HashMap<PathBuf, Instant>,
 }
 
 impl Server {
     fn handle(&mut self, conn: &Connection, msg: Message) -> Result<Flow, String> {
+        match &msg {
+            Message::Request(r) => log::line!("< {} #{} {}", r.method, r.id, brief(&r.params)),
+            Message::Notification(n) => log::line!("< {} {}", n.method, brief(&n.params)),
+            Message::Response(_) => {}
+        }
         match msg {
             Message::Request(req) => {
                 if conn.handle_shutdown(&req).map_err(|e| e.to_string())? {
@@ -412,7 +467,10 @@ impl Server {
 
     fn completion(&self, uri: &Uri, position: Position) -> Option<CompletionResponse> {
         let path = uri_to_path(uri)?;
-        let (key, _, _) = self.unit_for(&path)?;
+        let Some((key, _, _)) = self.unit_for(&path) else {
+            log::line!("  completion: nothing has analyzed this file yet");
+            return None;
+        };
         let text = self.docs.get(&path)?;
         let offset = analysis::offset(text, position);
         // Incomplete, because what an import would bring in is offered by what
@@ -421,8 +479,10 @@ impl Server {
         if let Some((o, file, edits)) = self.parsed_for(&path)
             && let Some(items) = complete::from_analysis(&o.session, file, text, offset, &edits)
         {
+            log::line!("  completion: {} items from the analysis already made", items.len());
             return list(items);
         }
+        log::line!("  completion: analyzing again, with a name written at the cursor");
         // Analyzed again with a name written where the cursor is, so that
         // `p.` is a member access rather than a syntax error, and the tree
         // says what `p` is.
@@ -432,7 +492,9 @@ impl Server {
         buffers.insert(path.clone(), written);
         let o = analysis::analyze(&key.args, Arc::new(buffers)).ok()?;
         let file = ide::file_of(&o.session, &path)?;
-        list(complete::complete(&o.session, file, text, offset, PLACEHOLDER))
+        let items = complete::complete(&o.session, file, text, offset, PLACEHOLDER);
+        log::line!("  completion: {} items from that analysis", items.len());
+        list(items)
     }
 
     fn notification(&mut self, n: Notification) {
@@ -510,12 +572,14 @@ impl Server {
                 if edits.len() > EDITS {
                     edits.drain(..edits.len() - EDITS);
                 }
+                self.touched.insert(path.clone(), Instant::now());
                 self.docs.insert(path, text);
             }
             // A closed document is read from disk again, which may be different.
             None => {
                 self.docs.remove(&path);
                 self.edits.remove(&path);
+                self.touched.remove(&path);
             }
         }
     }
@@ -529,6 +593,7 @@ impl Server {
             return;
         }
         ws.running = true;
+        log::line!("  preparing {} with twig", root.display());
         let toolchain = self.toolchain.clone();
         let done = self.prepared_tx.clone();
         let root = root.to_path_buf();
@@ -540,9 +605,17 @@ impl Server {
 
     fn prepared(&mut self, root: PathBuf, result: Result<Metadata, String>) {
         let ws = self.workspaces.entry(root.clone()).or_default();
+        // The generation is what makes every unit of the workspace stale, so it
+        // moves only when the answer is a different one. A save prepares the
+        // workspace again, and the usual answer is the one it already had:
+        // nothing about how the files are compiled changed, and analyzing them
+        // again would find what is already known.
+        let changed = ws.meta.as_ref() != Some(&result);
         ws.meta = Some(result);
         ws.running = false;
-        ws.generation += 1;
+        if changed {
+            ws.generation += 1;
+        }
         if std::mem::take(&mut ws.again) {
             self.prepare(&root);
         }
@@ -564,17 +637,47 @@ impl Server {
     }
 
     /// Analyze whatever is out of date and wait for it, publishing as it goes.
+    ///
+    /// A question about the text as it is now cannot wait for the typing to
+    /// stop, so this is the one path that analyzes a document that was just
+    /// edited.
     fn settle(&mut self) {
+        log::line!("  waiting for what is being analyzed");
+        self.touched.clear();
         self.analyze();
-        while self.busy {
-            let (job, outcome) = self.analyzed.recv().expect("the analyzing thread runs while the server does");
-            self.finished(job, outcome);
+        loop {
+            if self.busy {
+                let (job, outcome) = self.analyzed.recv().expect("the analyzing thread runs while the server does");
+                self.finished(job, outcome);
+                continue;
+            }
+            // Nothing can be analyzed until twig has said how, so a question
+            // asked in the first moments of a session waits for that rather
+            // than answering nothing.
+            if self.workspaces.values().any(|ws| ws.running) {
+                log::line!("  waiting for twig");
+                let (root, result) = self.prepared_rx.recv().expect("the server holds a sender");
+                self.prepared(root, result);
+                self.analyze();
+                continue;
+            }
+            log::line!("  nothing left to wait for");
+            return;
         }
     }
 
     /// An analysis is done.
     fn finished(&mut self, job: Job, outcome: Result<Outcome, String>) {
         self.busy = false;
+        match &outcome {
+            Ok(o) => log::line!(
+                "  analyzed {}: {} files, {} with diagnostics",
+                unit_name(&job.key),
+                o.files.len(),
+                o.diagnostics.len()
+            ),
+            Err(why) => log::line!("  analyzing {} failed: {why}", unit_name(&job.key)),
+        }
         let clean = |o: &Result<Outcome, String>| o.as_ref().is_ok_and(|o| o.files.iter().filter(|f| self.docs.contains_key(*f)).all(|f| o.parsed.contains(f)));
         let parsed = match self.units.remove(&job.key) {
             _ if clean(&outcome) => None,
@@ -598,10 +701,12 @@ impl Server {
             Err(_) => docs.keys().any(|d| key.is_about(d)),
         });
         if !self.busy
+            && self.hot().is_none()
             && let Some(key) = self.next()
         {
             let versions = self.versions.clone();
             let generation = self.generation(key.root.as_ref());
+            log::line!("  analyzing {}", unit_name(&key));
             let job = Job { key, buffers: Arc::new(self.docs.clone()), versions, generation };
             self.busy = self.jobs.send(job).is_ok();
         }
@@ -673,6 +778,19 @@ impl Server {
         None
     }
 
+    /// How long until the document being typed in is quiet, when one is.
+    ///
+    /// Analysis waits for it. Everything else — completion, hover — reads what
+    /// is already analyzed and does not.
+    fn hot(&self) -> Option<Duration> {
+        self.touched
+            .values()
+            .map(|at| at.elapsed())
+            .filter(|since| *since < IDLE)
+            .map(|since| IDLE - since)
+            .max()
+    }
+
     /// Whether some unit already read `path`.
     fn covers(&self, path: &Path) -> bool {
         self.units.values().any(|u| u.outcome.as_ref().is_ok_and(|o| o.files.contains(path)))
@@ -723,6 +841,11 @@ impl Server {
 
     fn publish_one(&self, path: &Path, diagnostics: Vec<lsp_types::Diagnostic>) {
         let Some(uri) = path_to_uri(path) else { return };
+        log::line!(
+            "> diagnostics {} ({})",
+            path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned()),
+            diagnostics.len()
+        );
         let params = PublishDiagnosticsParams { uri, diagnostics, version: None };
         self.send(Notification::new(PublishDiagnostics::METHOD.to_string(), params).into());
     }

@@ -177,6 +177,23 @@ impl Client {
         self.published.iter().rev().find(|p| p.uri == uri).map(|p| p.diagnostics.clone()).unwrap_or_default()
     }
 
+    /// Everything published within `wait`, which is nothing when the server
+    /// has no reason to say anything.
+    fn quiet(&mut self, wait: Duration) -> Vec<PublishDiagnosticsParams> {
+        let until = std::time::Instant::now() + wait;
+        let mut out = Vec::new();
+        while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+            match self.conn.receiver.recv_timeout(left) {
+                Ok(Message::Notification(n)) if n.method == PublishDiagnostics::METHOD => {
+                    out.push(serde_json::from_value(n.params).unwrap());
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
     /// Every message published for `path` so far.
     fn messages(&self, path: &Path) -> Vec<String> {
         let uri = path_to_uri(path).unwrap();
@@ -433,6 +450,67 @@ fn completion_imports_what_it_offers() {
     assert_eq!(edit["range"]["start"]["line"], 1, "{map}");
     // What is imported already is not offered again.
     assert!(!items.iter().any(|i| i["label"] == "io" && i.get("additionalTextEdits").is_some()), "{answer}");
+}
+
+/// Deleting most of a file and asking for completion in what is left still
+/// answers, import and all: every offset the answer carries is one into the
+/// text the editor has, which is shorter than the one that was analyzed.
+#[test]
+fn completion_after_most_of_the_file_is_deleted_answers() {
+    let (_dir, file, mut client) = program();
+    // The last import sits at the end, so the place an import would be written
+    // is further into this text than the shorter one is long.
+    let long = "io :: import <std/io>\n".to_string() + PROGRAM + "\nfs :: import <std/fs>\n";
+    client.change(&file, &long);
+    client.settle(&file);
+
+    let short = "io :: import <std/io>\nf :: func () -> i32 {\n  let h := HashM\n  return 0\n}\n";
+    client.change(&file, short);
+    let answer = client.at(Completion::METHOD, &file, position(short, "HashM\n", 0, 5));
+    let items = answer["items"].as_array().expect("an answer, rather than a server that died");
+    let map = items.iter().find(|i| i["label"] == "HashMap").expect("`HashMap` is offered");
+    let edit = &map["additionalTextEdits"][0];
+    assert_eq!(edit["newText"], "{ HashMap } :: import <std/collections>\n", "{map}");
+}
+
+/// Saving prepares the workspace again, and when twig says what it said before,
+/// nothing is analyzed again: the file read from disk is not read again, so the
+/// error written into it while nothing was watching is not found.
+#[test]
+fn saving_with_the_same_metadata_analyzes_nothing_again() {
+    let dir = Scratch::new();
+    std::fs::write(dir.0.join("nest.toml"), "").unwrap();
+    let main = dir.0.join("main.nest");
+    let other = dir.0.join("other.nest");
+    std::fs::write(&other, "@public g :: func () -> i32 { return 1 }\n").unwrap();
+    let meta = Metadata {
+        root: dir.0.clone(),
+        packages: vec![Package {
+            name: "app".to_string(),
+            dir: dir.0.clone(),
+            targets: vec![Target {
+                entry: main.clone(),
+                lib: false,
+                args: vec![main.display().to_string()],
+            }],
+        }],
+    };
+    let mut client = Client::start(Fake(Ok(meta)));
+    // An error of its own, so that the first analysis is waited for by waiting
+    // for what it publishes.
+    client.open(&main, "{ g } :: import \"other.nest\"\nf :: func () -> i32 { return g() + \"x\" }\n");
+    assert_eq!(client.diagnostics(&main).len(), 1);
+
+    // Broken, and nothing told the server: only analyzing it again would find
+    // it.
+    std::fs::write(&other, "@public g :: func () -> str { return 1 }\n").unwrap();
+    client.notify(
+        lsp_types::notification::DidSaveTextDocument::METHOD,
+        serde_json::json!({ "textDocument": { "uri": path_to_uri(&main).unwrap() } }),
+    );
+    let said = client.quiet(Duration::from_secs(2));
+    assert!(said.is_empty(), "a save analyzed everything again: {said:?}");
+    assert!(client.current(&other).is_empty(), "{:?}", client.messages(&other));
 }
 
 /// An impl whose generics are bounded applies only where the bounds hold: a
