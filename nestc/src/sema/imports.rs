@@ -116,9 +116,23 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
             }
         }
         // Disjoint field borrows: reading `asts` while mutating `defs`.
+        let mut missing: Vec<(NodeId, String)> = Vec::new();
         let Session { asts, defs, .. } = &mut *session;
         let ast = &asts[&file];
-        bind_pattern(defs, ast, imp.pattern, imp.scope, base, imp.reexport, file);
+        bind_pattern(
+            defs,
+            ast,
+            imp.pattern,
+            imp.scope,
+            base,
+            imp.reexport,
+            file,
+            &mut missing,
+        );
+        for (at, msg) in missing {
+            let span = session.asts[&file].node(at).span;
+            session.error(file, span, msg);
+        }
     }
 }
 
@@ -132,6 +146,7 @@ fn bind_pattern(
     base: Option<DefId>,
     reexport: bool,
     file: crate::common::source::FileId,
+    missing: &mut Vec<(NodeId, String)>,
 ) {
     let kind = ast.node(pattern).kind.clone();
     match kind {
@@ -156,7 +171,7 @@ fn bind_pattern(
         // `{ a, b: pat, c: * } :: import ...` — selective destructuring.
         NodeKind::StructPat { fields, .. } => {
             for field in fields {
-                bind_field(defs, ast, field, scope, base, reexport, file);
+                bind_field(defs, ast, field, scope, base, reexport, file, missing);
             }
         }
         // Anything else in import position is meaningless; ignore (collection
@@ -175,12 +190,40 @@ fn bind_field(
     base: Option<DefId>,
     reexport: bool,
     file: crate::common::source::FileId,
+    missing: &mut Vec<(NodeId, String)>,
 ) {
     let NodeKind::FieldPat { name, pattern, .. } = ast.node(field).kind.clone() else {
         return;
     };
     // Look the member up in the target namespace.
     let member = base.and_then(|b| lookup_public(defs, b, &name));
+    // A name the namespace does not publish is an error **here**, where it is
+    // written. The `external` stand-in below is for a namespace that could not
+    // be *loaded* — there the whole import is already reported and one more
+    // complaint per name would be noise — but a namespace that loaded and
+    // simply has no such member is a different thing. Left as a stand-in it
+    // types as an error with no diagnostic behind it, and the first anything is
+    // heard of it is "an error type reached code generation".
+    if let Some(b) = base
+        && member.is_none()
+    {
+        let b = defs.resolve_alias(b);
+        let within = defs.canonical_string(b);
+        let msg = if defs.get(b).ns.members.contains_key(&name) {
+            format!("`{name}` is not public in `{within}`")
+        } else if let Some(owner) = impl_member_owner(defs, b, &name) {
+            // The commonest way to write this one is to reach for a method:
+            // `wrapping_sub` is a member of `impl uint.<N>`, not of `core/num`.
+            // Saying where it actually lives is the whole of the answer.
+            format!(
+                "`{within}` has no member `{name}`: it is a member of `{owner}`, \
+                 and a method is reached through a value of its type rather than imported"
+            )
+        } else {
+            format!("`{within}` has no member `{name}`")
+        };
+        missing.push((field, msg));
+    }
     match pattern.map(|p| ast.node(p).kind.clone()) {
         // `{ name }` — bind the member itself under its own name.
         None => {
@@ -209,7 +252,7 @@ fn bind_field(
         Some(NodeKind::StructPat { .. }) => {
             let sub = member.map(|m| defs.resolve_alias(m));
             if let Some(p) = pattern {
-                bind_pattern(defs, ast, p, scope, sub, reexport, file);
+                bind_pattern(defs, ast, p, scope, sub, reexport, file, missing);
             }
         }
         _ => {}
@@ -286,6 +329,21 @@ pub fn lookup_public(defs: &DefTable, base: DefId, name: &Symbol) -> Option<DefI
     let member = defs.get(base).ns.members.get(name).copied()?;
     let member = defs.resolve_alias(member);
     defs.get(member).vis.is_public().then_some(member)
+}
+
+/// The `impl` block inside `base` that declares `name`, if one does.
+///
+/// An inherent or trait `impl` whose target is not a type `base` itself
+/// declares — `impl <const N: u16> uint.<N>` in `core/num` — gets a namespace of
+/// its own under `base` (see `collect_impl`), private and unnamed. Its members
+/// are reachable through a *value*, never through the enclosing namespace, so
+/// importing one is always a mistake; this is how the diagnostic says which
+/// `impl` the name was found in instead of leaving the reader to guess.
+fn impl_member_owner(defs: &DefTable, base: DefId, name: &Symbol) -> Option<String> {
+    defs.iter()
+        .filter(|d| d.parent == Some(base) && d.kind == DefKind::Namespace)
+        .find(|d| d.ns.members.contains_key(name))
+        .map(|d| d.name.to_string())
 }
 
 /// All public members of `base` (following aliases), as `(name, def)` pairs.

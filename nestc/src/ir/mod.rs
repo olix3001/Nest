@@ -611,8 +611,13 @@ pub enum ExprKind {
     /// An infinite loop; exits only through a `break`.
     Loop { body: Block },
     /// A struct / record construction `Type { field: value, ... }`.
+    ///
+    /// `def` is `None` for an **anonymous** struct (§3.8): there is no
+    /// declaration behind one, and the members are read off the expression's
+    /// own type instead. Everything else about the two is the same, which is
+    /// why it is this variant and not a second one.
     Construct {
-        def: DefId,
+        def: Option<DefId>,
         fields: Vec<(Symbol, Expr)>,
     },
     /// An enum-variant value `.variant(args...)`.

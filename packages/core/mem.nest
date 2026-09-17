@@ -68,3 +68,26 @@
 
 // Splice a file's bytes into the binary as a compile-time `[]u8`.
 @public embed_file :: #intrinsic("embed_file") func (path: str) -> []u8
+
+// Copy `src` onto the front of `dst`, as one block move.
+//
+// `src.len()` elements are copied, so `dst` must be at least that long; a
+// caller that cannot promise it wants `std/mem`'s `copy`, which clamps to the
+// shorter of the two and says how much it moved.
+//
+// **The two must not overlap.** Nothing here can check that — a slice knows its
+// address and its length, and two slices into one buffer are two ordinary
+// values — so it is stated rather than enforced, exactly as C states it.
+//
+// It takes slices and not a pointer and a count: the length is already part of
+// the value, so the byte count is derived rather than trusted, and the
+// mismatched-count mistake cannot be written.
+@public copy_nonoverlapping :: #intrinsic("memcpy") func <T> (dst: []mut T, src: []T) -> void
+
+// Set every byte of `dst` to `byte`.
+//
+// Bytes, not elements: this is the machine's fill, and what it writes is a byte
+// pattern. `set_bytes(xs, 0)` zeroes any slice whatever its element type, which
+// is what it is for; filling with an *element* is `std/mem`'s `fill`, which is
+// a loop because a general `T` is not one byte.
+@public set_bytes :: #intrinsic("memset") func <T> (dst: []mut T, byte: u8) -> void

@@ -276,6 +276,16 @@ pub enum Ty {
     },
     /// `(A, B, ...)` — a tuple. The empty tuple is spelled [`Ty::Void`].
     Tuple(Vec<Ty>),
+    /// An anonymous `struct { a: A, b: B }` — a **structural** type (§3.8): two
+    /// of them are the same type when their field name→type sets match, and a
+    /// named struct with the same fields is a different type.
+    ///
+    /// The fields are kept **sorted by name**, by every constructor of this
+    /// variant ([`Ty::anon_struct`]). §3.8 makes the identity the field *set*,
+    /// so `struct { a: i32, b: i32 }` and `struct { b: i32, a: i32 }` have to
+    /// be one type — sorting is what makes the derived `PartialEq` say so, and
+    /// it fixes a layout order for the two spellings at the same time.
+    Struct(Vec<(Symbol, Ty)>),
     /// `func(params) -> ret`.
     Func {
         params: Vec<Ty>,
@@ -295,6 +305,15 @@ impl Ty {
             signed,
             width: Const::bits_of(bits),
         }
+    }
+
+    /// An anonymous `struct { ... }` from its fields, in whatever order they
+    /// were written. The order is **not** part of the type (§3.8 makes the
+    /// identity the field set), so the fields are sorted by name here and
+    /// nowhere else has to think about it again.
+    pub fn anon_struct(mut fields: Vec<(Symbol, Ty)>) -> Ty {
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
+        Ty::Struct(fields)
     }
 
     /// `u8` — common enough (a byte string's element, a `str`'s
@@ -323,6 +342,7 @@ impl Ty {
                 inner.mentions_error()
             }
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_error),
+            Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_error()),
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_error),
             Ty::Func { params, ret } => {
                 params.iter().any(Ty::mentions_error) || ret.mentions_error()
@@ -461,6 +481,14 @@ impl Ty {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("({inner})")
+            }
+            Ty::Struct(fields) => {
+                let inner = fields
+                    .iter()
+                    .map(|(n, t)| format!("{n}: {}", t.display(defs)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("struct {{ {inner} }}")
             }
             Ty::Func { params, ret } => {
                 let ps = params
@@ -730,6 +758,12 @@ impl InferCtxt {
                 inner: Box::new(self.name_literals(&inner)),
             },
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.name_literals(e)).collect()),
+            Ty::Struct(fields) => Ty::Struct(
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.name_literals(t)))
+                    .collect(),
+            ),
             Ty::Func { params, ret } => Ty::Func {
                 params: params.iter().map(|p| self.name_literals(p)).collect(),
                 ret: Box::new(self.name_literals(&ret)),
@@ -973,6 +1007,15 @@ impl InferCtxt {
                 width: self.shallow_const(&width),
             },
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.resolve(e)).collect()),
+            // Already sorted — resolving a field's type cannot change its name,
+            // so this rebuilds the variant directly rather than through
+            // `anon_struct` and its sort.
+            Ty::Struct(fields) => Ty::Struct(
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.resolve(t)))
+                    .collect(),
+            ),
             Ty::Func { params, ret } => Ty::Func {
                 params: params.iter().map(|p| self.resolve(p)).collect(),
                 ret: Box::new(self.resolve(&ret)),
@@ -1107,6 +1150,17 @@ impl InferCtxt {
                 }
                 Ok(())
             }
+            // Both sides are sorted by name, so equal field *sets* line up
+            // position by position and a single zip decides it.
+            (Ty::Struct(xs), Ty::Struct(ys))
+                if xs.len() == ys.len()
+                    && xs.iter().zip(ys).all(|((n, _), (m, _))| n == m) =>
+            {
+                for ((_, x), (_, y)) in xs.iter().zip(ys) {
+                    self.unify(x, y)?;
+                }
+                Ok(())
+            }
             (
                 Ty::Func {
                     params: p1,
@@ -1204,6 +1258,7 @@ impl InferCtxt {
                 self.occurs(v, &inner)
             }
             Ty::Tuple(elems) => elems.iter().any(|e| self.occurs(v, e)),
+            Ty::Struct(fields) => fields.iter().any(|(_, t)| self.occurs(v, t)),
             Ty::Func { params, ret } => {
                 params.iter().any(|p| self.occurs(v, p)) || self.occurs(v, &ret)
             }
@@ -1285,6 +1340,12 @@ impl InferCtxt {
                 elems
                     .iter()
                     .map(|e| self.finalize(e, on_ambiguous))
+                    .collect(),
+            ),
+            Ty::Struct(fields) => Ty::Struct(
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.finalize(t, on_ambiguous)))
                     .collect(),
             ),
             Ty::Func { params, ret } => Ty::Func {

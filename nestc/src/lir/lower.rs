@@ -77,6 +77,16 @@ use super::{
     TypeMember, VariantDef,
 };
 
+/// How long a `value ; count` array may be before it is filled by a loop
+/// instead of written out element by element.
+///
+/// Both forms are correct; this is where one stops being cheaper than the
+/// other. Below it the elements are operands the constant evaluator can fold
+/// and the backend can emit as one constant. Above it they are `n` operands
+/// carried through every later stage for no gain, which is a cost the *compiler*
+/// pays rather than the program — and it grows with `n` without bound.
+const REPEAT_UNROLL: u64 = 32;
+
 /// Lower the whole monomorphized program.
 #[allow(clippy::too_many_arguments)]
 pub fn lower(
@@ -222,6 +232,10 @@ pub fn lower_against_libraries(
         super::entry::synthesize(&mut unit, id, start, options.target);
     }
     super::safepoint::annotate(&mut unit);
+    // Which functions can reach themselves, and so need a stack check in their
+    // prologue. After the entry point is in, because it is a function like any
+    // other and its calls are edges like any others.
+    super::recursion::mark(&mut unit);
     super::unit::split(unit, options.codegen_units, sources)
 }
 
@@ -548,7 +562,7 @@ impl Cx<'_> {
                     ret: Box::new(ret),
                 }
             }
-            Ty::Slice { .. } | Ty::Tuple(_) => LirTy::Named(self.intern(ty, depth)),
+            Ty::Slice { .. } | Ty::Tuple(_) | Ty::Struct(_) => LirTy::Named(self.intern(ty, depth)),
             Ty::Nominal { def, .. } => match self.linked.ty(*def).map(|t| &t.kind) {
                 Some(TypeDefKind::Struct { .. } | TypeDefKind::Enum { .. }) => {
                     LirTy::Named(self.intern(ty, depth))
@@ -665,6 +679,27 @@ impl Cx<'_> {
                     })
                     .collect();
                 def.origin = Origin::Tuple;
+            }
+            // An anonymous struct flattens to exactly what it is: its fields,
+            // under their own names, at the offsets the layout gave them. It
+            // stays `Origin::Struct` — there is nothing about it a backend has
+            // to treat differently from a named one.
+            Ty::Struct(fields) => {
+                let offsets = self
+                    .layouts
+                    .fields(ty)
+                    .and_then(|f| f.ok())
+                    .map(|f| f.offsets)
+                    .unwrap_or_default();
+                def.members = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, t))| TypeMember {
+                        name: name.clone(),
+                        ty: self.lir_at(&self.strip(t), depth + 1),
+                        offset: offsets.get(i).copied().unwrap_or(0),
+                    })
+                    .collect();
             }
             // A slice **does** flatten, and it is the interesting near-miss: it
             // is a pointer and a length, and neither is indexed by a run-time
@@ -3097,16 +3132,39 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 if let Some(v) = self.cx.const_value(e) {
                     return Some(self.const_rvalue(&v, &ty, span));
                 }
-                let v = self.eval(&args[0]);
                 // A cast between two names for one type is nothing to do. It
                 // is the shape the IR gives a `distinct` peel — `cast.<Point>`
                 // on a `Handle` — and since a `distinct` is its representation
                 // here (§9) both sides are the same type by the time this runs.
                 if from == ty {
-                    return Some(Rvalue::Use(v));
+                    return Some(Rvalue::Use(self.eval(&args[0])));
                 }
-                let from = self.cx.lir(&from);
-                let to = self.cx.lir(&ty);
+                let from_lir = self.cx.lir(&from);
+                let to_lir = self.cx.lir(&ty);
+                // Two aggregates of the same size and alignment: this is §3.8's
+                // named-to-anonymous `cast`, and it moves no bits. The bytes are
+                // already the value the target wants — the fields are the same
+                // fields at the same offsets — so it is the one address read at
+                // the other type, which is exactly `Projection::Cast`. Doing it
+                // as an instruction instead would mean inventing a struct-to-
+                // struct conversion no backend has.
+                if let (LirTy::Named(_), LirTy::Named(id)) = (&from_lir, &to_lir) {
+                    let same = self
+                        .cx
+                        .layouts
+                        .of(&from)
+                        .ok()
+                        .zip(self.cx.layouts.of(&ty).ok())
+                        .is_some_and(|(a, b)| a == b);
+                    if same && let Some(place) = self.place_of(&args[0]) {
+                        let id = *id;
+                        return Some(Rvalue::Use(Operand::Copy(
+                            place.then(Projection::Cast(id)),
+                        )));
+                    }
+                }
+                let v = self.eval(&args[0]);
+                let (from, to) = (from_lir, to_lir);
                 // Which conversion this is, decided once, here. A backend reads
                 // the answer; it does not re-derive it from the pair.
                 let kind = CastKind::of(&from, &to);
@@ -3466,11 +3524,169 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // that comes back, and §10 says an intrinsic is one instruction or
             // one call.
             "repeat" if args.len() == 2 => self.lower_repeat(&args[0], &args[1], &ty, span),
+            // Bulk memory. Both are declared over **slices**, so the byte count
+            // is computed here from a length the value already carries rather
+            // than taken from the caller — the two-argument mistake C's
+            // versions are famous for cannot be written.
+            "memcpy" if args.len() == 2 => {
+                let dest = self.slice_start(&args[0])?;
+                let src = self.slice_start(&args[1])?;
+                let bytes = self.slice_bytes(&args[1], span)?;
+                self.push(
+                    LirStmtKind::Call {
+                        dest: None,
+                        callee: Callee::Intrinsic(Intrinsic::Memcpy),
+                        args: vec![dest, src, bytes],
+                    },
+                    span,
+                );
+                Some(Rvalue::Use(Operand::Const(Constant::Undef)))
+            }
+            "memset" if args.len() == 2 => {
+                let dest = self.slice_start(&args[0])?;
+                let bytes = self.slice_bytes(&args[0], span)?;
+                let byte = self.eval(&args[1]);
+                self.push(
+                    LirStmtKind::Call {
+                        dest: None,
+                        callee: Callee::Intrinsic(Intrinsic::Memset),
+                        args: vec![dest, byte, bytes],
+                    },
+                    span,
+                );
+                Some(Rvalue::Use(Operand::Const(Constant::Undef)))
+            }
             _ => {
                 let vals = self.passed(args);
                 self.emit_intrinsic(name.clone(), vals, ty, span)
             }
         }
+    }
+
+    /// The address a slice argument starts at — its `ptr` member (§7b).
+    fn slice_start(&mut self, arg: &Expr) -> Option<Operand> {
+        let place = self.place_of(arg)?;
+        Some(Operand::Copy(place.then(Projection::Field {
+            index: 0,
+            name: Symbol::new("ptr"),
+        })))
+    }
+
+    /// How many **bytes** a slice argument spans: its length times its element's
+    /// stride. The stride, not the element's data size, for the reason an array
+    /// uses it too — the elements sit end to end at that spacing.
+    fn slice_bytes(&mut self, arg: &Expr, span: Option<FileSpan>) -> Option<Operand> {
+        let ty = self.cx.ty_of(arg.id);
+        let Ty::Slice { inner, .. } = &ty else {
+            return None;
+        };
+        let stride = self.cx.stride(inner);
+        let place = self.place_of(arg)?;
+        let len = Operand::Copy(place.then(Projection::Field {
+            index: 1,
+            name: Symbol::new("len"),
+        }));
+        let usize_ty = self.cx.usize_ty();
+        let usize_lir = self.cx.lir(&usize_ty);
+        // A stride of one is the common case — every `[]u8` — and multiplying
+        // by it would be an instruction that says nothing.
+        if stride == 1 {
+            return Some(len);
+        }
+        Some(self.into_temp(
+            Rvalue::Op {
+                op: Op::Mul,
+                ty: usize_lir,
+                args: vec![len, Operand::int(stride as i128)],
+            },
+            usize_ty,
+            span,
+        ))
+    }
+
+    /// The single byte a repeated element is made of, when it is made of one.
+    ///
+    /// Two cases, and no attempt at a third. **Zero** is uniform whatever the
+    /// element's size or shape: an all-zero element of any type is `size` zero
+    /// bytes. A **one-byte** element is uniform because it is one byte. Anything
+    /// else — a repeated `0x0101`, say — would need the target's byte order to
+    /// decide, and the loop that handles it is correct without asking.
+    fn uniform_byte(&mut self, value: &Expr, elem_size: Option<u64>) -> Option<u8> {
+        let v = self.cx.const_value(value)?;
+        let zero = match &v {
+            crate::ir::ConstValue::Int(n) => *n == num_bigint::BigInt::from(0),
+            crate::ir::ConstValue::Float(f) => *f == 0.0 && f.is_sign_positive(),
+            crate::ir::ConstValue::Bool(b) => !*b,
+            crate::ir::ConstValue::Char(c) => *c == '\0',
+            _ => false,
+        };
+        if zero {
+            return Some(0);
+        }
+        if elem_size != Some(1) {
+            return None;
+        }
+        match &v {
+            crate::ir::ConstValue::Int(n) => u8::try_from(n).ok(),
+            crate::ir::ConstValue::Bool(b) => Some(*b as u8),
+            _ => None,
+        }
+    }
+
+    /// Fill `dest` — an array place — with `v`, `n` times, as a loop.
+    ///
+    /// `i := 0; while i < n { dest[i] = v; i = i + 1 }`, written out as the
+    /// three blocks a `while` is by this point. The counter is a length, so it
+    /// cannot overflow before the storage it walks would have: the unchecked
+    /// `add` is the same instruction the checked form leaves behind, without
+    /// the branch that can never be taken.
+    fn fill_loop(&mut self, dest: Place, v: Operand, n: Operand, span: Option<FileSpan>) {
+        let usize_ty = self.cx.usize_ty();
+        let usize_lir = self.cx.lir(&usize_ty);
+        let i = self.temp(usize_ty, span);
+        self.assign(Place::local(i), Rvalue::Use(Operand::int(0)), span);
+        let head = self.new_block(Some("repeat".to_string()));
+        let body = self.new_block(None);
+        let done = self.new_block(None);
+        self.terminate(Terminator::new(TermKind::Goto(head), span));
+
+        self.at = head;
+        let more = self.into_temp(
+            Rvalue::Op {
+                op: Op::Lt,
+                ty: usize_lir.clone(),
+                args: vec![Operand::local(i), n],
+            },
+            Ty::Bool,
+            span,
+        );
+        self.terminate(Terminator::new(
+            TermKind::Switch {
+                value: more,
+                ty: LirTy::Bool,
+                arms: vec![(1, body)],
+                otherwise: done,
+            },
+            span,
+        ));
+
+        self.at = body;
+        self.assign(
+            dest.then(Projection::Index(Operand::local(i))),
+            Rvalue::Use(v),
+            span,
+        );
+        self.assign(
+            Place::local(i),
+            Rvalue::Op {
+                op: Op::Add,
+                ty: usize_lir,
+                args: vec![Operand::local(i), Operand::int(1)],
+            },
+            span,
+        );
+        self.terminate(Terminator::new(TermKind::Goto(head), span));
+        self.at = done;
     }
 
     /// `value ; count` — see the `"repeat"` arm above.
@@ -3489,10 +3705,63 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             Ty::Array { len, .. } => {
                 let n = len.value()?;
                 let v = self.eval(value);
-                Some(Rvalue::Aggregate {
-                    kind: Aggregate::Array,
-                    fields: vec![v; n as usize],
-                })
+                // Writing the elements out one by one is right for a short
+                // array: it is a value the constant evaluator can fold, and the
+                // backend emits it whole.
+                //
+                // It is **not** right for a long one, and the cost is not the
+                // program's, it is the compiler's: every element is a separate
+                // operand carried through every stage after this, so
+                // `.{ 0; 1000000 }` is a million of them and the compile does
+                // not finish. Past a threshold the same array is filled by a
+                // loop instead, which is a fixed amount of LIR whatever the
+                // length — and a loop that stores one constant to every slot is
+                // the shape a backend turns back into a `memset`.
+                if n <= REPEAT_UNROLL {
+                    return Some(Rvalue::Aggregate {
+                        kind: Aggregate::Array,
+                        fields: vec![v; n as usize],
+                    });
+                }
+                let slot = self.temp(ty.clone(), span);
+                let elem_size = match ty {
+                    Ty::Array { inner, .. } => self.cx.layouts.of(inner).ok().map(|l| l.size),
+                    _ => None,
+                };
+                // A repeated value whose bytes are all the same is a `memset`,
+                // which is the whole of the work: one call, whatever the length.
+                // Zero is the case that matters — `.{ 0; N }` is how every
+                // buffer in every program starts — and it is uniform at any
+                // element size.
+                match (self.uniform_byte(value, elem_size), elem_size) {
+                    (Some(byte), Some(size)) => {
+                        let at = self.into_temp(
+                            Rvalue::Ref(Place::local(slot)),
+                            Ty::Ptr {
+                                mutable: true,
+                                inner: Box::new(Ty::u8()),
+                            },
+                            span,
+                        );
+                        self.push(
+                            LirStmtKind::Call {
+                                dest: None,
+                                callee: Callee::Intrinsic(Intrinsic::Memset),
+                                args: vec![
+                                    at,
+                                    Operand::int(byte as i128),
+                                    Operand::int((n.saturating_mul(size)) as i128),
+                                ],
+                            },
+                            span,
+                        );
+                    }
+                    // Anything else — a repeated value that is not a constant,
+                    // or one whose bytes differ — is a loop. Still a fixed
+                    // amount of LIR, which is the point.
+                    _ => self.fill_loop(Place::local(slot), v, Operand::int(n as i128), span),
+                }
+                Some(Rvalue::Use(Operand::Copy(Place::local(slot))))
             }
             Ty::Slice { inner, .. } => {
                 let elem = (**inner).clone();
@@ -3857,6 +4126,8 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 .map(|i| Symbol::new(&i.to_string()))
                 .collect(),
             Ty::Slice { .. } => vec![Symbol::new("ptr"), Symbol::new("len")],
+            // Already in the sorted order the layout used.
+            Ty::Struct(fields) => fields.iter().map(|(n, _)| n.clone()).collect(),
             Ty::Nominal { def, .. } => match self.cx.linked.ty(*def).map(|t| &t.kind) {
                 Some(TypeDefKind::Struct { members }) => {
                     members.iter().map(|m| m.name.clone()).collect()

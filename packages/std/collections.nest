@@ -20,7 +20,7 @@
 // want and none is needed by what `std` exists for yet
 // (`design/toolchain.md`: the floor `twig` and the language server stand on).
 
-{ make } :: import <core/mem>
+{ make, copy_nonoverlapping, set_bytes } :: import <core/mem>
 { Eq } :: import <core/cmp>
 { Iterator, IntoIterator, SliceIter } :: import <core/iter>
 
@@ -57,7 +57,7 @@
 // A `Vec` holding a copy of `xs`.
 @public from_slice :: func <T> (xs: []T) -> Vec.<T> {
   let out: []mut T := make.<[]T>(xs.len())
-  for i in 0..<xs.len() { out[i] = xs[i] }
+  copy_nonoverlapping.<T>(out, xs)
   return Vec.<T> { data: out, count: xs.len() }
 }
 
@@ -90,7 +90,7 @@ impl <T> Vec.<T> {
     if cap < 8 { cap = 8 }
     while cap < need { cap = cap * 2 }
     let fresh: []mut T := make.<[]T>(cap)
-    for i in 0..<self.count { fresh[i] = self.data[i] }
+    copy_nonoverlapping.<T>(fresh, cast.<[]T>(self.data[0..<self.count]))
     self.data = fresh
   }
 
@@ -129,8 +129,23 @@ impl <T> Vec.<T> {
   // Add every element of `xs`.
   @public extend :: func (self: *mut Self, xs: []T) -> void {
     self.reserve(xs.len())
-    for i in 0..<xs.len() { self.data[self.count + i] = xs[i] }
+    copy_nonoverlapping.<T>(self.data[self.count..<(self.count + xs.len())], xs)
     self.count = self.count + xs.len()
+  }
+
+  // Set every element to `value`.
+  //
+  // The elements it *holds*, not the storage it has room for: a `Vec` of three
+  // in a buffer of eight has three elements to fill, and writing the other five
+  // would be writing slots `len` says are not there.
+  @public fill :: func (self: *mut Self, value: T) -> void {
+    for i in 0..<self.count { self.data[i] = value }
+  }
+
+  // Set every byte of every element it holds to zero — one fill instruction,
+  // whatever the element type. See `core/mem`'s `set_bytes`.
+  @public zero :: func (self: *mut Self) -> void {
+    set_bytes.<T>(self.data[0..<self.count], 0)
   }
 
   // Forget every element. The storage is kept, which is the whole difference

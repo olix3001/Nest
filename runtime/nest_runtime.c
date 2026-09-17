@@ -53,6 +53,8 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <sys/resource.h>
 #include <string.h>
 
 #include <gc.h>
@@ -66,6 +68,10 @@ static int poison;
  * collector scanning uninitialized bytes would see addresses that were never
  * pointers. `n == 0` still returns a distinct address: a zero-length slice has
  * a valid pointer (`design/lir.md` §10). */
+/* How much stack the overflow handler is left to run in. One page is plenty
+ * for a `fputs` and an `abort`, and a whole one keeps the margin aligned. */
+#define NEST_STACK_MARGIN 65536
+
 void *nest_alloc(size_t n) {
     void *p = GC_malloc(n ? n : 1);
     if (!p) {
@@ -201,7 +207,49 @@ void nest_gc_collect(void) {
  * one file that is supposed to know only about machines. They go to whoever
  * claims `#lang("start")` now — `std/sys` — and this prepares the collector,
  * which is a fact about the machine and is all of what belongs here. */
+/* The lowest stack address a Nest function may run at.
+ *
+ * Deep recursion is otherwise a SIGSEGV: the guard page below the stack is hit
+ * by whatever instruction happens to touch it first, and the process dies with
+ * no indication of which function ran away. A Nest program reports its own
+ * failures — an index past the end, an overflow, a failed assertion — and this
+ * is the same thing one level down.
+ *
+ * It is a plain global rather than a function because the generated code reads
+ * it in the prologue of every function that can recurse: a load and a compare
+ * that a branch predictor gets right every time. Zero means "not set", which
+ * disables the check — a program whose limit could not be read keeps running
+ * rather than refusing to start. */
+uintptr_t nest_stack_floor = 0;
+
+/* Where the stack ends, from the current frame and the limit the OS reports.
+ *
+ * The margin is what the handler itself needs: by the time the check fails
+ * there must still be enough stack under it to print a line and abort. */
+static void nest_stack_init(void) {
+    struct rlimit rl;
+    char here;
+    uintptr_t sp = (uintptr_t)&here;
+    if (getrlimit(RLIMIT_STACK, &rl) != 0) {
+        return;
+    }
+    if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur < NEST_STACK_MARGIN * 2) {
+        return;
+    }
+    if ((uintptr_t)rl.rlim_cur >= sp) {
+        return;
+    }
+    nest_stack_floor = sp - (uintptr_t)rl.rlim_cur + NEST_STACK_MARGIN;
+}
+
+/* The prologue check failed: this frame would run past the end of the stack. */
+void nest_stack_overflow(void) {
+    fputs("nest: stack overflow\n", stderr);
+    abort();
+}
+
 void nest_init(void) {
+    nest_stack_init();
     /* A sub-slice points into the middle of its array, and is all that may be
      * left of it. This is Boehm's default already; it is set here because the
      * language depends on it. */

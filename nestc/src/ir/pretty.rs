@@ -427,7 +427,11 @@ impl Printer<'_> {
                     .map(|(n, e)| format!("{n}: {}", self.expr(e)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{} {{ {fs} }}: {ty}", self.defs.canonical_string(*def))
+                let head = match def {
+                    Some(d) => self.defs.canonical_string(*d),
+                    None => "struct".to_string(),
+                };
+                format!("{head} {{ {fs} }}: {ty}")
             }
             ExprKind::Variant { name, args, .. } if args.is_empty() => format!(".{name}: {ty}"),
             ExprKind::Variant { name, args, .. } => {

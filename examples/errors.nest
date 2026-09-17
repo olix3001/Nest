@@ -36,7 +36,7 @@ summarize :: func (xs: []i32) -> Parsed {
     count += 1
     total += x
   }
-  return Parsed { count: count, total: total }
+  return .{ count: count, total: total }
 }
 
 @public

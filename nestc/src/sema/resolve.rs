@@ -224,6 +224,7 @@ impl Resolver<'_> {
                 for g in &generics {
                     self.resolve_node(*g);
                 }
+                self.introduce_bound_projections(&generics);
                 for p in &params {
                     if self.self_ty.is_empty() && self.is_bare_self(*p) {
                         self.report(
@@ -282,6 +283,19 @@ impl Resolver<'_> {
             // `cannot resolve name` on the declaration itself.
             NodeKind::ConstBind { pattern, rhs } => {
                 self.resolve_node(rhs);
+                // An abstract associated type records what its own bounds came
+                // to, on its def — the one place a later file can read them
+                // from, having no access to this one's syntax tree. See
+                // [`Def::assoc_bounds`].
+                if let NodeKind::AssocType { bounds } = self.ast.node(rhs).kind.clone()
+                    && let Some(def) = self.def_of(id)
+                {
+                    let traits = bounds
+                        .iter()
+                        .filter_map(|&b| self.bound_trait_def(b))
+                        .collect();
+                    self.defs.get_mut(def).assoc_bounds = Some(traits);
+                }
                 if self.def_of(id).is_some() {
                     return;
                 }
@@ -423,6 +437,14 @@ impl Resolver<'_> {
                 self.resolve_node(path);
                 // Mirror the path's resolution onto the TypePath for convenience.
                 if let Some(res) = self.ast.meta::<Resolution>(path) {
+                    self.ast.set_meta(id, res);
+                }
+                // And the per-segment resolutions with it. A type position holds
+                // the `TypePath`, not the `Path` inside it, so anything that has
+                // to know what a name was read *through* — `T.Item`, where the
+                // base decides whether this is a projection — would otherwise
+                // find nothing here.
+                if let Some(res) = self.ast.meta::<PathRes>(path) {
                     self.ast.set_meta(id, res);
                 }
                 for a in generic_args {
@@ -742,6 +764,156 @@ impl Resolver<'_> {
         } else {
             None
         }
+    }
+
+    /// Give each generic type parameter the associated types its bounds
+    /// declare, as type parameters of their own (§5.4).
+    ///
+    /// `<T: Holder>` makes `T.Item` writable wherever `T` is. A type parameter
+    /// has no namespace to look a member up in — it is not a type yet — so the
+    /// name is put *there*: `Item` becomes a member of `T`'s own namespace, and
+    /// the ordinary member hop finds it with no special case.
+    ///
+    /// What it becomes is the point. `T.Item` is not known until a call site
+    /// says what `T` is, and something whose value one call site fixes is a
+    /// **type parameter**, so that is what is synthesized — one per
+    /// `(parameter, associated type)` pair, because two parameters bounded by
+    /// the same trait project two different types. The equation that solves it
+    /// rides along in [`Def::projection`], and the call site registers it as an
+    /// ordinary projection obligation once it has a `T` to project through.
+    ///
+    /// Runs after the constraints are resolved, which is why it is not part of
+    /// `bind_generics` — a bound cannot be read until its trait name has been.
+    fn introduce_bound_projections(&mut self, generics: &[NodeId]) {
+        for &g in generics {
+            let NodeKind::GenericTypeParam {
+                name,
+                constraint: Some(constraint),
+                ..
+            } = self.ast.node(g).kind.clone()
+            else {
+                continue;
+            };
+            let Some(param) = self.def_of(g) else {
+                continue;
+            };
+            let bounds = match self.ast.node(constraint).kind.clone() {
+                NodeKind::Bounds { bounds } => bounds,
+                _ => vec![constraint],
+            };
+            let traits: Vec<(DefId, Option<NodeId>)> = bounds
+                .iter()
+                .filter_map(|&b| self.bound_trait_def(b).map(|t| (t, Some(b))))
+                .collect();
+            self.project_bounds(param, name.as_str(), &traits, g, 0);
+        }
+    }
+
+    /// Add one parameter per associated type of `traits` to `param`'s namespace,
+    /// then do the same to each one it adds.
+    ///
+    /// The recursion is what makes `T.Item.Item` work: an associated type
+    /// declared `Item :: type: Holder` is itself a `Holder`, so it has an `Item`
+    /// of its own, and nothing about the second hop differs from the first. The
+    /// depth cap is for a trait whose associated type is bounded by the trait
+    /// itself — `Item :: type: Holder` inside `Holder` is a legal declaration
+    /// and an infinite family of names, so the parameters are minted to a fixed
+    /// depth rather than forever. A projection past it is an unresolved name,
+    /// which is a diagnostic rather than a hang.
+    fn project_bounds(
+        &mut self,
+        param: DefId,
+        path: &str,
+        traits: &[(DefId, Option<NodeId>)],
+        at: NodeId,
+        depth: u32,
+    ) {
+        if depth > 4 {
+            return;
+        }
+        for &(t, bound) in traits {
+            if self.defs.get(t).kind != DefKind::Trait {
+                continue;
+            }
+            let members: Vec<(Symbol, DefId)> = self
+                .defs
+                .get(t)
+                .ns
+                .members
+                .iter()
+                .map(|(n, &d)| (n.clone(), d))
+                .collect();
+            for (assoc, member) in members {
+                let member = self.defs.resolve_alias(member);
+                // Only an **abstract** associated type is a parameter: a trait
+                // may also declare ordinary aliases, and those already have an
+                // answer that needs none.
+                let Some(inner) = self.defs.get(member).assoc_bounds.clone() else {
+                    continue;
+                };
+                // A name two bounds both declare is bound by the first; the
+                // second would be a different type under the same name, and that
+                // is a question §5.4 does not answer yet.
+                if self.defs.get(param).ns.members.contains_key(&assoc) {
+                    continue;
+                }
+                let name = format!("{path}.{assoc}");
+                let mut canonical = self.defs.get(param).canonical.clone();
+                canonical.push(assoc.clone());
+                let span = self.ast.node(at).span;
+                let synth = self.defs.alloc(
+                    Symbol::new(&name),
+                    DefKind::TypeParam,
+                    Visibility::Private,
+                    Some(param),
+                    Some(self.file),
+                    Some(span),
+                    Some(at),
+                    canonical,
+                );
+                self.defs.get_mut(synth).projection = Some(super::def::Projection {
+                    base: param,
+                    trait_def: t,
+                    assoc: assoc.clone(),
+                    pinned: bound.and_then(|b| self.assoc_binding(b, &assoc)),
+                });
+                self.defs.get_mut(param).ns.members.insert(assoc, synth);
+                let inner: Vec<(DefId, Option<NodeId>)> =
+                    inner.into_iter().map(|t| (t, None)).collect();
+                self.project_bounds(synth, &name, &inner, at, depth + 1);
+            }
+        }
+    }
+
+    /// The type node a bound pinned an associated type to: the `i32` of
+    /// `Holder.<Item = i32>`.
+    fn assoc_binding(&self, bound: NodeId, assoc: &Symbol) -> Option<NodeId> {
+        // A bound is written either way round depending on where it stands:
+        // `Holder.<Item = i32>` in a generic list parses as a `TypePath` with
+        // arguments, and the same thing in expression position as a postfix
+        // `GenericApply`.
+        let args = match self.ast.node(bound).kind.clone() {
+            NodeKind::TypePath { generic_args, .. } => generic_args,
+            NodeKind::GenericApply { args, .. } => args,
+            _ => return None,
+        };
+        args.iter().find_map(|&a| match &self.ast.node(a).kind {
+            NodeKind::AssocBinding { name, ty } if name == assoc => Some(*ty),
+            _ => None,
+        })
+    }
+
+    /// The trait a bound names, following `Trait.<args>` to its head.
+    fn bound_trait_def(&self, bound: NodeId) -> Option<DefId> {
+        let head = match self.ast.node(bound).kind.clone() {
+            NodeKind::GenericApply { base, .. } => base,
+            _ => bound,
+        };
+        let Resolution::Def(t) = self.ast.meta::<Resolution>(head)? else {
+            return None;
+        };
+        let t = self.defs.resolve_alias(t);
+        (self.defs.get(t).kind == DefKind::Trait).then_some(t)
     }
 
     fn public_member(&self, base: DefId, name: &Symbol) -> Option<DefId> {

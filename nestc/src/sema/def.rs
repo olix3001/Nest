@@ -137,6 +137,27 @@ impl Namespace {
     }
 }
 
+/// What a synthesized associated-type parameter stands for: `<base as
+/// trait_def>.assoc`. See [`Def::projection`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Projection {
+    /// The type parameter the associated type is projected through.
+    pub base: DefId,
+    /// The trait that declares it — one of `base`'s bounds.
+    pub trait_def: DefId,
+    /// The associated type's name, as the trait declares it.
+    pub assoc: Symbol,
+    /// The type node a bound **pinned** it to, if it did: the `i32` of
+    /// `<T: Holder.<Item = i32>>`.
+    ///
+    /// A pinned projection has an answer without waiting for a call site, and
+    /// the answer is needed *inside* the generic body — a function declared to
+    /// return `i32` whose `t.get()` yields `T.Item` type-checks only because
+    /// the bound says those are the same type. The node lives in the file the
+    /// bound was written in, which is this def's own.
+    pub pinned: Option<NodeId>,
+}
+
 /// One `#name(args...)` directive as written on a definition (§9).
 ///
 /// The name is kept verbatim and the arguments are kept as the small literal
@@ -219,6 +240,28 @@ pub struct Def {
     pub directives: Vec<Directive>,
     /// Members this def owns (empty for leaf defs).
     pub ns: Namespace,
+    /// For a trait's **abstract** associated type (`Item :: type`): the traits
+    /// its own bounds name, resolved.
+    ///
+    /// `None` for anything else, so this doubles as the test for "is this an
+    /// abstract associated type" — a question that would otherwise need the
+    /// declaring file's syntax tree, which the file *using* the trait does not
+    /// have. It is filled in when the trait's own body is resolved, and read
+    /// wherever a bound mentioning that trait is.
+    ///
+    /// The bounds are what makes `T.Item.Item` writable: `Item :: type: Holder`
+    /// says the projected type is itself a `Holder`, so it gets associated-type
+    /// parameters of its own (see [`Def::projection`]).
+    pub assoc_bounds: Option<Vec<DefId>>,
+    /// For a type parameter **synthesized from a bound's associated type** —
+    /// the `Item` of `T.Item` where `<T: Holder>` (§5.4) — what it projects.
+    ///
+    /// A bound is a promise that whatever instantiates `T` has an impl, and an
+    /// associated type of that impl is a type the signature may name. It is not
+    /// known until the call site says what `T` is, which is exactly what a type
+    /// parameter is — so it *is* one, and this records the equation that solves
+    /// it: `<base as trait_def>.assoc`.
+    pub projection: Option<Projection>,
     /// For an [`DefKind::Import`] binding: the def it aliases (a namespace or a
     /// selected member). Following `alias` reaches the real target.
     pub alias: Option<DefId>,
@@ -351,6 +394,8 @@ impl DefTable {
             lang: None,
             directives: Vec::new(),
             ns: Namespace::default(),
+            assoc_bounds: None,
+            projection: None,
             alias: None,
             using: false,
             attribute: false,

@@ -80,6 +80,7 @@ pub mod entry;
 pub mod escape;
 pub mod lower;
 pub mod pretty;
+pub mod recursion;
 pub mod safepoint;
 pub mod unit;
 
@@ -359,6 +360,15 @@ pub struct FunctionAttrs {
     /// objects linked into one program may each define it. A backend has the
     /// linker keep one (`weak_odr`) instead of reporting a duplicate.
     pub shared: bool,
+    /// Whether this function can call itself, directly or through others.
+    ///
+    /// Set by [`crate::lir::recursion::mark`] over the call graph, and the one
+    /// thing that decides where a stack check is emitted. A function that
+    /// cannot recurse runs in a frame the compiler can bound, so the check
+    /// would be a load and a branch that can never fail; a function that can
+    /// recurse has no bound at all, and without the check running past the end
+    /// of the stack is a SIGSEGV rather than one of the language's own traps.
+    pub recursive: bool,
     /// `#unsafe` — the checks this body was compiled without. A backend does not
     /// act on it; it is carried because a profiler and a debugger both want to
     /// say so (§9).
@@ -614,6 +624,22 @@ pub enum Intrinsic {
     /// type is not in the instruction: it is on the destination, because "become
     /// whatever this slot holds" is what the operation *is*.
     Transmute,
+    /// Fill a region with one byte: `memset(dest, byte, bytes)`.
+    ///
+    /// The lowering of `value ; count` over an array whose repeated value has a
+    /// **uniform byte pattern** — every zero, and every `u8` (§6.7). It is not a
+    /// function the language declares: nothing writes it, and the one thing that
+    /// emits it is the repeat above, which knows the region is an array it has
+    /// just made and the byte is a constant.
+    ///
+    /// Three arguments, in order: the destination address, the byte as a `u8`,
+    /// and the length in bytes.
+    Memset,
+    /// Copy `bytes` bytes from one address to another, which must not overlap.
+    ///
+    /// Three arguments: the destination address, the source address, and the
+    /// length in bytes.
+    Memcpy,
     /// The file's bytes, at compile time.
     EmbedFile,
     /// Run a collection now (§6.4.1).
@@ -642,6 +668,8 @@ impl Intrinsic {
             Intrinsic::Trap => "trap",
             Intrinsic::Assert => "assert",
             Intrinsic::Transmute => "transmute",
+            Intrinsic::Memset => "memset",
+            Intrinsic::Memcpy => "memcpy",
             Intrinsic::EmbedFile => "embed_file",
             Intrinsic::GcCollect => "gc_collect",
             Intrinsic::GcKeepAlive => "gc_keep_alive",
@@ -659,6 +687,8 @@ impl Intrinsic {
             "trap" => Intrinsic::Trap,
             "assert" => Intrinsic::Assert,
             "transmute" => Intrinsic::Transmute,
+            "memset" => Intrinsic::Memset,
+            "memcpy" => Intrinsic::Memcpy,
             "embed_file" => Intrinsic::EmbedFile,
             "gc_collect" => Intrinsic::GcCollect,
             "gc_keep_alive" => Intrinsic::GcKeepAlive,

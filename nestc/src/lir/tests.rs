@@ -2974,7 +2974,7 @@ fn an_empty_string_pattern_is_the_same_call() {
 fn a_gc_collect_is_a_safepoint() {
     let lir = lir_text(
         "\
-{ new, gc_collect } :: import <core/mem>
+{ new } :: import <core/mem>
 { gc_collect } :: import <core/gc>
 Node :: struct { x: i32 }
 f :: func () -> i32 {

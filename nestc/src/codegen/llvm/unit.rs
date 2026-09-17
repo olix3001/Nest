@@ -63,6 +63,7 @@ use crate::lir::{
     Operand, Place, Projection, Rvalue, StmtKind, TermKind, Ty, TypeId, Unit,
 };
 
+
 type Result<T> = std::result::Result<T, CodegenError>;
 
 /// A message about a unit this backend cannot emit.
@@ -791,8 +792,21 @@ impl<'ctx> Cx<'ctx, '_> {
                 .ok_or_else(|| failed(format!("{}: no parameter {i}", f.name)))?;
             self.builder.build_store(slots[i], arg).map_err(failed)?;
         }
+        // The stack check, for a function that can reach itself (§7d). Its
+        // frame is already allocated by this point — the `alloca`s above are it
+        // — so comparing this frame's address against the floor is asking
+        // exactly the right question: is there room for *this* call.
+        let first = if f.attrs.recursive {
+            let check = self.stack_check(value, blocks[0], &f.name)?;
+            // `stack_check` left the builder in the block it ends with; the
+            // entry block is still waiting for its terminator.
+            self.builder.position_at_end(entry);
+            check
+        } else {
+            blocks[0]
+        };
         self.builder
-            .build_unconditional_branch(blocks[0])
+            .build_unconditional_branch(first)
             .map_err(failed)?;
 
         let fx = FnCx {
@@ -843,6 +857,14 @@ impl<'ctx> Cx<'ctx, '_> {
     }
 
     /// The word-sized integer type — what a length, an index and a size are.
+    /// The LIR type a byte count arrives at: an unsigned word.
+    fn word_ty(&self) -> Ty {
+        Ty::Int {
+            bits: (self.pointer_bytes * 8) as u16,
+            signed: false,
+        }
+    }
+
     fn word(&self) -> inkwell::types::IntType<'ctx> {
         // The pointer width is never zero, so this cannot be the error case.
         self.int_type(self.pointer_bytes as u32 * 8)
@@ -1008,6 +1030,23 @@ impl<'ctx> Cx<'ctx, '_> {
     fn assign(&self, fx: &FnCx<'ctx>, f: &Function, place: &Place, value: &Rvalue) -> Result<()> {
         let (ptr, ty) = self.place(fx, f, place)?;
         match value {
+            // Copying an **aggregate** is a `memcpy`. An array or a struct
+            // moved from one place to another is a block of bytes going
+            // somewhere, which is the operation every target has; going through
+            // a load and a store instead asks LLVM to build a first-class value
+            // of every element first — a form no machine has a register for. At
+            // a megabyte that costs minutes of compile time, and at two words it
+            // costs nothing either way, because the optimizer turns a short
+            // `memcpy` back into the pair.
+            Rvalue::Use(Operand::Copy(src)) if matches!(ty, Ty::Array { .. } | Ty::Named(_)) => {
+                let (from, _) = self.place(fx, f, src)?;
+                let align = self.align_of(&ty);
+                let bytes = self.word().const_int(self.size_of(&ty), false);
+                self.builder
+                    .build_memcpy(ptr, align, from, align, bytes)
+                    .map_err(failed)?;
+                Ok(())
+            }
             Rvalue::Use(o) => {
                 let v = self.operand(fx, f, o, &ty)?;
                 self.store(ptr, v, &ty)
@@ -1425,6 +1464,85 @@ impl<'ctx> Cx<'ctx, '_> {
     /// The runtime is a small C shim (`runtime/`): the allocator is the
     /// collector's, the panic path is an abort, and swapping the collector is a
     /// link-time choice rather than a change here.
+    /// Emit the prologue stack check and return the block the entry should jump
+    /// to instead of the body's first.
+    ///
+    /// `nest_stack_floor` is the lowest address a frame may start at, written
+    /// once by the runtime at startup (see `nest_runtime.c`). A **zero** floor
+    /// means the runtime could not work one out, and the comparison is false
+    /// for every address, so the check disables itself without a second branch.
+    ///
+    /// The address compared is this frame's own, taken with `llvm.frameaddress`
+    /// rather than an `alloca` of its own — an `alloca` would be a slot the
+    /// function then carries for the life of the call, and the frame pointer is
+    /// the number actually wanted.
+    fn stack_check(
+        &self,
+        value: FunctionValue<'ctx>,
+        body: BasicBlock<'ctx>,
+        name: &str,
+    ) -> Result<BasicBlock<'ctx>> {
+        let word = self.word();
+        let floor_global = match self.module.get_global("nest_stack_floor") {
+            Some(g) => g,
+            None => {
+                let g = self.module.add_global(word, None, "nest_stack_floor");
+                g.set_linkage(LlvmLinkage::External);
+                g
+            }
+        };
+        let check = self.context.append_basic_block(value, "stack.check");
+        let overflow = self.context.append_basic_block(value, "stack.overflow");
+        self.builder.position_at_end(check);
+
+        let frame = self
+            .module
+            .get_function("llvm.frameaddress.p0")
+            .unwrap_or_else(|| {
+                let sig = self
+                    .ptr()
+                    .fn_type(&[self.context.i32_type().into()], false);
+                self.module.add_function("llvm.frameaddress.p0", sig, None)
+            });
+        let here = self
+            .builder
+            .build_call(frame, &[self.context.i32_type().const_zero().into()], "")
+            .map_err(failed)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| failed(format!("{name}: frameaddress returned nothing")))?
+            .into_pointer_value();
+        let here = self
+            .builder
+            .build_ptr_to_int(here, word, "")
+            .map_err(failed)?;
+        let floor = self
+            .builder
+            .build_load(word, floor_global.as_pointer_value(), "")
+            .map_err(failed)?
+            .into_int_value();
+        let low = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::ULT, here, floor, "")
+            .map_err(failed)?;
+        self.builder
+            .build_conditional_branch(low, overflow, body)
+            .map_err(failed)?;
+
+        self.builder.position_at_end(overflow);
+        let report = self.runtime("nest_stack_overflow", &[], None);
+        report.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            self.context.create_enum_attribute(
+                inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
+                0,
+            ),
+        );
+        self.builder.build_call(report, &[], "").map_err(failed)?;
+        self.builder.build_unreachable().map_err(failed)?;
+        Ok(check)
+    }
+
     fn runtime(
         &self,
         name: &str,
@@ -1595,6 +1713,38 @@ impl<'ctx> Cx<'ctx, '_> {
                 let data = self.alloc(bytes)?;
                 self.store(self.at(ptr, ptr_member.offset)?, data.into(), &ptr_member.ty)?;
                 self.store(self.at(ptr, len_member.offset)?, len.into(), &len_member.ty)
+            }
+            // One call, whatever the length — see [`Intrinsic::Memset`]. LLVM
+            // lowers it to the target's own fill, and recognizes a zero one as
+            // the zeroing it is.
+            Intrinsic::Memset => {
+                let dest = self
+                    .operand(fx, f, &args[0], &Ty::ptr(Ty::Bool))?
+                    .into_pointer_value();
+                let byte = self
+                    .operand(fx, f, &args[1], &Ty::Int { bits: 8, signed: false })?
+                    .into_int_value();
+                let len = self.operand(fx, f, &args[2], &self.word_ty())?.into_int_value();
+                self.builder.build_memset(dest, 1, byte, len).map_err(failed)?;
+                Ok(())
+            }
+            // The source and destination are addresses and the length is in
+            // bytes, so both are the LLVM builtin directly. The alignment given
+            // is 1: these arrive from slices of any element type, and claiming
+            // more than a byte would be claiming something the caller never
+            // promised.
+            Intrinsic::Memcpy => {
+                let dest = self
+                    .operand(fx, f, &args[0], &Ty::ptr(Ty::Bool))?
+                    .into_pointer_value();
+                let src = self
+                    .operand(fx, f, &args[1], &Ty::ptr(Ty::Bool))?
+                    .into_pointer_value();
+                let len = self.operand(fx, f, &args[2], &self.word_ty())?.into_int_value();
+                self.builder
+                    .build_memcpy(dest, 1, src, 1, len)
+                    .map_err(failed)?;
+                Ok(())
             }
             Intrinsic::GcCollect => {
                 let collect = self.runtime("nest_gc_collect", &[], None);

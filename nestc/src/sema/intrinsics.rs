@@ -102,6 +102,12 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // one thing the declared signature cannot say — see
     // [`crate::sema::lower::Lowerer::lower_index_call`].
     plain("index"),
+    // Bulk memory (§6.9). Both take slices rather than a pointer and a count:
+    // a slice already carries its length, so the byte count is derived rather
+    // than trusted, and there is no way to spell the two-argument mistake C's
+    // versions are famous for. `std/mem`'s `copy` and `fill` are these.
+    plain("memcpy"),
+    plain("memset"),
     // Compile-time data.
     plain("embed_file"),
     // Failing, at run time and at compile time (§6.10, §8).

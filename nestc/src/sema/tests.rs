@@ -8407,6 +8407,39 @@ fn a_broken_import_is_reported_once() {
     assert!(messages.iter().any(|m| m.contains("`core` has no public namespace `nope`")), "{messages:#?}");
 }
 
+/// A `{ name }` import of something the namespace does not publish is reported
+/// **where it is written**.
+///
+/// It used to bind a stand-in def instead, which types as an error with no
+/// diagnostic behind it — so the first anything was heard of the mistake was
+/// "an error type reached code generation", from the use site, naming the
+/// compiler rather than the import. The commonest way to write one is to reach
+/// for a method: `wrapping_sub` is a member of `impl uint.<N>` in `core/num`,
+/// not of the namespace, and the message says so.
+#[test]
+fn importing_a_name_a_namespace_does_not_publish_is_reported() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "{ wrapping_sub } :: import <core/num>\n\
+             { no_such_thing } :: import <core/mem>\n\
+             main :: func () -> i32 { return 0 }\n",
+        )],
+        "main",
+    );
+    let messages: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages.len(), 2, "{messages:#?}");
+    assert!(
+        messages.iter().any(|m| m.contains("`core.num` has no member `wrapping_sub`")
+            && m.contains("a method is reached through a value of its type")),
+        "{messages:#?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("`core.mem` has no member `no_such_thing`")),
+        "{messages:#?}"
+    );
+}
+
 /// A member a namespace does not have is reported once, and a call, a field or a
 /// literal built on it adds nothing.
 #[test]

@@ -1166,7 +1166,10 @@ impl Lowerer<'_> {
                 .enumerate()
                 .map(|(i, e)| (Symbol::new(&i.to_string()), e))
                 .collect();
-            return self.expr(node, ty, ExprKind::Construct { def, fields });
+            return self.expr(node, ty, ExprKind::Construct {
+                def: Some(def),
+                fields,
+            });
         }
         let target = self.resolved_def(head);
         // A call to an `#intrinsic` declaration has no body to call: the
@@ -1348,7 +1351,14 @@ impl Lowerer<'_> {
                 self.expr(at, u32_ty, ExprKind::Lit(Lit::Int(column.into()))),
             ),
         ];
-        self.expr(at, ty, ExprKind::Construct { def, fields })
+        self.expr(
+            at,
+            ty,
+            ExprKind::Construct {
+                def: Some(def),
+                fields,
+            },
+        )
     }
 
     /// The lowered default of `def`'s `i`-th **value** parameter, if it has one.
@@ -1905,8 +1915,27 @@ impl Lowerer<'_> {
                         if let Some(s) = spread {
                             self.fill_from_spread(*s, def, &mut lowered);
                         }
-                        self.expr(node, ty, ExprKind::Construct { def, fields: lowered })
+                        self.expr(
+                            node,
+                            ty,
+                            ExprKind::Construct {
+                                def: Some(def),
+                                fields: lowered,
+                            },
+                        )
                     }
+                    // An anonymous struct (§3.8): the same construction with no
+                    // declaration behind it. A `..rest` spread is not expanded
+                    // here — the fields it would fill come from a *declaration*,
+                    // and there is none — so it is refused in inference.
+                    Ty::Struct(_) => self.expr(
+                        node,
+                        ty,
+                        ExprKind::Construct {
+                            def: None,
+                            fields: lowered,
+                        },
+                    ),
                     // Named fields on a non-struct: already diagnosed.
                     _ => self.expr(node, ty, ExprKind::Error),
                 }
@@ -1924,7 +1953,14 @@ impl Lowerer<'_> {
                             .enumerate()
                             .map(|(i, e)| (Symbol::new(&i.to_string()), e))
                             .collect();
-                        self.expr(node, ty, ExprKind::Construct { def, fields })
+                        self.expr(
+                            node,
+                            ty,
+                            ExprKind::Construct {
+                                def: Some(def),
+                                fields,
+                            },
+                        )
                     }
                     Ty::Array { .. } | Ty::Slice { .. } => self.expr(
                         node,

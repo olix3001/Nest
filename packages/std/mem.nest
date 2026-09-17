@@ -11,7 +11,7 @@
 // which is what lets a caller reuse a buffer rather than getting a fresh one
 // per call.
 
-{ make } :: import <core/mem>
+{ make, copy_nonoverlapping, set_bytes } :: import <core/mem>
 // `Eq` is imported **by name**, not through a namespace: a trait's impls apply
 // only where the trait itself is in scope.
 { Eq } :: import <core/cmp>
@@ -29,13 +29,25 @@
 @public copy :: func <T> (dst: []mut T, src: []T) -> usize {
   let mut n: usize := src.len()
   if dst.len() < n { n = dst.len() }
-  for i in 0..<n { dst[i] = src[i] }
+  copy_nonoverlapping.<T>(dst[0..<n], cast.<[]T>(src[0..<n]))
   return n
 }
 
 // Set every element of `dst` to `value`.
+//
+// A loop, because a general `T` is not one byte and there is no byte pattern
+// that means "this element". `zero` below is the case that *is* a byte pattern.
 @public fill :: func <T> (dst: []mut T, value: T) -> void {
   for i in 0..<dst.len() { dst[i] = value }
+}
+
+// Set every byte of `dst` to zero.
+//
+// Separate from `fill` because it is a different operation on the machine: one
+// fill instruction over the whole run, whatever the element type, where `fill`
+// has to write an element at a time.
+@public zero :: func <T> (dst: []mut T) -> void {
+  set_bytes.<T>(dst, 0)
 }
 
 // A fresh slice holding `src`'s elements.

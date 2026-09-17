@@ -234,6 +234,12 @@ impl<'a> Layouts<'a> {
     pub fn fields(&self, ty: &Ty) -> Option<Result<Fields>> {
         match ty {
             Ty::Tuple(elems) => Some(self.aggregate(ty, &elems.iter().collect::<Vec<_>>(), None, 0)),
+            Ty::Struct(fields) => Some(self.aggregate(
+                ty,
+                &fields.iter().map(|(_, t)| t).collect::<Vec<_>>(),
+                None,
+                0,
+            )),
             Ty::Nominal { def, .. } => {
                 let t = self.linked.ty(*def)?;
                 match &t.kind {
@@ -262,6 +268,11 @@ impl<'a> Layouts<'a> {
     ///
     /// `None` for anything that is not a struct or a `distinct`.
     pub fn member_types(&self, ty: &Ty) -> Option<Vec<(crate::common::symbol::Symbol, Ty)>> {
+        // An anonymous struct carries its members in the type itself; there is
+        // no definition to look up and nothing to substitute.
+        if let Ty::Struct(fields) = ty {
+            return Some(fields.clone());
+        }
         let Ty::Nominal { def, .. } = ty else {
             return None;
         };
@@ -395,6 +406,14 @@ impl<'a> Layouts<'a> {
             }
             Ty::Tuple(elems) => Ok(self
                 .aggregate(ty, &elems.iter().collect::<Vec<_>>(), None, depth)?
+                .layout),
+            // An anonymous struct lays out like a tuple of its field types. The
+            // order is the sorted one [`Ty::anon_struct`] fixed, so the two
+            // spellings of one type get the same offsets — the declaration
+            // order a named struct promises is a promise about a *declaration*,
+            // and an anonymous struct has none.
+            Ty::Struct(fields) => Ok(self
+                .aggregate(ty, &fields.iter().map(|(_, t)| t).collect::<Vec<_>>(), None, depth)?
                 .layout),
             Ty::Nominal { def, .. } => self.nominal(ty, *def, depth),
             Ty::Dyn(_) => Err(LayoutError::Unsized(self.show(ty))),

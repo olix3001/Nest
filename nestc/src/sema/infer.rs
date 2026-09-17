@@ -37,7 +37,8 @@ use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{
-    Ast, BinOp, Lit, NodeId, NodeKind, SliceRest, UnOp, VariantArgs, VariantPatArgs, WideFloat,
+    Ast, BinOp, Lit, NodeId, NodeKind, SliceRest, StructKind, UnOp, VariantArgs, VariantPatArgs,
+    WideFloat,
 };
 
 use super::builtins::{self, Applies, BuiltinOp, BuiltinRow};
@@ -1043,7 +1044,45 @@ impl Inferer<'_> {
                 order.push(d);
             }
         }
+        self.close_over_projections(&mut order);
         self.ast.set_meta(func, Generics { params: order, own });
+    }
+
+    /// Extend a generic-parameter list with every associated-type parameter
+    /// reachable from it, transitively.
+    ///
+    /// `deep :: func <N: Nest> (n: *N) -> N.Inner.Item` is generic over three
+    /// things, and its *signature* names only two: `N.Inner` appears nowhere
+    /// but in the body, as the type of the value `n.peel()` returns. It still
+    /// has to be in the list — monomorphization substitutes the body with
+    /// exactly what this records, and a type it has no binding for is a call it
+    /// cannot resolve.
+    ///
+    /// The order is by name at each step, because the source of these is a
+    /// namespace (a hash map) rather than a written list, and an instantiation
+    /// lines up with this list **by position**. An order that varied between
+    /// two runs — or between the call site and the declaration — would pair
+    /// arguments with the wrong parameters.
+    fn close_over_projections(&self, order: &mut Vec<DefId>) {
+        let mut i = 0;
+        while i < order.len() {
+            let mut kids: Vec<(Symbol, DefId)> = self
+                .defs
+                .get(order[i])
+                .ns
+                .members
+                .iter()
+                .filter(|&(_, &m)| self.defs.get(m).projection.is_some())
+                .map(|(n, &m)| (n.clone(), m))
+                .collect();
+            kids.sort_by(|a, b| a.0.cmp(&b.0));
+            for (_, k) in kids {
+                if !order.contains(&k) {
+                    order.push(k);
+                }
+            }
+            i += 1;
+        }
     }
 
     /// Discharge the queued trait/projection obligations to a fixpoint, then
@@ -1572,7 +1611,22 @@ impl Inferer<'_> {
                         self.expect(value, &vty, &ann);
                         ann
                     }
-                    None => vty,
+                    // No annotation: there is no context left to type a
+                    // `.{ ... }` on the right, so it settles here as the
+                    // anonymous struct it is (§3.8). Doing it now rather than
+                    // at the end of the body is what makes the spec's own
+                    // example work — `const a := .{ x: 1, y: 2 }` followed by
+                    // `const p: P := a` — because otherwise the *later* line
+                    // would be the first thing to touch the variable and would
+                    // solve `a` to `P` outright, leaving no anonymous value for
+                    // the coercion to happen from.
+                    None => {
+                        if is_var(&self.cx.shallow(&vty)) {
+                            self.solve_to_fixpoint();
+                            self.default_anon_structs();
+                        }
+                        vty
+                    }
                 };
                 self.bind_pattern(pattern, &bound);
             }
@@ -1721,6 +1775,15 @@ impl Inferer<'_> {
         };
         let bty = self.infer_expr(base);
         let ity = self.infer_expr(index);
+        // **Settle the base before asking what it is.** When the base is itself
+        // an index — `g[1][2] = 6` — typing it registered an `Index.Output`
+        // projection and handed back the variable it will solve to, so without
+        // this the head is a variable, the array case below does not recognize
+        // it, and the write is sent to `IndexMut` — which the built-in
+        // sequences deliberately do not implement. The result was
+        // "`[3]i32` does not implement `core.ops.IndexMut.<?7>`": the right
+        // type, named by the wrong trait, once it was too late to matter.
+        let bty = self.settle(&bty);
         let head = self.autoderef(&bty);
         // An errored base has already been reported; registering an obligation
         // about it would add a second diagnostic for one mistake.
@@ -1960,10 +2023,69 @@ impl Inferer<'_> {
             for ob in deferred {
                 self.cx.register(ob);
             }
-            if !progressed {
+            if !progressed && !self.default_anon_structs() {
                 break;
             }
         }
+    }
+
+    /// Give a `.{ name: value, ... }` that nothing typed the **anonymous
+    /// struct** type it has on its own (§3.8), and report whether that unstuck
+    /// anything.
+    ///
+    /// `.{ ... }` normally takes its type from context, so its result starts as
+    /// a variable waiting on an annotation, a parameter or a return type. When
+    /// the sweep stalls there is no context coming, and the spec's answer is
+    /// not "ambiguous": a record literal *is* a value of the anonymous struct
+    /// whose fields are the ones written, and `let a := .{ x: 2 }` is the
+    /// example §3.8 gives. The field types may still be unsolved literal
+    /// variables at this point — that is fine, they default like any other.
+    ///
+    /// Only a **named** body defaults. A positional or repeat body builds an
+    /// array or a tuple, and which one it is is exactly what the context was
+    /// going to say, so there is nothing to fall back to and it stays the
+    /// "type annotations needed" it already was. A body with a `..rest` spread
+    /// does not default either: a spread fills in the fields the literal did
+    /// not write, which is a question only a declaration can answer.
+    fn default_anon_structs(&mut self) -> bool {
+        use crate::parser::ast::CompositeBody;
+        let pending = self.cx.take_obligations();
+        let mut changed = false;
+        for ob in &pending {
+            let Obligation::CompositeBody { recv, origin } = ob else {
+                continue;
+            };
+            if !is_var(&self.cx.shallow(recv)) {
+                continue;
+            }
+            let NodeKind::CompositeLit { body, ty: None } = self.ast.node(*origin).kind.clone()
+            else {
+                continue;
+            };
+            let CompositeBody::Named {
+                fields,
+                spread: None,
+            } = body
+            else {
+                continue;
+            };
+            let mut named: Vec<(Symbol, Ty)> = Vec::with_capacity(fields.len());
+            for f in fields {
+                let NodeKind::FieldInit { name, value } = self.ast.node(f).kind.clone() else {
+                    continue;
+                };
+                let t = self.node_ty(value);
+                named.push((name, t));
+            }
+            let anon = Ty::anon_struct(named);
+            if self.cx.unify(recv, &anon).is_ok() {
+                changed = true;
+            }
+        }
+        for ob in pending {
+            self.cx.register(ob);
+        }
+        changed
     }
 
     /// Attempt to discharge one obligation: select its impl, and for a
@@ -2223,8 +2345,22 @@ impl Inferer<'_> {
         // reaches here with no fields to miss, so the kind is what has to be
         // checked rather than the shape — `E { ..e }` and `E { }` were both
         // silently accepted while this only looked for `Ty::Nominal`.
-        let struct_def = match self.autoderef(target) {
-            Ty::Nominal { def, .. } if self.defs.get(def).kind == DefKind::Struct => def,
+        // An **anonymous** struct is a struct too (§3.8), and it has no def:
+        // its declared fields are in the type itself. `owner` is what a
+        // diagnostic calls the thing being built, and `declared` is the field
+        // list a missing-field check needs; the two shapes differ in nothing
+        // else, so they are collected here and the body below is shared.
+        let (def, owner, declared) = match self.autoderef(target) {
+            Ty::Nominal { def, .. } if self.defs.get(def).kind == DefKind::Struct => (
+                Some(def),
+                self.defs.canonical_string(def),
+                self.record_field_names(def),
+            ),
+            Ty::Struct(ref fields) => (
+                None,
+                self.cx.resolve(target).display(self.defs),
+                fields.iter().map(|(n, _)| n.clone()).collect(),
+            ),
             _ => {
                 let msg = format!(
                     "`{}` is not a struct, so it cannot be built from named fields",
@@ -2234,7 +2370,7 @@ impl Inferer<'_> {
                 return;
             }
         };
-        let def = struct_def;
+        let _ = def;
         let mut seen: Vec<Symbol> = Vec::new();
         for &f in fields {
             let NodeKind::FieldInit { name, value } = self.ast.node(f).kind.clone() else {
@@ -2246,10 +2382,7 @@ impl Inferer<'_> {
                     self.expect(value, &vty, &ft);
                 }
                 None => {
-                    let msg = format!(
-                        "`{}` has no field `{name}`",
-                        self.defs.canonical_string(def)
-                    );
+                    let msg = format!("`{owner}` has no field `{name}`");
                     self.report(f, msg);
                     continue;
                 }
@@ -2270,18 +2403,16 @@ impl Inferer<'_> {
             return;
         }
         // Every declared field must be initialized.
-        let missing: Vec<String> = self
-            .record_field_names(def)
+        let missing: Vec<String> = declared
             .into_iter()
             .filter(|n| !seen.contains(n))
             .map(|n| format!("`{n}`"))
             .collect();
         if !missing.is_empty() {
             let msg = format!(
-                "missing field{} {} in `{}`",
+                "missing field{} {} in `{owner}`",
                 if missing.len() == 1 { "" } else { "s" },
                 missing.join(", "),
-                self.defs.canonical_string(def)
             );
             self.report(node, msg);
         }
@@ -3537,36 +3668,129 @@ impl Inferer<'_> {
         let Ty::Nominal { def, .. } = s else {
             return None;
         };
-        let d = self.defs.get(def);
-        if d.kind != DefKind::TypeParam {
+        if self.defs.get(def).kind != DefKind::TypeParam {
             return None;
         }
-        let (file, node) = (d.file?, d.node?);
-        let NodeKind::GenericTypeParam { constraint, .. } =
-            self.asts[&file].node(node).kind.clone()
-        else {
-            return None;
-        };
         let sym = crate::common::symbol::Symbol::new(name);
-        for bound in self.bound_nodes(file, constraint?) {
-            let Some(t) = self.type_head_def_in(file, bound) else {
-                continue;
-            };
-            if self.defs.get(t).kind != DefKind::Trait || !self.in_scope_traits.contains(&t) {
-                continue;
-            }
-            if let Some(&m) = self.defs.get(t).ns.members.get(&sym) {
-                if self.defs.get(m).kind == DefKind::Func {
-                    // The bound's own arguments — the `f64` of `T: Add.<f64>`.
-                    // They travel with the method because they are half of
-                    // *which* impl this bound stands for, and the impl is picked
-                    // long after this (see [`MethodDispatch::Generic`]).
-                    let args = self.bound_trait_args(file, bound);
-                    return Some((m, args));
+        // The bound's own arguments — the `f64` of `T: Add.<f64>` — travel with
+        // the method, because they are half of *which* impl this bound stands
+        // for and the impl is picked long after this (see
+        // [`MethodDispatch::Generic`]). They are read off the parameter's own
+        // declaration, which a synthesized one does not have; a bounded
+        // associated type is written `Item :: type: Holder`, with no place to
+        // put arguments, so an empty list is the whole truth there.
+        let written = match self.defs.get(def).projection {
+            Some(_) => None,
+            None => {
+                let d = self.defs.get(def);
+                match (d.file, d.node) {
+                    (Some(file), Some(node)) => match self.asts[&file].node(node).kind.clone() {
+                        NodeKind::GenericTypeParam {
+                            constraint: Some(c), ..
+                        } => Some((file, self.bound_nodes(file, c))),
+                        _ => None,
+                    },
+                    _ => None,
                 }
             }
+        };
+        for t in self.param_bound_traits(def) {
+            if !self.in_scope_traits.contains(&t) {
+                continue;
+            }
+            let Some(&m) = self.defs.get(t).ns.members.get(&sym) else {
+                continue;
+            };
+            if self.defs.get(m).kind != DefKind::Func {
+                continue;
+            }
+            let args = match &written {
+                Some((file, bounds)) => {
+                    let (file, bounds) = (*file, bounds.clone());
+                    match bounds
+                        .into_iter()
+                        .find(|&b| self.type_head_def_in(file, b) == Some(t))
+                    {
+                        Some(b) => self.bound_trait_args(file, b),
+                        None => Vec::new(),
+                    }
+                }
+                None => Vec::new(),
+            };
+            return Some((m, args));
         }
         None
+    }
+
+    /// The type a type-parameter def stands for.
+    ///
+    /// Ordinarily the parameter itself. A **pinned** associated-type parameter
+    /// is the exception: `<T: Holder.<Item = i32>>` says `T.Item` *is* `i32`,
+    /// and that is true inside the generic body, before any call site exists —
+    /// which is exactly where it has to be true, since that is where a function
+    /// declared to return `i32` has to accept what `t.get()` gives back.
+    fn param_ty(&mut self, def: DefId) -> Ty {
+        if let Some(p) = self.defs.get(def).projection.clone()
+            && let (Some(file), Some(node)) = (self.defs.get(def).file, p.pinned)
+        {
+            return self.ty_from_node_in(file, node);
+        }
+        Ty::Nominal {
+            def,
+            args: Vec::new(),
+        }
+    }
+
+    /// The traits that bound a type parameter.
+    ///
+    /// Two shapes answer this. An ordinary parameter carries its bounds in its
+    /// own declaration, as written. A **synthesized** one — the `Item` of
+    /// `T.Item` — has no declaration of its own: what bounds it is what the
+    /// associated type's declaration said (`Item :: type: Holder`), which is
+    /// recorded on that declaration's def because the file using the trait
+    /// cannot read the file that wrote it.
+    fn param_bound_traits(&mut self, def: DefId) -> Vec<DefId> {
+        if let Some(p) = self.defs.get(def).projection.clone() {
+            let Some(&adef) = self.defs.get(p.trait_def).ns.members.get(&p.assoc) else {
+                return Vec::new();
+            };
+            let adef = self.defs.resolve_alias(adef);
+            return self.defs.get(adef).assoc_bounds.clone().unwrap_or_default();
+        }
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Vec::new();
+        };
+        let NodeKind::GenericTypeParam {
+            constraint: Some(constraint),
+            ..
+        } = self.asts[&file].node(node).kind.clone()
+        else {
+            return Vec::new();
+        };
+        self.bound_nodes(file, constraint)
+            .into_iter()
+            .filter_map(|b| self.type_head_def_in(file, b))
+            .filter(|&t| self.defs.get(t).kind == DefKind::Trait)
+            .collect()
+    }
+
+    /// Whether `ty` is a type parameter that `trait_def` bounds.
+    ///
+    /// The same walk [`Inferer::bound_method_def`] does, asking about the trait
+    /// rather than about one of its methods. `in_scope_traits` is deliberately
+    /// **not** consulted: that filter is about which names a method call may
+    /// resolve through, and a bound the program wrote is a fact about the
+    /// parameter whether or not the trait's name is in scope here.
+    fn param_has_bound(&mut self, ty: &Ty, trait_def: DefId) -> bool {
+        let s = self.cx.shallow(ty);
+        let Ty::Nominal { def, .. } = s else {
+            return false;
+        };
+        if self.defs.get(def).kind != DefKind::TypeParam {
+            return false;
+        }
+        self.param_bound_traits(def).contains(&trait_def)
     }
 
     /// The trait arguments a bound was written with, as types.
@@ -3723,7 +3947,32 @@ impl Inferer<'_> {
         if matches!(head, Ty::Error) || is_var(&head) {
             return sig.clone();
         }
-        let map = Subst::of_types(HashMap::from([(parent, head)]));
+        // `Self` is only half of it. A signature may also name `Self.Item`, and
+        // what that *is* depends on the same receiver: for a type parameter it
+        // is the associated-type parameter its bound minted (`N.Inner`), and
+        // for a concrete type it is whatever the impl bound the name to. Both
+        // live in the receiver's own namespace, under the associated type's
+        // name, so one lookup answers both.
+        let mut tys = HashMap::from([(parent, head.clone())]);
+        if let Ty::Nominal { def: head_def, .. } = &head {
+            let assocs: Vec<(Symbol, DefId)> = self
+                .defs
+                .get(parent)
+                .ns
+                .members
+                .iter()
+                .filter(|&(_, &m)| self.defs.get(m).assoc_bounds.is_some())
+                .map(|(n, &m)| (n.clone(), m))
+                .collect();
+            for (name, adef) in assocs {
+                if let Some(&bound) = self.defs.get(*head_def).ns.members.get(&name) {
+                    let bound = self.defs.resolve_alias(bound);
+                    let t = self.param_ty(bound);
+                    tys.insert(adef, t);
+                }
+            }
+        }
+        let map = Subst::of_types(tys);
         self.subst_type_params(sig, &map)
     }
 
@@ -4086,6 +4335,14 @@ impl Inferer<'_> {
                 e.insert(self.cx.fresh_const());
             }
         }
+        // The same closure [`Inferer::stamp_generics`] takes, so that a call
+        // site's arguments and the declaration's parameters stay one list.
+        self.close_over_projections(&mut order);
+        for &d in &order {
+            map.tys
+                .entry(d)
+                .or_insert_with(|| self.cx.fresh());
+        }
         // Record what this call site bound each parameter to. The arguments are
         // still variables here — `id(x)`'s `T` is solved by the argument below,
         // not above — so they travel through `finalize_metas` with every other
@@ -4099,6 +4356,31 @@ impl Inferer<'_> {
                 })
                 .collect();
             self.ast.set_meta(at, Instantiation(args));
+        }
+        // Every associated-type parameter the signature mentions — the `Item`
+        // of `T.Item` — is solved by the equation its declaration recorded:
+        // `<T as Holder>.Item`. `T` is a variable here, not yet a type, so this
+        // is an obligation like any other and the solver discharges it once the
+        // arguments below pin `T` down. Registering it *here* is what ties the
+        // two: this is the one place where the call site's `T` and the call
+        // site's `T.Item` are both in hand.
+        for &d in &order {
+            let Some(p) = self.defs.get(d).projection.clone() else {
+                continue;
+            };
+            let (Some(base), Some(out)) = (map.tys.get(&p.base).cloned(), map.tys.get(&d).cloned())
+            else {
+                continue;
+            };
+            self.cx.register(Obligation::Projection {
+                self_ty: base,
+                trait_def: p.trait_def,
+                args: Vec::new(),
+                assoc: p.assoc,
+                out,
+                origin: at,
+                method: None,
+            });
         }
         let inst = self.subst_type_params(sig, &map);
         (inst, map)
@@ -4939,6 +5221,33 @@ impl Inferer<'_> {
             };
             map.tys.insert(g, t);
         }
+        // And each abstract associated type takes what this impl bound it to.
+        // The trait declares `get` as returning `Self.Item`, which is kept as
+        // the associated type itself (see [`Inferer::self_assoc_ty`]) precisely
+        // so that it can be substituted — and here is where the impl's own
+        // `Item :: i32` becomes the answer. Without it the requirement and the
+        // member disagree on every signature that mentions one.
+        let assocs: Vec<(Symbol, DefId)> = self
+            .defs
+            .get(trait_def)
+            .ns
+            .members
+            .iter()
+            .filter(|&(_, &m)| self.defs.get(m).assoc_bounds.is_some())
+            .map(|(n, &m)| (n.clone(), m))
+            .collect();
+        for (name, adef) in assocs {
+            let t = match imp.assoc.get(&name) {
+                Some(&node) => {
+                    let t = self.ty_from_node_in(imp.file, node);
+                    self.subst_type_params(&t, &map)
+                }
+                // An impl that does not bind it is incomplete, reported as such;
+                // a variable keeps this check from adding a second complaint.
+                None => self.cx.fresh(),
+            };
+            map.tys.insert(adef, t);
+        }
 
         let members: Vec<(Symbol, DefId)> = self
             .defs
@@ -5134,6 +5443,14 @@ impl Inferer<'_> {
 
     fn field_ty(&mut self, base: &Ty, name: &str) -> Option<Ty> {
         let base = self.autoderef(base);
+        // An anonymous struct carries its fields in the type: there is no def
+        // to look up and no generics to substitute.
+        if let Ty::Struct(fields) = &base {
+            return fields
+                .iter()
+                .find(|(n, _)| n.as_str() == name)
+                .map(|(_, t)| t.clone());
+        }
         let Ty::Nominal { def, args } = base else {
             return None;
         };
@@ -5573,6 +5890,11 @@ impl Inferer<'_> {
                 Some(def) => Ty::Dyn(def),
                 None => Ty::Error,
             },
+            // An anonymous `struct { ... }` written inline (§3.8). It is not a
+            // declaration and gets no def: the fields *are* the type.
+            NodeKind::StructType {
+                generics, kind: sk, ..
+            } => self.anon_struct_ty(file, node, &generics, &sk),
             NodeKind::DistinctType { inner, .. } => self.ty_from_node_in(file, inner),
             NodeKind::TypePath { generic_args, .. } => self.typepath_ty(file, node, &generic_args),
             // `Type.<args>` in expression position (e.g. a composite-literal head)
@@ -5589,6 +5911,60 @@ impl Inferer<'_> {
             NodeKind::FieldAccess { .. } => self.typepath_ty(file, node, &[]),
             _ => Ty::Error,
         }
+    }
+
+    /// The type of an anonymous `struct { ... }` in a type position (§3.8).
+    ///
+    /// Everything a *declaration* may carry is refused here rather than
+    /// ignored. An anonymous struct has no name to be generic over and no
+    /// declaration order to promise, so generics and the tuple form have
+    /// nowhere to go: `struct (A, B)` inline is the tuple `(A, B)` spelled
+    /// wrong, and saying so is better than laying out something the program did
+    /// not ask for.
+    fn anon_struct_ty(
+        &mut self,
+        file: FileId,
+        node: NodeId,
+        generics: &[NodeId],
+        kind: &StructKind,
+    ) -> Ty {
+        if let Some(&g) = generics.first() {
+            self.report_in(
+                file,
+                g,
+                "an anonymous `struct` cannot be generic: only a declared type takes parameters"
+                    .to_string(),
+            );
+            return Ty::Error;
+        }
+        let members = match kind {
+            StructKind::Record(ids) => ids.as_slice(),
+            StructKind::Unit => &[],
+            StructKind::Tuple(_) => {
+                self.report_in(
+                    file,
+                    node,
+                    "an anonymous `struct` has named fields: write the tuple type `(A, B)`                      for a positional one"
+                        .to_string(),
+                );
+                return Ty::Error;
+            }
+        };
+        let mut fields: Vec<(Symbol, Ty)> = Vec::with_capacity(members.len());
+        for &m in members {
+            // A record body may hold comptime items (`$assert`) beside its
+            // fields; those are not members and carry no type.
+            let NodeKind::Field { name, ty, .. } = self.asts[&file].node(m).kind.clone() else {
+                continue;
+            };
+            if fields.iter().any(|(n, _)| *n == name) {
+                self.report_in(file, m, format!("duplicate field `{name}`"));
+                return Ty::Error;
+            }
+            let t = self.ty_from_node_in(file, ty);
+            fields.push((name, t));
+        }
+        Ty::anon_struct(fields)
     }
 
     /// `int.<N>` / `uint.<N>` — one member of an integer family (§3.1).
@@ -5710,7 +6086,10 @@ impl Inferer<'_> {
             // binding `Output :: Vec3`) expands to its right-hand side. This is
             // what turns `Self.Output` on a concrete type into the impl's chosen
             // type (§ associated-type projection).
-            DefKind::TypeAlias => self.expand_alias(def),
+            DefKind::TypeAlias => match self.self_assoc_ty(file, node, def) {
+                Some(t) => t,
+                None => self.expand_alias(def),
+            },
             // `K :: P.<u8>` is an alias too, and collection could not know it:
             // a `::`-RHS is parsed as an *expression*, so an instantiation
             // comes back as a `GenericApply` that is a type when its head
@@ -5866,6 +6245,43 @@ impl Inferer<'_> {
         let ty = self.typepath_ty(file, head, &args);
         self.alias_stack.pop();
         Some(ty)
+    }
+
+    /// `Self.Item` written **inside the trait that declares `Item`**, kept as
+    /// the associated type itself rather than expanded to a fresh variable.
+    ///
+    /// [`Inferer::expand_alias`] hands an abstract associated type a fresh
+    /// variable, on the grounds that context will pin it. That is true of the
+    /// trait's own body, and false for the one caller that matters here: a call
+    /// through a type parameter's bound (`n.peel()` where `<N: Nest>`), whose
+    /// result is `N.Inner` — a type the signature can *name*, because §5.4 says
+    /// it can. A variable cannot be substituted into, so the link between the
+    /// declaration's `Self.Inner` and the caller's `N.Inner` would be lost
+    /// before [`Inferer::subst_trait_self`] ever ran.
+    ///
+    /// Keeping the associated def is what gives that substitution something to
+    /// rewrite. It is narrow on purpose — only `Self.Assoc` where `Self` is the
+    /// declaring trait — so every other use of an abstract associated type
+    /// keeps the variable it had.
+    fn self_assoc_ty(&mut self, file: FileId, node: NodeId, def: DefId) -> Option<Ty> {
+        let owner = self.defs.get(def).parent?;
+        if self.defs.get(owner).kind != DefKind::Trait {
+            return None;
+        }
+        if self.defs.get(def).assoc_bounds.is_none() {
+            return None;
+        }
+        // The base has to be `Self` — the trait itself. `Holder.Item` written
+        // as a path from outside is a different question.
+        let segs = self.asts[&file].meta::<super::PathRes>(node)?;
+        let base = match segs.0.get(segs.0.len().checked_sub(2)?)? {
+            Resolution::Def(b) => self.defs.resolve_alias(*b),
+            _ => return None,
+        };
+        (base == owner).then(|| Ty::Nominal {
+            def,
+            args: Vec::new(),
+        })
     }
 
     /// Expand a type-alias / associated-type binding to the type it names.
@@ -6419,6 +6835,7 @@ impl Inferer<'_> {
             if self.try_int_widen(node, actual, expected)
                 || self.try_array_to_slice(node, actual, expected)
                 || self.try_dyn_coerce(node, actual, expected)
+                || self.try_anon_to_named(node, actual, expected)
                 || self.try_upcast(node, actual, expected)
             {
                 return;
@@ -6539,7 +6956,16 @@ impl Inferer<'_> {
         }
         // The coercion is only sound when the concrete type really implements
         // the trait; an unsatisfied bound stays a plain type mismatch.
-        if !matches!(self.select(&concrete, trait_def, &[]), Select::Ok(_)) {
+        //
+        // A **type parameter** proves it a different way. There is no impl to
+        // find for `X` — it is not a type yet — but `<X: T>` is the promise that
+        // whatever instantiates it has one, and that promise is exactly what the
+        // coercion needs. Monomorphization substitutes the real type here and
+        // builds the vtable from it, so by the time a vtable is wanted the
+        // question has an ordinary answer.
+        if !self.param_has_bound(&concrete, trait_def)
+            && !matches!(self.select(&concrete, trait_def, &[]), Select::Ok(_))
+        {
             return false;
         }
         self.ast.set_meta(
@@ -6595,6 +7021,54 @@ impl Inferer<'_> {
                 target,
             },
         );
+        true
+    }
+
+    /// Try to reach `expected` from `actual` by the one implicit struct→struct
+    /// coercion §3.8 allows besides `@using`: an **anonymous** struct value
+    /// becoming a named struct with the same field name→type set.
+    ///
+    /// It is one-way. A named struct never becomes anonymous on its own —
+    /// that direction is an explicit `cast` — so there is no matching attempt
+    /// the other way round.
+    ///
+    /// The conversion itself is nothing: both sides have the same fields at the
+    /// same offsets, so it lowers to the implicit `$cast` every other exact
+    /// coercion lowers to, which LIR turns into a read of the same address at
+    /// the other type.
+    fn try_anon_to_named(&mut self, node: NodeId, actual: &Ty, expected: &Ty) -> bool {
+        let Ty::Struct(fields) = self.cx.shallow(actual) else {
+            return false;
+        };
+        let want = self.cx.shallow(expected);
+        let Ty::Nominal { def, .. } = &want else {
+            return false;
+        };
+        if self.defs.get(*def).kind != DefKind::Struct {
+            return false;
+        }
+        // The *set* has to match: a named struct with a field the value does
+        // not carry has nothing to build that field from, and a value with a
+        // field the struct does not declare has nowhere to put it.
+        let declared = self.record_field_names(*def);
+        if declared.len() != fields.len()
+            || !declared.iter().all(|n| fields.iter().any(|(m, _)| m == n))
+        {
+            return false;
+        }
+        let snapshot = self.cx.snapshot();
+        for (name, t) in &fields {
+            let Some(ft) = self.field_ty(&want, name.as_str()) else {
+                self.cx.rollback(snapshot);
+                return false;
+            };
+            if self.cx.unify(t, &ft).is_err() {
+                self.cx.rollback(snapshot);
+                return false;
+            }
+        }
+        let to = self.cx.resolve(&want);
+        self.ast.set_meta(node, Coercion { to });
         true
     }
 

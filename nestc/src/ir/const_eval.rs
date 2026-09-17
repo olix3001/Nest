@@ -1410,7 +1410,19 @@ impl<'a> ConstEval<'a> {
 
     /// Reorder a struct literal's written fields into the type's **declaration**
     /// order, which is what every consumer of a constant aggregate expects.
-    fn in_member_order(&self, def: DefId, written: Vec<(Symbol, ConstValue)>) -> Vec<ConstValue> {
+    fn in_member_order(
+        &self,
+        def: Option<DefId>,
+        written: Vec<(Symbol, ConstValue)>,
+    ) -> Vec<ConstValue> {
+        // An anonymous struct has no declaration to order by. Its members are
+        // the sorted ones [`Ty::anon_struct`] fixed, so sorting the written
+        // fields by name puts them in the same order the layout used.
+        let Some(def) = def else {
+            let mut written = written;
+            written.sort_by(|a, b| a.0.cmp(&b.0));
+            return written.into_iter().map(|(_, v)| v).collect();
+        };
         let Some(order) = self.member_names(def) else {
             return written.into_iter().map(|(_, v)| v).collect();
         };

@@ -752,6 +752,149 @@ fn a_program_links_and_runs() {
              }\n",
             14,
         ),
+        // An **anonymous struct** (§3.8), in every position one can be written:
+        // an annotation, a parameter, a return type, a field of a named struct,
+        // and none at all — `.{ ... }` with nothing to type it is a value of the
+        // anonymous struct whose fields are the ones written. Plus both
+        // conversions §3.8 names: the implicit anonymous→named one, and the
+        // explicit `cast` back. 3 + 9 + 5 + 4 + 5 + 7.
+        (
+            "P :: struct { x: i32, y: i32 }\n\
+             Box :: struct { inner: struct { n: i32 } }\n\
+             take :: func (p: P) -> i32 { return p.x + p.y }\n\
+             anon :: func (a: struct { x: i32, y: i32 }) -> i32 { return a.x - a.y }\n\
+             ret :: func () -> struct { n: i32 } { return .{ n: 5 } }\n\
+             main :: func () -> i32 {\n\
+            \x20 let a := .{ x: 7, y: 2 }\n\
+            \x20 let p: P := a\n\
+            \x20 let q := cast.<struct { x: i32, y: i32 }>(p)\n\
+            \x20 let b: Box := .{ inner: .{ n: 4 } }\n\
+            \x20 let s: struct { x: i32, y: i32 } := .{ y: 2, x: 7 }\n\
+            \x20 return take(.{ x: 1, y: 2 }) + take(p) + anon(q) + b.inner.n + ret().n + s.x\n\
+             }\n",
+            33,
+        ),
+        // **Writing through more than one level of indexing.** Reading
+        // `g[1][2]` always worked and so did `g[1] = ...`; only the nested
+        // write failed, because typing the inner index handed back the variable
+        // its `Index.Output` projection would solve to and the write was sent
+        // to `IndexMut` — which the built-in sequences deliberately do not
+        // implement. Arrays three deep, slices of slices, and a read-modify-
+        // write that is both sides at once. 9 + 4 + 3.
+        (
+            "{ make } :: import <core/mem>\n\
+             main :: func () -> i32 {\n\
+            \x20 let mut g: [2][2][2]i32 := .{ .{ .{ 0; 2 }; 2 }; 2 }\n\
+            \x20 g[1][0][1] = 9\n\
+            \x20 let mut s: []mut []mut i32 := make.<[][]mut i32>(2)\n\
+            \x20 s[0] = make.<[]i32>(2)\n\
+            \x20 s[1] = make.<[]i32>(2)\n\
+            \x20 s[1][0] = 4\n\
+            \x20 let mut a: [2][2]i32 := .{ .{ 0; 2 }; 2 }\n\
+            \x20 a[0][1] = a[0][1] + 3\n\
+            \x20 return g[1][0][1] + s[1][0] + a[0][1]\n\
+             }\n",
+            16,
+        ),
+        // **A bounded type parameter coerces to its trait object.** `&a` where
+        // `impl T for A` always did; the same coercion from a parameter that the
+        // trait bounds did not, because the search was for an *impl* and a
+        // parameter has none — the bound is the promise that stands in for one,
+        // and monomorphization builds a vtable per instantiation from it. Two
+        // instantiations, and the `*mut X` direction. 3 + 40 + 40.
+        (
+            "T :: trait { v :: func (self: *Self) -> i32 }\n\
+             call :: func (d: *dyn T) -> i32 { return d.v() }\n\
+             wrap :: func <X: T> (x: *X) -> i32 { return call(x) }\n\
+             mwrap :: func <X: T> (x: *mut X) -> i32 { return call(x) }\n\
+             A :: struct { n: i32 }\n\
+             B :: struct { m: i32 }\n\
+             impl T for A { v :: func (self: *Self) -> i32 { return self.n } }\n\
+             impl T for B { v :: func (self: *Self) -> i32 { return self.m * 10 } }\n\
+             main :: func () -> i32 {\n\
+            \x20 let a: A := .{ n: 3 }\n\
+            \x20 let mut b: B := .{ m: 4 }\n\
+            \x20 return wrap(&a) + wrap(&b) + mwrap(&mut b)\n\
+             }\n",
+            83,
+        ),
+        // **An associated type projected through a type parameter** (§5.4):
+        // `T.Item`, which used to be "cannot resolve name". A bound's
+        // associated types are parameters of the function too — one per
+        // (parameter, associated type) — solved from the impl once a call site
+        // says what `T` is, which is why two instantiations get two different
+        // item types. `N.Inner.Item` is the same thing twice over, and the
+        // pinned spelling `<Item = i32>` still means what it did. 30 + 4 + 21.
+        (
+            "Holder :: trait { Item :: type\n\
+            \x20 get :: func (self: *Self) -> Self.Item }\n\
+             Nest :: trait { Inner :: type: Holder\n\
+            \x20 peel :: func (self: *Self) -> Self.Inner }\n\
+             Ai :: struct { v: i32 }\n\
+             Bu :: struct { v: u8 }\n\
+             impl Holder for Ai { Item :: i32\n\
+            \x20 get :: func (self: *Self) -> Self.Item { return self.v } }\n\
+             impl Holder for Bu { Item :: u8\n\
+            \x20 get :: func (self: *Self) -> Self.Item { return self.v } }\n\
+             Outer :: struct { l: Ai }\n\
+             impl Nest for Outer { Inner :: Ai\n\
+            \x20 peel :: func (self: *Self) -> Self.Inner { return self.l } }\n\
+             grab :: func <T: Holder> (t: *T) -> T.Item { return t.get() }\n\
+             pinned :: func <T: Holder.<Item = i32>> (t: *T) -> i32 { return t.get() }\n\
+             deep :: func <N: Nest> (n: *N) -> N.Inner.Item {\n\
+            \x20 let mid := n.peel()\n\
+            \x20 return mid.get()\n\
+             }\n\
+             main :: func () -> i32 {\n\
+            \x20 let a: Ai := .{ v: 30 }\n\
+            \x20 let b: Bu := .{ v: 4 }\n\
+            \x20 let o: Outer := .{ l: .{ v: 21 } }\n\
+            \x20 let x: i32 := grab(&a)\n\
+            \x20 let y: u8 := grab(&b)\n\
+            \x20 if pinned(&a) != 30 { return 1 }\n\
+            \x20 return x + cast.<i32>(y) + deep(&o)\n\
+             }\n",
+            55,
+        ),
+        // **A repeat is a fill, not `n` operands.** `.{ 0; N }` used to be
+        // written out element by element, which made the *compiler* do work
+        // proportional to `N` — 50 000 took two seconds and a million never
+        // finished. A uniform byte pattern is a `memset` and anything else is a
+        // loop, both a fixed amount of LIR. The long array is here to be long;
+        // the short ones check that the unrolled form still folds, and that a
+        // repeat the fill cannot express (a four-byte element, a value that is
+        // not a constant) still produces the right elements.
+        (
+            "seed :: func () -> i32 { return 5 }\n\
+             main :: func () -> i32 {\n\
+            \x20 let big: [100000]u8 := .{ 0; 100000 }\n\
+            \x20 let ones: [64]u8 := .{ 1; 64 }\n\
+            \x20 let wide: [100]i32 := .{ 3; 100 }\n\
+            \x20 let run: [100]i32 := .{ seed(); 100 }\n\
+            \x20 return cast.<i32>(big[99999]) + cast.<i32>(ones[63]) + wide[99] + run[99]\n\
+             }\n",
+            9,
+        ),
+        // `core/mem`'s bulk moves, and the `std` that is built on them: a
+        // block copy between slices, a byte fill, and the `Vec` methods that
+        // grow and copy through the same two instructions. 3 + 3 + 2 + 0.
+        (
+            "c :: import <std/collections>\n\
+             m :: import <std/mem>\n\
+             { make } :: import <core/mem>\n\
+             main :: func () -> i32 {\n\
+            \x20 let mut v := c.from_slice.<i32>(.{ 1, 2, 3 })\n\
+            \x20 v.push(4)\n\
+            \x20 v.extend(.{ 5, 6 })\n\
+            \x20 let dst: []mut i32 := make.<[]i32>(3)\n\
+            \x20 let n := m.copy.<i32>(dst, v.as_slice())\n\
+            \x20 v.fill(2)\n\
+            \x20 let mut z := c.from_slice.<i32>(.{ 9, 9 })\n\
+            \x20 z.zero()\n\
+            \x20 return dst[2] + cast.<i32>(n) + v.as_slice()[5] + z.as_slice()[1]\n\
+             }\n",
+            8,
+        ),
     ] {
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
         let file = session.load_entry("main").expect("entry loads");
@@ -1131,6 +1274,36 @@ fn a_leaked_object_lives_until_it_is_dropped() {
     };
     let out = run_on_host(include_str!("../../../../examples/gc/leak.nest"));
     assert_eq!(out.status.code(), Some(0), "a leaked node was collected: {out:?}");
+}
+
+/// **Recursion too deep to fit is a trap, not a segmentation fault.**
+///
+/// The stack has an end, and reaching it used to be a `SIGSEGV` from whichever
+/// instruction happened to touch the guard page — no message, and nothing
+/// naming the runaway function. Every function that can reach itself now checks
+/// its own frame against the floor the runtime recorded at startup, so the
+/// failure arrives the way the language's other failures do. A recursion that
+/// *does* fit is untouched, which is the half worth guarding: a check that
+/// fired early would make the language's own depth limit smaller than the
+/// platform's.
+#[test]
+fn recursion_past_the_end_of_the_stack_traps() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let deep = run_on_host(
+        "f :: func (n: i32) -> i32 { if n == 0 { return 0 } return f(n - 1) }\n\
+         main :: func () -> i32 { return f(100000) }\n",
+    );
+    assert_eq!(deep.status.code(), None, "it exited instead of trapping: {deep:?}");
+    let said = String::from_utf8_lossy(&deep.stderr);
+    assert!(said.contains("stack overflow"), "it did not say what happened: {said}");
+
+    let shallow = run_on_host(
+        "f :: func (n: i32) -> i32 { if n == 0 { return 0 } return f(n - 1) + 1 }\n\
+         main :: func () -> i32 { return f(1000) - 990 }\n",
+    );
+    assert_eq!(shallow.status.code(), Some(10), "a recursion that fits ran wrong: {shallow:?}");
 }
 
 /// **Optimizing changes nothing a program does**: at every `opt-level`, and for

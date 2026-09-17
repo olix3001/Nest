@@ -1797,6 +1797,19 @@ fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
             }
             s.push('E');
         }
+        // An anonymous struct: `X`, then each field as its length-prefixed name
+        // followed by its type, then `E`. The names are part of the encoding
+        // because they are part of the type — `struct { a: i32 }` and
+        // `struct { b: i32 }` are two types and must not mangle alike — and the
+        // fields arrive sorted, so one type has one encoding.
+        Ty::Struct(fields) => {
+            s.push('X');
+            for (name, t) in fields {
+                push_len(s, name.as_str());
+                push_ty(s, defs, t);
+            }
+            s.push('E');
+        }
         Ty::Func { params, ret } => {
             s.push('F');
             for p in params {
