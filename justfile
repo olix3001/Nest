@@ -26,16 +26,18 @@ bin := root / "nestc/target" / profile
 nestc := bin / "nestc"
 twig := root / "twig/build" / profile / "twig"
 
+export NESTC := nestc
+
 # The collector and LLVM are found the way nestc/build.rs finds them, so that a
 # build through `cargo` directly and a build through here agree. Both are
 # resolved once, when this file is read, and exported to every recipe.
-export BDW_GC_PREFIX := env_var_or_default("BDW_GC_PREFIX", ```
+export BDW_GC_PREFIX := env("BDW_GC_PREFIX", ```
     if command -v brew >/dev/null 2>&1 && brew --prefix bdw-gc >/dev/null 2>&1; then
       brew --prefix bdw-gc
     fi
 ```)
 
-export LLVM_SYS_211_PREFIX := env_var_or_default("LLVM_SYS_211_PREFIX", ```
+export LLVM_SYS_211_PREFIX := env("LLVM_SYS_211_PREFIX", ```
     if command -v brew >/dev/null 2>&1 && brew --prefix llvm@21 >/dev/null 2>&1; then
       brew --prefix llvm@21
     else
