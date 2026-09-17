@@ -1,172 +1,272 @@
-# Handoff: after the language server; next, `@test` and `twig test`
+# Handoff: seven bugs found by fuzzing, none fixed yet; then `@test`
 
-**Generated**: 2026-09-16
+**Generated**: 2026-09-17
 **Branch**: `main`
-**Last commit**: `2047f05`
-**Status**: Step 10 (the editor) is done: highlighting, diagnostics, hover, go-to-definition and completion in Zed. The user has tried the diagnostics in Zed. **First handle the open items below, then the test system**; nothing of the test system is started.
+**Last commit**: `77ad6d6`
+**Status**: The GC work and the LSP work are done and committed. A bug hunt over
+the compiler and the language followed, and **the bugs it found are all still
+open** — they are the list below, in the order I would fix them. Nothing else is
+in flight.
 **Tests**:
-- `cd nestc && rtk proxy cargo test -p nestc` gives **623**.
-- `LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 rtk proxy cargo test --features llvm -p nestc` gives **643**.
-- `cargo test -p nest-lsp` gives **15**.
+- `cd nestc && rtk proxy cargo test -p nestc` gives **651**.
+- `cd nestc && rtk proxy cargo test -p nest-lsp` gives **30**.
 - `cd editors/tree-sitter-nest && npx tree-sitter test` gives 7.
 
-## First: open items from the user (before the test system)
+## The bugs to fix
 
-1. **The twig path setting in Zed still did not work** for the user. `2047f05` is a guess at the cause: `~/` wasn't expanded, and relative paths weren't resolved against the worktree. It also adds logging: nest-lsp writes its arguments, the resolved twig and nestc, and every twig run to stderr, which Zed's language server log shows. **Ask the user for that log.** Other things to check:
-   - does `LspSettings::for_worktree("nest-lsp")` see `lsp.nest-lsp.settings`?
-   - was the dev extension rebuilt?
-   - Possible extra: handle `workspace/didChangeConfiguration`, and send log lines with `window/logMessage`.
-2. Done: **`twig build|run --emit ast,ir,mono,lir,llvm-ir,asm`** writes dumps for the root package's targets to `build/<profile>/obj/{lib,bin}/<name>/<name>.{ast,ir,mono,lir,ll,s}`, and asking for them recompiles the root library. nestc's `--emit` takes `kind=path` (for `ast`, `ir`, `mono`, `lir`, `obj`, `asm`, `backend-ir`).
-   - Fixed: a slice constant (`X: []str :: .{ "a", "b" }`) failed in LLVM. LIR typed its storage as the slice itself; it is now an `[N]T` array global plus a `{ ptr, len }` view (`lir/lower.rs` `slice_storage`), tested in `a_program_links_and_runs`. twig's `build.known_emit` workaround could go back to a `[]str`.
-3. `2047f05`: `nestc --obj-dir` plus twig keeping objects is done. The user asked that objects stay always; twig now passes `--obj-dir` on every build. Plain `nestc` still uses a temporary directory. Old objects from a changed `codegen-units` aren't cleaned.
+Each one has a program that shows it. They are small enough to retype; write them
+under `/tmp` and compile with `nestc/target/release/nestc <file> -o /tmp/x`.
 
-## Next Step: a built-in test system
+### 1. Anonymous struct types do not work at all (spec §3.8)
 
-The user asked for it: **`@test` on a function marks it a test, and twig runs the tests of a package.** (`twig run` already exists: `twig run [--bin <name>] [-- <args>]`.)
+**The largest of these.** An anonymous `struct { ... }` in *any* type position is
+rejected, and a `cast` to one reaches code generation as an error type.
 
-**Ask the user before designing**, in one batch:
+```
+main :: func () -> i32 {
+  let a: struct { x: i32 } := .{ x: 2 }     // error: type annotations needed
+  return a.x
+}
+```
 
-1. **What a test is.** Is it `@test` on a `func () -> void` that fails by panicking or trapping? Or should a `func () -> Result.<void, str>` also be allowed?
-2. **What `@test` is.**
-   - It could be a fixed attribute the compiler reads, like `@public` and `@link_name`.
-   - Or it could be an `@attribute` struct declared in `core` and found by a `#lang` tag.
-   - The second fits §9's user attributes and reflection.
-3. **How tests run.** A failing test aborts the process (`nest_trap`), so:
-   - (a) one process per test, where twig runs the test binary once per test name (`<bin> --run <name>`); or
-   - (b) the runtime catches the trap (`setjmp`/`longjmp` or a signal handler) so one process runs them all.
-   - (a) is simple and isolates tests.
-4. **Where tests live.**
-   - Tests could sit anywhere in a package's files, compiled only for `twig test`.
-   - Or they could sit in a `tests/` directory as their own targets.
-   - Should tests of a library see its private members?
-5. **Output.** Should it look like cargo's (`test foo ... ok`, a summary, a non-zero exit on failure)? Should `twig test <filter>` exist?
+```
+main :: func () -> i32 {
+  let a := .{ x: 2 }                        // error: type annotations needed
+  return a.x                                // spec: this is an anonymous struct value
+}
+```
 
-A likely shape, to propose rather than assume:
-- **nestc:** `nestc --test` compiles the entry as a test binary. It collects every function with `@test` (in the entry package's own files, not libraries') and synthesizes a `main` that runs one by name, or lists them all. See how `entry=auto` synthesizes a C `main` (`-C entry`, `lir/entry.rs`).
-- **twig:** `twig test [filter] [--release]`
-  - builds the dependencies as usual;
-  - compiles the root package's library and each binary root with `--test` (`build::command` plus a flag; keep it the single source of flags);
-  - runs each test in its own process and prints the results.
-- **LSP (later):** code lenses to run a test.
+```
+S :: struct { x: i32 }
+main :: func () -> i32 {
+  let p: S := .{ x: 2 }
+  let q := cast.<struct { x: i32 }>(p)      // error: internal: an error type reached
+  return q.x                                //        code generation in `main`
+}
+```
 
-*Done when*: a package with `@test` functions, some passing and some failing, prints each result through `twig test` and exits non-zero on a failure. Commit, stop.
+A parameter typed `struct { x: i32 }` fails the same way, and so does a named
+struct with an anonymous struct field once it is *used* (declaring one compiles).
+What does work: `.{ ... }` into a named struct, in a `let`, a `return` and an
+argument, and the implicit anonymous→named coercion is untestable while the
+anonymous side cannot be written. The spec promises all of it in §3.8, including
+the two implicit struct→struct coercions and `cast` for the named→anonymous
+direction.
+
+### 2. Importing an inherent-impl member is accepted, then fails internally
+
+```
+{ wrapping_sub } :: import <core/num>       // accepted, though `wrapping_sub` is
+main :: func () -> i32 {                    // a member of `impl uint.<N>`, not of
+  let a: u8 := 0                            // the namespace
+  let b := wrapping_sub(a, 1)               // error: internal: an error type reached
+  return 0                                  //        code generation in `main`
+}
+```
+
+The diagnostic says it is a compiler defect itself ("nothing was reported about
+it, so inference produced an error type without a diagnostic"). Either the import
+should be refused where it is written, or the call should be a real error.
+`a.wrapping_sub(1)` — the method call — is fine.
+
+### 3. Writing through two levels of indexing
+
+```
+main :: func () -> i32 {
+  let mut g: [3][3]i32 := .{ .{ 0; 3 }; 3 }
+  g[1][2] = 6            // error: `[3]i32` does not implement `core.ops.IndexMut.<?7>`
+  return g[1][2]         //        and: cannot assign to this expression
+}
+```
+
+Reading `g[1][2]` compiles and runs; `g[1] = ...` compiles. Only the nested write
+fails, and the unresolved `?7` in the message says the index's type was never
+inferred for the inner level.
+
+### 4. A bounded type parameter does not coerce to its trait object
+
+```
+T :: trait { v :: func (self: *Self) -> i32 }
+call :: func (d: *dyn T) -> i32 { return d.v() }
+wrap :: func <X: T> (x: *X) -> i32 { return call(x) }   // error: type mismatch:
+                                                        // expected `dyn T`, found `X`
+```
+
+`&a` where `a: A` and `impl T for A` coerces fine; the same coercion from a
+type parameter that is bounded by the trait does not happen.
+
+### 5. `T.Item` — an associated type through a type parameter
+
+```
+Holder :: trait { Item :: type
+  get :: func (self: *Self) -> Self.Item }
+use :: func <T: Holder> (t: *T) -> T.Item { return t.get() }  // error: cannot
+                                                              // resolve name `T.Item`
+```
+
+`Self.Item` inside a trait works (`core/iter` uses it), and so does pinning it in
+a bound, `<T: Holder.<Item = i32>>`. Only the projection through the parameter
+fails — and `spec/05-functions-and-generics.md` §5.4 writes exactly that form
+(`C: FromIterator.<Item = I.Item>`).
+
+### 6. A repeat aggregate is written out element by element
+
+`let a: [N]u8 := .{ 0; N }` costs about 40 µs per element: 10 000 takes 0.4 s,
+50 000 takes 2 s, and 1 000 000 never finished (killed at 25 s). It should lower
+to a zero initializer or a memset for a constant repeat, and to a loop otherwise.
+
+### 7. Deep recursion is a segmentation fault
+
+`f :: func (n: i32) -> i32 { if n == 0 { return 0 } return f(n - 1) }` with
+`f(100000)` dies with SIGSEGV rather than a trap. Decide whether that is worth a
+stack guard (a probe in the prologue, or a runtime-checked limit) or is the
+platform's business; it is the one item here that may be "as intended".
+
+*Done when*: each has a test in the suite that fails without the fix. §1 and §2
+are the two that end in `internal:`, which is the compiler calling itself wrong.
+
+## Then: `opaque` (the user asked for this)
+
+A type that has **no size and no values**, usable only behind a pointer, for the
+FFI cases where the pointee is not ours to describe: `FILE`, `sqlite3`, a handle
+a C library hands back. `*mut opaque` / `*opaque` are the only forms.
+
+The user's preference, verbatim: **`opaque` is the name, with `c.void` an alias
+for it if that fits.** So the language gets `opaque`, and `std/c` re-exports it
+under the name C programmers will look for. Things to settle while designing it:
+
+- Is it one built-in type (`opaque`), or a declaration (`Handle :: opaque`) that
+  makes a fresh nominal one per library handle? The second is what C headers
+  mean, and it keeps two libraries' handles from being interchangeable.
+- What is refused: `let x: opaque`, a field of it, `size_of`, `new.<opaque>()`,
+  dereferencing `*opaque`, `make.<[]opaque>`.
+- `*opaque` ↔ `*mut opaque` ↔ `*u8` conversions: which are implicit, which need
+  `cast`, and whether a `*T` may `cast` to `*opaque` at all (§11 says a C pointer
+  is not nullable, which stays true).
+- Where it lives in the spec: §3 as a type, §11 for the FFI rules.
+
+## Then: a built-in test system (unchanged, not started)
+
+`@test` on a function marks it a test, and `twig` runs a package's tests. The
+five questions to ask before designing it are in the previous handoff's list and
+still stand:
+
+1. What a test *is*: `func () -> void` that fails by trapping, or also
+   `func () -> Result.<void, str>`?
+2. What `@test` is: a fixed attribute the compiler reads (like `@public`), or a
+   `@attribute` struct in `core` found by a `#lang` tag?
+3. How tests run: one process per test (`<bin> --run <name>`), or the runtime
+   catching the trap?
+4. Where tests live: anywhere in the package, compiled only for `twig test`, or a
+   `tests/` directory? Do they see private members?
+5. Output: cargo's shape (`test foo ... ok`, a summary, non-zero exit)? A filter?
+
+A likely shape: `nestc --test` compiles the entry as a test binary, collecting the
+entry package's `@test` functions and synthesizing a `main` the way `entry=auto`
+already synthesizes one (`lir/entry.rs`); `twig test [filter]` builds through
+`build::command` and runs each test in its own process. Write the design into
+`design/toolchain.md` first. Twig's own tests come after `@test` works.
 
 ## Completed This Session
 
-- [x] `fa6a515`:
-  - **`twig metadata`** prints JSON (root, profile, packages with targets `{name, entry, lib, output, program, args}`); the args are `build::command`'s.
-  - **`twig build --deps`** builds only the dependency libraries that are stale.
-  - **`nestc` became a library.** `src/lib.rs` holds the modules, `src/driver.rs` everything `main.rs` had, and `main.rs` is only `main` and `requested`.
-    - `driver::Invocation::parse(args)` plus `.session(loader)` is how a tool gets a session set up exactly as a command line would.
-  - **`nest-lsp`** in `nestc/lsp`, a workspace member of `nestc/Cargo.toml`.
-- [x] `4a01ce0`: the Zed extension (`editors/zed`, a Rust `cdylib` on `zed_extension_api` 0.7) starts `nest-lsp`.
-- [x] `0a287e2`:
-  - **`nest-lsp --twig <path> --nestc <path>`**, which the extension sets from `lsp.nest-lsp.settings.{twig,nestc}` (the user hit "cannot find twig");
-  - **hover**, **go-to-definition** and **completion**;
-  - `///` lines above a definition are its hover documentation.
+- [x] `d383dd1` — **the collector**:
+  - The runtime is Boehm and nothing else; the leaking `calloc` build is gone.
+    `nestc/build.rs` finds bdwgc (`BDW_GC_PREFIX`, pkg-config, brew, `/usr/local`,
+    `/usr`) and fails the build without it; `libgc.a` is linked statically, so a
+    built program does not need the collector installed. `build.sh` checks too.
+  - `NEST_GC_POISON=1` makes `nest_free` fill an object with `0xDB` and keep it,
+    so a read after a wrong free fails every time rather than sometimes.
+  - **Escape analysis was freeing memory still in use**: `&p.*.x`, `&mut
+    p.*.arr[2]` and `p.*.arr[0..]` each let an address inside the allocation
+    leave, and none of them disqualified it. An element used in place
+    (`p.*.arr[2] = 7`) still does not, which is the precision worth keeping.
+  - **A compiler crash**: `match` on `Option.<*mut Node>` where `Node` reaches
+    itself through a pointer overflowed the stack in the exhaustiveness check
+    (`ir/check/exhaustive.rs`). A wildcard column whose rows name no constructor
+    now goes to the default matrix instead of being expanded.
+  - `gc_pin` now promises only that the object does not move (Boehm never moves
+    anything, so it compiles to nothing); `gc_leak(p)` is new and keeps an object
+    alive until `drop(p)`, through a root set the runtime keeps
+    (`nest_gc_leak`/`nest_free`).
+  - `examples/gc/{collects,escapes,leak}.nest`, each run by a test in
+    `codegen/llvm/tests.rs`.
+- [x] `77ad6d6` — **the language server**:
+  - `settle()` waits for twig, so the first question of a session is answered
+    instead of returning nothing (this was "no completions in Zed").
+  - A save that finds the same metadata no longer bumps the workspace's
+    generation, which used to mark every unit stale: three saves went from a full
+    re-analysis each to 0.01 s.
+  - A document is analyzed once it has been quiet for 400 ms (`IDLE`), so typing
+    no longer publishes diagnostics about half-written lines.
+  - An import an answer would write is clamped into the text the editor has.
+  - `NEST_LSP_LOG=<path>` records every message, every analysis, and whether a
+    completion came from the analysis already made or ran a new one
+    (`nestc/lsp/src/log.rs`).
+  - Measured: completion 25–30 ms a keystroke, from the existing analysis, with
+    no re-analysis at all.
+- [x] `design/library.md` — the `.nlib` and `.nmeta` formats (uncommitted at the
+  time of writing this, along with this file).
 
-## How the Server Works
+## How the Bug Hunt Was Run
 
-- **`nestc/lsp/src/workspace.rs`**
-  - A file's workspace is its nearest `nest.toml`.
-  - `Toolchain::prepare` (for twig: `build --deps`, then `metadata`) runs on a thread; tests use a `Fake`.
-  - `candidates` orders a package's targets for a file. A binary's own-package `--extern` is swapped for `--package` so its library is read from source.
-- **`analysis.rs`**
-  - An `Overlay` `FileLoader` puts buffers over the disk, keyed by `session::resolve_import`.
-  - `analyze(args, buffers)` returns an `Outcome { files, diagnostics, session }`.
-  - Positions are UTF-16.
-- **`server.rs`**
-  - A **unit** is one command line: a workspace target, or a lone file with no manifest.
-  - Units are re-analyzed when a file they read changes, or when their workspace is re-prepared.
-  - After every save, all workspaces are prepared again.
-  - Requests call `analyze()` first, so they see the latest edit.
-  - Publishing only sends files whose diagnostics changed.
-- **`complete.rs`**: completion, auto-import (`importable`: breadth-first over package roots from `libraries` and `pkg_of`) and variant completion.
-- **`ide.rs`**
-  - `find` picks the smallest node containing the offset that names something: a `Resolution`/`PathRes` on a use, a `MethodRes` on a method `FieldAccess`, or a `DefMeta` but only on the def's **name** (found with `word_in` inside `Def.span`, which covers the whole declaration).
-  - Hover shows the declaration source (cut at a function's body, at most 16 lines), a local's or parameter's `name: Ty`, and the container path.
-  - Completion re-analyzes with `__nest_lsp_complete` inserted at the cursor. After a `.` it offers a namespace's public `ns.members` or a type's fields plus `ImplTable` members. Otherwise it offers locals (after their `let`, inside their block), the file's names, the prelude and keywords.
+A directory of small programs, each with `// expect: <status>` or
+`// expect: error` on its first line, and a script that compiles and runs them and
+reports an ICE, a compile failure, a wrong status, or a compiler that had to be
+killed. Roughly 70 programs over: nesting and long expressions, traps (overflow,
+division, shifts, index), slices and arrays, unicode in strings and identifiers,
+`defer` in every position, generics and monomorphization (including an infinite
+one, which is refused properly), `dyn`, enums and match (guards, or-patterns,
+nested payloads, tuples of bools), `distinct`, `transmute`, statics, recursion,
+`@using`, interpolation, operators, associated types, function pointers, FFI,
+`embed_file`, and empty files. Everything not in the list above passed.
 
-## Not Yet Done / Unverified
-
-- [ ] Hover, go-to-definition, completion and the new settings have **not been tried in the Zed GUI** (only through tests and a Python stdio driver against `twig/src/main.nest`). The wasm build of the extension is done by Zed.
-- [x] Completion covers primitives, slices, `distinct` types and `.variant`. Names not in scope are offered with an auto-import, and trait methods too (`nestc/lsp/src/complete.rs`).
-- [x] Files changed on disk are watched through `workspace/didChangeWatchedFiles`, registered dynamically when the client supports it.
-- [x] Completion checks impl bounds (`complete.rs` `applies`/`bind`/`implements`): self types are matched structurally, bound generics are checked against their bounds (at most 4 levels deep), builtin operator rows count for primitives, and `distinct` types fall back to their representation. Trait arguments (`Add.<f64>`) are not checked.
-- [x] Compiler fix: from another file, a namespace member is looked up in `ns.members` only, never `ns.imported` (`resolve.rs` `resolve_member`). An `@public x :: import` alias def is now `Visibility::Public`. Test: `a_private_import_is_not_a_member_to_other_files`.
-- [ ] A standalone file (no manifest) only offers imports from packages it already loads.
-- [ ] std and core document with `//`, not `///`, so their hovers have no documentation. Ask whether to convert them.
-- [ ] Speed: completion re-analyzes, about 1.5 s in a debug build on twig. A release build should be much faster, but that isn't measured.
-- [ ] Carried over:
-  - Rust tests for the library path (an `.nmeta` round trip; an LLVM core → std → program run; an `--indirect` import error; `--up-to-date`).
-  - `-C target-cpu=bogus` only warns.
-
-## Failed Approaches (Don't Repeat These)
-
-- **A test helper waiting for an empty `publishDiagnostics` on a correct file times out.** Nothing is published when nothing changed. Send a request instead; it analyzes first.
-- **Needles in test drivers**: `"s.\n"` matched `packages.\n` in a comment. Anchor on something unique.
-- `lsp_server::Response` has `response_result`, not `result`/`error`; use `Response::new_ok`/`new_err`.
-- `lsp-types` 0.97's `Uri` is not `url::Url`; convert through `url::Url::from_file_path`, then `.as_str().parse()`.
-- Earlier ones still apply:
-  - Piping `cargo test` through the RTK hook shows nothing; use `rtk proxy cargo test > $SCRATCH/log 2>&1` and grep `^test result:`.
-  - tree-sitter needs `prec.dynamic(-1)` for `Name {`, and `self` stays an identifier.
-  - macOS has no `timeout`.
-  - Nest code has no `.is_some()`, and a non-void statement must be bound to a name.
-
-## Key Decisions
-
-| Decision | Rationale |
-|---|---|
-| lib split + `nest-lsp` crate (user) | `main.rs` stays thin; the server is a client of the library |
-| `lsp-server` + `lsp-types`, sync (user) | The compiler is synchronous and single-threaded |
-| twig produces metadata and libraries (user: "always use twig") | One source of truth for flags; `build::command` |
-| Only the open package from source, dependencies from `.nlib` | Fast; the dependencies are kept fresh by `twig build --deps` on save |
-| `///` is documentation (user) | `//` stays a plain comment |
-| Completion by re-analysis with a placeholder | A buffer being typed doesn't parse; the placeholder makes `p.` a member access with a typed base |
-
-## Files to Know
-
-| File | Why |
-|---|---|
-| `nestc/src/driver.rs` | The former `main.rs`: flags, `Invocation`, `load_libraries`, emission, linking |
-| `nestc/lsp/src/{server,ide,analysis,workspace}.rs` | The server |
-| `twig/src/{main,build,metadata}.nest` | Commands; `build::command` is the single source of flags |
-| `nestc/src/lir/entry.rs` | Where a C `main` is synthesized, the model for a test runner |
-| `runtime/nest_runtime.c` | `nest_trap`, which is what a failing test hits |
-| `editors/zed/src/lib.rs`, `editors/README.md` | Extension and setup |
-| `design/toolchain.md` | Step 10 is marked done; its "not scheduled" list has room for the tests |
-
-## Resume Instructions
-
-1. Run the tests as above.
-2. Ask how hover, go-to-definition and completion behave in Zed, and fix what they report first.
-3. Ask the five test-system questions above, in one batch.
-4. Write the design into `design/toolchain.md` as a step, then build nestc's `--test` first (with Rust tests), then `twig test`. Commit, stop.
+Worth keeping in mind while fixing: three of the seven (§1, §2, §5) are inference
+or resolution gaps against what the spec already promises, so the spec is the
+thing to read first, not the code.
 
 ## Warnings
 
 - **Standing rules**:
   - No `cargo fmt`; format by hand.
   - Don't edit existing comments unless they're now false.
-  - Commits are title-only (`feat: a + feat: b`), with **no body and no co-author**.
+  - Commits are title-only (`feat: a + fix: b`), with **no body, no co-author and
+    no session trailer**.
   - Ask questions in batches, and ask when unsure.
-  - Simplify LIR while working on codegen if possible, and pass this rule on in every handoff.
+  - Simplify LIR while working on codegen if possible, and pass this rule on in
+    every handoff.
 - **Don't push** without asking.
-- Every new side-table type needs registering in `library/metas.rs`. A serialized struct change needs a bump of `library::FORMAT`; after one, delete the `build/` directories.
-- `nestc` for twig and `nest-lsp` must be built from the same source: the server reads `.nlib`s by `FORMAT` and struct layout, and `compiler_id` is only the version.
-- Grammar edits: run `npx tree-sitter generate`, re-parse the corpus, re-copy `highlights.scm`, commit, then bump `rev` in `editors/zed/extension.toml`.
-- Language gotchas: a line starting with `.` continues the previous one; no multi-line strings; `return`/`break` in a match arm need a block; no `++`.
-- Open questions carried over:
-  - implicit `str` → `String`;
-  - plain enums in serialize;
-  - TOML multi-line strings and dates;
-  - trait impls on named types parking members without the trait in scope.
-- Stale comments left as-is:
-  - `session.rs` `<dir>/foo/foo.nest`;
-  - the `std/str.nest` header;
-  - `sema/tests.rs` `only_in_scope_traits_are_selection_candidates`;
-  - `driver.rs` "A future `twig`".
+- Boehm is required now: `brew install bdw-gc`, or `BDW_GC_PREFIX`.
+- Every new side-table type needs registering in `library/metas.rs` (and must be
+  `Send`). A serialized struct change needs a bump of `library::FORMAT`; after
+  one, delete the `build/` directories. `design/library.md` says why.
+- `nestc` for twig and `nest-lsp` must be built from the same source.
+- Grammar edits: run `npx tree-sitter generate`, re-parse the corpus, re-copy
+  `highlights.scm`, commit, then bump `rev` in `editors/zed/extension.toml`.
+- Language gotchas that cost time while fuzzing: a line starting with `.`
+  continues the previous one (so match arms on their own lines need commas or
+  braces), ranges are `..<` and `..=` rather than `..`, a binding is `:=` and not
+  `=`, `return`/`break` in a match arm need a block, and there is no `++`.
+- `nestc/lsp/Cargo.toml` has a `[profile.release]` block that cargo ignores:
+  profiles only count in the workspace root manifest.
+
+## Failed Approaches (Don't Repeat These)
+
+- Driving the server with **incremental** `didChange` ranges: it advertises full
+  synchronization, so a range change makes its copy of the file the typed text
+  alone. Send the whole document.
+- Measuring "is the server re-analyzing" by CPU alone: an analysis of `std` in
+  release is ~100 ms and hides in the noise. Use `NEST_LSP_LOG`.
+- `git stash -- <path>` to check whether a fix is load-bearing, when the file is
+  already committed: it stashes nothing and the check silently passes.
+- In the escape-analysis tests, a case with no `drop` in its LIR proves nothing
+  about freeing too early. Run it under `NEST_GC_POISON=1`.
 
 ## User Notes
-- I want you to build tests for twig after @test is working,
-- Inside design/ directory, write a description of how nlib and nmeta formats work,
+
+- ~~LSP completions do not work~~: fixed in `77ad6d6`.
+- ~~Ensure the GC works properly~~: done in `d383dd1`.
+- ~~Document the `.nlib` and `.nmeta` formats in `design/`~~: `design/library.md`.
+- Fix the bugs found by the hunt (the seven above).
+- Add `opaque` (with `c.void` as an alias if it fits).
+- Build tests for twig after `@test` works.
+- LSP tests should keep covering odd editor scenarios.
