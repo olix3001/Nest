@@ -1034,6 +1034,15 @@ fn run_on_host(src: &str) -> std::process::Output {
 
 /// [`run_on_host`], with `-C` settings applied on top of the host's.
 fn run_on_host_with(src: &str, settings: &[(&str, &str)]) -> std::process::Output {
+    run_on_host_in(src, settings, &[])
+}
+
+/// [`run_on_host_with`], with variables added to the program's environment.
+fn run_on_host_in(
+    src: &str,
+    settings: &[(&str, &str)],
+    env: &[(&str, &str)],
+) -> std::process::Output {
     let mut probe = LlvmBackend::default();
     let info = probe.target_info(None).expect("the host resolves");
     let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
@@ -1076,7 +1085,52 @@ fn run_on_host_with(src: &str, settings: &[(&str, &str)]) -> std::process::Outpu
         &crate::codegen::link::LinkOptions::default(),
     )
     .unwrap_or_else(|e| panic!("linking:\n{e}"));
-    std::process::Command::new(&exe).output().expect("it runs")
+    std::process::Command::new(&exe)
+        .envs(env.iter().copied())
+        .output()
+        .expect("it runs")
+}
+
+// ===< The collector >===
+//
+// The programs are the ones in `examples/gc`, where each says what it checks and
+// what its exit status means.
+
+/// Allocating far more than fits in memory, with a little of it kept, leaves the
+/// collector's heap small.
+#[test]
+fn memory_nothing_reaches_is_collected() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let out = run_on_host(include_str!("../../../../examples/gc/collects.nest"));
+    assert_eq!(out.status.code(), Some(0), "the heap grew past 64 MB: {out:?}");
+}
+
+/// No allocation escape analysis frees is still reachable, however it left its
+/// scope. Freed memory is poisoned, so reading it is seen every time.
+#[test]
+fn nothing_is_freed_while_something_still_reaches_it() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let out = run_on_host_in(
+        include_str!("../../../../examples/gc/escapes.nest"),
+        &[],
+        &[("NEST_GC_POISON", "1")],
+    );
+    assert_eq!(out.status.code(), Some(0), "the case numbered by the status read freed memory: {out:?}");
+}
+
+/// A leaked object outlives everything that reached it, until it is dropped,
+/// and dropping some leaked objects keeps the rest.
+#[test]
+fn a_leaked_object_lives_until_it_is_dropped() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let out = run_on_host(include_str!("../../../../examples/gc/leak.nest"));
+    assert_eq!(out.status.code(), Some(0), "a leaked node was collected: {out:?}");
 }
 
 /// **Optimizing changes nothing a program does**: at every `opt-level`, and for

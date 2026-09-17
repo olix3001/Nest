@@ -132,10 +132,11 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // It is declared by whatever library owns the trait, which is why the row
     // is not tied to one: `core` cannot name a trait `std` has not written.
     plain("member_dyn"),
-    // The collector (§6.4.1). All three yield `void`.
+    // The collector (§6.4.1). All four yield `void`.
     plain("gc_collect"),
     plain("gc_keep_alive"),
     plain("gc_pin"),
+    plain("gc_leak"),
 ];
 
 /// The row for `tag`, or `None` if the compiler has never heard of it.

@@ -6,9 +6,9 @@
 #   twig       the build tool (Nest), bootstrapped with nestc, then rebuilt by itself
 #
 # Needs: rustup (the toolchain in nestc/rust-toolchain.toml is installed on
-# first use), a C compiler (`cc`), and LLVM 21. LLVM is found through
-# LLVM_SYS_211_PREFIX, then `brew --prefix llvm@21`, then `llvm-config-21` or
-# `llvm-config` reporting version 21.
+# first use), a C compiler (`cc`), the Boehm collector (bdw-gc), and LLVM 21.
+# LLVM is found through LLVM_SYS_211_PREFIX, then `brew --prefix llvm@21`, then
+# `llvm-config-21` or `llvm-config` reporting version 21.
 #
 # usage: ./build.sh [--debug]    (default: release)
 
@@ -30,6 +30,15 @@ fail() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 step "Checking tools"
 command -v cargo >/dev/null || fail "cargo not found; install Rust with rustup (https://rustup.rs)"
 command -v cc >/dev/null || fail "cc not found; install a C compiler (Xcode command line tools, or gcc/clang)"
+
+# The runtime allocates from the Boehm collector; nestc/build.rs finds it the
+# same way, and refuses to build without it.
+if [[ -z "${BDW_GC_PREFIX:-}" ]] && command -v brew >/dev/null && [[ -d "$(brew --prefix bdw-gc)" ]]; then
+  export BDW_GC_PREFIX="$(brew --prefix bdw-gc)"
+fi
+if [[ -z "${BDW_GC_PREFIX:-}" ]] && ! { [[ -f /usr/include/gc.h ]] || [[ -f /usr/local/include/gc.h ]]; }; then
+  fail "the Boehm collector was not found; install it (\`brew install bdw-gc\`, or your distribution's libgc-dev) or set BDW_GC_PREFIX"
+fi
 
 if [[ -z "${LLVM_SYS_211_PREFIX:-}" ]]; then
   if command -v brew >/dev/null && brew --prefix llvm@21 >/dev/null 2>&1 && [[ -d "$(brew --prefix llvm@21)" ]]; then

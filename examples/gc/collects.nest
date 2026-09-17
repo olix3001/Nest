@@ -1,0 +1,28 @@
+// collects.nest — memory is collected. Allocates about 8 GB in a loop, in every
+// shape `new` and `make` produce, while holding on to a little of it, and exits
+// 1 if the collector's heap grew past 64 MB. Exits 0 otherwise.
+
+{ new, make } :: import <core/mem>
+
+Node :: struct { next: *mut Node, value: i64 }
+
+extern("c") {
+  GC_get_heap_size :: func () -> usize
+}
+
+// A chain of 1000 nodes stays reachable at a time; the one before it does not.
+main :: func () -> i32 {
+  let mut kept: *mut Node := new.<Node>()
+  let mut i: i64 := 0
+  while i < 2000000 {
+    let n := new.<Node>()
+    n.*.next = kept
+    n.*.value = i
+    if i % 1000 == 0 { kept = new.<Node>() } else { kept = n }
+    let buf: []mut u8 := make.<[]u8>(4096)
+    buf[0] = 1
+    i = i + 1
+  }
+  if GC_get_heap_size() > 64000000 { return 1 }
+  return 0
+}

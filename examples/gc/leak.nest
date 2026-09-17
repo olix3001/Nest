@@ -1,0 +1,68 @@
+// leak.nest — `gc_leak` keeps alive what nothing reaches, until `drop`.
+//
+// 1000 nodes are leaked, and their addresses kept only in memory `malloc`
+// allocated, which the collector does not scan. After a loop that allocates
+// enough to be collected several times over, every node still holds its value.
+// Half are then dropped, and the other half survive another such loop.
+//
+// Exits 0 when they did, 1 when a leaked node was collected, 2 when one of the
+// half still leaked was lost after the others were dropped.
+
+{ new, make, drop, transmute } :: import <core/mem>
+{ gc_leak, gc_collect } :: import <core/gc>
+
+Node :: struct { x: i64, pad: [8]i64 }
+
+extern("c") {
+  malloc :: func (n: usize) -> *mut *mut Node
+}
+
+// The `i`th slot of the `malloc`ed array.
+slot :: func (held: *mut *mut Node, i: usize) -> *mut *mut Node {
+  return transmute.<*mut *mut Node>(transmute.<usize>(held) + i * 8)
+}
+
+churn :: func () {
+  let mut i := 0
+  while i < 200000 {
+    let q := new.<Node>()
+    q.*.x = -1
+    let s: []mut i64 := make.<[]i64>(64)
+    s[3] = -1
+    i = i + 1
+  }
+  gc_collect()
+}
+
+main :: func () -> i32 {
+  let count: usize := 1000
+  let held := malloc(count * 8)
+  let mut i: usize := 0
+  while i < count {
+    let p := new.<Node>()
+    p.*.x = cast.<i64>(i)
+    gc_leak(p)
+    slot(held, i).* = p
+    i = i + 1
+  }
+
+  churn()
+  i = 0
+  while i < count {
+    if slot(held, i).*.*.x != cast.<i64>(i) { return 1 }
+    i = i + 1
+  }
+
+  i = 0
+  while i < count {
+    drop(slot(held, i).*)
+    i = i + 2
+  }
+  churn()
+  i = 1
+  while i < count {
+    if slot(held, i).*.*.x != cast.<i64>(i) { return 2 }
+    i = i + 2
+  }
+  return 0
+}

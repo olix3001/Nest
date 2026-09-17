@@ -1286,6 +1286,49 @@ f :: func () -> i32 {
     assert!(!lir.contains("drop "), "{lir}");
 }
 
+/// Taking the address of anything inside an allocation lets the object leave
+/// with the address, however far down the place the `&` is: a member, an
+/// element, or the array a sub-slice is cut from.
+#[test]
+fn an_address_inside_an_allocation_escapes_with_it() {
+    for (ret, body) in [
+        ("*i64", "return &p.*.x"),
+        ("*mut i64", "return &mut p.*.arr[2]"),
+        ("[]i64", "return p.*.arr[0..]"),
+    ] {
+        let lir = lir_text(&format!(
+            "\
+{{ new }} :: import <core/mem>
+Node :: struct {{ x: i64, arr: [4]i64 }}
+f :: func () -> {ret} {{
+  let p := new.<Node>()
+  p.*.x = 7
+  {body}
+}}
+"
+        ));
+        assert!(!lir.contains("drop "), "`{body}`:\n{lir}");
+    }
+}
+
+/// An element read and written in place keeps its allocation a candidate: the
+/// address `$index` makes is used up on the spot.
+#[test]
+fn an_element_used_in_place_does_not_disqualify_its_allocation() {
+    let lir = lir_text(
+        "\
+{ new } :: import <core/mem>
+Node :: struct { arr: [4]i64 }
+f :: func () -> i64 {
+  let p := new.<Node>()
+  p.*.arr[2] = 7
+  return p.*.arr[2]
+}
+",
+    );
+    assert!(lir.contains("drop p_"), "{lir}");
+}
+
 /// A returned allocation outlives its scope, which is the first rule §5 lists.
 #[test]
 fn a_returned_allocation_is_not_dropped() {

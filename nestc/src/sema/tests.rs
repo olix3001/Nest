@@ -2032,6 +2032,29 @@ f :: func (b: Box.<E>) -> i32 { return b.match { { value: .a } => 0 } }
     );
 }
 
+#[test]
+fn a_binding_to_a_struct_that_points_at_itself_is_checked_without_expanding_it() {
+    // `m` is a wildcard on `*mut Node`, and `Node` reaches `*mut Node` again
+    // through `next`. Splitting a wildcard column into its fields would never
+    // stop; this overflowed the compiler's stack.
+    let ok = "\
+Node :: struct { x: i64, next: *mut Node }
+f :: func (n: Option.<*mut Node>) -> i64 { match n { .some(m) => { return m.x }, .none => { return 0 } } }
+";
+    assert!(messages(ok).is_empty(), "{:#?}", messages(ok));
+
+    let bad = "\
+Node :: struct { x: i64, next: *mut Node }
+f :: func (n: Option.<*mut Node>) -> i64 { match n { .some(m) => { return m.x } }
+  return 0 }
+";
+    assert!(
+        only_message(bad).contains("`.none` is not covered"),
+        "{}",
+        only_message(bad)
+    );
+}
+
 // ===< The `#const` check >===
 
 const CONST_PRELUDE: &str = "\

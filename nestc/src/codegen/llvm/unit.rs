@@ -1606,6 +1606,14 @@ impl<'ctx> Cx<'ctx, '_> {
             // already alive and a pinned one already never moves. They become
             // instructions the day the collector does.
             Intrinsic::GcKeepAlive | Intrinsic::GcPin => Ok(()),
+            // The object becomes a root until `drop` releases it, which is
+            // the runtime's to track: `nest_free` is where a drop ends up.
+            Intrinsic::GcLeak => {
+                let v = self.operand(fx, f, &args[0], &Ty::ptr(Ty::Bool))?;
+                let leak = self.runtime("nest_gc_leak", &[self.ptr().into()], None);
+                self.builder.build_call(leak, &[v.into()], "").map_err(failed)?;
+                Ok(())
+            }
             // "Reinterpret as whatever this slot holds" — so the bytes are
             // written to the destination and read back at its type, which is
             // exactly what the operation says and needs no instruction.

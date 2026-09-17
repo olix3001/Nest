@@ -399,6 +399,13 @@ place being read or written — `p.*.x`, `p.*`, `p.*.x = 1`. Anything else
 disqualifies it, including forms that would be provably fine, because a whitelist
 that is wrong leaks and a blacklist that is wrong corrupts memory.
 
+A place whose **address** is taken is not a read or a write, however far down it
+the `&` is. `&p.*.x`, `&mut p.*.arr[2]` and `p.*.arr[0..]` (a sub-slice is the
+array's own storage) each hand out an address inside the object, so each
+disqualifies `p`. An element used in place, `p.*.arr[2] = 7`, does not: the
+address `$index` makes is consumed by the `.*` on the spot. `examples/gc/escapes.nest`
+checks the ways an object can leave by running them with freed memory poisoned.
+
 One ordering rule falls out of the ladder being shared. A rung is built at the
 first exit that needs it (§3), so a `let` that comes *after* an exit has no slot
 yet when that rung is built, and putting a drop there would free a slot the path
@@ -522,13 +529,14 @@ separately, which costs a word on the most common data type in the language.
 
 ### User control
 
-Three intrinsics:
+Four intrinsics:
 
 | Intrinsic | Meaning |
 |---|---|
 | `$gc_collect()` | Request a collection now. |
 | `$gc_keep_alive(x)` | A no-op that **counts as a use**, so `x` stays in the live set up to this point. |
-| `$gc_pin(x)` | Make an object immortal and immovable. |
+| `$gc_pin(x)` | Make an object immovable. |
+| `$gc_leak(p)` | Keep an object alive until `drop(p)`. |
 
 `$gc_keep_alive` exists for a specific failure. Liveness ends at the last *read*,
 so this is wrong:
@@ -543,8 +551,17 @@ The collector may free or move `buf` during the call even though C is using its
 address. `$gc_keep_alive(buf)` after the call extends the live range across it.
 
 `$gc_pin` is for handing a pointer to C for longer than one call. A pinned object
-is never moved and never collected, which is a leak by construction — that is the
-trade, and it is why the intrinsic is explicit rather than inferred.
+is never moved, so the address C holds stays valid while the object lives. It is
+not kept alive: memory C allocated is not scanned, so the program keeps its own
+reference for as long as C may use the address.
+
+Under Boehm both are nothing. It scans stacks and registers and recognizes
+interior pointers, so an address a C call is using keeps its object; and it never
+moves anything, so every object is already pinned.
+
+`$gc_leak` is a call, `nest_gc_leak(p)`: the runtime keeps `p` in a set allocated
+uncollectable, which the collector scans as a root. `nest_free` removes it, so a
+`drop` ends the leak on the same instruction that frees.
 
 ### What is not a root
 
@@ -1385,9 +1402,9 @@ the four names it used to have for "build a struct" were four names for one
 operation, and the type says which struct. `Offset` is a GEP in elements with the
 stride in bytes beside it.
 
-**Nine intrinsics** reach a backend, and each is one instruction or one
+**Ten intrinsics** reach a backend, and each is one instruction or one
 runtime call: `new`, `make`, `trap`, `assert`, `transmute`, `embed_file`,
-`gc_collect`, `gc_keep_alive`, `gc_pin`. Everything else a
+`gc_collect`, `gc_keep_alive`, `gc_pin`, `gc_leak`. Everything else a
 `#intrinsic` declares is *gone* by this point — `size_of`, `align_of` and `cast`
 are constants, `index` and `len` are projections, `wrapping_add` and
 `wrapping_sub` are opcodes, `drop` is a statement. A test asserts that mapping is

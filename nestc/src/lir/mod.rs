@@ -622,6 +622,8 @@ pub enum Intrinsic {
     GcKeepAlive,
     /// Pin this object for the duration (§6.4.1).
     GcPin,
+    /// Keep this object alive until it is dropped (§6.4.1).
+    GcLeak,
     /// An intrinsic this lowering has no case for.
     ///
     /// It exists so that adding a row to `sema::intrinsics` cannot silently
@@ -644,6 +646,7 @@ impl Intrinsic {
             Intrinsic::GcCollect => "gc_collect",
             Intrinsic::GcKeepAlive => "gc_keep_alive",
             Intrinsic::GcPin => "gc_pin",
+            Intrinsic::GcLeak => "gc_leak",
             Intrinsic::Unknown(s) => s.as_str(),
         }
     }
@@ -660,6 +663,7 @@ impl Intrinsic {
             "gc_collect" => Intrinsic::GcCollect,
             "gc_keep_alive" => Intrinsic::GcKeepAlive,
             "gc_pin" => Intrinsic::GcPin,
+            "gc_leak" => Intrinsic::GcLeak,
             _ => Intrinsic::Unknown(name.clone()),
         }
     }

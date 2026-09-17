@@ -22,6 +22,13 @@ use std::process::Command;
 /// Where the runtime archive `build.rs` produced ended up, if it produced one.
 const RUNTIME: Option<&str> = option_env!("NEST_RUNTIME_LIB");
 
+/// The collector the runtime was compiled against, as tab-separated link-line
+/// arguments: `libgc.a`, or `-L<dir>` and `-lgc`. It comes after the runtime on
+/// every link, `-C runtime=` included — an archive only contributes what
+/// something still needs, so a runtime that does not call Boehm pulls in none of
+/// it.
+const GC: Option<&str> = option_env!("NEST_GC_LIB");
+
 /// What a link needs beyond the objects: the tool, the runtime, and whatever
 /// the person invoking it knows that this compiler does not.
 ///
@@ -39,8 +46,8 @@ pub struct LinkOptions {
     /// system libraries, and this one must do no such thing.
     pub partial_linker: String,
     /// `-C link-arg=` — one extra argument, repeatable, passed through in the
-    /// order given. `-lgc` for a Boehm runtime, `-L`/`-l` for a C library a
-    /// program declares with `extern("c")`.
+    /// order given. `-L`/`-l` for a C library a program declares with
+    /// `extern("c")`.
     pub args: Vec<String>,
     /// `-C runtime=` — the runtime archive or object, overriding the one built
     /// beside the compiler. A cross-compilation needs this, because the runtime
@@ -125,7 +132,9 @@ pub fn combine(objects: &[PathBuf], out: &Path, options: &LinkOptions) -> Result
 pub fn link(objects: &[PathBuf], out: &Path, options: &LinkOptions) -> Result<(), String> {
     let runtime = options.runtime_path()?;
     let mut command = Command::new(&options.linker);
-    command.args(objects).arg(&runtime).arg("-o").arg(out);
+    command.args(objects).arg(&runtime);
+    command.args(GC.into_iter().flat_map(|l| l.split('\t')));
+    command.arg("-o").arg(out);
     command.args(&options.args);
 
     let status = command.status().map_err(|e| {

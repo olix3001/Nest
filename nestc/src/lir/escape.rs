@@ -93,6 +93,11 @@ enum Ctx {
     /// Everything else — an argument, a returned value, a member of an
     /// aggregate, the right-hand side of a store.
     Escaping,
+    /// A place whose **address** is taken: `&p.*.x`, or the array a sub-slice
+    /// is cut from. A projection does not protect its base here, because the
+    /// address it makes points into the same object — the object leaves with
+    /// it.
+    Addressed,
 }
 
 #[derive(Default)]
@@ -191,15 +196,37 @@ impl Escape {
     fn uses_expr(&mut self, e: &Expr, ctx: Ctx) {
         match &e.kind {
             ExprKind::Local(def) => {
-                if ctx == Ctx::Escaping && self.candidates.contains(def) {
+                if ctx != Ctx::Projected && self.candidates.contains(def) {
                     self.escaped.insert(*def);
                 }
             }
-            // A place path: the base is reached *through*, not handed out.
-            ExprKind::Deref { base } | ExprKind::Field { base, .. } => {
-                self.uses_expr(base, Ctx::Projected)
+            ExprKind::Ref { place, .. } => self.uses_expr(place, Ctx::Addressed),
+            // An element read or written in place, `p.*.xs[i]`: `$index` makes
+            // an address into the object and the `.*` consumes it on the spot.
+            // Under a `&` the address is kept, and the general arms see that.
+            ExprKind::Deref { base } if ctx != Ctx::Addressed => match &base.kind {
+                ExprKind::Intrinsic { name, args, .. }
+                    if matches!(name.as_str(), "index" | "index_mut") && args.len() == 2 =>
+                {
+                    match &args[0].kind {
+                        ExprKind::Ref { place, .. } => self.uses_expr(place, Ctx::Projected),
+                        _ => self.uses_expr(&args[0], Ctx::Escaping),
+                    }
+                    self.uses_expr(&args[1], Ctx::Escaping);
+                }
+                _ => self.uses_expr(base, Ctx::Projected),
+            },
+            // A place path: the base is reached *through*, not handed out —
+            // unless the path's address is what is being taken.
+            ExprKind::Deref { base } | ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => {
+                let inner = if ctx == Ctx::Addressed { Ctx::Addressed } else { Ctx::Projected };
+                self.uses_expr(base, inner)
             }
-            ExprKind::TupleIndex { base, .. } => self.uses_expr(base, Ctx::Projected),
+            // A sub-slice of an array is the array's own storage.
+            ExprKind::Intrinsic { name, args, .. } if name.as_str() == "slice" && !args.is_empty() => {
+                self.uses_expr(&args[0], Ctx::Addressed);
+                args[1..].iter().for_each(|a| self.uses_expr(a, Ctx::Escaping));
+            }
             _ => {
                 each_block(e, &mut |b| self.uses_block(b));
                 each_child(e, &mut |c| self.uses_expr(c, Ctx::Escaping));

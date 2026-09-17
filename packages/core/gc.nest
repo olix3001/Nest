@@ -3,7 +3,7 @@
 // Memory is collected automatically and none of these is needed by ordinary
 // code. They exist because two things the collector cannot see from the outside
 // — a pointer that has escaped to C, and a pointer C will hold for longer than
-// one call — have no other expression. All three return `void`: what they do is
+// one call — have no other expression. All four return `void`: what they do is
 // change what the collector may do next, not hand anything back.
 //
 // None of them is in the prelude. Reaching for one is a deliberate act, and it
@@ -17,6 +17,14 @@
 // interior pointer can be moved or freed during the call unless this follows it.
 @public gc_keep_alive :: #intrinsic("gc_keep_alive") func <T> (x: T) -> void
 
-// Make `x`'s object immortal and immovable. That is a leak by construction, and
-// it is the trade for handing a pointer to C for longer than one call.
+// Make `x`'s object immovable, so an address handed to C for longer than one
+// call stays its address. It does not keep the object alive: that still takes a
+// reference the program holds, since the collector does not look inside memory
+// C allocated.
 @public gc_pin :: #intrinsic("gc_pin") func <T> (x: T) -> void
+
+// Keep `p`'s object alive whether or not anything reaches it, until `drop(p)`
+// releases it. This is the reference a program holds for C when it has nowhere
+// else to hold one — a callback's context, a buffer the other side keeps — and
+// without the `drop` it is a leak.
+@public gc_leak :: #intrinsic("gc_leak") func <T> (p: *mut T) -> void

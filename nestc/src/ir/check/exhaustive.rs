@@ -435,7 +435,17 @@ impl Cx<'_> {
             // constructors already exhaust the type.
             None => {
                 let seen = self.column_ctors(p, &ty);
-                let split = self.split(&ty, &seen);
+                let split = match self.split(&ty, &seen) {
+                    // No row names a constructor here, so every row already
+                    // matches whatever is in the column and trying each
+                    // constructor learns nothing. It must not be tried anyway:
+                    // a struct reaching itself through a pointer field would be
+                    // expanded forever.
+                    Split::Complete(ctors) if seen.is_empty() && !ctors.is_empty() => {
+                        Split::Missing(None)
+                    }
+                    split => split,
+                };
                 match split {
                     // Complete: a wildcard is only as good as trying each.
                     Split::Complete(ctors) => {

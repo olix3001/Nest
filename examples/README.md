@@ -18,6 +18,13 @@ exist.
 | `arrays.nest` | `[N]T` lengths, `<const N: usize>` value generics, `.len` / `len`, array→slice |
 | `dispatch.nest` | `@using` upcasts, `dyn` trait objects, bound-directed calls |
 
+`gc/` holds three programs about the collector, each run by a test in
+`nestc/src/codegen/llvm/tests.rs`. They import `core`, and their exit status is
+the answer: `collects.nest` (memory nothing reaches is collected),
+`escapes.nest` (escape analysis frees nothing still reachable; run it with
+`NEST_GC_POISON=1`) and `leak.nest` (`gc_leak` keeps an object alive until
+`drop`).
+
 `use_math.nest` is the cross-file example: `math :: import "math.nest"` binds the
 sibling file's namespace, and its `@public` functions are reached as
 `math.add(...)`, `math.factorial(...)`.

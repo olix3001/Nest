@@ -10,48 +10,55 @@
  *
  * `new` and `make` allocate from the collector, and the generated code could
  * have called `GC_malloc` directly. It calls `nest_alloc` instead so that which
- * collector is linked is a **link-time** choice: the Boehm build and the
- * malloc-and-leak build produce the same object files from the same compiler.
+ * collector is linked is a **link-time** choice: another collector produces the
+ * same object files from the same compiler.
  * Go and OCaml both put a shim here for the same reason. The indirection costs
- * nothing — with `NEST_GC_BOEHM` these are one-line forwards the C compiler
- * inlines.
+ * nothing — these are one-line forwards the C compiler inlines.
  *
  * ## Which collector
  *
- * Boehm (bdwgc), when built with `-DNEST_GC_BOEHM`. It is **conservative**: it
+ * Boehm (bdwgc), and nothing else. It is **conservative**: it
  * finds roots by scanning the stack and registers itself, which is why the
  * backend emits no root maps even though `design/lir.md` §6 computed a precise
  * live set at every safepoint. Those live sets are what a precise or moving
  * collector would need, and this is the file that would change to want them.
  *
- * Without that define the allocator is `calloc` and nothing is ever collected,
- * which is a correct program that grows. It exists so the runtime builds with no
- * dependencies at all.
+ * There used to be a second build, `calloc` with nothing ever collected. It was
+ * removed: a program that grows until the machine runs out is not a correct
+ * program, and a build that nothing tests is not one that keeps working.
  *
  * ## Building
  *
- *   cc -c -O2 nest_runtime.c -o nest_runtime.o                    # leaking
- *   cc -c -O2 -DNEST_GC_BOEHM nest_runtime.c -o nest_runtime.o    # collected
+ *   cc -c -O2 -I<bdwgc>/include nest_runtime.c -o nest_runtime.o
  *
  * and then link a Nest object against it:
  *
  *   nestc --emit obj -o prog.o prog.nest
- *   cc prog.o nest_runtime.o -o prog            # add -lgc for the Boehm build
+ *   cc prog.o nest_runtime.o <bdwgc>/lib/libgc.a -o prog
  *
- * `nestc` does this itself for an ordinary build: `nestc/build.rs` compiles this
- * file into `libnest_runtime.a` beside the compiler and `nestc prog.nest` links
- * against it, so the two commands above are what a *different* runtime is
- * substituted with — built how you like, and passed as `-C runtime=<path>`
- * (`-C link-arg=-lgc` for the Boehm build's dependency).
+ * `nestc` does this itself for an ordinary build: `nestc/build.rs` finds the
+ * collector, compiles this file into `libnest_runtime.a` beside the compiler,
+ * and `nestc prog.nest` links against both. The commands above are what a
+ * *different* runtime is substituted with, passed as `-C runtime=<path>`.
+ *
+ * ## Poisoning frees
+ *
+ * With `NEST_GC_POISON` set in the environment, `nest_free` fills the object
+ * with `0xDB` and keeps it instead of releasing it. A program that reads an
+ * object after the compiler freed it then reads garbage every time, rather than
+ * only when the collector happens to have handed the memory out again. It is
+ * how the escape analysis is tested (`design/lir.md` §5).
  */
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-#ifdef NEST_GC_BOEHM
 #include <gc.h>
-#endif
+
+/* Whether `NEST_GC_POISON` was set when the program started. */
+static int poison;
 
 /* Allocate `n` zeroed bytes that the collector owns.
  *
@@ -60,12 +67,7 @@
  * pointers. `n == 0` still returns a distinct address: a zero-length slice has
  * a valid pointer (`design/lir.md` §10). */
 void *nest_alloc(size_t n) {
-    void *p;
-#ifdef NEST_GC_BOEHM
-    p = GC_malloc(n ? n : 1);
-#else
-    p = calloc(1, n ? n : 1);
-#endif
+    void *p = GC_malloc(n ? n : 1);
     if (!p) {
         fputs("nest: out of memory\n", stderr);
         abort();
@@ -73,27 +75,108 @@ void *nest_alloc(size_t n) {
     return p;
 }
 
+/* The objects `gc_leak` was given and `drop` has not released: a set of
+ * addresses, open-addressed with linear probing, in a block the collector scans
+ * and never collects. That block is what keeps each of them alive.
+ *
+ * A set rather than a list because `nest_free` asks it about every pointer it
+ * frees, and most of those were never leaked. */
+static void **leaked;
+static size_t leaked_len, leaked_cap;
+
+static size_t leaked_slot(void *p) {
+    size_t h = (size_t)p >> 3;
+    h ^= h >> 17;
+    h *= 0x9E3779B97F4A7C15u;
+    return (h ^ (h >> 29)) & (leaked_cap - 1);
+}
+
+static void leaked_insert(void *p) {
+    size_t i = leaked_slot(p);
+    while (leaked[i] && leaked[i] != p) {
+        i = (i + 1) & (leaked_cap - 1);
+    }
+    if (!leaked[i]) {
+        leaked[i] = p;
+        leaked_len++;
+    }
+}
+
+/* Keep `p` alive until it is freed. Leaking it twice is leaking it once. */
+void nest_gc_leak(void *p) {
+    if (!p) {
+        return;
+    }
+    if ((leaked_len + 1) * 2 > leaked_cap) {
+        void **old = leaked;
+        size_t old_cap = leaked_cap;
+        leaked_cap = old_cap ? old_cap * 2 : 64;
+        leaked = GC_malloc_uncollectable(leaked_cap * sizeof *leaked);
+        if (!leaked) {
+            fputs("nest: out of memory\n", stderr);
+            abort();
+        }
+        memset(leaked, 0, leaked_cap * sizeof *leaked);
+        leaked_len = 0;
+        for (size_t i = 0; i < old_cap; i++) {
+            if (old[i]) {
+                leaked_insert(old[i]);
+            }
+        }
+        GC_free(old);
+    }
+    leaked_insert(p);
+}
+
+/* Forget `p` if it was leaked. Deleting from a linearly probed table shifts the
+ * entries after it back, so a lookup never stops early at the hole. */
+static void leaked_remove(void *p) {
+    if (!leaked_len) {
+        return;
+    }
+    size_t i = leaked_slot(p);
+    while (leaked[i] != p) {
+        if (!leaked[i]) {
+            return;
+        }
+        i = (i + 1) & (leaked_cap - 1);
+    }
+    leaked[i] = NULL;
+    leaked_len--;
+    for (size_t j = (i + 1) & (leaked_cap - 1); leaked[j]; j = (j + 1) & (leaked_cap - 1)) {
+        void *q = leaked[j];
+        size_t home = leaked_slot(q);
+        /* `q` may move into the hole at `i` unless its home lies cyclically
+         * in (i, j], where it would no longer be found. */
+        if ((j > i && (home <= i || home > j)) || (j < i && home <= i && home > j)) {
+            leaked[i] = q;
+            leaked[j] = NULL;
+            i = j;
+        }
+    }
+}
+
 /* Release `p`.
  *
  * This is a **hint**, and under a collector it is one the collector may ignore.
  * It is the instruction the escape analysis emits on its own (§5) and the one a
- * written `drop(p)` produces, so there is one of them rather than two. */
+ * written `drop(p)` produces, so there is one of them rather than two. It is
+ * also what ends a `gc_leak`. */
 void nest_free(void *p) {
     if (!p) {
         return;
     }
-#ifdef NEST_GC_BOEHM
+    leaked_remove(p);
+    if (poison) {
+        memset(p, 0xDB, GC_size(p));
+        return;
+    }
     GC_free(p);
-#else
-    free(p);
-#endif
 }
 
 /* Run a collection now. `gc_collect()` in source. */
 void nest_gc_collect(void) {
-#ifdef NEST_GC_BOEHM
     GC_gcollect();
-#endif
 }
 
 /* The arguments the process was started with, kept.
@@ -119,9 +202,12 @@ void nest_gc_collect(void) {
  * claims `#lang("start")` now — `std/sys` — and this prepares the collector,
  * which is a fact about the machine and is all of what belongs here. */
 void nest_init(void) {
-#ifdef NEST_GC_BOEHM
+    /* A sub-slice points into the middle of its array, and is all that may be
+     * left of it. This is Boehm's default already; it is set here because the
+     * language depends on it. */
+    GC_set_all_interior_pointers(1);
     GC_INIT();
-#endif
+    poison = getenv("NEST_GC_POISON") != NULL;
 }
 
 /* The environment, `NAME=value` per entry and NULL-terminated.

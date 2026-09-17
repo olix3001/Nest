@@ -167,7 +167,8 @@ The intrinsics (extensible; not a closed list):
 | `embed_file("path")` | splice a file's bytes as a compile-time `[]u8` |
 | `gc_collect()` | request a collection now (§6.4.1) |
 | `gc_keep_alive(x)` | keep `x` reachable up to this point (§6.4.1) |
-| `gc_pin(x)` | make `x`'s object immortal and immovable (§6.4.1) |
+| `gc_pin(x)` | make `x`'s object immovable (§6.4.1) |
+| `gc_leak(p)` | keep `p`'s object alive until `drop(p)` (§6.4.1) |
 | `wrapping_add`, `checked_add`, `saturating_add`, … | integer operations with a stated overflow behaviour; inherent methods on `int.<N>` / `uint.<N>` (§3.1) |
 
 ```nest
@@ -199,14 +200,15 @@ why `cast(8080)` and `embed_file(...)` may appear on the RHS of `::`.
 Memory is collected automatically and none of these is needed by ordinary code.
 They exist because two things the collector cannot see from the outside — a
 pointer that has escaped to C, and a pointer C will hold for longer than one call
-— have no other expression. All three return `void`: what they do is change what
+— have no other expression. All four return `void`: what they do is change what
 the collector may do next.
 
 | Intrinsic | Meaning |
 |---|---|
 | `gc_collect()` | Request a collection now. A hint, not a guarantee. |
 | `gc_keep_alive(x)` | A no-op that **counts as a use**, so `x` stays reachable up to this point. |
-| `gc_pin(x)` | Make the object immortal and immovable. |
+| `gc_pin(x)` | Make the object immovable. |
+| `gc_leak(p)` | Keep the object alive until `drop(p)`, reachable or not. |
 
 `gc_keep_alive` exists for one specific failure. A value's live range ends at
 its last **read**, so this is wrong:
@@ -222,9 +224,16 @@ address. `gc_keep_alive(buf)` **after** the call extends the live range across
 it.
 
 `gc_pin` is for handing a pointer to C for longer than one call — a callback
-registration, a buffer the other side keeps. A pinned object is never moved and
-never collected, which is a leak by construction. That is the trade, and it is
-why the intrinsic is explicit rather than something the compiler infers.
+registration, a buffer the other side keeps. A pinned object is never moved, so
+the address C holds stays the object's address. It is **not** kept alive: it is
+collected like anything else once nothing in the program reaches it, because
+memory C allocated is not somewhere the collector looks. A program that hands C
+a pointer to keep also keeps a reference of its own — in a `#static`, say — for
+as long as C may use it.
+
+`gc_leak(p)` is that reference when the program has nowhere to put one: the
+object stays alive whether anything reaches it or not, until `drop(p)` releases
+it. Without the `drop` it lives as long as the process — a leak, by request.
 
 ## 6.5 `cast`
 
