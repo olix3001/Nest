@@ -43,6 +43,11 @@ options:
                          to that file instead
   -L <dir>               a directory to search for packages; `<foo/...>` is
                          <dir>/foo/package.nest. Repeatable, in order
+  -l <name>              a C library to link against, as the linker names it:
+                         `-l m`, `-lsfml-graphics`. Repeatable, in order.
+                         `--link-lib <name>` is the same flag spelled out
+  --link-search <dir>    a directory to look for those libraries in. Not `-L`,
+                         which is this compiler's package search path
   --color <when>         auto (default), always or never: colour in human
                          diagnostics; auto means when stderr is a terminal
                          and `NO_COLOR` is not set
@@ -361,6 +366,24 @@ impl Invocation {
                         .split_once('=')
                         .ok_or_else(|| format!("`{flag} {spec}` is not a `name=path` pair"))?;
                     externs.push((name.to_string(), PathBuf::from(lib), flag == "--extern"));
+                }
+                a if a == "-l" || a.starts_with("-l") && a.len() > 2 => {
+                    // `-l name` and `-lname` both, which is what every C
+                    // toolchain accepts and what a person pasting a
+                    // `pkg-config` line has in hand.
+                    link_options.libs.push(match arg.strip_prefix("-l") {
+                        Some("") => args.next().ok_or("`-l` wants a library name")?,
+                        Some(rest) => rest.trim_start_matches('=').to_string(),
+                        None => unreachable!(),
+                    });
+                }
+                a if a == "--link-lib" || a.starts_with("--link-lib=") => {
+                    link_options.libs.push(value("--link-lib", &mut args)?);
+                }
+                a if a == "--link-search" || a.starts_with("--link-search=") => {
+                    link_options
+                        .search
+                        .push(PathBuf::from(value("--link-search", &mut args)?));
                 }
                 a if a == "--obj-dir" || a.starts_with("--obj-dir=") => {
                     obj_dir = Some(PathBuf::from(value("--obj-dir", &mut args)?));

@@ -46,9 +46,19 @@ pub struct LinkOptions {
     /// system libraries, and this one must do no such thing.
     pub partial_linker: String,
     /// `-C link-arg=` — one extra argument, repeatable, passed through in the
-    /// order given. `-L`/`-l` for a C library a program declares with
-    /// `extern("c")`.
+    /// order given, for whatever this compiler has no spelling of its own for.
     pub args: Vec<String>,
+    /// `-l <name>` — a C library to link against, by the name the linker knows
+    /// it by: `-l m`, `-lsfml-graphics`. What a program that declares a symbol
+    /// `extern("c")` needs, so it has a spelling of its own rather than an
+    /// argument passed blindly through.
+    pub libs: Vec<String>,
+    /// `--link-search <dir>` — a directory to look for those libraries in.
+    ///
+    /// Not `-L`, which this compiler already spends on *package* search paths.
+    /// The name is the one a build script's `twig:link-search` directive will
+    /// carry, so the two agree.
+    pub search: Vec<PathBuf>,
     /// `-C runtime=` — the runtime archive or object, overriding the one built
     /// beside the compiler. A cross-compilation needs this, because the runtime
     /// built here is for the host.
@@ -61,6 +71,8 @@ impl Default for LinkOptions {
             linker: "cc".to_string(),
             partial_linker: "ld".to_string(),
             args: Vec::new(),
+            libs: Vec::new(),
+            search: Vec::new(),
             runtime: None,
         }
     }
@@ -136,6 +148,15 @@ pub fn link(objects: &[PathBuf], out: &Path, options: &LinkOptions) -> Result<()
     command.args(GC.into_iter().flat_map(|l| l.split('\t')));
     command.arg("-o").arg(out);
     command.args(&options.args);
+    // After the objects, which is where a linker that resolves left to right
+    // wants them: a library is searched for the symbols the objects before it
+    // left undefined.
+    for dir in &options.search {
+        command.arg("-L").arg(dir);
+    }
+    for lib in &options.libs {
+        command.arg(format!("-l{lib}"));
+    }
 
     let status = command.status().map_err(|e| {
         format!(
