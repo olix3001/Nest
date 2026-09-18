@@ -20,6 +20,8 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, Lit, NodeId, NodeKind, StructKind};
@@ -28,8 +30,97 @@ use super::DefMeta;
 use super::Resolution;
 use super::def::{DefId, DefKind, DefTable};
 
+/// What a definition declares, as the pass that read its syntax concluded it.
+///
+/// One per definition that declares anything — a function, a type, a trait's
+/// associated item. Everything else (a local, an import, a primitive) declares
+/// nothing a use site has to look up, and has no entry.
+///
+/// This is what a **library** carries in place of the trees it was analyzed
+/// from. A question asked of a definition in another package is answered from
+/// here or not at all, which is why each variant holds the *answer* rather than
+/// a position to go and look one up: the position would point into a file this
+/// compilation does not have.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Decl {
+    /// A `func`, free or associated.
+    Func(FuncDecl),
+    /// A `struct`, an `enum` or a `trait`.
+    Type(TypeDecl),
+    /// A trait's associated type or constant.
+    Assoc(AssocDecl),
+}
+
+/// What a call site needs to know about a function it is calling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FuncDecl {
+    /// Its **value** parameters, `self` excluded, in declaration order.
+    ///
+    /// The receiver is left out because it is not one of a call's written
+    /// arguments, so these line up with the arguments either way.
+    pub params: Vec<Param>,
+    /// Its generic parameters — types **and** `const` values — in source order,
+    /// which is the order `.<...>` arguments bind to.
+    pub generics: Vec<GenericParam>,
+    /// Whether it has a body. A trait method without one is a requirement an
+    /// impl must satisfy; with one it is a default the impl may inherit.
+    pub has_body: bool,
+}
+
+/// What a use of a `struct` / `enum` / `trait` needs to know about it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeDecl {
+    /// The generic parameters it declares, in source order. The number of type
+    /// arguments a nominal use carries is this list's length.
+    pub generics: Vec<GenericParam>,
+    /// A record struct's field names, in declaration order — empty for a tuple
+    /// struct, a unit struct, an `enum` or a `trait`.
+    ///
+    /// Order is the whole point: a literal that spreads a base fills the fields
+    /// it did not write, and the IR reads a struct's members positionally, so
+    /// two compilations have to agree on it.
+    pub fields: Vec<Symbol>,
+}
+
+/// A trait's associated type or constant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssocDecl {
+    /// Which of the two it is.
+    pub kind: Requirement,
+    /// Whether the trait already answered it: an associated constant with a
+    /// `:=` default has an answer, and an associated type never does — a trait
+    /// cannot guess it.
+    pub answered: bool,
+}
+
+/// One generic parameter, as a declaration lists it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct GenericParam {
+    /// The def it introduced, when collection gave it one.
+    pub def: Option<DefId>,
+    /// A `<const N: T>` — a compile-time **value** rather than a type (§5).
+    pub value: bool,
+}
+
+/// One **value** parameter of a function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Param {
+    pub name: Symbol,
+    /// Whether it carries a default.
+    ///
+    /// Only presence, not the expression: a call site never looks at the
+    /// default itself. It was type-checked once at the declaration and is
+    /// filled in by lowering, so all a caller needs to know is that the slot
+    /// may legally be left empty.
+    pub default: bool,
+}
+
+/// Every definition's [`Decl`], by [`DefId`] — the ones this compilation
+/// recorded and the ones its libraries arrived with, in one table.
+pub type DeclTable = HashMap<DefId, Decl>;
+
 /// What a trait member asks of an impl — see [`Decls::requirement`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Requirement {
     Method,
     AssocType,
@@ -57,11 +148,35 @@ impl Requirement {
 pub struct Decls<'a> {
     pub defs: &'a DefTable,
     pub asts: &'a HashMap<FileId, Ast>,
+    /// What [`record`] concluded, and what a library arrived with.
+    ///
+    /// Asked first, and the tree only when it has no answer. A definition this
+    /// compilation analyzed has both; one from a library has this alone.
+    pub table: &'a DeclTable,
 }
 
 impl<'a> Decls<'a> {
-    pub fn new(defs: &'a DefTable, asts: &'a HashMap<FileId, Ast>) -> Self {
-        Self { defs, asts }
+    pub fn new(defs: &'a DefTable, asts: &'a HashMap<FileId, Ast>, table: &'a DeclTable) -> Self {
+        Self { defs, asts, table }
+    }
+
+    /// What `def` declares, if anything recorded it.
+    pub fn get(&self, def: DefId) -> Option<&'a Decl> {
+        self.table.get(&def)
+    }
+
+    fn func_decl(&self, def: DefId) -> Option<&'a FuncDecl> {
+        match self.table.get(&def)? {
+            Decl::Func(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    fn type_decl(&self, def: DefId) -> Option<&'a TypeDecl> {
+        match self.table.get(&def)? {
+            Decl::Type(t) => Some(t),
+            _ => None,
+        }
     }
 
     /// Where `def` was written, and the node that *declares* it: the RHS of the
@@ -114,6 +229,9 @@ impl<'a> Decls<'a> {
 
     /// The **value** parameter names of a function def, in declaration order.
     pub fn param_names(&self, def: DefId) -> Option<Vec<Symbol>> {
+        if let Some(f) = self.func_decl(def) {
+            return Some(f.params.iter().map(|p| p.name.clone()).collect());
+        }
         let (file, _) = self.func(def)?;
         let ast = &self.asts[&file];
         Some(
@@ -150,6 +268,9 @@ impl<'a> Decls<'a> {
     /// lowering, so all inference needs to know is that the slot may legally be
     /// left empty.
     pub fn param_defaults(&self, def: DefId) -> Option<Vec<bool>> {
+        if let Some(f) = self.func_decl(def) {
+            return Some(f.params.iter().map(|p| p.default).collect());
+        }
         Some(
             self.param_default_nodes(def)?
                 .into_iter()
@@ -162,6 +283,9 @@ impl<'a> Decls<'a> {
     /// trait's **default** method from a bodyless requirement an impl must
     /// satisfy.
     pub fn has_body(&self, def: DefId) -> bool {
+        if let Some(f) = self.func_decl(def) {
+            return f.has_body;
+        }
         let Some((file, func)) = self.func(def) else {
             return false;
         };
@@ -178,6 +302,12 @@ impl<'a> Decls<'a> {
     /// a default, and so is an associated constant with a `:=`. An associated
     /// type always requires an answer — a trait cannot guess it.
     pub fn requirement(&self, def: DefId) -> Option<Requirement> {
+        match self.table.get(&def) {
+            Some(Decl::Func(f)) => return (!f.has_body).then_some(Requirement::Method),
+            Some(Decl::Assoc(a)) => return (!a.answered).then_some(a.kind),
+            Some(Decl::Type(_)) => return None,
+            None => {}
+        }
         let (file, node) = self.declaration(def)?;
         match &self.asts[&file].node(node).kind {
             NodeKind::FuncExpr { body: Some(_), .. } => None,
@@ -206,11 +336,17 @@ impl<'a> Decls<'a> {
     /// Types only: a `struct` / `enum` / `trait` carries type arguments and
     /// nothing else, so this is the arity a nominal type has.
     pub fn generic_arity(&self, def: DefId) -> usize {
+        if let Some(t) = self.type_decl(def) {
+            return t.generics.len();
+        }
         self.type_generic_nodes(def).map_or(0, |(_, g)| g.len())
     }
 
     /// The generic **type**-parameter defs a type def declares, in order.
     pub fn type_param_defs(&self, def: DefId) -> Vec<DefId> {
+        if let Some(t) = self.type_decl(def) {
+            return t.generics.iter().filter_map(|g| g.def).collect();
+        }
         let Some((file, generics)) = self.type_generic_nodes(def) else {
             return Vec::new();
         };
@@ -222,6 +358,17 @@ impl<'a> Decls<'a> {
 
     /// A trait's declared generic **type** parameters, in source order.
     pub fn trait_generic_param_defs(&self, trait_def: DefId) -> Vec<DefId> {
+        if self.defs.get(trait_def).kind != DefKind::Trait {
+            return Vec::new();
+        }
+        if let Some(t) = self.type_decl(trait_def) {
+            return t
+                .generics
+                .iter()
+                .filter(|g| !g.value)
+                .filter_map(|g| g.def)
+                .collect();
+        }
         let Some((file, node)) = self.declaration(trait_def) else {
             return Vec::new();
         };
@@ -251,6 +398,9 @@ impl<'a> Decls<'a> {
     /// A function's declared generic parameters — types **and** `const` values —
     /// in source order, which is the order `.<...>` arguments bind to.
     pub fn func_generic_param_defs(&self, def: DefId) -> Vec<DefId> {
+        if let Some(f) = self.func_decl(def) {
+            return f.generics.iter().filter_map(|g| g.def).collect();
+        }
         let Some((file, func)) = self.func(def) else {
             return Vec::new();
         };
@@ -271,6 +421,28 @@ impl<'a> Decls<'a> {
             .collect()
     }
 
+    /// The generic parameters a def declares, in source order.
+    fn generic_params(&self, def: DefId) -> Vec<GenericParam> {
+        let Some((file, node)) = self.declaration(def) else {
+            return Vec::new();
+        };
+        let ast = &self.asts[&file];
+        let generics = match &ast.node(node).kind {
+            NodeKind::StructType { generics, .. }
+            | NodeKind::EnumType { generics, .. }
+            | NodeKind::TraitType { generics, .. }
+            | NodeKind::FuncExpr { generics, .. } => generics.clone(),
+            _ => return Vec::new(),
+        };
+        generics
+            .iter()
+            .map(|&g| GenericParam {
+                def: self.def_of(file, g),
+                value: matches!(ast.node(g).kind, NodeKind::GenericConstParam { .. }),
+            })
+            .collect()
+    }
+
     /// The individual trait nodes of a generic parameter's constraint, which is
     /// either a `+`-separated [`NodeKind::Bounds`] list or a single trait.
     pub fn bound_nodes(&self, file: FileId, constraint: NodeId) -> Vec<NodeId> {
@@ -284,6 +456,9 @@ impl<'a> Decls<'a> {
 
     /// The declared field names of a record struct, in declaration order.
     pub fn record_field_names(&self, def: DefId) -> Vec<Symbol> {
+        if let Some(t) = self.type_decl(def) {
+            return t.fields.clone();
+        }
         let Some((file, node)) = self.declaration(def) else {
             return Vec::new();
         };
@@ -355,5 +530,128 @@ impl<'a> Decls<'a> {
             Resolution::Def(d) => Some(self.defs.resolve_alias(d)),
             _ => None,
         }
+    }
+}
+
+/// Record what every definition in `file` declares.
+///
+/// Runs once per file of the package being compiled, after resolution — which
+/// is what a generic parameter's def and a bound's trait are read from — and
+/// before anything asks a question of a definition it did not write.
+///
+/// The answers are the same ones [`Decls`] would have read off the tree, worked
+/// out once instead of at each asking. That they are *written down* is the
+/// point: a package compiled against this one has the table and not the tree.
+pub fn record(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    table: &mut DeclTable,
+    file: FileId,
+) {
+    // Read against an empty table: this is where the entries come from, and a
+    // query that consulted a half-filled one would answer differently depending
+    // on the order the defs happen to be in.
+    let empty = DeclTable::new();
+    let q = Decls::new(defs, asts, &empty);
+    for d in defs.iter() {
+        if d.file != Some(file) {
+            continue;
+        }
+        let decl = match d.kind {
+            DefKind::Func => Decl::Func(FuncDecl {
+                params: q
+                    .param_names(d.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .zip(q.param_defaults(d.id).unwrap_or_default())
+                    .map(|(name, default)| Param { name, default })
+                    .collect(),
+                generics: q.generic_params(d.id),
+                has_body: q.has_body(d.id),
+            }),
+            DefKind::Struct | DefKind::Enum | DefKind::Trait => Decl::Type(TypeDecl {
+                generics: q.generic_params(d.id),
+                fields: q.record_field_names(d.id),
+            }),
+            // A trait's associated items. `DefKind::Const` covers both, and a
+            // `::` constant that is not one has no requirement to record.
+            DefKind::Const | DefKind::TypeAlias => match q.requirement(d.id) {
+                Some(kind) => Decl::Assoc(AssocDecl {
+                    kind,
+                    answered: false,
+                }),
+                None => continue,
+            },
+            _ => continue,
+        };
+        table.insert(d.id, decl);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sema::session::Session;
+
+    /// Every recorded answer is the one the tree gives.
+    ///
+    /// This is the property the whole table rests on, and the one that has to
+    /// keep holding while the queries move off the tree one at a time: as long
+    /// as both can answer, they must agree, or a package compiled against a
+    /// library would be compiled against something other than its source.
+    fn agrees_with_the_tree(session: &Session) {
+        let empty = DeclTable::new();
+        let tree = Decls::new(&session.defs, &session.asts, &empty);
+        let table = Decls::new(&session.defs, &session.asts, &session.decls);
+        let mut checked = 0;
+        for d in session.defs.iter() {
+            if !session.decls.contains_key(&d.id) {
+                continue;
+            }
+            checked += 1;
+            let what = &d.name;
+            assert_eq!(table.param_names(d.id), tree.param_names(d.id), "{what}");
+            assert_eq!(
+                table.param_defaults(d.id),
+                tree.param_defaults(d.id),
+                "{what}"
+            );
+            assert_eq!(table.has_body(d.id), tree.has_body(d.id), "{what}");
+            assert_eq!(table.requirement(d.id), tree.requirement(d.id), "{what}");
+            assert_eq!(table.generic_arity(d.id), tree.generic_arity(d.id), "{what}");
+            assert_eq!(
+                table.type_param_defs(d.id),
+                tree.type_param_defs(d.id),
+                "{what}"
+            );
+            assert_eq!(
+                table.trait_generic_param_defs(d.id),
+                tree.trait_generic_param_defs(d.id),
+                "{what}"
+            );
+            assert_eq!(
+                table.func_generic_param_defs(d.id),
+                tree.func_generic_param_defs(d.id),
+                "{what}"
+            );
+            assert_eq!(
+                table.record_field_names(d.id),
+                tree.record_field_names(d.id),
+                "{what}"
+            );
+        }
+        assert!(checked > 100, "only {checked} declarations were recorded");
+    }
+
+    #[test]
+    fn the_table_answers_what_the_tree_would() {
+        // twig over `std` over `core`: the largest program there is, and the one
+        // that exercises the most shapes a declaration can have.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../twig/src/main.nest");
+        let mut session = Session::new();
+        let file = session.load_entry(path).expect("twig's entry loads");
+        crate::sema::analyze(&mut session, file);
+        assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+        agrees_with_the_tree(&session);
     }
 }

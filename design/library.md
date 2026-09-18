@@ -42,7 +42,10 @@ The body is everything a package compiled against this one needs:
 
 - **each file**: its name, its text, the namespace it is, its AST, and the facts
   the passes left on that tree (resolutions, types, coercions, …);
-- **every definition**, with its namespace;
+- **every definition**, with its namespace, and **what it declares**
+  (`sema::decl`) — the parameters of a function, the generics and fields of a
+  type, what a trait member asks of an impl. These are the answers a package
+  compiled against this one would otherwise read off a tree it does not have;
 - the **`#lang` tags** the package claims.
 
 The text of each file travels because a diagnostic pointing into a library still

@@ -131,6 +131,7 @@ pub fn load(
     for def in body.defs {
         session.defs.push(def)?;
     }
+    session.decls.extend(body.decls);
     for (tag, def, from_core) in body.lang_items {
         session.lang_items.set(tag, def, from_core);
     }

@@ -44,7 +44,7 @@ use crate::parser::ast::{
     VariantPayload,
 };
 
-use super::decl::Decls;
+use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::OpResolution;
 use super::infer::{
@@ -64,6 +64,7 @@ pub fn lower_file(
     defs: &DefTable,
     lang: &LangItems,
     asts: &HashMap<FileId, Ast>,
+    decls: &DeclTable,
     meta: &Meta,
     sources: &crate::common::source::SourceMap,
     file: FileId,
@@ -71,6 +72,7 @@ pub fn lower_file(
     let ast = &asts[&file];
     let mut lo = Lowerer {
         defs,
+        decls,
         sources,
         lang,
         ast,
@@ -116,6 +118,8 @@ pub fn lower_file(
 
 struct Lowerer<'a> {
     defs: &'a DefTable,
+    /// What every definition declares — see [`super::decl`].
+    decls: &'a DeclTable,
     /// The program's source text, for the one construct that needs a line and a
     /// column rather than a byte span: `#caller_location`.
     sources: &'a crate::common::source::SourceMap,
@@ -147,7 +151,7 @@ struct Lowerer<'a> {
 impl Lowerer<'_> {
     /// The declaration queries, over the tables this pass already holds.
     fn decls(&self) -> Decls<'_> {
-        Decls::new(self.defs, self.asts)
+        Decls::new(self.defs, self.asts, self.decls)
     }
 
     // ===< node construction >===

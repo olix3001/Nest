@@ -272,6 +272,14 @@ pub struct Session {
     pub asts: HashMap<FileId, Ast>,
     /// Per-file analysis metadata, keyed by [`FileId`] (populated at collection).
     pub files: HashMap<FileId, FileMeta>,
+    /// What each definition declares, keyed by [`DefId`]: recorded here by
+    /// [`super::decl::record`] for this compilation's own files, and read out of
+    /// its metadata for each library's (`crate::library`).
+    ///
+    /// It is the library's answer to a question that would otherwise need the
+    /// declaring file's syntax tree — which a package compiled against another
+    /// does not have.
+    pub decls: super::decl::DeclTable,
     /// The lowered IR of each file, keyed by [`FileId`] (populated by the lower
     /// stage after inference).
     pub ir: HashMap<FileId, crate::ir::Program>,
@@ -423,6 +431,7 @@ impl Session {
             diagnostics: Vec::new(),
             asts: HashMap::new(),
             files: HashMap::new(),
+            decls: super::decl::DeclTable::new(),
             ir: HashMap::new(),
             ir_meta: crate::ir::Meta::new(),
             linked: crate::ir::Linked::default(),

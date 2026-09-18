@@ -5,9 +5,10 @@
 //!
 //! One file per package, an `ar` archive (`archive`) of three kinds of member:
 //!
-//! - `nest.nmeta`, the **analysis**: every definition with its namespace, the
-//!   facts resolution and inference left, the `#lang` tags — what a package
-//!   compiled against this one needs in order to typecheck against it.
+//! - `nest.nmeta`, the **analysis**: every definition with its namespace and
+//!   what it declares, the facts resolution and inference left, the `#lang`
+//!   tags — what a package compiled against this one needs in order to
+//!   typecheck against it.
 //! - `nest.nir`, the **IR**, before monomorphization: a generic function is
 //!   instantiated by whoever calls it, so its body has to travel. It is read
 //!   beside the metadata, and separate from it because typechecking alone does
@@ -36,6 +37,7 @@ use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
 use crate::ir::{IrId, Program};
 use crate::parser::ast::{Ast, NodeId};
+use crate::sema::decl::Decl;
 use crate::sema::def::{Def, DefId};
 
 use codec::{Bases, Counts};
@@ -45,7 +47,7 @@ pub const MAGIC: &[u8; 8] = b"NESTMETA";
 
 /// The layout of what follows the magic. Raised whenever anything written
 /// changes shape, so an old library is refused by name rather than misread.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 /// What a reader checks before it reads anything else.
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,6 +86,10 @@ pub struct Meta {
     /// The package's root file.
     pub root: FileId,
     pub defs: Vec<Def>,
+    /// What each of them declares (`crate::sema::decl`) — the answers a package
+    /// compiled against this one would otherwise have to read off a tree it
+    /// does not have.
+    pub decls: Vec<(DefId, Decl)>,
     /// The `#lang` tags this package's definitions claim, and whether each was
     /// `core`'s claim.
     pub lang_items: Vec<(Symbol, DefId, bool)>,

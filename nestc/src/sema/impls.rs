@@ -22,7 +22,7 @@ use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
-use super::decl::Decls;
+use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable};
 use super::{DefMeta, Resolution};
 
@@ -84,6 +84,7 @@ pub struct ImplTable {
 pub fn build(
     defs: &DefTable,
     asts: &HashMap<FileId, Ast>,
+    decls: &DeclTable,
     pkg_of: &HashMap<FileId, String>,
     diags: &mut Vec<Diagnostic>,
     files: &[FileId],
@@ -103,7 +104,7 @@ pub fn build(
             };
             if let Some(info) = record(defs, ast, file, &generics, ty, for_ty, &items) {
                 check_coherence(defs, ast, pkg_of, diags, id, &info);
-                check_completeness(defs, asts, diags, id, &info);
+                check_completeness(defs, asts, decls, diags, id, &info);
                 table.impls.push(info);
             }
         }
@@ -134,6 +135,7 @@ pub fn build(
 fn check_completeness(
     defs: &DefTable,
     asts: &HashMap<FileId, Ast>,
+    decls: &DeclTable,
     diags: &mut Vec<Diagnostic>,
     node: NodeId,
     imp: &ImplInfo,
@@ -148,7 +150,7 @@ fn check_completeness(
         if imp.members.contains_key(name) || imp.assoc.contains_key(name) {
             continue;
         }
-        let Some(kind) = Decls::new(defs, asts).requirement(member) else {
+        let Some(kind) = Decls::new(defs, asts, decls).requirement(member) else {
             continue;
         };
         let kind = kind.label();

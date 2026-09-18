@@ -9,6 +9,7 @@ use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
 use crate::ir::{IrId, Program};
 use crate::parser::ast::{Ast, NodeId};
+use crate::sema::decl::Decl;
 use crate::sema::def::{Def, DefId, DefKind};
 use crate::sema::session::Session;
 
@@ -24,6 +25,7 @@ struct Meta<'a> {
     files: Vec<FileRecord<'a>>,
     root: FileId,
     defs: Vec<&'a Def>,
+    decls: Vec<(DefId, &'a Decl)>,
     lang_items: Vec<(Symbol, DefId, bool)>,
 }
 
@@ -149,6 +151,10 @@ pub fn members(
             files: records,
             root,
             defs: defs.clone(),
+            decls: defs
+                .iter()
+                .filter_map(|d| session.decls.get(&d.id).map(|decl| (d.id, decl)))
+                .collect(),
             lang_items: session
                 .lang_items
                 .claims()

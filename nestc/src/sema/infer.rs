@@ -46,7 +46,7 @@ use num_traits::ToPrimitive;
 
 use crate::ir::ConstValue;
 
-use super::decl::Decls;
+use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::impls::{ImplInfo, ImplTable};
 use super::ty::{Const, FloatWidth, InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
@@ -418,6 +418,7 @@ pub struct ImplTarget {
 pub fn resolve_impl_targets(
     defs: &DefTable,
     asts: &HashMap<FileId, Ast>,
+    decls: &DeclTable,
     diags: &mut Vec<Diagnostic>,
     lang: &LangItems,
     impls: &ImplTable,
@@ -440,6 +441,7 @@ pub fn resolve_impl_targets(
         let mut cx = Inferer {
             defs,
             asts,
+            decls,
             ast,
             diags,
             lang,
@@ -479,6 +481,7 @@ pub fn resolve_impl_targets(
 pub fn infer_file(
     defs: &DefTable,
     asts: &HashMap<FileId, Ast>,
+    decls: &DeclTable,
     diags: &mut Vec<Diagnostic>,
     lang: &LangItems,
     impls: &ImplTable,
@@ -549,6 +552,7 @@ pub fn infer_file(
             Inferer {
                 defs,
                 asts,
+                decls,
                 ast,
                 diags,
                 lang,
@@ -925,6 +929,8 @@ fn bound_traits(defs: &DefTable, ast: &Ast) -> HashSet<DefId> {
 struct Inferer<'a> {
     defs: &'a DefTable,
     asts: &'a HashMap<FileId, Ast>,
+    /// What every definition declares — see [`super::decl`].
+    decls: &'a DeclTable,
     ast: &'a Ast,
     diags: &'a mut Vec<Diagnostic>,
     /// The `#lang` registry, for mapping an operator to its trait.
@@ -967,7 +973,7 @@ struct Inferer<'a> {
 impl Inferer<'_> {
     /// The declaration queries, over the tables this pass already holds.
     fn decls(&self) -> Decls<'_> {
-        Decls::new(self.defs, self.asts)
+        Decls::new(self.defs, self.asts, self.decls)
     }
 
     fn infer_func(&mut self, func: NodeId) {

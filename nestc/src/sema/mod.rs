@@ -279,6 +279,19 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     for &file in &files {
         desugar_one(session, file);
     }
+    // What each of this package's definitions declares, written down once.
+    //
+    // Before anything asks: impl conformance is the first pass that looks a
+    // definition up rather than walking it, and every pass after it does the
+    // same. A definition in a **library** was recorded where that library was
+    // compiled and arrived with its metadata, which is the whole reason this is
+    // a table and not a walk (see [`decl::record`]).
+    for &file in &files {
+        let Session {
+            defs, asts, decls, ..
+        } = &mut *session;
+        decl::record(defs, asts, decls, file);
+    }
     // Index every impl once the whole program is resolved; inference selects
     // over this table (operators, trait methods) per function body. This is also
     // where each impl's coherence is checked — it is the one pass that sees the
@@ -287,11 +300,12 @@ pub fn analyze(session: &mut Session, entry: FileId) {
         let Session {
             defs,
             asts,
+            decls,
             pkg_of,
             diagnostics,
             ..
         } = &mut *session;
-        impls::build(defs, asts, pkg_of, diagnostics, &all_files)
+        impls::build(defs, asts, decls, pkg_of, diagnostics, &all_files)
     };
     for &file in &files {
         infer_one(session, &impls, file);
@@ -312,11 +326,12 @@ pub fn analyze(session: &mut Session, entry: FileId) {
         let Session {
             defs,
             asts,
+            decls,
             diagnostics,
             lang_items,
             ..
         } = &mut *session;
-        infer::resolve_impl_targets(defs, asts, diagnostics, lang_items, &impls)
+        infer::resolve_impl_targets(defs, asts, decls, diagnostics, lang_items, &impls)
     };
     session.impls = impls;
     session.impl_targets = impl_targets;
@@ -703,6 +718,7 @@ fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
     let Session {
         asts,
         defs,
+        decls,
         diagnostics,
         lang_items,
         ..
@@ -710,6 +726,7 @@ fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
     infer::infer_file(
         defs,
         asts,
+        decls,
         diagnostics,
         lang_items,
         impls,
@@ -736,6 +753,7 @@ fn lower_one(session: &mut Session, file: FileId) {
         &session.defs,
         &session.lang_items,
         &session.asts,
+        &session.decls,
         &session.ir_meta,
         &session.sources,
         file,
