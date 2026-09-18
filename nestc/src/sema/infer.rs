@@ -4004,16 +4004,23 @@ impl Inferer<'_> {
             },
             _ => return None,
         };
-        let d = self.defs.get(def);
-        let (file, node) = (d.file?, d.node?);
-        let rhs = match &self.asts[&file].node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
+        let repr = match self.decls().distinct_repr(def) {
+            Some(t) => t,
+            None => {
+                let d = self.defs.get(def);
+                let (file, node) = (d.file?, d.node?);
+                let rhs = match &self.asts[&file].node(node).kind {
+                    NodeKind::ConstBind { rhs, .. } => *rhs,
+                    _ => node,
+                };
+                let NodeKind::DistinctType { inner, .. } =
+                    self.asts[&file].node(rhs).kind.clone()
+                else {
+                    return None;
+                };
+                self.ty_from_node_in(file, inner)
+            }
         };
-        let NodeKind::DistinctType { inner, .. } = self.asts[&file].node(rhs).kind.clone() else {
-            return None;
-        };
-        let repr = self.ty_from_node_in(file, inner);
         Some(match ptr {
             Some(mutable) => Ty::Ptr {
                 mutable,
@@ -5240,6 +5247,9 @@ impl Inferer<'_> {
     /// associated constant's `MAX: i32`. `None` when the member declares no
     /// type (an associated-type binding, or an impl constant that leaves it out).
     fn declared_member_ty(&mut self, def: DefId) -> Option<Ty> {
+        if let Some(t) = self.decls().assoc_const_ty(def) {
+            return Some(t);
+        }
         let d = self.defs.get(def);
         let (file, node) = (d.file?, d.node?);
         let NodeKind::ConstBind { rhs, .. } = self.asts[&file].node(node).kind.clone() else {
@@ -5342,13 +5352,19 @@ impl Inferer<'_> {
         if self.defs.get(field).kind != DefKind::Field {
             return None;
         }
-        let d = self.defs.get(field);
-        let (file, node) = (d.file?, d.node?);
-        let t = match self.asts[&file].node(node).kind.clone() {
-            NodeKind::Field { ty, .. } => self.ty_from_node_in(file, ty),
-            // A tuple struct's field def points straight at the positional type
-            // node: there is no `Field` node wrapping it (see `collect_struct`).
-            _ => self.ty_from_node_in(file, node),
+        let t = match self.decls().field_ty(field) {
+            Some(t) => t,
+            None => {
+                let d = self.defs.get(field);
+                let (file, node) = (d.file?, d.node?);
+                match self.asts[&file].node(node).kind.clone() {
+                    NodeKind::Field { ty, .. } => self.ty_from_node_in(file, ty),
+                    // A tuple struct's field def points straight at the
+                    // positional type node: there is no `Field` node wrapping
+                    // it (see `collect_struct`).
+                    _ => self.ty_from_node_in(file, node),
+                }
+            }
         };
         let map = self.nominal_subst(def, &args);
         Some(self.subst_type_params(&t, &map))
@@ -5376,13 +5392,21 @@ impl Inferer<'_> {
         if self.defs.get(variant).kind != DefKind::Variant {
             return None;
         }
+        let map = self.nominal_subst(def, &args);
+        if let Some(payload) = self.decls().variant_payload(variant) {
+            return Some(
+                payload
+                    .into_iter()
+                    .map(|(name, t)| (name, self.subst_type_params(&t, &map)))
+                    .collect(),
+            );
+        }
         let vd = self.defs.get(variant);
         let (file, node) = (vd.file?, vd.node?);
         let payload = match &self.asts[&file].node(node).kind {
             NodeKind::Variant { payload, .. } => payload.clone(),
             _ => return None,
         };
-        let map = self.nominal_subst(def, &args);
         let mut out = Vec::new();
         match payload {
             VariantPayload::None => {}
@@ -5413,6 +5437,14 @@ impl Inferer<'_> {
         let Ty::Nominal { def, args } = base else {
             return None;
         };
+        let map = self.nominal_subst(def, &args);
+        if let Some(tys) = self.decls().tuple_tys(def) {
+            return Some(
+                tys.iter()
+                    .map(|t| self.subst_type_params(t, &map))
+                    .collect(),
+            );
+        }
         let d = self.defs.get(def);
         let (file, node) = (d.file?, d.node?);
         let rhs = match &self.asts[&file].node(node).kind {
@@ -5426,7 +5458,6 @@ impl Inferer<'_> {
             } => tys.clone(),
             _ => return None,
         };
-        let map = self.nominal_subst(def, &args);
         Some(
             tys.iter()
                 .map(|&t| {

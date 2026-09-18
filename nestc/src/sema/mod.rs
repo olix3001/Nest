@@ -310,6 +310,15 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     for &file in &files {
         infer_one(session, &impls, file);
     }
+    // The types every declaration declares — a field's, a variant's payload,
+    // a `distinct`'s representation — which only inference could work out, and
+    // now has. The second half of the table `decl::record` started.
+    for &file in &files {
+        let Session {
+            defs, asts, decls, ..
+        } = &mut *session;
+        decl::record_types(defs, asts, decls, file);
+    }
     // Field uses can only be bound once their bases are typed, so this runs
     // after inference and before lowering reads the links.
     for &file in &files {

@@ -29,6 +29,7 @@ use crate::parser::ast::{Ast, Lit, NodeId, NodeKind, StructKind};
 use super::DefMeta;
 use super::Resolution;
 use super::def::{DefId, DefKind, DefTable};
+use super::ty::Ty;
 
 /// What a definition declares, as the pass that read its syntax concluded it.
 ///
@@ -49,6 +50,13 @@ pub enum Decl {
     Type(TypeDecl),
     /// A trait's associated type or constant.
     Assoc(AssocDecl),
+    /// A record field, or one position of a tuple struct: its declared type.
+    Field(Ty),
+    /// An `enum` variant: its payload, each entry named for a record variant
+    /// and unnamed for a tuple one.
+    Variant(Vec<(Option<Symbol>, Ty)>),
+    /// A `distinct T` or a plain type alias.
+    Alias(AliasDecl),
 }
 
 /// What a call site needs to know about a function it is calling.
@@ -80,6 +88,22 @@ pub struct TypeDecl {
     /// it did not write, and the IR reads a struct's members positionally, so
     /// two compilations have to agree on it.
     pub fields: Vec<Symbol>,
+    /// A tuple struct's positional types, in order — empty for everything else.
+    ///
+    /// A record struct's fields are defs of their own and carry their types
+    /// there ([`Decl::Field`]); a tuple struct's positions are defs too, but
+    /// the list as a whole is what a construction is checked against, so it is
+    /// here as well.
+    pub tuple: Vec<Ty>,
+}
+
+/// A `distinct T` or a plain type alias.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AliasDecl {
+    /// What a `distinct` type is distinct **from** — the representation whose
+    /// methods it inherits (§2.4). `None` for a plain alias, which is not a
+    /// type of its own and expands instead.
+    pub repr: Option<Ty>,
 }
 
 /// A trait's associated type or constant.
@@ -91,6 +115,9 @@ pub struct AssocDecl {
     /// `:=` default has an answer, and an associated type never does — a trait
     /// cannot guess it.
     pub answered: bool,
+    /// An associated constant's declared type — the one every impl's value must
+    /// have. `None` for an associated type, which declares no type of its own.
+    pub ty: Option<Ty>,
 }
 
 /// One generic parameter, as a declaration lists it.
@@ -175,6 +202,52 @@ impl<'a> Decls<'a> {
     fn type_decl(&self, def: DefId) -> Option<&'a TypeDecl> {
         match self.table.get(&def)? {
             Decl::Type(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    // ===< declared types >===
+    //
+    // Each is **definition-relative**: a field of `Box.<T>` declared `T` comes
+    // back as the type parameter, not as anything a use site substituted. The
+    // caller applies the substitution its own use implies, which is the only
+    // place that knows it.
+
+    /// The declared type of a record field or of one tuple-struct position.
+    pub fn field_ty(&self, field: DefId) -> Option<Ty> {
+        match self.table.get(&field)? {
+            Decl::Field(t) => Some(t.clone()),
+            _ => None,
+        }
+    }
+
+    /// The declared payload of an `enum` variant, each entry named for a record
+    /// variant and unnamed for a tuple one.
+    pub fn variant_payload(&self, variant: DefId) -> Option<Vec<(Option<Symbol>, Ty)>> {
+        match self.table.get(&variant)? {
+            Decl::Variant(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    /// The declared positional types of a tuple struct.
+    pub fn tuple_tys(&self, def: DefId) -> Option<Vec<Ty>> {
+        let t = self.type_decl(def)?;
+        (!t.tuple.is_empty()).then(|| t.tuple.clone())
+    }
+
+    /// What a `distinct` type is distinct **from**.
+    pub fn distinct_repr(&self, def: DefId) -> Option<Ty> {
+        match self.table.get(&def)? {
+            Decl::Alias(a) => a.repr.clone(),
+            _ => None,
+        }
+    }
+
+    /// The declared type of an associated constant.
+    pub fn assoc_const_ty(&self, def: DefId) -> Option<Ty> {
+        match self.table.get(&def)? {
+            Decl::Assoc(a) => a.ty.clone(),
             _ => None,
         }
     }
@@ -305,7 +378,7 @@ impl<'a> Decls<'a> {
         match self.table.get(&def) {
             Some(Decl::Func(f)) => return (!f.has_body).then_some(Requirement::Method),
             Some(Decl::Assoc(a)) => return (!a.answered).then_some(a.kind),
-            Some(Decl::Type(_)) => return None,
+            Some(_) => return None,
             None => {}
         }
         let (file, node) = self.declaration(def)?;
@@ -319,6 +392,25 @@ impl<'a> Decls<'a> {
             NodeKind::AssocConst { .. } => Some(Requirement::AssocConst),
             _ => None,
         }
+    }
+
+    /// The associated type or constant `def` declares, if it is one.
+    ///
+    /// The declared type is left out here and filled in by [`record_types`]:
+    /// it is a type expression, and resolving one is inference's work rather
+    /// than the syntax pass's.
+    fn assoc(&self, def: DefId) -> Option<AssocDecl> {
+        let (file, node) = self.declaration(def)?;
+        let (kind, answered) = match &self.asts[&file].node(node).kind {
+            NodeKind::AssocType { .. } => (Requirement::AssocType, false),
+            NodeKind::AssocConst { default, .. } => (Requirement::AssocConst, default.is_some()),
+            _ => return None,
+        };
+        Some(AssocDecl {
+            kind,
+            answered,
+            ty: None,
+        })
     }
 
     /// The trait's own declaration of `name`, but only when it carries a
@@ -572,16 +664,20 @@ pub fn record(
             DefKind::Struct | DefKind::Enum | DefKind::Trait => Decl::Type(TypeDecl {
                 generics: q.generic_params(d.id),
                 fields: q.record_field_names(d.id),
+                tuple: Vec::new(),
             }),
-            // A trait's associated items. `DefKind::Const` covers both, and a
-            // `::` constant that is not one has no requirement to record.
-            DefKind::Const | DefKind::TypeAlias => match q.requirement(d.id) {
-                Some(kind) => Decl::Assoc(AssocDecl {
-                    kind,
-                    answered: false,
-                }),
+            // An associated type or constant, of a trait or of an impl. Both
+            // land in `DefKind::Const` or `DefKind::TypeAlias`, and which of
+            // the two shapes a def has is a question about its declaration.
+            DefKind::Const | DefKind::TypeAlias => match q.assoc(d.id) {
+                Some(decl) => Decl::Assoc(decl),
                 None => continue,
             },
+            // A field's type, a variant's payload and a `distinct`'s
+            // representation are type expressions, and resolving one is
+            // inference's work — [`record_types`] adds them afterwards. Nothing
+            // is written here in their place: an absent entry means "ask the
+            // tree", and a placeholder would be an answer that is wrong.
             _ => continue,
         };
         table.insert(d.id, decl);
@@ -643,6 +739,60 @@ mod tests {
         assert!(checked > 100, "only {checked} declarations were recorded");
     }
 
+    /// Every definition that declares a **type** has that type written down.
+    ///
+    /// Coverage is the property the tree can stop being kept for: a field whose
+    /// type never reached the table is one a package compiled against this
+    /// library could not ask about at all.
+    fn every_declared_type_is_recorded(session: &Session) {
+        let mut missing: Vec<String> = Vec::new();
+        let mut counts = (0, 0, 0, 0);
+        for d in session.defs.iter() {
+            let Some(file) = d.file else { continue };
+            let Some(ast) = session.asts.get(&file) else {
+                continue;
+            };
+            let Some(node) = d.node else { continue };
+            let what = session.defs.canonical_string(d.id);
+            match (d.kind, session.decls.get(&d.id)) {
+                (DefKind::Field, Some(Decl::Field(_))) => counts.0 += 1,
+                (DefKind::Field, _) => missing.push(format!("field {what}")),
+                (DefKind::Variant, Some(Decl::Variant(_))) => counts.1 += 1,
+                (DefKind::Variant, _) => missing.push(format!("variant {what}")),
+                // An associated constant declares a type every impl's value
+                // must have; an associated *type* declares none.
+                (DefKind::Const, Some(Decl::Assoc(a))) => {
+                    if a.kind == Requirement::AssocConst && a.ty.is_none() {
+                        missing.push(format!("associated constant {what}"));
+                    } else {
+                        counts.3 += 1;
+                    }
+                }
+                (DefKind::TypeAlias, entry) => {
+                    let rhs = match &ast.node(node).kind {
+                        NodeKind::ConstBind { rhs, .. } => *rhs,
+                        _ => node,
+                    };
+                    if !matches!(ast.node(rhs).kind, NodeKind::DistinctType { .. }) {
+                        continue;
+                    }
+                    match entry {
+                        Some(Decl::Alias(AliasDecl { repr: Some(_) })) => counts.2 += 1,
+                        _ => missing.push(format!("distinct {what}")),
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(missing.is_empty(), "not recorded: {missing:#?}");
+        let (fields, variants, distincts, assocs) = counts;
+        assert!(
+            fields > 50 && variants > 20 && distincts > 0 && assocs > 0,
+            "thin coverage: {fields} fields, {variants} variants, {distincts} distincts, \
+             {assocs} associated constants"
+        );
+    }
+
     #[test]
     fn the_table_answers_what_the_tree_would() {
         // twig over `std` over `core`: the largest program there is, and the one
@@ -653,5 +803,131 @@ mod tests {
         crate::sema::analyze(&mut session, file);
         assert!(!session.has_errors(), "{:#?}", session.diagnostics);
         agrees_with_the_tree(&session);
+        every_declared_type_is_recorded(&session);
+    }
+}
+
+/// Record the **types** every declaration in `file` declares.
+///
+/// The second half of [`record`], and separate from it for one reason: a
+/// field's type, a variant's payload, a `distinct`'s representation and an
+/// associated constant's type are all type *expressions*, and working out what
+/// one denotes — an alias, a generic argument, `Self` — is inference's job.
+/// Inference has already done it by the time this runs: each of these is
+/// stamped on its own node (`Inferer::stamp_member_types`), and this reads the
+/// answers back and files them under the definition they belong to.
+///
+/// A type that still mentions an inference variable is **not** recorded. A
+/// variable is a hole in one context and means nothing in another, so an
+/// unsettled type is left for the tree to answer as it did before.
+pub fn record_types(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    table: &mut DeclTable,
+    file: FileId,
+) {
+    let Some(ast) = asts.get(&file) else { return };
+    let settled = |t: Option<Ty>| t.filter(|t| !t.mentions_var());
+    for d in defs.iter() {
+        if d.file != Some(file) {
+            continue;
+        }
+        let Some(node) = d.node else { continue };
+        match d.kind {
+            // A record field carries its type on the `Field` node; a tuple
+            // struct's position has no `Field` node around it, and the def
+            // points at the type node itself (see `collect_struct`). Either
+            // way it is the node the def points at that was stamped.
+            DefKind::Field => {
+                if let Some(t) = settled(ast.meta::<Ty>(node)) {
+                    table.insert(d.id, Decl::Field(t));
+                }
+            }
+            DefKind::Variant => {
+                if let Some(payload) = variant_payload(ast, node, &settled) {
+                    table.insert(d.id, Decl::Variant(payload));
+                }
+            }
+            DefKind::TypeAlias | DefKind::Const => {
+                let rhs = match &ast.node(node).kind {
+                    NodeKind::ConstBind { rhs, .. } => *rhs,
+                    _ => node,
+                };
+                match &ast.node(rhs).kind {
+                    NodeKind::DistinctType { inner, .. } => {
+                        if let Some(t) = settled(ast.meta::<Ty>(*inner)) {
+                            table.insert(d.id, Decl::Alias(AliasDecl { repr: Some(t) }));
+                        }
+                    }
+                    // Stamped on the `AssocConst` node itself, which is the one
+                    // the member's def points at.
+                    NodeKind::AssocConst { .. } => {
+                        if let (Some(Decl::Assoc(a)), Some(t)) =
+                            (table.get(&d.id), settled(ast.meta::<Ty>(rhs)))
+                        {
+                            let a = AssocDecl {
+                                ty: Some(t),
+                                ..a.clone()
+                            };
+                            table.insert(d.id, Decl::Assoc(a));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            DefKind::Struct => {
+                let rhs = match &ast.node(node).kind {
+                    NodeKind::ConstBind { rhs, .. } => *rhs,
+                    _ => node,
+                };
+                let NodeKind::StructType {
+                    kind: StructKind::Tuple(tys),
+                    ..
+                } = ast.node(rhs).kind.clone()
+                else {
+                    continue;
+                };
+                let recorded: Vec<Ty> = tys.iter().filter_map(|&t| settled(ast.meta::<Ty>(t))).collect();
+                if recorded.len() != tys.len() {
+                    continue;
+                }
+                if let Some(Decl::Type(t)) = table.get(&d.id) {
+                    let t = TypeDecl {
+                        tuple: recorded,
+                        ..t.clone()
+                    };
+                    table.insert(d.id, Decl::Type(t));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The stamped payload types of the variant at `node`, or `None` if any of them
+/// is missing or unsettled — a half-recorded payload would be worse than none.
+fn variant_payload(
+    ast: &Ast,
+    node: NodeId,
+    settled: &impl Fn(Option<Ty>) -> Option<Ty>,
+) -> Option<Vec<(Option<Symbol>, Ty)>> {
+    use crate::parser::ast::VariantPayload;
+    let NodeKind::Variant { payload, .. } = ast.node(node).kind.clone() else {
+        return None;
+    };
+    match payload {
+        VariantPayload::None => Some(Vec::new()),
+        VariantPayload::Tuple(tys) => tys
+            .iter()
+            .map(|&t| settled(ast.meta::<Ty>(t)).map(|t| (None, t)))
+            .collect(),
+        VariantPayload::Record(fields) => fields
+            .iter()
+            .filter_map(|&f| match ast.node(f).kind.clone() {
+                NodeKind::Field { name, .. } => Some((f, name)),
+                _ => None,
+            })
+            .map(|(f, name)| settled(ast.meta::<Ty>(f)).map(|t| (Some(name), t)))
+            .collect(),
     }
 }

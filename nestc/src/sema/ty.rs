@@ -245,6 +245,16 @@ impl Const {
         Const::Value(Box::new(ConstArg { ty, value }))
     }
 
+    /// Whether an unsolved variable appears in this value or in the type it was
+    /// written at — see [`Ty::mentions_var`].
+    pub fn mentions_var(&self) -> bool {
+        match self {
+            Const::Var(_) => true,
+            Const::Value(arg) => arg.ty.mentions_var(),
+            _ => false,
+        }
+    }
+
     /// A length — what an array length always is (§3.2), at the `usize` the
     /// caller found.
     ///
@@ -476,6 +486,30 @@ impl Ty {
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_error),
             Ty::Func { params, ret } => {
                 params.iter().any(Ty::mentions_error) || ret.mentions_error()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an unsolved **inference variable** appears anywhere inside this
+    /// type, a `const` one included.
+    ///
+    /// What it is for is deciding whether a type is worth **writing down**. A
+    /// variable is a hole in one inference context, and its number means
+    /// nothing in another — so a type carrying one cannot be recorded against a
+    /// definition, let alone travel in a library. A caller that finds one keeps
+    /// asking the way it asked before (see [`crate::sema::decl`]).
+    pub fn mentions_var(&self) -> bool {
+        match self {
+            Ty::Var(_) => true,
+            Ty::Int { width, .. } => width.mentions_var(),
+            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } => inner.mentions_var(),
+            Ty::Array { len, inner, .. } => len.mentions_var() || inner.mentions_var(),
+            Ty::Tuple(elems) => elems.iter().any(Ty::mentions_var),
+            Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_var()),
+            Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_var),
+            Ty::Func { params, ret } => {
+                params.iter().any(Ty::mentions_var) || ret.mentions_var()
             }
             _ => false,
         }

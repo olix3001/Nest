@@ -1441,6 +1441,9 @@ impl Lowerer<'_> {
         let Some(field) = self.field_def(def, name) else {
             return Ty::Error;
         };
+        if let Some(t) = self.decls().field_ty(field) {
+            return t;
+        }
         let d = self.defs.get(field);
         let (Some(file), Some(node)) = (d.file, d.node) else {
             return Ty::Error;
