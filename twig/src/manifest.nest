@@ -274,7 +274,7 @@ before :: func (a: str, b: str) -> bool {
   return x.len() < y.len()
 }
 
-tests :: namespace {
+tests :: #when(test) namespace {
     empty :: func (name: str) -> Manifest {
         return Manifest {
             package: Package { name: name, version: "0.1.0" },

@@ -365,7 +365,7 @@ run :: func (program: str, args: []str) -> Result.<process.Status, str> {
 // this file that is a *translation* — twig's vocabulary into `nestc`'s — which
 // is where a silent mistake produces a build that runs and writes the wrong
 // thing rather than one that fails.
-tests :: namespace {
+tests :: #when(test) namespace {
     // A package: a name, whether it has a `[lib]`, and what it depends on.
     member :: func (name: str, lib: bool, deps: []str, build: Option.<Build>) -> Member {
         let mut d: collections.HashMap.<str, manifest.Dependency> :=

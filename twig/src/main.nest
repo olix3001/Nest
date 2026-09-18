@@ -386,7 +386,7 @@ select :: func (all: []Target, name: str) -> Result.<[]Target, str> {
   return .err(f"no binary named `{name}`")
 }
 
-tests :: namespace {
+tests :: #when(test) namespace {
     @test
     a_package_is_compiled_again_when_something_it_depends_on_is :: func () {
         let ws: Workspace := workspace.tests.graph()

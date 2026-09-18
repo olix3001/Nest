@@ -222,7 +222,7 @@ contains :: func (names: []str, name: str) -> bool {
 
 // Public because the fixtures are what a test of the build plan in `main.nest`
 // builds its workspace with: one graph, described in one place.
-@public tests :: namespace {
+@public tests :: #when(test) namespace {
     @public member_of :: func (name: str, deps: []str) -> Member {
         let mut d: collections.HashMap.<str, manifest.Dependency> :=
             collections.map.<str, manifest.Dependency>()

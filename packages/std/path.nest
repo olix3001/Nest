@@ -92,7 +92,7 @@ SLASH: u8 :: 47
 // names — and they are gathered rather than scattered, so that what a reader
 // skips is one block and not every third declaration. When there is conditional
 // compilation, this is the namespace to compile only in a test build.
-tests :: namespace {
+tests :: #when(test) namespace {
     @test
     joining :: func () {
         assert(join("a", "b") == "a/b")
