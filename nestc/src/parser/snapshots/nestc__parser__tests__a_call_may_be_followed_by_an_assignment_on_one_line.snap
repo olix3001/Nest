@@ -1,6 +1,5 @@
 ---
 source: src/parser/tests.rs
-assertion_line: 426
 expression: "tree(\"f :: func (n: i32) {}\\n\\\n         go :: func () -> i32 { let mut n: i32 := 0  f(n) n = n + 1  return n }\\n\")"
 ---
 File

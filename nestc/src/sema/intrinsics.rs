@@ -118,7 +118,11 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // other. What no library can write is the last instruction, so that — and
     // only that — is the intrinsic.
     plain("trap"),
-    plain("assert"),
+    // The **compile-time** assertion (§6.10). `assert` is the run-time one and
+    // is an ordinary function in `core`, not an intrinsic: it is a `panic` with
+    // a condition in front of it, and it goes through the replaceable panic
+    // handler like every other failure. The name here says which is which.
+    plain("comptime_assert"),
     // Integer arithmetic with a stated overflow behaviour (§6.6). These are the
     // inherent methods on the two integer families in `core/num.nest`, and they
     // need no `Special`: `func (self: Self, rhs: Self) -> Self` inside

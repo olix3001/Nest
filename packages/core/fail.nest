@@ -7,6 +7,7 @@
 // things. `str.nest` is left unexported for the same reason.
 
 { Location } :: import "loc.nest"
+{ len } :: import "slice.nest"
 
 // Abort the program with a message (§8). The `loc` default is what makes the
 // report name the line that called `panic`, rather than this declaration: a
@@ -39,8 +40,93 @@
 // A `#lang` tag claimed outside `core` wins over `core`'s claim of the same tag
 // (§9), which is what makes this a **default** rather than a fixed answer; two
 // claims in the same package are still the duplicate error they always were.
+// Set while a panic is being reported, so that a panic *inside* the report does
+// not start another one.
+//
+// The cycle is real and not hypothetical: writing the digits below indexes an
+// array, an index is bounds-checked, and a failed bounds check panics — which
+// would arrive back here. One flag turns what would be unbounded recursion into
+// a second line and a stop.
+#static reporting: bool := false
+
 @public panic_handler :: #lang("panic_handler") func (msg: str, loc: Location) -> never {
+  if reporting {
+    put("nest: panic while panicking\n")
+    trap()
+  }
+  reporting = true
+  put("nest: panic: ")
+  put(msg)
+  put("\n  at ")
+  put(loc.file)
+  put(":")
+  put_u32(loc.line)
+  put(":")
+  put_u32(loc.column)
+  put("\n")
   trap()
+}
+
+// Bytes to stderr. The only thing the runtime does for a failing program: it
+// knows how to reach stderr and nothing else — what a report *looks like* is
+// decided above, in Nest, so that changing its shape does not mean changing C.
+//
+// The name is the runtime's own symbol: an `extern("c")` declaration links by
+// the name it is written with.
+nest_write_err :: extern("c") func (buf: *u8, len: usize) -> void
+
+// One `str` out. A slice is a pointer and a length (`design/lir.md` §7b), which
+// is exactly what the call wants, so this is a reinterpretation rather than a
+// conversion. An empty one writes nothing and never forms a pointer to read.
+put :: func (s: str) -> void {
+  let b: []u8 := cast.<[]u8>(s)
+  if b.len() > 0 { nest_write_err(b.ptr(), b.len()) }
+}
+
+// A `u32` as decimal, **without allocating**.
+//
+// That constraint is the reason this is written by hand rather than as
+// `f"{n}"`: interpolation builds a format buffer, and a panic is the one moment
+// that must not allocate, because a failed allocation is one of the things that
+// gets here. Ten digits is the widest a `u32` reaches, so the buffer is a fixed
+// ten bytes filled from the back.
+// A `u32` as decimal, **without allocating and without anything that can
+// fail**.
+//
+// Both halves of that matter, and the second is the harder one. A panic is the
+// one moment that must not allocate, because a failed allocation is one of the
+// things that arrives here — so `f"{n}"`, which builds a format buffer, is out.
+// But it also must not *panic*, and a panic inside the panic report is what an
+// array index or a sub-slice would risk: each is checked, and a failed check
+// calls `panic`, which is how the report becomes the thing that failed.
+//
+// So there is no buffer and no index. The digits are produced most-significant
+// first by dividing by a falling power of ten, and each is written on its own.
+// Ten small writes on the failure path is not a cost worth a buffer, and this
+// way the report cannot fail.
+put_u32 :: #unsafe func (n: u32) -> void {
+  if n == 0 {
+    put_byte(48)
+    return
+  }
+  let mut div: u32 := 1000000000
+  let mut seen: bool := false
+  while div > 0 {
+    let d: u32 := (n / div) % 10
+    if d != 0 || seen {
+      seen = true
+      put_byte(cast.<u8>(48 + d))
+    }
+    if div == 1 { break }
+    div = div / 10
+  }
+}
+
+// One byte out. The address of a local is a `*u8`, which is what the runtime
+// takes; there is no sequence here to index and so nothing to check.
+put_byte :: #unsafe func (b: u8) -> void {
+  let x: u8 := b
+  nest_write_err(&x, 1)
 }
 
 // Stop the process, immediately and without unwinding — the one part of failing
@@ -48,6 +134,27 @@
 // target has one: `ud2`, `brk`, `unreachable`.
 @public trap :: #intrinsic("trap") func () -> never
 
-// A compile-time assertion (§6.10). Checked during compilation, producing no
-// run-time code; the run-time `assert` is an ordinary `std` function, not this.
-@public assert :: #intrinsic("assert") func (cond: bool) -> void
+// A **compile-time** assertion (§6.10). The condition is evaluated during
+// compilation and the program does not build if it is false; nothing is emitted
+// either way, so this costs nothing at run time.
+//
+// The name says which one it is on purpose. `assert` below is the run-time one,
+// and a reader should never have to know which file a name came from to know
+// when it runs.
+@public comptime_assert :: #intrinsic("comptime_assert") func (cond: bool) -> void
+
+// A **run-time** assertion: if `cond` is false, panic with `msg`, reporting the
+// line that called this rather than this line (§5.2).
+//
+// It is an ordinary function, not an intrinsic, and it goes through `panic` —
+// so a program that replaced `#lang("panic_handler")` has replaced what a failed
+// assertion does too. That is the whole reason not to make it an intrinsic: an
+// assertion is a panic with a condition in front of it, and it should not be a
+// second, less replaceable way to fail.
+@public assert :: func (
+  cond: bool,
+  msg: str := "assertion failed",
+  loc: Location := #caller_location,
+) -> void {
+  if cond == false { panic(msg, loc) }
+}

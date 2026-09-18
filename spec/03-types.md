@@ -333,7 +333,7 @@ Fields are private to the struct's namespace unless the struct is `@public(all)`
 or the field is individually `@public`. Inside a `@public(all)` struct, an
 individual field may be re-hidden with `@private` (see
 [09-directives-and-attributes.md](09-directives-and-attributes.md)). A record
-body may also contain compile-time items such as `assert(...)` (see
+body may also contain compile-time items such as `comptime_assert(...)` (see
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.10).
 
 Struct layout is affected by the directives `#packed`, `#align(N)`, and `#raw`

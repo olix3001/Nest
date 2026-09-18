@@ -37,4 +37,8 @@
 // signatures and constants to earn its place; the rest of `core/mem` and all of
 // `core/gc` are an import away.
 @public { cast, size_of } :: import "mem.nest"
-@public { panic } :: import "fail.nest"
+//
+// `assert` joins them: a run-time assertion is written in the same places a
+// `panic` is, and a program that has to import it before it can check anything
+// writes the import far more often than it writes anything else.
+@public { panic, assert } :: import "fail.nest"

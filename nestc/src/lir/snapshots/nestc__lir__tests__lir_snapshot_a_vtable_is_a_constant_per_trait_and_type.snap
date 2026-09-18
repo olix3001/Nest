@@ -37,8 +37,8 @@ unit mem:main {
   private const vtable.Draw.for.Square: vtable.Draw = { &Square.<as Draw>.area, &Square.<as Draw>.perimeter, &Square.<as Draw>.sides }  // _NVN4DrawIEN6SquareIE
   private const vtable.Draw.for.Circle: vtable.Draw = { &Circle.<as Draw>.area, &Circle.<as Draw>.perimeter, &Circle.<as Draw>.sides }  // _NVN4DrawIEN6CircleIE
   private const vtable.Draw.for.Box.<i32>: vtable.Draw = { &Box.<as Draw>.area, &Box.<as Draw>.perimeter, &Box.<as Draw>.sides }  // _NVN4DrawIEN3BoxIi32E
-  private const const.str.3: [16]u8 = b"integer overflow"  // _NK3
-  private const const.str.4: [8]u8 = b"mem:main"  // _NK4
+  private const const.str.4: [16]u8 = b"integer overflow"  // _NK4
+  private const const.str.5: [8]u8 = b"mem:main"  // _NK5
 
   func total(sq_0: *Square, ci_1: *Circle, bx_2: *Box.<i32>) -> i32  // _NC5total
     let _3: *dyn Draw
@@ -104,8 +104,8 @@ unit mem:main {
     _19 := add_checked.i32 _16, _18
     switch.bool _19.1 { 1 => bb1, _ => bb2 }
   bb1:                    // overflow
-    _20 := []u8(&const.str.3, 16)
-    _21 := []u8(&const.str.4, 8)
+    _20 := []u8(&const.str.4, 16)
+    _21 := []u8(&const.str.5, 8)
     _22 := core.loc.Location(_21, 30, 10)
     call core.fail.panic(_20, _22)
       @safepoint { live: [_20, _22]
@@ -123,8 +123,8 @@ unit mem:main {
     _25 := add_checked.i32 _19.0, _24
     switch.bool _25.1 { 1 => bb3, _ => bb4 }
   bb3:                    // overflow
-    _26 := []u8(&const.str.3, 16)
-    _27 := []u8(&const.str.4, 8)
+    _26 := []u8(&const.str.4, 16)
+    _27 := []u8(&const.str.5, 8)
     _28 := core.loc.Location(_27, 30, 10)
     call core.fail.panic(_26, _28)
       @safepoint { live: [_26, _28]
@@ -141,8 +141,8 @@ unit mem:main {
     _31 := add_checked.i32 _25.0, _30
     switch.bool _31.1 { 1 => bb5, _ => bb6 }
   bb5:                    // overflow
-    _32 := []u8(&const.str.3, 16)
-    _33 := []u8(&const.str.4, 8)
+    _32 := []u8(&const.str.4, 16)
+    _33 := []u8(&const.str.5, 8)
     _34 := core.loc.Location(_33, 30, 10)
     call core.fail.panic(_32, _34)
       @safepoint { live: [_32, _34]
@@ -162,8 +162,8 @@ unit mem:main {
     _1 := mul_checked.i32 self_0.*.s, self_0.*.s
     switch.bool _1.1 { 1 => bb1, _ => bb2 }
   bb1:                    // overflow
-    _2 := []u8(&const.str.3, 16)
-    _3 := []u8(&const.str.4, 8)
+    _2 := []u8(&const.str.4, 16)
+    _3 := []u8(&const.str.5, 8)
     _4 := core.loc.Location(_3, 10, 46)
     call core.fail.panic(_2, _4)
       @safepoint { live: [_2, _4]
@@ -183,8 +183,8 @@ unit mem:main {
     _1 := mul_checked.i32 self_0.*.s, 4
     switch.bool _1.1 { 1 => bb1, _ => bb2 }
   bb1:                    // overflow
-    _2 := []u8(&const.str.3, 16)
-    _3 := []u8(&const.str.4, 8)
+    _2 := []u8(&const.str.4, 16)
+    _3 := []u8(&const.str.5, 8)
     _4 := core.loc.Location(_3, 11, 51)
     call core.fail.panic(_2, _4)
       @safepoint { live: [_2, _4]
@@ -212,8 +212,8 @@ unit mem:main {
     _1 := mul_checked.i32 self_0.*.r, self_0.*.r
     switch.bool _1.1 { 1 => bb1, _ => bb2 }
   bb1:                    // overflow
-    _2 := []u8(&const.str.3, 16)
-    _3 := []u8(&const.str.4, 8)
+    _2 := []u8(&const.str.4, 16)
+    _3 := []u8(&const.str.5, 8)
     _4 := core.loc.Location(_3, 15, 46)
     call core.fail.panic(_2, _4)
       @safepoint { live: [_2, _4]
@@ -225,8 +225,8 @@ unit mem:main {
     _5 := mul_checked.i32 _1.0, 3
     switch.bool _5.1 { 1 => bb3, _ => bb4 }
   bb3:                    // overflow
-    _6 := []u8(&const.str.3, 16)
-    _7 := []u8(&const.str.4, 8)
+    _6 := []u8(&const.str.4, 16)
+    _7 := []u8(&const.str.5, 8)
     _8 := core.loc.Location(_7, 15, 46)
     call core.fail.panic(_6, _8)
       @safepoint { live: [_6, _8]
@@ -246,8 +246,8 @@ unit mem:main {
     _1 := mul_checked.i32 self_0.*.r, 6
     switch.bool _1.1 { 1 => bb1, _ => bb2 }
   bb1:                    // overflow
-    _2 := []u8(&const.str.3, 16)
-    _3 := []u8(&const.str.4, 8)
+    _2 := []u8(&const.str.4, 16)
+    _3 := []u8(&const.str.5, 8)
     _4 := core.loc.Location(_3, 16, 51)
     call core.fail.panic(_2, _4)
       @safepoint { live: [_2, _4]

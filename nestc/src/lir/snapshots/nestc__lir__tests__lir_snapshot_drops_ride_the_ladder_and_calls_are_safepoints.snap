@@ -1,6 +1,5 @@
 ---
 source: src/lir/tests.rs
-assertion_line: 1339
 expression: lir_text(src)
 ---
 unit mem:main {

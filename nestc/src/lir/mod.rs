@@ -618,8 +618,6 @@ pub enum Intrinsic {
     /// Stop the processor: `ud2`, `brk`, `unreachable`. The one operation no
     /// library can write, which is why it is the only unconditional one here.
     Trap,
-    /// Fail the run unless the argument is true (§6.10).
-    Assert,
     /// Reinterpret the bits as the destination's type. The one intrinsic whose
     /// type is not in the instruction: it is on the destination, because "become
     /// whatever this slot holds" is what the operation *is*.
@@ -666,7 +664,6 @@ impl Intrinsic {
             Intrinsic::New => "new",
             Intrinsic::Make => "make",
             Intrinsic::Trap => "trap",
-            Intrinsic::Assert => "assert",
             Intrinsic::Transmute => "transmute",
             Intrinsic::Memset => "memset",
             Intrinsic::Memcpy => "memcpy",
@@ -685,7 +682,6 @@ impl Intrinsic {
             "new" => Intrinsic::New,
             "make" => Intrinsic::Make,
             "trap" => Intrinsic::Trap,
-            "assert" => Intrinsic::Assert,
             "transmute" => Intrinsic::Transmute,
             "memset" => Intrinsic::Memset,
             "memcpy" => Intrinsic::Memcpy,

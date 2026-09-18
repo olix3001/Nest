@@ -242,6 +242,24 @@ static void nest_stack_init(void) {
     nest_stack_floor = sp - (uintptr_t)rl.rlim_cur + NEST_STACK_MARGIN;
 }
 
+/* Bytes to stderr, and nothing else.
+ *
+ * This is the whole of what the runtime does for a failing program. `core` has
+ * no I/O of its own — it does not know whether a target has a console — so it
+ * needs *a* way to emit bytes; it does not need the runtime to decide what a
+ * panic looks like. The shape of the report ("nest: panic: ", the `at
+ * file:line:column` line) is assembled in `core/fail.nest`, where it can be
+ * changed without touching C.
+ *
+ * The text is a pointer and a length because that is what a Nest `str` is
+ * (`design/lir.md` §7b) and it is not NUL terminated. A zero length is normal
+ * and reads nothing. */
+void nest_write_err(const unsigned char *buf, size_t len) {
+    if (buf != NULL && len > 0) {
+        fwrite(buf, 1, len, stderr);
+    }
+}
+
 /* The prologue check failed: this frame would run past the end of the stack. */
 void nest_stack_overflow(void) {
     fputs("nest: stack overflow\n", stderr);
@@ -298,18 +316,18 @@ int nest_errno(void) {
 /* The last instruction: `trap()` in source, and where a panic ends up.
  *
  * It does not return, and the backend marks every call to it `noreturn`, which
- * is what makes the `unreachable` after it a guarantee rather than a claim. */
+ * is what makes the `unreachable` after it a guarantee rather than a claim.
+ *
+ * It prints **nothing**. A trap is the machine instruction at the end of a
+ * failure, not the failure's report: everything that has something to say —
+ * a panic the program wrote, a trapped overflow, an index past the end — says
+ * it through `core`'s panic handler first and only then arrives here. A
+ * `trap()` called directly is a program asking to stop without a word, and
+ * that is what it gets. */
 void nest_trap(void) {
-    fputs("nest: trap\n", stderr);
     abort();
 }
 
 /* `assert(cond)`. The argument is a byte holding 0 or 1 — a Nest `bool` is a
  * byte in every slot, member and argument, which is what keeps its size the same
  * in a register and in memory. */
-void nest_assert(unsigned char cond) {
-    if (!cond) {
-        fputs("nest: assertion failed\n", stderr);
-        abort();
-    }
-}

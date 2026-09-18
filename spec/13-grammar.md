@@ -29,7 +29,7 @@ declaration = { attribute } [ directive ] ( const_bind | local_decl )
 
 attribute   = '@' identifier [ '(' [ attr_arg { ',' attr_arg } ] ')' ]
 directive   = '#' ( identifier | 'const' ) [ '(' [ arg { ',' arg } ] ')' ] { directive }
-comptime_item = call                               // e.g. assert(...)  (returns void)
+comptime_item = call                               // e.g. comptime_assert(...)  (returns void)
 
 const_bind  = pattern [ ':' type ] '::' const_rhs
             | '#static' ... identifier ':' type [ '::' expr ]   // zeroed if omitted
@@ -57,7 +57,7 @@ the two are told apart by the directive and the colon rather than by what
 follows three tokens later. A `#static` **must** write its type. A `field_item`
 inside a
 struct/enum/trait/namespace body may also be a `comptime_item` (e.g.
-`assert(...)`). A `local_decl` at namespace scope is rejected outright: `let`
+`comptime_assert(...)`). A `local_decl` at namespace scope is rejected outright: `let`
 binds a stack slot and there is no call there — use `::`, with `#static` for a
 mutable region. See
 [02-declarations-and-bindings.md](02-declarations-and-bindings.md).
@@ -177,7 +177,7 @@ statement = local_decl
           | return_stmt
           | break_stmt | continue_stmt
           | loop_stmt
-          | expr                                 // includes an intrinsic call, e.g. assert(...)
+          | expr                                 // includes an intrinsic call, e.g. comptime_assert(...)
 
 local_decl  = ( 'let' | 'const' ) pattern [ ':' type ] ':=' expr
 assign_stmt = place assign_op expr               // place must be mutable

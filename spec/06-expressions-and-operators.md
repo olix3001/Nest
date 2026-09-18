@@ -162,7 +162,7 @@ The intrinsics (extensible; not a closed list):
 | `size_of.<T>()` / `align_of.<T>()` | layout queries (`usize`), `#const` |
 | `len(x)` | element count of an array or slice (`usize`); the core library's `.len()` method is written in terms of it |
 | `drop(p)` | free `p`'s object now, rather than when the collector next runs (§6.9) |
-| `assert(cond[, msg])` | compile-time assertion (§6.10) |
+| `comptime_assert(cond)` | compile-time assertion (§6.10); `assert` is the run-time one and is an ordinary `core` function |
 | `trap()` | stop the process immediately, without unwinding — the last instruction of a panic |
 | `embed_file("path")` | splice a file's bytes as a compile-time `[]u8` |
 | `gc_collect()` | request a collection now (§6.4.1) |
@@ -439,25 +439,48 @@ the one intrinsic whose correctness is partly the author's, which is also why th
 parameter is `*mut T`: freeing an object is the most destructive write there is,
 and the permission to do it belongs in the type.
 
-## 6.10 Compile-time statement items (`assert`)
+## 6.10 Compile-time statement items (`comptime_assert`)
 
 Intrinsic calls that return `void` can be used as standalone statements — not
 only inside function bodies, but also as **items** inside a `struct`, `enum`,
-`trait`, or `namespace` body. `assert(cond[, msg])` is the canonical case: a
+`trait`, or `namespace` body. `comptime_assert(cond)` is the canonical case: a
 compile-time assertion. A body entry is therefore
 `field | variant | decl | comptime-statement`.
 
 ```
 Header :: #packed struct {
-  assert(size_of.<Self>() == 64, "Header must be 64 bytes")   // static check
-  magic: uint32,
-  len:   uint32,
+  comptime_assert(size_of.<Self>() == 64)   // static check
+  magic: u32,
+  len:   u32,
 }
 ```
 
-`assert` is checked during compilation and produces no run-time code. A
-**run-time** assertion is the ordinary std function `assert(cond, msg)`, not an
-intrinsic (see [08-error-handling-and-defer.md](08-error-handling-and-defer.md)).
+`comptime_assert` is checked during compilation and produces **no run-time
+code**: the condition is evaluated by the compiler, a false one stops the build,
+and nothing at all is emitted either way.
+
+### `comptime_assert` and `assert`
+
+The two are different tools and the names say which is which:
+
+| | when it runs | on failure | what it costs at run time |
+|---|---|---|---|
+| `comptime_assert(cond)` | while compiling | the build stops | nothing; no code is emitted |
+| `assert(cond[, msg])` | while running | panics | the condition and a branch |
+
+`assert` is an ordinary function in `core` (`core/fail`), in the prelude, and
+**not** an intrinsic. It is a `panic` with a condition in front of it:
+
+```
+assert :: func (cond: bool, msg: str := "assertion failed",
+                loc: Location := #caller_location) -> void
+```
+
+Being a plain function is the point. It reports the line that *called* it
+(§5.2), and it fails through `#lang("panic_handler")` — so a program that
+replaced the panic handler has replaced what a failed assertion does too,
+rather than facing a second and less replaceable way to stop
+(see [08-error-handling-and-defer.md](08-error-handling-and-defer.md)).
 
 ## 6.11 Interpolated strings
 

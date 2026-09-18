@@ -20,9 +20,9 @@ unit mem:main {
     0: i32                    // +0
     1: bool                    // +4
   }
-  private const const.str.0: [19]u8 = b"index out of bounds"  // _NK0
-  private const const.str.1: [8]u8 = b"mem:main"  // _NK1
-  private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
+  private const const.str.1: [19]u8 = b"index out of bounds"  // _NK1
+  private const const.str.2: [8]u8 = b"mem:main"  // _NK2
+  private const const.str.3: [16]u8 = b"integer overflow"  // _NK3
 
   func sum(xs_0: []i32, k_1: u64) -> i32  // _NC3sum   // mem:main:1:8
     let _2: i32   // mem:main:2:3
@@ -44,8 +44,8 @@ unit mem:main {
     _5 := lt.u64 k_1, _4.*.len   // mem:main:3:19
     switch.bool _5 { 1 => bb2, _ => bb1 }   // mem:main:3:19
   bb1:                    // out of bounds
-    _6 := []u8(&const.str.0, 19)   // mem:main:3:19
-    _7 := []u8(&const.str.1, 8)   // mem:main:3:19
+    _6 := []u8(&const.str.1, 19)   // mem:main:3:19
+    _7 := []u8(&const.str.2, 8)   // mem:main:3:19
     _8 := core.loc.Location(_7, 3, 19)   // mem:main:3:19
     call core.fail.panic(_6, _8)   // mem:main:3:19
       @safepoint { live: [_6, _8]
@@ -58,8 +58,8 @@ unit mem:main {
     _10 := add_checked.i32 total_3, _9.*   // mem:main:3:11
     switch.bool _10.1 { 1 => bb3, _ => bb4 }   // mem:main:3:11
   bb3:                    // overflow
-    _11 := []u8(&const.str.2, 16)   // mem:main:3:11
-    _12 := []u8(&const.str.1, 8)   // mem:main:3:11
+    _11 := []u8(&const.str.3, 16)   // mem:main:3:11
+    _12 := []u8(&const.str.2, 8)   // mem:main:3:11
     _13 := core.loc.Location(_12, 3, 11)   // mem:main:3:11
     call core.fail.panic(_11, _13)   // mem:main:3:11
       @safepoint { live: [_11, _13]
@@ -71,5 +71,5 @@ unit mem:main {
     total_3 := _10.0   // mem:main:3:3
     return total_3   // mem:main:4:3
 
-  declare func core.fail.panic(msg_0: []u8, loc_1: core.loc.Location) -> never @public  // _NC4core4fail5panic   // fail.nest:25:18
+  declare func core.fail.panic(msg_0: []u8, loc_1: core.loc.Location) -> never @public  // _NC4core4fail5panic   // fail.nest:26:18
 }

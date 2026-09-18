@@ -3571,6 +3571,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 );
                 Some(Rvalue::Use(Operand::Const(Constant::Undef)))
             }
+            // The compile-time assertion produces no code. Its condition was
+            // evaluated and judged by `ir::check::constants` long before this,
+            // which is the whole of what it does; reaching run time at all
+            // would make "costs nothing" false.
+            "comptime_assert" => Some(Rvalue::Use(Operand::Const(Constant::Undef))),
             _ => {
                 let vals = self.passed(args);
                 self.emit_intrinsic(name.clone(), vals, ty, span)

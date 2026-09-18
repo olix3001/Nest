@@ -195,10 +195,11 @@ found through their `#lang` tags, not by name.
 | abort / trap | `panic`, `.!` on failure, failed `assert`, out-of-bounds index, illegal `cast`, uninitialized read | no (aborts) | programming errors, invariant violations |
 
 Use `Result` for anything a caller could respond to. Reserve aborts for bugs. A
-**compile-time** assertion is `assert(...)` (see
-[06-expressions-and-operators.md](06-expressions-and-operators.md) §6.10); a
-**run-time** assertion is the std function `assert(cond, msg)`, which aborts on
-failure and may be compiled out in release builds.
+**compile-time** assertion is `comptime_assert(cond)` (see
+[06-expressions-and-operators.md](06-expressions-and-operators.md) §6.10), which
+stops the build and emits nothing; a **run-time** assertion is `assert(cond,
+msg)`, an ordinary `core` function in the prelude that panics on failure,
+reporting the line that called it.
 
 ## 8.6 The panic handler
 

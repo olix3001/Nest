@@ -1676,14 +1676,6 @@ impl<'ctx> Cx<'ctx, '_> {
                 );
                 Ok(())
             }
-            Intrinsic::Assert => {
-                let cond = self.operand(fx, f, &args[0], &Ty::Bool)?;
-                let assert = self.runtime("nest_assert", &[self.context.i8_type().into()], None);
-                self.builder
-                    .build_call(assert, &[cond.into()], "")
-                    .map_err(failed)?;
-                Ok(())
-            }
             // `new.<T>()` — one `T`'s worth of collected memory. The size comes
             // from the destination's pointee, which is where the type argument
             // ended up by this level.

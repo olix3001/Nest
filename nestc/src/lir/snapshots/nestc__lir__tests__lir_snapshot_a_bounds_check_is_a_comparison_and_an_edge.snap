@@ -16,8 +16,8 @@ unit mem:main {
     line: u32                    // +16
     column: u32                    // +20
   }
-  private const const.str.0: [19]u8 = b"index out of bounds"  // _NK0
-  private const const.str.1: [8]u8 = b"mem:main"  // _NK1
+  private const const.str.1: [19]u8 = b"index out of bounds"  // _NK1
+  private const const.str.2: [8]u8 = b"mem:main"  // _NK2
 
   func get(s_0: []i32, k_1: u64) -> i32  // _NC3get
     let _2: *[]i32
@@ -31,8 +31,8 @@ unit mem:main {
     _3 := lt.u64 k_1, _2.*.len
     switch.bool _3 { 1 => bb2, _ => bb1 }
   bb1:                    // out of bounds
-    _4 := []u8(&const.str.0, 19)
-    _5 := []u8(&const.str.1, 8)
+    _4 := []u8(&const.str.1, 19)
+    _5 := []u8(&const.str.2, 8)
     _6 := core.loc.Location(_5, 1, 50)
     call core.fail.panic(_4, _6)
       @safepoint { live: [_4, _6]

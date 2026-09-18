@@ -32,9 +32,9 @@ use crate::sema::def::DefTable;
 use crate::sema::infer::RangeReported;
 use crate::sema::ty::Ty;
 
-use crate::ir::const_eval::ConstEval;
+use crate::ir::const_eval::{ConstEval, ConstValue};
 use crate::ir::layout::Layouts;
-use crate::ir::{Linked, Meta};
+use crate::ir::{Expr, ExprKind, Linked, Meta, Visitor, walk_expr};
 
 /// Evaluate every global initializer, recording what it produced and reporting
 /// what it could not.
@@ -89,5 +89,71 @@ pub fn check(
                 }));
             }
         }
+    }
+    comptime_assertions(defs, meta, linked, layouts, out);
+}
+
+/// Judge every `comptime_assert(cond)` in the program (§6.10).
+///
+/// This is the whole of what the intrinsic does. The condition is evaluated
+/// here and the call lowers to nothing at all, so a false one stops the build
+/// and a true one costs the program nothing — which is the difference between
+/// it and the run-time `assert`, an ordinary `core` function that panics.
+///
+/// A condition that cannot be evaluated is its own error, and a different one:
+/// "this assertion is false" and "I could not tell" are not the same thing to
+/// report, and only the first is the program saying something untrue.
+fn comptime_assertions(
+    defs: &DefTable,
+    meta: &Meta,
+    linked: &Linked,
+    layouts: &Layouts,
+    out: &mut Vec<Diagnostic>,
+) {
+    let mut v = Assertions {
+        cx: ConstEval::new(defs, meta, linked, layouts),
+        meta,
+        out,
+    };
+    for func in linked.funcs() {
+        if let Some(body) = &func.body {
+            v.visit_block(body);
+        }
+    }
+}
+
+struct Assertions<'a, 'b> {
+    cx: ConstEval<'a>,
+    meta: &'a Meta,
+    out: &'b mut Vec<Diagnostic>,
+}
+
+impl Visitor for Assertions<'_, '_> {
+    fn visit_expr(&mut self, expr: &Expr) {
+        if let ExprKind::Intrinsic { name, args } = &expr.kind
+            && name.as_str() == "comptime_assert"
+            && let Some(cond) = args.first()
+        {
+            match self.cx.eval(cond) {
+                Ok(ConstValue::Bool(true)) => {}
+                Ok(_) => {
+                    let mut d = Diagnostic::error("assertion failed at compile time");
+                    if let Some(span) = self.meta.span(expr.id) {
+                        d = d.with_primary(span, "this is false");
+                    }
+                    self.out.push(d.with_note(
+                        "`comptime_assert` is checked while compiling; the run-time assertion is \
+                         `assert`, which panics instead",
+                    ));
+                }
+                // Already somebody's diagnostic — the same rule the globals
+                // above follow.
+                Err(err) if err.reported || self.meta.get::<RangeReported>(err.at).is_some() => {}
+                Err(err) => self
+                    .out
+                    .push(err.to_diagnostic(self.meta, "a `comptime_assert` condition")),
+            }
+        }
+        walk_expr(self, expr);
     }
 }

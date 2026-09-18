@@ -3772,6 +3772,30 @@ fn reading_through_an_opaque_pointer_is_refused() {
 }
 
 #[test]
+fn a_comptime_assert_is_judged_while_compiling() {
+    // §6.10: the condition is evaluated by the compiler. A false one stops the
+    // build; a true one is not an error and emits nothing.
+    let s = analyze1(
+        "{ comptime_assert } :: import <core/fail>\nf :: func () -> i32 { comptime_assert(1 + 1 == 3)\n  return 0 }\n",
+    );
+    assert!(diag_contains(&s, "assertion failed at compile time"));
+    analyze_clean(
+        "{ comptime_assert } :: import <core/fail>\nf :: func () -> i32 { comptime_assert(1 + 1 == 2)\n  return 0 }\n",
+    );
+}
+
+#[test]
+fn assert_is_the_run_time_one_and_an_ordinary_function() {
+    // `assert` is in the prelude, takes an optional message, and is not an
+    // intrinsic — it is a `panic` with a condition in front of it, so a false
+    // one is a run-time failure rather than a compile-time one. A condition the
+    // compiler could fold is still not its business.
+    analyze_clean("f :: func (n: i32) -> i32 { assert(n > 0, \"n must be positive\")\n  return n }\n");
+    let s = analyze1("f :: func () -> i32 { assert(1 + 1 == 3)\n  return 0 }\n");
+    assert!(!diag_contains(&s, "assertion failed at compile time"));
+}
+
+#[test]
 fn dyn_needs_a_trait() {
     assert!(
         first_error("f :: func (x: *dyn i32) -> i32 { return 0 }\n").contains("is not a trait"),

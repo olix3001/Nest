@@ -2047,6 +2047,10 @@ fn every_declared_intrinsic_has_a_lir_case() {
         "member_ptr",
         // An offset and a table read, paired into a trait object.
         "member_dyn",
+        // Judged rather than lowered: `ir::check::constants` evaluates the
+        // condition and the call becomes no code at all. Listed again below,
+        // where the assertion is that it has no case.
+        "comptime_assert",
     ];
     for row in crate::sema::intrinsics::INTRINSICS {
         if lowered.contains(&row.tag) {
@@ -2076,7 +2080,13 @@ fn every_declared_intrinsic_has_a_lir_case() {
     // more at all. An `f"..."` is desugared to `core`'s formatter before
     // inference ever sees it (`sema::desugar`), so nothing downstream has a
     // name to lower.
-    for name in ["slice", "array", "index_mut", "repeat", "format"] {
+    //
+    // `comptime_assert` is a third reason again: it is *judged* rather than
+    // lowered. `ir::check::constants` evaluates its condition and either stops
+    // the build or says nothing, and the call itself becomes no code at all —
+    // which is the whole difference between it and the run-time `assert`, an
+    // ordinary `core` function that is not an intrinsic in the first place.
+    for name in ["slice", "array", "index_mut", "repeat", "format", "comptime_assert"] {
         let i = Intrinsic::from_name(&Symbol::new(name));
         assert!(
             matches!(i, Intrinsic::Unknown(_)),
