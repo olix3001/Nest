@@ -38,6 +38,7 @@ use crate::common::symbol::Symbol;
 use crate::ir::{IrId, Program};
 use crate::parser::ast::{Ast, NodeId};
 use crate::sema::decl::Decl;
+use crate::sema::impls::ImplInfo;
 use crate::sema::def::{Def, DefId};
 
 use codec::{Bases, Counts};
@@ -47,7 +48,7 @@ pub const MAGIC: &[u8; 8] = b"NESTMETA";
 
 /// The layout of what follows the magic. Raised whenever anything written
 /// changes shape, so an old library is refused by name rather than misread.
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = 5;
 
 /// What a reader checks before it reads anything else.
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,6 +91,11 @@ pub struct Meta {
     /// compiled against this one would otherwise have to read off a tree it
     /// does not have.
     pub decls: Vec<(DefId, Decl)>,
+    /// Every `impl` the package writes, resolved into types
+    /// (`crate::sema::impls`). An impl is a candidate at every selection in
+    /// every package that reads this one, so it travels rather than being read
+    /// out of syntax again.
+    pub impls: Vec<ImplInfo>,
     /// The `#lang` tags this package's definitions claim, and whether each was
     /// `core`'s claim.
     pub lang_items: Vec<(Symbol, DefId, bool)>,

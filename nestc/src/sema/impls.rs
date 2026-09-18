@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
+use serde::{Deserialize, Serialize};
+
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
 use super::decl::{DeclTable, Decls};
@@ -31,21 +33,16 @@ use super::{DefMeta, Resolution};
 ///
 /// For an inherent impl (`impl Vec3 { … }`) [`trait_def`](ImplInfo::trait_def)
 /// is `None`. For a trait impl (`impl [<g>] Trait[.<args>] for Self { … }`) it
-/// is the trait's [`DefId`], [`self_node`](ImplInfo::self_node) is the `for`
-/// target's type node, and [`trait_args`](ImplInfo::trait_args) are the trait's
-/// own generic arguments.
-#[derive(Debug, Clone)]
+/// is the trait's [`DefId`], and [`typed`](ImplInfo::typed) carries the `for`
+/// target and the trait's own generic arguments as types.
+///
+/// Everything here but [`syntax`](ImplInfo::syntax) **travels**: an impl in
+/// another package is a candidate at every selection in this one, and its tree
+/// stayed behind with its library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImplInfo {
     /// The implemented trait, or `None` for an inherent impl.
     pub trait_def: Option<DefId>,
-    /// The trait's generic-argument type nodes (`Add.<Rhs>` → the `Rhs` node),
-    /// excluding `<Assoc = T>` bindings. Empty for an inherent impl or a bare
-    /// `impl Trait for Self`.
-    pub trait_args: Vec<NodeId>,
-    /// The self type's type-expression node (the impl's target), used to build
-    /// the concrete self [`Ty`](super::ty::Ty) with the impl's generics
-    /// instantiated fresh.
-    pub self_node: NodeId,
     /// The head [`DefId`] of the self type — a `struct`/`enum` (or, for a
     /// blanket impl, one of [`generics`](ImplInfo::generics)). Used to index
     /// candidates and to judge specificity (a generic self is less specific).
@@ -56,19 +53,33 @@ pub struct ImplInfo {
     /// Every named member the impl declares: methods and associated-type
     /// bindings, `name → def`.
     pub members: HashMap<Symbol, DefId>,
-    /// Associated-type bindings, `assoc name → its RHS type-expression node`
-    /// (e.g. `Output :: Vec3` → the `Vec3` node). Projection substitutes the
-    /// impl's solved generics into this node.
-    pub assoc: HashMap<Symbol, NodeId>,
-    /// The file the impl (and its member/assoc nodes) lives in.
+    /// The file the impl lives in.
     pub file: FileId,
-    /// The same impl with its three type expressions **resolved**, filled in by
+    /// The impl's type expressions **resolved**, filled in by
     /// [`super::infer::resolve_impl_targets`] before inference begins.
     ///
-    /// `None` only where they could not be settled, in which case the nodes
-    /// above still answer. For an impl read out of a **library** it is the
-    /// other way round and there are no nodes: this is all there is.
+    /// `None` only where they could not be settled, in which case
+    /// [`syntax`](ImplInfo::syntax) still answers.
     pub typed: Option<TypedImpl>,
+    /// The syntax it was read from — present only for an impl **this**
+    /// compilation parsed, and not written to a library.
+    #[serde(skip)]
+    pub syntax: Option<ImplSyntax>,
+}
+
+/// Where an impl's three type expressions are written, for the compilation that
+/// has the tree they are written in.
+#[derive(Debug, Clone)]
+pub struct ImplSyntax {
+    /// The trait's generic-argument type nodes (`Add.<Rhs>` → the `Rhs` node),
+    /// excluding `<Assoc = T>` bindings. Empty for an inherent impl or a bare
+    /// `impl Trait for Self`.
+    pub trait_args: Vec<NodeId>,
+    /// The self type's type-expression node (the impl's target).
+    pub self_node: NodeId,
+    /// Associated-type bindings, `assoc name → its RHS type-expression node`
+    /// (e.g. `Output :: Vec3` → the `Vec3` node).
+    pub assoc: HashMap<Symbol, NodeId>,
 }
 
 /// An impl's type expressions, resolved once — see [`ImplInfo::typed`].
@@ -76,7 +87,7 @@ pub struct ImplInfo {
 /// The impl's own generics stay **rigid** here, each a [`Ty`] naming its
 /// parameter, so a selection instantiates them by substituting fresh variables
 /// rather than by resolving the syntax again.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypedImpl {
     /// The `for` target (`impl Add for Vec3` → `Vec3`).
     pub self_ty: Ty,
@@ -95,24 +106,30 @@ impl ImplInfo {
     }
 }
 
-/// The whole-program impl index.
+/// The whole-program impl index: every impl this compilation wrote, and every
+/// impl its libraries brought.
 #[derive(Debug, Default)]
 pub struct ImplTable {
     /// Every recorded impl, in collection order.
     pub impls: Vec<ImplInfo>,
 }
 
-/// Build the [`ImplTable`] from every collected, resolved file, checking each
-/// impl's **coherence** (§4.8) as it goes.
+/// Add every impl written in `files` to `table`, checking each one's
+/// **coherence** (§4.8) as it goes.
+///
+/// `files` are **this compilation's**. An impl a library brought is already in
+/// the table, put there when the library was read: it was recorded, checked and
+/// resolved where it was written, and the tree that would let any of that
+/// happen again stayed behind with it.
 pub fn build(
+    table: &mut ImplTable,
     defs: &DefTable,
     asts: &HashMap<FileId, Ast>,
     decls: &DeclTable,
     pkg_of: &HashMap<FileId, String>,
     diags: &mut Vec<Diagnostic>,
     files: &[FileId],
-) -> ImplTable {
-    let mut table = ImplTable::default();
+) {
     for &file in files {
         let ast = &asts[&file];
         for id in ast.ids() {
@@ -132,7 +149,6 @@ pub fn build(
             }
         }
     }
-    table
 }
 
 // ===< completeness >===
@@ -170,7 +186,11 @@ fn check_completeness(
     // like any other. Nothing special is needed: its members are its own.
     let mut missing: Vec<String> = Vec::new();
     for (name, &member) in &defs.get(trait_def).ns.members {
-        if imp.members.contains_key(name) || imp.assoc.contains_key(name) {
+        let bound = imp
+            .syntax
+            .as_ref()
+            .is_some_and(|sx| sx.assoc.contains_key(name));
+        if imp.members.contains_key(name) || bound {
             continue;
         }
         let Some(kind) = Decls::new(defs, asts, decls).requirement(member) else {
@@ -278,7 +298,8 @@ fn check_coherence(
             if owner(defs, pkg_of, t) == here {
                 return;
             }
-            if mentions_local(defs, ast, pkg_of, here, imp, imp.self_node) {
+            let Some(sx) = &imp.syntax else { return };
+            if mentions_local(defs, ast, pkg_of, here, imp, sx.self_node) {
                 return;
             }
             let msg = format!(
@@ -385,14 +406,16 @@ fn record(
 
     Some(ImplInfo {
         trait_def,
-        trait_args,
-        self_node,
         self_head,
         generics,
         members,
-        assoc,
         file,
         typed: None,
+        syntax: Some(ImplSyntax {
+            trait_args,
+            self_node,
+            assoc,
+        }),
     })
 }
 

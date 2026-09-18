@@ -441,18 +441,19 @@ pub fn resolve_impl_targets(
     let mut out = Vec::with_capacity(impls.impls.len());
     for i in 0..frozen.impls.len() {
         let imp = frozen.impls[i].clone();
+        // An impl that arrived from a library is already resolved — that is
+        // what its metadata carries — so there is nothing to work out here.
+        if let Some(t) = &imp.typed {
+            out.push(ImplTarget {
+                self_ty: t.self_ty.clone(),
+                trait_args: t.trait_args.clone(),
+            });
+            continue;
+        }
         let Some(ast) = asts.get(&imp.file) else {
-            // An impl whose typed view already arrived with its library: there
-            // is no syntax here to resolve, and none is needed.
-            out.push(match &imp.typed {
-                Some(t) => ImplTarget {
-                    self_ty: t.self_ty.clone(),
-                    trait_args: t.trait_args.clone(),
-                },
-                None => ImplTarget {
-                    self_ty: Ty::Error,
-                    trait_args: Vec::new(),
-                },
+            out.push(ImplTarget {
+                self_ty: Ty::Error,
+                trait_args: Vec::new(),
             });
             continue;
         };
@@ -478,13 +479,20 @@ pub fn resolve_impl_targets(
             int_values: HashMap::new(),
             float_values: HashMap::new(),
         };
-        let self_ty = cx.ty_from_node_in(imp.file, imp.self_node);
-        let trait_args: Vec<Ty> = imp
+        let Some(sx) = imp.syntax.clone() else {
+            out.push(ImplTarget {
+                self_ty: Ty::Error,
+                trait_args: Vec::new(),
+            });
+            continue;
+        };
+        let self_ty = cx.ty_from_node_in(imp.file, sx.self_node);
+        let trait_args: Vec<Ty> = sx
             .trait_args
             .iter()
             .map(|&n| cx.ty_from_node_in(imp.file, n))
             .collect();
-        let assoc: HashMap<Symbol, Ty> = imp
+        let assoc: HashMap<Symbol, Ty> = sx
             .assoc
             .iter()
             .map(|(name, &n)| (name.clone(), cx.ty_from_node_in(imp.file, n)))
@@ -2800,34 +2808,40 @@ impl Inferer<'_> {
 
     /// Build the impl's self [`Ty`] with its generics substituted by `map`.
     fn impl_self_ty(&mut self, imp: &ImplInfo, map: &Subst) -> Ty {
-        let raw = match &imp.typed {
-            Some(t) => t.self_ty.clone(),
-            None => self.ty_from_node_in(imp.file, imp.self_node),
+        let raw = match (&imp.typed, &imp.syntax) {
+            (Some(t), _) => t.self_ty.clone(),
+            (None, Some(sx)) => {
+                let node = sx.self_node;
+                self.ty_from_node_in(imp.file, node)
+            }
+            (None, None) => Ty::Error,
         };
         self.subst_type_params(&raw, map)
     }
 
     /// The impl's trait arguments, generics still rigid.
     fn impl_trait_args(&mut self, imp: &ImplInfo) -> Vec<Ty> {
-        match &imp.typed {
-            Some(t) => t.trait_args.clone(),
-            None => imp
+        match (&imp.typed, &imp.syntax) {
+            (Some(t), _) => t.trait_args.clone(),
+            (None, Some(sx)) => sx
                 .trait_args
                 .clone()
                 .iter()
                 .map(|&n| self.ty_from_node_in(imp.file, n))
                 .collect(),
+            (None, None) => Vec::new(),
         }
     }
 
     /// What the impl binds the associated type `name` to, generics still rigid.
     fn impl_assoc(&mut self, imp: &ImplInfo, name: &Symbol) -> Option<Ty> {
-        match &imp.typed {
-            Some(t) => t.assoc.get(name).cloned(),
-            None => {
-                let node = *imp.assoc.get(name)?;
+        match (&imp.typed, &imp.syntax) {
+            (Some(t), _) => t.assoc.get(name).cloned(),
+            (None, Some(sx)) => {
+                let node = *sx.assoc.get(name)?;
                 Some(self.ty_from_node_in(imp.file, node))
             }
+            (None, None) => None,
         }
     }
 
@@ -5383,8 +5397,17 @@ impl Inferer<'_> {
                 self.cx.resolve(&want).display(self.defs),
                 self.cx.resolve(&got).display(self.defs),
             );
-            let at = self.defs.get(supplied).node.unwrap_or(imp.self_node);
-            self.report_in(imp.file, at, msg);
+            // The member's own node, or the impl's target as a fallback.
+            // Conformance is checked where the impl is *written*, so there is
+            // always one of the two.
+            let at = self
+                .defs
+                .get(supplied)
+                .node
+                .or_else(|| imp.syntax.as_ref().map(|sx| sx.self_node));
+            if let Some(at) = at {
+                self.report_in(imp.file, at, msg);
+            }
         }
     }
 

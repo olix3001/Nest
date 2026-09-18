@@ -10,6 +10,7 @@ use crate::common::symbol::Symbol;
 use crate::ir::{IrId, Program};
 use crate::parser::ast::{Ast, NodeId};
 use crate::sema::decl::Decl;
+use crate::sema::impls::ImplInfo;
 use crate::sema::def::{Def, DefId, DefKind};
 use crate::sema::session::Session;
 
@@ -26,6 +27,7 @@ struct Meta<'a> {
     root: FileId,
     defs: Vec<&'a Def>,
     decls: Vec<(DefId, &'a Decl)>,
+    impls: Vec<&'a ImplInfo>,
     lang_items: Vec<(Symbol, DefId, bool)>,
 }
 
@@ -105,6 +107,15 @@ pub fn members(
         defs.push(def);
     }
 
+    // The package's own impls: what a package compiled against this one selects
+    // over, and the half of an impl that has no tree to be read from there.
+    let own_impls: Vec<&ImplInfo> = session
+        .impls
+        .impls
+        .iter()
+        .filter(|i| own_files.contains_key(&i.file))
+        .collect();
+
     let mut packages = vec![package.to_string()];
     let foreign = session
         .libraries
@@ -155,6 +166,7 @@ pub fn members(
                 .iter()
                 .filter_map(|d| session.decls.get(&d.id).map(|decl| (d.id, decl)))
                 .collect(),
+            impls: own_impls.clone(),
             lang_items: session
                 .lang_items
                 .claims()

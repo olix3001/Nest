@@ -46,6 +46,9 @@ The body is everything a package compiled against this one needs:
   (`sema::decl`) — the parameters of a function, the generics and fields of a
   type, what a trait member asks of an impl. These are the answers a package
   compiled against this one would otherwise read off a tree it does not have;
+- **every `impl` it writes**, resolved into types (`sema::impls`): an impl is a
+  candidate at every selection in every package that reads this one, and it is
+  checked for coherence once, where it is written;
 - the **`#lang` tags** the package claims.
 
 The text of each file travels because a diagnostic pointing into a library still

@@ -296,7 +296,10 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // over this table (operators, trait methods) per function body. This is also
     // where each impl's coherence is checked — it is the one pass that sees the
     // trait, the self type, and the package all three at once.
-    let mut impls = {
+    // Seeded with what the libraries brought, so that selection sees every impl
+    // in the program and only this compilation's are read out of syntax.
+    let mut impls = std::mem::take(&mut session.impls);
+    {
         let Session {
             defs,
             asts,
@@ -305,8 +308,8 @@ pub fn analyze(session: &mut Session, entry: FileId) {
             diagnostics,
             ..
         } = &mut *session;
-        impls::build(defs, asts, decls, pkg_of, diagnostics, &all_files)
-    };
+        impls::build(&mut impls, defs, asts, decls, pkg_of, diagnostics, &files);
+    }
     // Resolve each impl's target into types, **before** inference rather than
     // after it: selection unifies against these on every trial of every
     // obligation, and resolving the same syntax each time was the bulk of what
