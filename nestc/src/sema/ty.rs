@@ -508,9 +508,7 @@ impl Ty {
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_var),
             Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_var()),
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_var),
-            Ty::Func { params, ret } => {
-                params.iter().any(Ty::mentions_var) || ret.mentions_var()
-            }
+            Ty::Func { params, ret } => params.iter().any(Ty::mentions_var) || ret.mentions_var(),
             _ => false,
         }
     }

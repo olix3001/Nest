@@ -105,6 +105,16 @@ pub struct DefMeta(pub DefId);
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Signature(pub ty::Ty);
 
+/// What a type alias expands to, stamped on the alias's own binding node by the
+/// declaration-level pass that checks it (`infer::check_type_aliases`).
+///
+/// An alias is expanded **on use**, and a use in another package has no tree to
+/// expand: [`decl::record_types`] reads this back and files it under the alias's
+/// definition, which is what travels. Derived rather than persisted for exactly
+/// that reason — the answer travels once, on the def, not once per node.
+#[derive(Debug, Clone)]
+pub struct Expansion(pub ty::Ty);
+
 /// The per-segment resolution of a multi-segment [`Path`], so every name in a
 /// dotted path (e.g. `Self.Output`) is linked, not just the final one.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

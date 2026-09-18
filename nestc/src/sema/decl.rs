@@ -27,9 +27,9 @@ use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, Lit, NodeId, NodeKind, StructKind};
 
 use super::Resolution;
-use super::{DefMeta, Signature};
 use super::def::{DefId, DefKind, DefTable};
 use super::ty::Ty;
+use super::{DefMeta, Expansion, Signature};
 
 /// What a definition declares, as the pass that read its syntax concluded it.
 ///
@@ -111,6 +111,11 @@ pub struct AliasDecl {
     /// methods it inherits (§2.4). `None` for a plain alias, which is not a
     /// type of its own and expands instead.
     pub repr: Option<Ty>,
+    /// What a plain alias **expands to**, which is what a use of it means.
+    ///
+    /// A `distinct` expands to itself and so has `None` here: that is the whole
+    /// difference between the two.
+    pub expands_to: Option<Ty>,
 }
 
 /// A trait's associated type or constant.
@@ -254,6 +259,20 @@ impl<'a> Decls<'a> {
     /// The signature of a function: the `Ty::Func` a call instantiates.
     pub fn signature(&self, def: DefId) -> Option<Ty> {
         self.func_decl(def)?.sig.clone()
+    }
+
+    /// What a use of this alias means: its expansion for a plain alias, the
+    /// type itself for a `distinct`, and nothing for an abstract associated
+    /// type — which has no answer until a call site supplies one.
+    pub fn expansion(&self, def: DefId) -> Option<Ty> {
+        match self.table.get(&def)? {
+            Decl::Alias(a) if a.repr.is_some() => Some(Ty::Nominal {
+                def,
+                args: Vec::new(),
+            }),
+            Decl::Alias(a) => a.expands_to.clone(),
+            _ => None,
+        }
     }
 
     /// The declared type of an associated constant.
@@ -646,12 +665,7 @@ impl<'a> Decls<'a> {
 /// The answers are the same ones [`Decls`] would have read off the tree, worked
 /// out once instead of at each asking. That they are *written down* is the
 /// point: a package compiled against this one has the table and not the tree.
-pub fn record(
-    defs: &DefTable,
-    asts: &HashMap<FileId, Ast>,
-    table: &mut DeclTable,
-    file: FileId,
-) {
+pub fn record(defs: &DefTable, asts: &HashMap<FileId, Ast>, table: &mut DeclTable, file: FileId) {
     // Read against an empty table: this is where the entries come from, and a
     // query that consulted a half-filled one would answer differently depending
     // on the order the defs happen to be in.
@@ -727,7 +741,11 @@ mod tests {
             );
             assert_eq!(table.has_body(d.id), tree.has_body(d.id), "{what}");
             assert_eq!(table.requirement(d.id), tree.requirement(d.id), "{what}");
-            assert_eq!(table.generic_arity(d.id), tree.generic_arity(d.id), "{what}");
+            assert_eq!(
+                table.generic_arity(d.id),
+                tree.generic_arity(d.id),
+                "{what}"
+            );
             assert_eq!(
                 table.type_param_defs(d.id),
                 tree.type_param_defs(d.id),
@@ -790,7 +808,7 @@ mod tests {
                         continue;
                     }
                     match entry {
-                        Some(Decl::Alias(AliasDecl { repr: Some(_) })) => counts.2 += 1,
+                        Some(Decl::Alias(AliasDecl { repr: Some(_), .. })) => counts.2 += 1,
                         _ => missing.push(format!("distinct {what}")),
                     }
                 }
@@ -818,7 +836,9 @@ mod tests {
             let Some(Decl::Func(f)) = session.decls.get(&d.id) else {
                 continue;
             };
-            let Some(recorded) = f.sig.clone() else { continue };
+            let Some(recorded) = f.sig.clone() else {
+                continue;
+            };
             let tree = crate::sema::infer::signature_from_tree(
                 &session.defs,
                 &session.asts,
@@ -926,7 +946,13 @@ pub fn record_types(
                 match &ast.node(rhs).kind {
                     NodeKind::DistinctType { inner, .. } => {
                         if let Some(t) = settled(ast.meta::<Ty>(*inner)) {
-                            table.insert(d.id, Decl::Alias(AliasDecl { repr: Some(t) }));
+                            table.insert(
+                                d.id,
+                                Decl::Alias(AliasDecl {
+                                    repr: Some(t),
+                                    expands_to: None,
+                                }),
+                            );
                         }
                     }
                     // Stamped on the `AssocConst` node itself, which is the one
@@ -942,7 +968,35 @@ pub fn record_types(
                             table.insert(d.id, Decl::Assoc(a));
                         }
                     }
-                    _ => {}
+                    // A plain alias, or a `::` binding that names a type:
+                    // what a use of it means, worked out once by the pass that
+                    // checks it. An entry with nothing in it is an answer too —
+                    // it says this binding is not a type.
+                    // An associated item already has its entry, and it is not
+                    // an alias: leave it alone.
+                    _ if table.contains_key(&d.id) => {}
+                    _ => {
+                        if let Some(Expansion(t)) = ast.meta::<Expansion>(node)
+                            && !t.mentions_var()
+                            && !t.mentions_error()
+                        {
+                            table.insert(
+                                d.id,
+                                Decl::Alias(AliasDecl {
+                                    repr: None,
+                                    expands_to: Some(t),
+                                }),
+                            );
+                        } else {
+                            table.insert(
+                                d.id,
+                                Decl::Alias(AliasDecl {
+                                    repr: None,
+                                    expands_to: None,
+                                }),
+                            );
+                        }
+                    }
                 }
             }
             DefKind::Struct => {
@@ -957,7 +1011,10 @@ pub fn record_types(
                 else {
                     continue;
                 };
-                let recorded: Vec<Ty> = tys.iter().filter_map(|&t| settled(ast.meta::<Ty>(t))).collect();
+                let recorded: Vec<Ty> = tys
+                    .iter()
+                    .filter_map(|&t| settled(ast.meta::<Ty>(t)))
+                    .collect();
                 if recorded.len() != tys.len() {
                     continue;
                 }

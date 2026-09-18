@@ -6,9 +6,10 @@
 //! One file per package, an `ar` archive (`archive`) of three kinds of member:
 //!
 //! - `nest.nmeta`, the **analysis**: every definition with its namespace and
-//!   what it declares, the facts resolution and inference left, the `#lang`
-//!   tags — what a package compiled against this one needs in order to
-//!   typecheck against it.
+//!   what it declares, every `impl` it writes, the `#lang` tags — what a
+//!   package compiled against this one needs in order to typecheck against it.
+//!   **Not** its syntax trees: a question about a definition is answered from
+//!   what analysis concluded, never by reading the source again.
 //! - `nest.nir`, the **IR**, before monomorphization: a generic function is
 //!   instantiated by whoever calls it, so its body has to travel. It is read
 //!   beside the metadata, and separate from it because typechecking alone does
@@ -38,8 +39,8 @@ use crate::common::symbol::Symbol;
 use crate::ir::{IrId, Program};
 use crate::parser::ast::{Ast, NodeId};
 use crate::sema::decl::Decl;
-use crate::sema::impls::ImplInfo;
 use crate::sema::def::{Def, DefId};
+use crate::sema::impls::ImplInfo;
 
 use codec::{Bases, Counts};
 
@@ -48,7 +49,7 @@ pub const MAGIC: &[u8; 8] = b"NESTMETA";
 
 /// The layout of what follows the magic. Raised whenever anything written
 /// changes shape, so an old library is refused by name rather than misread.
-pub const FORMAT: u32 = 5;
+pub const FORMAT: u32 = 6;
 
 /// What a reader checks before it reads anything else.
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,6 +116,13 @@ pub struct Ir {
 }
 
 /// One file of the package.
+///
+/// The `ast` and its `facts` are on their way out, and are the bulk of what a
+/// library costs to read: **67%** of `std`'s metadata, against 1.6% for the
+/// table of what each definition declares (`crate::sema::decl`) that is
+/// replacing them. What still reaches for a dependency's tree is a short list —
+/// a constant's type, a generic parameter's bounds, a default argument — and
+/// each one is a fact to record rather than a tree to keep.
 #[derive(Serialize, Deserialize)]
 pub struct FileRecord {
     pub name: String,
@@ -197,7 +205,11 @@ mod tests {
         let mut core_session = Session::new();
         let core_root = core_session.load_package("core").expect("core loads");
         crate::sema::analyze(&mut core_session, core_root);
-        assert!(!core_session.has_errors(), "{:#?}", core_session.diagnostics);
+        assert!(
+            !core_session.has_errors(),
+            "{:#?}",
+            core_session.diagnostics
+        );
         let (core_meta, core_ir) =
             super::write::members(&core_session, "core", core_root).expect("core is writable");
 
@@ -211,9 +223,7 @@ mod tests {
                           area :: func (self: *Circle) -> f64 { return self.radius }\n\
                           }\n";
         let mut shapes_session = Session::with_loader(Box::new(
-            MemLoader::new()
-                .with("shapes", shapes_src)
-                .with("main", ""),
+            MemLoader::new().with("shapes", shapes_src).with("main", ""),
         ));
         super::read::load(&mut shapes_session, &core_meta, &core_ir, path, true)
             .expect("core loads as a library");
@@ -233,8 +243,7 @@ mod tests {
                        let a := obj.area()\n\
                        let b := a + 1.0\n\
                        }\n";
-        let mut session =
-            Session::with_loader(Box::new(MemLoader::new().with("main", program)));
+        let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", program)));
         super::read::load(&mut session, &core_meta, &core_ir, path, true)
             .expect("core loads as a library");
         super::read::load(&mut session, &shapes_meta, &shapes_ir, path, true)

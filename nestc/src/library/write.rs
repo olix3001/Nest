@@ -8,10 +8,11 @@ use serde::Serialize;
 use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
 use crate::ir::{IrId, Program};
+
 use crate::parser::ast::{Ast, NodeId};
 use crate::sema::decl::Decl;
-use crate::sema::impls::ImplInfo;
 use crate::sema::def::{Def, DefId, DefKind};
+use crate::sema::impls::ImplInfo;
 use crate::sema::session::Session;
 
 use super::codec::{self, Counts, Encoding};

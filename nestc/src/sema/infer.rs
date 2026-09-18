@@ -564,7 +564,6 @@ pub(crate) fn signature_from_tree(
     cx.cx.resolve(&ty)
 }
 
-
 /// Infer types for every function body in `file`, annotating each expression
 /// node with its resolved [`Ty`]. `asts` is the whole parsed program (read-only)
 /// so a field access can reach a struct declared in another file.
@@ -938,9 +937,8 @@ fn numeric_distincts(
                         // reading it is what makes that declaration in `core`
                         // real rather than decorative.
                         kind = match nd.name.as_str() {
-                            fam @ ("int" | "uint") => {
-                                family_inner(defs, asts, ast, inner).map(|w| Ty::int(w, fam == "int"))
-                            }
+                            fam @ ("int" | "uint") => family_inner(defs, asts, ast, inner)
+                                .map(|w| Ty::int(w, fam == "int")),
                             // The primitive itself, not just its family: a
                             // literal settling on this `distinct` type has to
                             // fit that width.
@@ -970,6 +968,51 @@ fn numeric_distincts(
         }
     }
     out
+}
+
+/// [`Inferer::rigid_self`]'s walk.
+fn rigid_self_in(ty: &Ty, trait_def: DefId, params: &[Ty]) -> Ty {
+    let go = |t: &Ty| rigid_self_in(t, trait_def, params);
+    match ty {
+        Ty::Nominal { def, args }
+            if *def == trait_def
+                && args.len() == params.len()
+                && args.iter().all(|a| matches!(a, Ty::Var(_))) =>
+        {
+            Ty::Nominal {
+                def: *def,
+                args: params.to_vec(),
+            }
+        }
+        Ty::Nominal { def, args } => Ty::Nominal {
+            def: *def,
+            args: args.iter().map(go).collect(),
+        },
+        Ty::Ptr { mutable, inner } => Ty::Ptr {
+            mutable: *mutable,
+            inner: Box::new(go(inner)),
+        },
+        Ty::Slice { mutable, inner } => Ty::Slice {
+            mutable: *mutable,
+            inner: Box::new(go(inner)),
+        },
+        Ty::Array {
+            len,
+            mutable,
+            inner,
+        } => Ty::Array {
+            len: len.clone(),
+            mutable: *mutable,
+            inner: Box::new(go(inner)),
+        },
+        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(go).collect()),
+        Ty::Struct(fields) => Ty::Struct(fields.iter().map(|(n, t)| (n.clone(), go(t))).collect()),
+        Ty::Func { params: ps, ret } => Ty::Func {
+            params: ps.iter().map(go).collect(),
+            ret: Box::new(go(ret)),
+        },
+        other => other.clone(),
+    }
 }
 
 /// Gather every trait [`DefId`] nameable from `file_ns` — its own members and
@@ -4172,8 +4215,7 @@ impl Inferer<'_> {
                     NodeKind::ConstBind { rhs, .. } => *rhs,
                     _ => node,
                 };
-                let NodeKind::DistinctType { inner, .. } =
-                    self.asts[&file].node(rhs).kind.clone()
+                let NodeKind::DistinctType { inner, .. } = self.asts[&file].node(rhs).kind.clone()
                 else {
                     return None;
                 };
@@ -5091,7 +5133,9 @@ impl Inferer<'_> {
             return self.cx.fresh();
         };
         // The def's node is the `ConstBind`; its RHS is the `FuncExpr`.
-        let ast = &self.asts[&file];
+        let Some(ast) = self.asts.get(&file) else {
+            return self.cx.fresh();
+        };
         let func = match &ast.node(node).kind {
             NodeKind::ConstBind { rhs, .. } => *rhs,
             NodeKind::FuncExpr { .. } => node,
@@ -5822,6 +5866,31 @@ impl Inferer<'_> {
         self.ty_from_node_in(self.file, node)
     }
 
+    /// Put the trait's **own** parameters back where `Self` left variables.
+    ///
+    /// `Self` inside a trait's declaration resolves to the trait, and naming a
+    /// generic type with nothing applied to it yields a fresh variable per
+    /// parameter — the right answer at a *use*, where context decides them.
+    /// This is a declaration, and its parameters are decided: they are the
+    /// trait's own. A signature recorded with variables in it would carry the
+    /// numbering of the context that made them, which means nothing in the
+    /// context that reads it back (see [`super::decl::record_types`]).
+    ///
+    /// Only arguments that *are* variables are replaced: a method that writes
+    /// the trait out with arguments of its own said what it meant.
+    fn rigid_self(&mut self, ty: Ty, trait_def: DefId) -> Ty {
+        let params: Vec<Ty> = self
+            .trait_generic_param_defs(trait_def)
+            .into_iter()
+            .map(|g| Ty::Nominal {
+                def: g,
+                args: Vec::new(),
+            })
+            .collect();
+        let ty = self.cx.resolve(&ty);
+        rigid_self_in(&ty, trait_def, &params)
+    }
+
     /// Stamp the declared type of every member in this file onto its own node,
     /// for lowering to read back when it builds the IR's type definitions.
     ///
@@ -5873,15 +5942,16 @@ impl Inferer<'_> {
         // vtable slot is not a call, though, and object safety is a question
         // about the signature alone — so stamp it here, once, on the method's
         // own `FuncExpr`.
-        let trait_methods: Vec<DefId> = self
+        let trait_methods: Vec<(DefId, DefId)> = self
             .defs
             .iter()
             .filter(|d| d.kind == DefKind::Trait && d.file == Some(self.file))
-            .flat_map(|d| d.ns.members.values().copied())
-            .filter(|&m| self.defs.get(m).kind == DefKind::Func)
+            .flat_map(|d| d.ns.members.values().map(move |&m| (d.id, m)))
+            .filter(|&(_, m)| self.defs.get(m).kind == DefKind::Func)
             .collect();
-        for m in trait_methods {
+        for (trait_def, m) in trait_methods {
             let ty = self.func_def_ty(m);
+            let ty = self.rigid_self(ty, trait_def);
             let (Some(file), Some(node)) = (self.defs.get(m).file, self.defs.get(m).node) else {
                 continue;
             };
@@ -5899,6 +5969,30 @@ impl Inferer<'_> {
             };
             let ty = self.cx.resolve(&ty);
             self.asts[&file].set_meta(func, super::Signature(ty));
+        }
+
+        // A **bodyless** function is never typed by the per-function passes
+        // either, and not every one of them is a trait method: an
+        // `#intrinsic` and an `extern("c")` declaration are signatures with
+        // nothing to infer. Their signature is still what a caller unifies
+        // against, so it is worked out here, once, like a trait method's.
+        let bodyless: Vec<DefId> = self
+            .defs
+            .iter()
+            .filter(|d| d.kind == DefKind::Func && d.file == Some(self.file))
+            .filter(|d| !self.decls().has_body(d.id))
+            .map(|d| d.id)
+            .collect();
+        for m in bodyless {
+            let Some((file, func)) = self.decls().func(m) else {
+                continue;
+            };
+            if file != self.file || self.ast.meta::<super::Signature>(func).is_some() {
+                continue;
+            }
+            let ty = self.func_def_ty(m);
+            let ty = self.cx.resolve(&ty);
+            self.ast.set_meta(func, super::Signature(ty));
         }
 
         // A tuple struct's positions are `Field` defs whose node is the type
@@ -6378,8 +6472,33 @@ impl Inferer<'_> {
             .filter(|d| d.file == Some(self.file) && d.kind == DefKind::TypeAlias)
             .map(|d| d.id)
             .collect();
+        // A `::` binding whose right-hand side names a type is an alias too,
+        // and it is a `DefKind::Const` — `K :: P.<u8>` (§2.4). Its expansion is
+        // worked out here for the same reason, and under the same key.
+        let const_aliases: Vec<DefId> = self
+            .defs
+            .iter()
+            .filter(|d| d.file == Some(self.file) && d.kind == DefKind::Const)
+            .map(|d| d.id)
+            .collect();
+        for def in const_aliases {
+            let Some(ty) = self.const_alias_ty(def) else {
+                continue;
+            };
+            if let Some(node) = self.defs.get(def).node {
+                let ty = self.cx.resolve(&ty);
+                self.ast.set_meta(node, super::Expansion(ty));
+            }
+        }
         for def in aliases {
-            self.expand_alias(def);
+            let ty = self.expand_alias(def);
+            // Stamped for [`super::decl::record_types`], which files it under
+            // the alias itself: expanding one needs the tree it is written in,
+            // and a use in another package does not have that.
+            if let Some(node) = self.defs.get(def).node {
+                let ty = self.cx.resolve(&ty);
+                self.ast.set_meta(node, super::Expansion(ty));
+            }
         }
     }
 
@@ -6389,12 +6508,18 @@ impl Inferer<'_> {
     /// `None` when the head does not name a type, which leaves a value used in
     /// type position exactly as it was: a `Ty::Error` reported elsewhere.
     fn const_alias_ty(&mut self, def: DefId) -> Option<Ty> {
+        // Recorded where it was written: a binding in another package has no
+        // tree here, and whether it named a type was settled there.
+        if self.decls().get(def).is_some() {
+            return self.decls().expansion(def);
+        }
         if self.alias_stack.contains(&def) {
             return None;
         }
         let d = self.defs.get(def);
         let (file, node) = (d.file?, d.node?);
-        let NodeKind::ConstBind { rhs, .. } = self.asts[&file].node(node).kind.clone() else {
+        let ast = self.asts.get(&file)?;
+        let NodeKind::ConstBind { rhs, .. } = ast.node(node).kind.clone() else {
             return None;
         };
         let (head, args) = match self.asts[&file].node(rhs).kind.clone() {
@@ -6477,6 +6602,17 @@ impl Inferer<'_> {
     /// fresh variable to be pinned by context (e.g. the enclosing return type).
     /// Cycles fall back to an opaque nominal.
     fn expand_alias(&mut self, def: DefId) -> Ty {
+        // A definition that arrived with a library answers from what its own
+        // compilation concluded: there is no tree here to expand. An entry with
+        // no expansion in it is an answer too — a `distinct`, or a binding that
+        // names no type — and it stands for the alias itself, the same as a
+        // cycle does below.
+        if self.decls().get(def).is_some() {
+            return self.decls().expansion(def).unwrap_or(Ty::Nominal {
+                def,
+                args: Vec::new(),
+            });
+        }
         if self.alias_stack.contains(&def) {
             return Ty::Nominal {
                 def,

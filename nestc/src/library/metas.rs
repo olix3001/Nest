@@ -104,6 +104,7 @@ persisted! {
 /// Caches, and what monomorphization decides: rebuilt by whoever asks, so a
 /// library does not carry them.
 pub const DERIVED: &[fn() -> TypeId] = &[
+    || TypeId::of::<crate::sema::Expansion>(),
     || TypeId::of::<crate::ir::layout::Layout>(),
     || TypeId::of::<crate::ir::check::declarations::RecursiveLayout>(),
     || TypeId::of::<crate::ir::mono::Instance>(),
