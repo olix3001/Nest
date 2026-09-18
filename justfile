@@ -189,7 +189,7 @@ fmt-check:
 # serialized-format change needs this — see design/library.md.
 [doc("Everything built, in both profiles, plus the package build directories.")]
 clean:
-    cd {{ root }}/nestc && cargo clean
+    cd {{ root }}/nestc && cargo clean -p nestc && cargo clean -p nest-lsp
     rm -rf {{ root }}/twig/build
     find {{ root }}/packages -type d -name build -prune -exec rm -rf {} +
 
