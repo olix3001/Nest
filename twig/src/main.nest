@@ -66,20 +66,14 @@ main :: func () -> i32 {
       return 2
     },
   }
-  let done: Result.<i32, str> := if opts.command == "help" {
-    run_help()
-  } else if opts.command == "new" {
-    run_new(&opts)
-  } else if opts.command == "init" {
-    run_init(&opts)
-  } else if opts.command == "build" {
-    run_build(&opts)
-  } else if opts.command == "run" {
-    run_run(&opts)
-  } else if opts.command == "metadata" {
-    run_metadata(&opts)
-  } else {
-    .err(f"no command `{opts.command}`; see `twig --help`")
+  let done: Result.<i32, str> := opts.command.match {
+    "help" => run_help(),
+    "new" => run_new(&opts),
+    "init" => run_init(&opts),
+    "build" => run_build(&opts),
+    "run" => run_run(&opts),
+    "metadata" => run_metadata(&opts),
+    _ => .err(f"no command `{opts.command}`; see `twig --help`"),
   }
   return done.match {
     .ok(code) => code,
