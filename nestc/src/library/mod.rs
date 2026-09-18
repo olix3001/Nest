@@ -159,3 +159,88 @@ impl Loaded {
 pub fn compiler_id() -> String {
     format!("nestc {}", env!("CARGO_PKG_VERSION"))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::sema::session::{MemLoader, Session};
+
+    /// One package's library members, and the session that produced them.
+    fn compile_library(mut session: Session, package: &str) -> (Vec<u8>, Vec<u8>) {
+        // Through `load_package`, so the session knows the file is the
+        // package's root — which is what makes it a library's to write.
+        let root = session
+            .load_package(package)
+            .unwrap_or_else(|| panic!("`{package}` loads"));
+        crate::sema::analyze(&mut session, root);
+        assert!(
+            !session.has_errors(),
+            "`{package}`: {:#?}",
+            session.diagnostics
+        );
+        super::write::members(&session, package, root).expect("the library is writable")
+    }
+
+    /// A program compiled against a library sees what the library's own
+    /// compilation concluded, and nothing it would have had to re-read.
+    ///
+    /// The whole chain in one process: `core` written as a library, a package
+    /// written against that, and a program written against both. It is the
+    /// shape `just build` has, and the one a `cargo test` alone never takes —
+    /// which is how a library that links against nothing got onto `main` once
+    /// already (see `codegen::llvm::tests::a_library_internalizes_nothing`).
+    #[test]
+    fn a_program_compiles_against_a_library() {
+        let path = std::path::Path::new("<test>");
+
+        // `core`, from its real source: a mock one would not exercise the
+        // shapes a library actually has to carry.
+        let mut core_session = Session::new();
+        let core_root = core_session.load_package("core").expect("core loads");
+        crate::sema::analyze(&mut core_session, core_root);
+        assert!(!core_session.has_errors(), "{:#?}", core_session.diagnostics);
+        let (core_meta, core_ir) =
+            super::write::members(&core_session, "core", core_root).expect("core is writable");
+
+        // A package of our own, compiled against `core` as a library.
+        let shapes_src = "@public\n\
+                          Circle :: struct { radius: f64 }\n\
+                          @public\n\
+                          Shape :: trait { area :: func (self: *Self) -> f64 }\n\
+                          impl Shape for Circle {\n\
+                          @public\n\
+                          area :: func (self: *Circle) -> f64 { return self.radius }\n\
+                          }\n";
+        let mut shapes_session = Session::with_loader(Box::new(
+            MemLoader::new()
+                .with("shapes", shapes_src)
+                .with("main", ""),
+        ));
+        super::read::load(&mut shapes_session, &core_meta, &core_ir, path, true)
+            .expect("core loads as a library");
+        shapes_session.register_package("shapes", "shapes");
+        let (shapes_meta, shapes_ir) = compile_library(shapes_session, "shapes");
+
+        // And a program against both. The call goes through a trait `impl`
+        // declared in one library over a type declared in the same one — every
+        // answer it needs is metadata, since neither tree is here.
+        // The call goes through a **trait object**, so the impl has to be
+        // selected and a vtable built out of it — which is the question only
+        // the library's metadata can answer, its tree being elsewhere.
+        let program = "shapes :: import <shapes>\n\
+                       main :: func () {\n\
+                       let c := shapes.Circle { radius: 2.0 }\n\
+                       const obj: *dyn shapes.Shape := &c\n\
+                       let a := obj.area()\n\
+                       let b := a + 1.0\n\
+                       }\n";
+        let mut session =
+            Session::with_loader(Box::new(MemLoader::new().with("main", program)));
+        super::read::load(&mut session, &core_meta, &core_ir, path, true)
+            .expect("core loads as a library");
+        super::read::load(&mut session, &shapes_meta, &shapes_ir, path, true)
+            .expect("shapes loads as a library");
+        let file = session.load_entry("main").expect("the program loads");
+        crate::sema::analyze(&mut session, file);
+        assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    }
+}
