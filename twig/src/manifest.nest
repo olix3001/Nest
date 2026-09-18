@@ -33,6 +33,7 @@
 fs :: import <std/fs>
 toml :: import <std/serialize/toml>
 { rename } :: import <std/serialize>
+collections :: import <std/collections>
 { HashMap } :: import <std/collections>
 { make } :: import <core/mem>
 path :: import <std/path>
@@ -271,4 +272,118 @@ before :: func (a: str, b: str) -> bool {
     i = i + 1
   }
   return x.len() < y.len()
+}
+
+tests :: namespace {
+    empty :: func (name: str) -> Manifest {
+        return Manifest {
+            package: Package { name: name, version: "0.1.0" },
+            lib: .none,
+            bin: .none,
+            dependencies: .none,
+            profile: .none,
+            build: .none,
+        }
+    }
+
+    with_bins :: func (name: str, bins: []Bin) -> Manifest {
+        let mut m: Manifest := empty(name)
+        m.bin = .some(bins)
+        return m
+    }
+
+    refused :: func (m: *Manifest) -> bool {
+        return check(m).match { .ok(_) => false, .err(_) => true }
+    }
+
+    @test
+    a_name_is_an_identifier :: func () {
+        assert(valid_name("util").match { .ok(_) => true, .err(_) => false })
+        assert(valid_name("u2").match { .ok(_) => true, .err(_) => false })
+        assert(valid_name("").match { .ok(_) => false, .err(_) => true })
+        assert(valid_name("2u").match { .ok(_) => false, .err(_) => true },
+               "a name is what an `import` can say, so it cannot start with a digit")
+        assert(valid_name("my-pkg").match { .ok(_) => false, .err(_) => true })
+    }
+
+    // What decoding cannot say, and `check` does.
+    @test
+    a_package_needs_a_target :: func () {
+        assert(refused(&empty("app")), "no `[lib]` and no `[[bin]]`")
+        let ok: Manifest := with_bins("app", .{ Bin { name: "app", path: "src/main.nest" } })
+        assert(refused(&ok) == false)
+    }
+
+    @test
+    two_binaries_cannot_share_a_name :: func () {
+        let m: Manifest := with_bins("app", .{
+            Bin { name: "app", path: "src/main.nest" },
+            Bin { name: "app", path: "src/other.nest" },
+        })
+        assert(refused(&m))
+    }
+
+    @test
+    a_dependency_is_not_the_package_itself_or_a_shipped_one :: func () {
+        let mut m: Manifest := with_bins("app", .{ Bin { name: "app", path: "src/main.nest" } })
+        let mut d: HashMap.<str, Dependency> := collections.map.<str, Dependency>()
+        d.insert("core", Dependency { path: .some("../core") })
+        m.dependencies = .some(d)
+        assert(refused(&m), "`core` ships with the compiler")
+
+        let mut own: HashMap.<str, Dependency> := collections.map.<str, Dependency>()
+        own.insert("app", Dependency { path: .some("..") })
+        m.dependencies = .some(own)
+        assert(refused(&m), "a package cannot depend on itself")
+
+        let mut no_path: HashMap.<str, Dependency> := collections.map.<str, Dependency>()
+        no_path.insert("util", Dependency { path: .none })
+        m.dependencies = .some(no_path)
+        assert(refused(&m), "a `path` is the only kind of dependency there is yet")
+    }
+
+    // A `[profile.release]` table, as one that sets everything.
+    settings :: func (overflow: str, units: usize, opt: str) -> Profiles {
+        return Profiles {
+            debug: .none,
+            release: .some(ProfileSettings {
+                overflow: .some(overflow),
+                codegen_units: .some(units),
+                opt_level: .some(opt),
+            }),
+        }
+    }
+
+    @test
+    a_profile_setting_is_one_of_the_words_it_takes :: func () {
+        let mut m: Manifest := with_bins("app", .{ Bin { name: "app", path: "src/main.nest" } })
+        m.profile = .some(settings("trap", 4, "s"))
+        assert(refused(&m) == false)
+        m.profile = .some(settings("saturate", 4, "s"))
+        assert(refused(&m), "`overflow` is `trap` or `wrap`")
+        m.profile = .some(settings("trap", 0, "s"))
+        assert(refused(&m), "a build has at least one codegen unit")
+        m.profile = .some(settings("trap", 4, "fast"))
+        assert(refused(&m), "`opt-level` is a level `nestc` takes")
+    }
+
+    // A manifest that says nothing about `[build]` reads as one that says
+    // nothing in it, so a caller never asks whether the section is there.
+    @test
+    an_absent_build_section_is_an_empty_one :: func () {
+        let m: Manifest := empty("app")
+        let b: Build := m.build_section()
+        assert(strings(b.link_libs).len() == 0)
+        assert(strings(b.nestc_args).len() == 0)
+        assert(b.linker.match { .some(_) => false, .none => true })
+    }
+
+    @test
+    sorting_is_byte_order :: func () {
+        let names: []str := sorted(.{ "util", "core", "Core", "util2" })
+        assert(names[0] == "Core", "upper case sorts before lower case")
+        assert(names[1] == "core")
+        assert(names[2] == "util")
+        assert(names[3] == "util2", "a prefix sorts before what extends it")
+    }
 }

@@ -366,6 +366,156 @@ run :: func (program: str, args: []str) -> Result.<process.Status, str> {
 // is where a silent mistake produces a build that runs and writes the wrong
 // thing rather than one that fails.
 tests :: namespace {
+    // A package: a name, whether it has a `[lib]`, and what it depends on.
+    member :: func (name: str, lib: bool, deps: []str, build: Option.<Build>) -> Member {
+        let mut d: collections.HashMap.<str, manifest.Dependency> :=
+            collections.map.<str, manifest.Dependency>()
+        for n in deps { d.insert(n, manifest.Dependency { path: .some(f"../{n}") }) }
+        let l: Option.<manifest.Lib> := if lib {
+            .some(manifest.Lib { path: "src/package.nest" })
+        } else {
+            .none
+        }
+        let b: Option.<[]Bin> := if lib {
+            .none
+        } else {
+            .some(.{ Bin { name: name, path: "src/main.nest" } })
+        }
+        return Member {
+            name: name,
+            dir: f"/w/{name}",
+            manifest: Manifest {
+                package: manifest.Package { name: name, version: "0.1.0" },
+                lib: l,
+                bin: b,
+                dependencies: .some(d),
+                profile: .none,
+                build: build,
+            },
+        }
+    }
+
+    // `app` (a binary, depending on `util`), `util` (a library, depending on
+    // `tiny`), `tiny`, and the two packages that ship with the compiler.
+    workspace :: func (build: Option.<Build>) -> Workspace {
+        return Workspace {
+            root: member("app", false, .{ "util" }, build),
+            deps: .{
+                member("core", true, .{}, .none),
+                member("std", true, .{}, .none),
+                member("tiny", true, .{}, .none),
+                member("util", true, .{ "tiny" }, .none),
+            },
+            shipped: .{ "core", "std" },
+        }
+    }
+
+    profile :: func () -> Profile {
+        return Profile {
+            name: "debug",
+            overflow: "trap",
+            codegen_units: 1,
+            opt_level: "0",
+            emit: .{},
+            verbose: false,
+            nestc_args: .{},
+        }
+    }
+
+    // Whether `args` has `a` immediately followed by `b`, which is how every
+    // flag that takes a value is pushed.
+    pair :: func (args: []str, a: str, b: str) -> bool {
+        for i in 0..<args.len() {
+            if args[i] == a && i + 1 < args.len() && args[i + 1] == b { return true }
+        }
+        return false
+    }
+
+    has :: func (args: []str, a: str) -> bool {
+        for x in args {
+            if x == a { return true }
+        }
+        return false
+    }
+
+    binary :: func (ws: *Workspace) -> Target {
+        return Target { name: "app", entry: "/w/app/src/main.nest", lib: false, test: false }
+    }
+
+    library :: func (ws: *Workspace, name: str) -> Target {
+        return Target { name: name, entry: f"/w/{name}/src/package.nest", lib: true, test: false }
+    }
+
+    // What a package may import is exactly what its command line gives it as
+    // `--extern`; what its dependencies need in order to link is `--indirect`.
+    @test
+    externs_are_direct_and_the_rest_is_indirect :: func () {
+        let ws: Workspace := workspace(.none)
+        let p: Profile := profile()
+        let app: []str := command(&ws, p, binary(&ws)).args
+        assert(pair(app, "--extern", f"util={library_file(&ws, p, "util")}"))
+        assert(pair(app, "--extern", f"core={library_file(&ws, p, "core")}"))
+        assert(pair(app, "--indirect", f"tiny={library_file(&ws, p, "tiny")}"),
+               "`tiny` is a dependency of a dependency: linked, not importable")
+
+        // `util` sees its own dependency and the shipped packages, and nothing
+        // of the package being built.
+        let util: []str := command(&ws, p, library(&ws, "util")).args
+        assert(pair(util, "--extern", f"tiny={library_file(&ws, p, "tiny")}"))
+        assert(has(util, f"app={library_file(&ws, p, "app")}") == false)
+    }
+
+    // A library is a `.nlib` to compile against; a binary is a program.
+    @test
+    a_library_emits_an_nlib_and_a_binary_links :: func () {
+        let ws: Workspace := workspace(.none)
+        let p: Profile := profile()
+        let util: []str := command(&ws, p, library(&ws, "util")).args
+        assert(pair(util, "--emit", "nlib"))
+        assert(pair(util, "--package", "util=/w/util/src/package.nest"))
+        assert(pair(util, "-o", library_file(&ws, p, "util")))
+
+        let app: []str := command(&ws, p, binary(&ws)).args
+        assert(pair(app, "--emit", "link"))
+        assert(has(app, "--package") == false, "only a library is named as a package")
+        assert(pair(app, "-o", output(&ws, p, binary(&ws))))
+    }
+
+    // `[build]` and `--nestc-arg` are the **root** package's, and reach only the
+    // targets it is made of: a dependency is compiled the way its own package
+    // says.
+    @test
+    the_root_s_flags_do_not_reach_a_dependency :: func () {
+        let b: Build := Build {
+            linker: .some("clang"),
+            link_args: .some(.{ "-Wl,-dead_strip" }),
+            link_libs: .some(.{ "sfml-graphics" }),
+            link_search: .some(.{ "vendor/lib" }),
+            nestc_args: .some(.{ "-C", "opt-level=2" }),
+        }
+        let ws: Workspace := workspace(.some(b))
+        let mut p: Profile := profile()
+        p.nestc_args = .{ "-C", "overflow=wrap" }
+
+        let app: []str := command(&ws, p, binary(&ws)).args
+        assert(pair(app, "-C", "linker=clang"))
+        assert(pair(app, "-C", "link-arg=-Wl,-dead_strip"))
+        assert(pair(app, "-l", "sfml-graphics"))
+        // A relative search path is the package's, not the one the build was
+        // started from.
+        assert(pair(app, "--link-search", "/w/app/vendor/lib"))
+        // The manifest's, and then this run's, so that `--nestc-arg` wins.
+        assert(pair(app, "-C", "opt-level=2"))
+        assert(app[app.len() - 1] == "overflow=wrap")
+
+        let util: []str := command(&ws, p, library(&ws, "util")).args
+        assert(has(util, "-l") == false)
+        assert(has(util, "linker=clang") == false)
+        assert(has(util, "overflow=wrap") == false)
+        // What the profile decided still reaches it.
+        assert(pair(util, "-C", "overflow=trap"))
+    }
+
     @test
     dump_names :: func () {
         assert(known_emit("lir"))

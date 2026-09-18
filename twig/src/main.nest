@@ -255,8 +255,10 @@ run_test :: func (o: *Options) -> Result.<i32, str> {
   p.nestc_args = o.nestc_args.as_slice()
   p.verbose = o.verbose
   let t: Target := build.test_target(&ws).?
-  compile_deps(&ws, p).?
-  compiling(&ws.root)
+  let libs: []Target := plan(&ws, p, false).?
+  let total: usize := libs.len() + 1
+  let n: usize := compile_each(&ws, p, libs, 0, total).?
+  compiling(&ws.root, n + 1, total)
   build.compile(&ws, p, t).?
 
   let exe: str := build.output(&ws, p, t)
@@ -270,33 +272,84 @@ run_test :: func (o: *Options) -> Result.<i32, str> {
 
 // Every library that is out of date, in order, then `bins`.
 compile_all :: func (ws: *Workspace, p: Profile, bins: []Target) -> Result.<void, str> {
-  let mut root_done: bool := false
-  for t in build.libraries(ws) {
-    // A dump is written when the root's library is compiled, so asking for one
-    // compiles it.
-    let dumps: bool := p.emit.len() > 0 && t.name == ws.root.name
-    if dumps == false && build.fresh(ws, p, t).? { continue }
-    let m: Member := ws.member(t.name)
-    compiling(&m)
-    if t.name == ws.root.name { root_done = true }
-    build.compile(ws, p, t).?
+  let libs: []Target := plan(ws, p, true).?
+  let root_done: bool := names(libs, ws.root.name)
+  // What the counter counts is the lines this run will print: one per library
+  // it compiles, and one for the root package when a binary is built from it.
+  let extra: usize := if bins.len() > 0 && root_done == false { 1 } else { 0 }
+  let total: usize := libs.len() + extra
+  let mut n: usize := compile_each(ws, p, libs, 0, total).?
+  if extra == 1 {
+    n = n + 1
+    compiling(&ws.root, n, total)
   }
-  if bins.len() > 0 && root_done == false { compiling(&ws.root) }
   for t in bins { build.compile(ws, p, t).? }
   term.status("Finished", f"`{p.name}` profile, in `{shown(ws, build.out_dir(ws, p))}`")
   return .ok(())
 }
 
+// Compile `targets` in order, numbering each line from `from` out of `total`,
+// and answer how many lines have been printed once they are done.
+compile_each :: func (ws: *Workspace, p: Profile, targets: []Target, from: usize, total: usize) -> Result.<usize, str> {
+  let mut n: usize := from
+  for t in targets {
+    n = n + 1
+    let m: Member := ws.member(t.name)
+    compiling(&m, n, total)
+    build.compile(ws, p, t).?
+  }
+  return .ok(n)
+}
+
+// The libraries a build has to compile, in order, decided **before** any of them
+// is: that is what lets each line say which of how many it is.
+//
+// A library is compiled when its own inputs changed — which `nestc --up-to-date`
+// answers — or when anything it depends on is being compiled again, because the
+// library it would be compiled against is then not the one on disk. The second
+// rule is what makes one pass enough: the packages come in dependency order, so
+// a dependency is already decided when the package that needs it is reached, and
+// asking the compiler about it would only be asking about a stale file.
+plan :: func (ws: *Workspace, p: Profile, with_root: bool) -> Result.<[]Target, str> {
+  let mut out: Vec.<Target> := collections.new.<Target>()
+  let mut again: Vec.<str> := collections.new.<str>()
+  for t in build.libraries(ws) {
+    if with_root == false && t.name == ws.root.name { continue }
+    let m: Member := ws.member(t.name)
+    // A dump is written when the root's library is compiled, so asking for one
+    // compiles it.
+    let dumps: bool := p.emit.len() > 0 && t.name == ws.root.name
+    let after: bool := depends_on_any(ws, &m, again.as_slice())
+    if dumps == false && after == false && build.fresh(ws, p, t).? { continue }
+    again.push(t.name)
+    out.push(t)
+  }
+  return .ok(out.as_slice())
+}
+
+// Whether `m` names any of `names` among what it depends on directly.
+depends_on_any :: func (ws: *Workspace, m: *Member, names: []str) -> bool {
+  for d in ws.direct(m) {
+    for n in names {
+      if d == n { return true }
+    }
+  }
+  return false
+}
+
+// Whether any of `targets` is called `name`.
+names :: func (targets: []Target, name: str) -> bool {
+  for t in targets {
+    if t.name == name { return true }
+  }
+  return false
+}
+
 // Every library but the root's own that is out of date, in order:
 // what a tool that analyzes the root itself needs built.
 compile_deps :: func (ws: *Workspace, p: Profile) -> Result.<void, str> {
-  for t in build.libraries(ws) {
-    if t.name == ws.root.name { continue }
-    if build.fresh(ws, p, t).? { continue }
-    let m: Member := ws.member(t.name)
-    compiling(&m)
-    build.compile(ws, p, t).?
-  }
+  let libs: []Target := plan(ws, p, false).?
+  compile_each(ws, p, libs, 0, libs.len()).?
   return .ok(())
 }
 
@@ -313,8 +366,10 @@ run_metadata :: func (o: *Options) -> Result.<i32, str> {
   return .ok(0)
 }
 
-compiling :: func (m: *Member) -> void {
-  term.status("Compiling", f"{m.name} v{m.manifest.package.version} ({m.dir})")
+// `Compiling [2/5] std v0.1.0 (...)`: which of how many, so a build that takes a
+// while says how far along it is.
+compiling :: func (m: *Member, n: usize, total: usize) -> void {
+  term.status("Compiling", f"[{n}/{total}] {m.name} v{m.manifest.package.version} ({m.dir})")
 }
 
 // A path under the package, written from the package's directory.
@@ -329,4 +384,26 @@ select :: func (all: []Target, name: str) -> Result.<[]Target, str> {
     }
   }
   return .err(f"no binary named `{name}`")
+}
+
+tests :: namespace {
+    @test
+    a_package_is_compiled_again_when_something_it_depends_on_is :: func () {
+        let ws: Workspace := workspace.tests.graph()
+        let util: Member := ws.member("util")
+        assert(depends_on_any(&ws, &util, .{ "tiny" }), "`util` depends on `tiny` directly")
+        assert(depends_on_any(&ws, &util, .{ "core" }), "and on the shipped packages")
+        assert(depends_on_any(&ws, &util, .{ "app" }) == false, "not on what depends on it")
+        assert(depends_on_any(&ws, &util, .{}) == false)
+    }
+
+    @test
+    a_target_is_found_in_a_plan_by_name :: func () {
+        let libs: []Target := .{
+            Target { name: "core", entry: "/w/core/src/package.nest", lib: true, test: false },
+            Target { name: "util", entry: "/w/util/src/package.nest", lib: true, test: false },
+        }
+        assert(names(libs, "util"))
+        assert(names(libs, "app") == false, "the root's library is not being compiled")
+    }
 }

@@ -219,3 +219,75 @@ contains :: func (names: []str, name: str) -> bool {
   }
   return false
 }
+
+// Public because the fixtures are what a test of the build plan in `main.nest`
+// builds its workspace with: one graph, described in one place.
+@public tests :: namespace {
+    @public member_of :: func (name: str, deps: []str) -> Member {
+        let mut d: collections.HashMap.<str, manifest.Dependency> :=
+            collections.map.<str, manifest.Dependency>()
+        for n in deps { d.insert(n, manifest.Dependency { path: .some(f"../{n}") }) }
+        return Member {
+            name: name,
+            dir: f"/w/{name}",
+            manifest: Manifest {
+                package: manifest.Package { name: name, version: "0.1.0" },
+                lib: .some(manifest.Lib { path: "src/package.nest" }),
+                bin: .none,
+                dependencies: .some(d),
+                profile: .none,
+                build: .none,
+            },
+        }
+    }
+
+    // `app` depends on `util`, `util` on `tiny`, and both ship packages are
+    // before all of them.
+    @public graph :: func () -> Workspace {
+        return Workspace {
+            root: member_of("app", .{ "util" }),
+            deps: .{
+                member_of("core", .{}),
+                member_of("std", .{}),
+                member_of("tiny", .{}),
+                member_of("util", .{ "tiny" }),
+            },
+            shipped: .{ "core", "std" },
+        }
+    }
+
+    @test
+    direct_is_the_shipped_packages_then_the_dependencies :: func () {
+        let ws: Workspace := graph()
+        let app: []str := ws.direct(&ws.root)
+        assert(app.len() == 3)
+        assert(app[0] == "core")
+        assert(app[1] == "std")
+        assert(app[2] == "util")
+        // A shipped package does not depend on itself or on what comes after
+        // it: `std` sees `core`, and `core` sees nothing.
+        let std: Member := ws.member("std")
+        assert(ws.direct(&std).len() == 1)
+        assert(ws.direct(&std)[0] == "core")
+        let core: Member := ws.member("core")
+        assert(ws.direct(&core).len() == 0)
+    }
+
+    // What a package's dependencies depend on is linked but not importable.
+    @test
+    indirect_is_what_the_direct_ones_reach :: func () {
+        let ws: Workspace := graph()
+        let rest: []str := ws.indirect(ws.direct(&ws.root))
+        assert(rest.len() == 1)
+        assert(rest[0] == "tiny")
+        // With `tiny` named directly there is nothing left over.
+        assert(ws.indirect(.{ "core", "std", "tiny", "util" }).len() == 0)
+    }
+
+    @test
+    a_member_is_found_by_name :: func () {
+        let ws: Workspace := graph()
+        assert(ws.member("app").dir == "/w/app", "the root answers to its own name")
+        assert(ws.member("tiny").dir == "/w/tiny")
+    }
+}
