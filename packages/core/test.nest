@@ -19,6 +19,8 @@
 
 { len } :: import "slice.nest"
 { make } :: import "mem.nest"
+{ Buf, Debug, end, start } :: import "fmt.nest"
+{ Location } :: import "loc.nest"
 { color, put, put_usize } :: import "write.nest"
 
 // One test: what it is called, and how to run it.
@@ -38,17 +40,47 @@ Case :: struct {
 // jump could be taken. See `runtime/nest_runtime.c`.
 nest_guard_run :: extern("c") func (run: func () -> void) -> i32
 
-// What a test that came back with `.err` fails with.
+// A test that returns a `Result`, run — and what its `.err` said, if it said
+// one.
 //
-// It is a `panic`, which is how a test fails every other way too — so the
+// **The compiler instantiates this**, once per error type a `Result`-returning
+// `@test` in the package has, and hands it the test itself
+// (`nestc/src/lir/entry.rs`). That is why it takes a function rather than being
+// the thing the runner calls: the runner calls one shape, `func () -> void`,
+// and this is generic over a type the runner must not have to know.
+//
+// Failing is a `panic`, which is how a test fails every other way too — so the
 // runner needs no second notion of failure, and a program that replaced the
 // panic handler has replaced this as well.
 //
-// The message says only *that* an error came back. Saying what it was would
-// mean formatting a value whose type is the test's own, and the wrapper that
-// calls this is built after monomorphization, where there is no longer a
-// `Display` to reach for. A test that wants its error reported writes the
-// message itself.
+// The `Location` is **passed in** rather than filled in by `#caller_location`:
+// what should be reported is where the `@test` function is written, not this
+// line, and the compiler is what knows the difference.
+//
+// `E` is bound by `Debug` rather than `Display` because an error is being shown
+// to whoever is fixing the test, not to a user — and every type has a `Debug`,
+// so the bound rules nothing out (`core/fmt.nest`).
+run_result :: #lang("test_result") func <E: Debug> (
+    test: func () -> Result.<void, E>,
+    loc: Location,
+) -> void {
+    test().match {
+        .ok => {},
+        .err(e) => {
+            let mut out: Buf := start()
+            out.bytes("the test returned an error: ".as_bytes())
+            e.debug(&mut out)
+            panic(end(&mut out), loc)
+        },
+    }
+}
+
+// What a `Result`-returning test fails with when there is no `test_result`
+// above — a `core` without one, or without a `Debug` to report through.
+//
+// It says only *that* an error came back, which is all that can be said with
+// no way to format the value. It stays because the fallback has to say
+// something: a failing test that reported nothing would pass.
 fail_err :: #lang("test_failed") func () -> void {
     panic("the test returned an error")
 }

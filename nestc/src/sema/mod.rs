@@ -386,6 +386,13 @@ pub fn analyze(session: &mut Session, entry: FileId) {
 /// waiting for exactly that.
 fn monomorphize(session: &mut Session) {
     let before: std::collections::HashSet<DefId> = session.linked.defs().collect();
+    // What a **test build** needs and no source names. Asked for here because
+    // this is the last moment a generic can be instantiated at all.
+    let wanted = test_wrappers(session);
+    let asked: Vec<(DefId, Vec<infer::GenericArg>)> = wanted
+        .iter()
+        .map(|(_, item, args)| (*item, args.clone()))
+        .collect();
     let Session {
         defs,
         ir_meta,
@@ -396,7 +403,8 @@ fn monomorphize(session: &mut Session) {
         ..
     } = &mut *session;
     let foreign = |def: DefId| libraries.iter().any(|l| l.owns_def(def));
-    let mut diags = crate::ir::mono::run(defs, ir_meta, linked, impls, impl_targets, &foreign);
+    let (mut diags, instances) =
+        crate::ir::mono::run(defs, ir_meta, linked, impls, impl_targets, &foreign, &asked);
 
     // The `#const` check defers every call in a generic body: which function it
     // reaches is a question about the instantiation, and there were none. Now
@@ -406,6 +414,59 @@ fn monomorphize(session: &mut Session) {
     let fresh: Vec<DefId> = linked.defs().filter(|d| !before.contains(d)).collect();
     crate::ir::check::constness::check_only(defs, ir_meta, linked, &fresh, &mut diags);
     session.diagnostics.extend(diags);
+    for ((test, _, _), instance) in wanted.iter().zip(instances) {
+        session.test_wrappers.insert(*test, instance);
+    }
+}
+
+/// The instantiations a **test build** needs that nothing in the program names.
+///
+/// A `Result`-returning `@test` is run through `#lang("test_result")` at its own
+/// error type (`lir::entry`): the wrapper is what turns an `.err` into a failure
+/// that says what the error *was*. It is ordinary Nest in `core`, generic over
+/// that error type, and no source calls it — so unless it is asked for here it
+/// is dropped with every other generic declaration and there is nothing left to
+/// call.
+///
+/// Each answer is the test, the declaration to instantiate, and what to
+/// instantiate it with.
+fn test_wrappers(session: &Session) -> Vec<(DefId, DefId, Vec<infer::GenericArg>)> {
+    if !session.options.test {
+        return Vec::new();
+    }
+    let Some(item) = session.lang_items.get("test_result") else {
+        return Vec::new();
+    };
+    let item = session.defs.resolve_alias(item);
+    session
+        .entry_package_tests()
+        .into_iter()
+        .filter_map(|test| {
+            let id = session.linked.get(test.def)?.id;
+            let err = test_error_ty(&session.defs, &session.ir_meta.ty(id)?)?;
+            Some((test.def, item, vec![infer::GenericArg::Ty(err)]))
+        })
+        .collect()
+}
+
+/// The `E` of a function returning `Result.<void, E>`, and nothing for any other
+/// return type — a `void` test needs no wrapper.
+fn test_error_ty(defs: &def::DefTable, ty: &ty::Ty) -> Option<ty::Ty> {
+    let ty::Ty::Func { ret, .. } = ty else {
+        return None;
+    };
+    let ty::Ty::Nominal { def, args } = &**ret else {
+        return None;
+    };
+    if defs
+        .get(*def)
+        .lang
+        .as_ref()
+        .is_none_or(|l| l.as_str() != "result")
+    {
+        return None;
+    }
+    args.get(1).cloned()
 }
 
 /// Drain a worklist of files, parsing (already done by the loader), creating each

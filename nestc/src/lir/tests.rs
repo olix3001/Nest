@@ -2852,14 +2852,15 @@ reads :: func () -> Result.<void, str> { return .ok(()) }
     let mut options = crate::common::options::Options::default();
     options.test = true;
     let lir = lir_text_with(src, options);
-    // The table, the function that hands it over, and the wrapper the `Result`
+    // The table, the function that hands it over, and the thunk the `Result`
     // test needs — a runner calls one shape of function, and that test is the
-    // other one.
+    // other one. The thunk calls `#lang("test_result")` at that test's error
+    // type, with the test itself and where it is written.
     assert!(lir.contains("test.cases"), "{lir}");
     assert!(lir.contains("test.main"), "{lir}");
-    assert!(lir.contains("test.wrap(reads)"), "{lir}");
+    assert!(lir.contains("test.run(reads)"), "{lir}");
     // The one returning nothing is called directly: there is nothing to wrap.
-    assert!(!lir.contains("test.wrap(adds)"), "{lir}");
+    assert!(!lir.contains("test.run(adds)"), "{lir}");
 
     // The same program, built the ordinary way: none of it is there.
     let plain = lir_text(src);

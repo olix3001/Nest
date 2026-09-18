@@ -136,6 +136,12 @@ pub struct VtableSlots {
 /// `defs` is taken mutably because an instantiation is a **new definition**: it
 /// has a name no source wrote and needs a [`DefId`] of its own, since that is
 /// what [`Linked`] is keyed by.
+///
+/// `asked` is the instantiations the **compiler** wants rather than the program:
+/// a `Result`-returning `@test` needs `#lang("test_result")` at its own error
+/// type, and nothing in the source names it. They are reached alongside the
+/// roots, so their bodies are walked like any other, and the def each one was
+/// given comes back in the same order.
 pub fn run(
     defs: &mut DefTable,
     meta: &Meta,
@@ -143,7 +149,8 @@ pub fn run(
     impls: &ImplTable,
     targets: &[ImplTarget],
     compiled_elsewhere: &dyn Fn(DefId) -> bool,
-) -> Vec<Diagnostic> {
+    asked: &[(DefId, Vec<GenericArg>)],
+) -> (Vec<Diagnostic>, Vec<DefId>) {
     let mut mono = Mono {
         defs,
         meta,
@@ -195,6 +202,10 @@ pub fn run(
         }
         mono.reach(linked, root, Vec::new(), 0);
     }
+    let asked: Vec<DefId> = asked
+        .iter()
+        .map(|(def, args)| mono.reach(linked, *def, args.clone(), 0))
+        .collect();
     while let Some(job) = mono.queue.pop_front() {
         let Some(original) = linked.get(job.origin).cloned() else {
             continue;
@@ -228,7 +239,7 @@ pub fn run(
         linked.remove(def);
     }
 
-    mono.out
+    (mono.out, asked)
 }
 
 /// The functions the walk starts from: **every concrete function the

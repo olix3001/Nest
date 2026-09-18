@@ -1457,8 +1457,44 @@ fn a_test_binary_runs_every_test_and_survives_a_failure() {
     assert!(said.contains("2 passed; 2 failed"), "{said}");
     // The failures said what they were, through the ordinary panic report.
     assert!(said.contains("division by zero"), "{said}");
-    assert!(said.contains("the test returned an error"), "{said}");
+    assert!(said.contains("the test returned an error: \"nope\""), "{said}");
     // A failing suite is a failing process.
+    assert_eq!(ran.status.code(), Some(1), "{ran:?}");
+}
+
+/// **A failing `Result` test says what the error was, and where the test is.**
+///
+/// The message is `Debug`'s, so an enum arrives as the variant it holds and
+/// text arrives quoted; the location is the `@test` function's own, passed into
+/// `#lang("test_result")` rather than filled in by `#caller_location`, which
+/// would have named the line inside `core` that raised the panic.
+#[test]
+fn a_failing_result_test_reports_its_error() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_tests_on_host(
+        "E :: enum { NotFound(i32), Broken { why: str } }\n\
+         @test\n\
+         missing :: func () -> Result.<void, E> { return .err(.NotFound(7)) }\n\
+         @test\n\
+         broken :: func () -> Result.<void, E> { return .err(.Broken { why: \"no reason\" }) }\n\
+         @test\n\
+         text :: func () -> Result.<void, str> { return .err(\"nope\") }\n\
+         main :: func () -> i32 { return 0 }\n",
+    );
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert!(said.contains("the test returned an error: E.NotFound(7)"), "{said}");
+    assert!(
+        said.contains("the test returned an error: E.Broken { why: \"no reason\" }"),
+        "{said}"
+    );
+    assert!(said.contains("the test returned an error: \"nope\""), "{said}");
+    // The entry file, which is what the program was written in — not `core`.
+    // `mem:` is the in-memory loader's prefix on a file's name.
+    assert!(said.contains("\n  at mem:main:"), "{said}");
+    assert!(!said.contains("test.nest"), "{said}");
+    assert!(said.contains("0 passed; 3 failed"), "{said}");
     assert_eq!(ran.status.code(), Some(1), "{ran:?}");
 }
 

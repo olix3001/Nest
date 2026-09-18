@@ -118,7 +118,7 @@ pub fn lower_against_libraries(
     options: &Options,
     lang: &LangItems,
     sources: &SourceMap,
-    tests: &[(String, DefId)],
+    tests: &[crate::sema::session::TestCase],
     foreign: &dyn Fn(DefId) -> bool,
 ) -> Program {
     let mut cx = Cx {
@@ -243,10 +243,14 @@ pub fn lower_against_libraries(
     if options.entry == crate::common::options::EntryMode::Auto {
         match (options.test, runner) {
             (true, Some(runner)) => {
-                let cases: Vec<(String, super::FuncId)> = tests
+                let cases: Vec<super::entry::Case> = tests
                     .iter()
-                    .filter_map(|(name, def)| {
-                        cx.func_of.get(def).map(|&f| (name.clone(), f))
+                    .filter_map(|t| {
+                        Some(super::entry::Case {
+                            name: t.name.clone(),
+                            func: *cx.func_of.get(&t.def)?,
+                            wrapper: t.wrapper.and_then(|w| cx.func_of.get(&w).copied()),
+                        })
                     })
                     .collect();
                 super::entry::synthesize_tests(
@@ -256,6 +260,7 @@ pub fn lower_against_libraries(
                     failed,
                     start,
                     options.target,
+                    sources,
                 );
             }
             _ => {

@@ -116,6 +116,12 @@ A test takes **no parameters**, is **not generic**, and returns either `void` or
 a panic — or, in the second shape, by returning `.err`. A value it returned
 successfully has nobody to read it, which is why `Result.<i32, E>` is refused.
 
+A returned `.err` is reported with the **error itself**, written through `core`'s
+`Debug` (§6.11). `E` is unconstrained because every type has a `Debug`: a
+concrete impl where `core` wrote one, and a reflective impl otherwise. The
+report names the `@test` function's own line, not the line inside `core` that
+raised the panic.
+
 **A program may not name a `@test` function**: not call it, not take its address.
 A test is run by `nestc --test` and by `twig test`, each of which guards the call
 so that a failing test is reported and the next one still runs. A call from

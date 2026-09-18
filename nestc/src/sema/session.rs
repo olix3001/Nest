@@ -243,6 +243,20 @@ pub struct FileMeta {
 }
 
 /// The whole-compilation analysis database.
+/// One `@test` the entry point of a test binary will run.
+#[derive(Debug, Clone)]
+pub struct TestCase {
+    /// The canonical path it is reported under — `math.adds`, which is what the
+    /// compiler knows the function by and what a filter would have to match.
+    pub name: String,
+    pub def: DefId,
+    /// The `#lang("test_result")` instantiation that runs it, when it returns a
+    /// `Result`: the wrapper that turns an `.err` into a failure saying what the
+    /// error was. `None` for a `void` test, which needs no wrapper, and for a
+    /// `core` that claims no such item.
+    pub wrapper: Option<DefId>,
+}
+
 pub struct Session {
     pub sources: SourceMap,
     pub defs: DefTable,
@@ -319,6 +333,14 @@ pub struct Session {
     /// How many defs there were then: the ones after it are monomorphization's
     /// instances, which a library's metadata leaves out for the same reason.
     pub defs_before_mono: u32,
+    /// For each `Result`-returning `@test`, the `#lang("test_result")`
+    /// instantiation that runs it: the one thing in a test build that no source
+    /// names, so monomorphization has to be asked for it (`crate::sema::tests`
+    /// of this module, and `lir::entry`).
+    ///
+    /// Empty in every build that is not `--test`, and empty in one whose `core`
+    /// claims no such item.
+    pub test_wrappers: HashMap<DefId, DefId>,
     /// The entry file's directory, when the entry is not a package's root: what
     /// the canonical path of a file outside every package is measured from
     /// ([`Session::program_module_path`]).
@@ -413,6 +435,7 @@ impl Session {
             own_ir_base: 0,
             ir_before_mono: 0,
             defs_before_mono: 0,
+            test_wrappers: HashMap::new(),
             twins_reported: HashSet::new(),
             cache: HashMap::new(),
             loader,
@@ -818,12 +841,8 @@ impl Session {
             .is_some_and(|f| f.name.starts_with(base.as_str()))
     }
 
-    /// Every `@test` function of the package being compiled, in source order,
-    /// with the name it is reported under.
-    ///
-    /// The name is the canonical path — `math.adds` — which is what the compiler
-    /// knows the function by, and so what a filter would have to match.
-    pub fn entry_package_tests(&self) -> Vec<(String, DefId)> {
+    /// Every `@test` function of the package being compiled, in source order.
+    pub fn entry_package_tests(&self) -> Vec<TestCase> {
         self.linked
             .funcs()
             .filter(|f| crate::ir::check::declarations::is_test(&self.defs, f.def))
@@ -833,7 +852,11 @@ impl Session {
                     .file_of(f.def)
                     .is_some_and(|file| self.in_entry_package(file))
             })
-            .map(|f| (self.defs.canonical_string(f.def), f.def))
+            .map(|f| TestCase {
+                name: self.defs.canonical_string(f.def),
+                def: f.def,
+                wrapper: self.test_wrappers.get(&f.def).copied(),
+            })
             .collect()
     }
 

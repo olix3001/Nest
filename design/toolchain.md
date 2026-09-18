@@ -290,6 +290,17 @@ functions it needs by `#lang` tag. It is in `core` rather than `std` because
 `core`'s own tests could not run — and the cost is that its output goes through
 `core/write.nest`, the same path to stderr the panic report takes.
 
+**What a returned `.err` says.** The error itself, written through `Debug`
+(`core/fmt.nest`). The wrapper that turns a `Result`-returning test into the
+`func () -> void` the runner calls cannot format anything — it is built after
+monomorphization, where there is no impl left to reach for — so it does not: it
+calls `#lang("test_result")`, an ordinary generic function in `core`,
+instantiated at that test's error type by the one thing that can still
+instantiate anything (`sema::test_wrappers`, reached through `ir::mono::run`'s
+`asked`). The thunk that remains in the compiler is two constants and a call:
+the test's address, and a `Location` built from the test's own span, so the
+report names the `@test` line rather than `core`'s.
+
 **What is left.**
 
 - **Conditional compilation**, so a `tests` namespace is not in a release
@@ -299,10 +310,6 @@ functions it needs by `#lang` tag. It is in `core` rather than `std` because
   that only make sense once there are threads.
 - **`tests/` as integration tests** — a second target seeing only the package's
   `@public` API, the way cargo's `tests/` does. Today every test is a unit test.
-- **Reporting what a returned `.err` said.** The wrapper that turns a
-  `Result`-returning test into the `func () -> void` the runner calls is built
-  after monomorphization, where there is no `Display` left to reach for, so it
-  reports only that an error came back.
 
 ### What `nestc` still owes it
 

@@ -46,7 +46,7 @@ use super::{
     Unit,
 };
 use crate::common::options::Target;
-use crate::common::source::FileSpan;
+use crate::common::source::{FileSpan, SourceMap};
 use crate::common::symbol::Symbol;
 
 /// The symbol the C runtime's startup calls. Not mangled, because the caller is
@@ -416,24 +416,38 @@ const TEST_SYMBOL: &str = "_NEtestmain";
 /// reported under. `runner` is whatever claimed `#lang("test_runner")`, and
 /// `failed` whatever claimed `#lang("test_failed")` — the two halves of what a
 /// test run *is*, which is why neither is written here.
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_tests(
     unit: &mut Unit,
-    tests: &[(String, FuncId)],
+    tests: &[Case],
     runner: FuncId,
     failed: Option<FuncId>,
     start: Option<FuncId>,
     target: Target,
+    sources: &SourceMap,
 ) {
-    let main = test_main(unit, tests, runner, failed);
+    let main = test_main(unit, tests, runner, failed, sources);
     synthesize(unit, main, start, target);
+}
+
+/// One test the entry point will run.
+pub struct Case {
+    /// What it is reported under: its canonical path.
+    pub name: String,
+    pub func: FuncId,
+    /// The `#lang("test_result")` instantiation for this test's error type,
+    /// when it returns a `Result` and `core` claims the item. It is what turns
+    /// an `.err` into a failure that says what the error *was*.
+    pub wrapper: Option<FuncId>,
 }
 
 /// `func () -> i32`: build the table, hand it to the runner, return its answer.
 fn test_main(
     unit: &mut Unit,
-    tests: &[(String, FuncId)],
+    tests: &[Case],
     runner: FuncId,
     failed: Option<FuncId>,
+    sources: &SourceMap,
 ) -> FuncId {
     // The **first test's** span, not the runner's. The unit split puts a
     // function where its span says it belongs (§11), and the runner lives in
@@ -442,7 +456,7 @@ fn test_main(
     // the code that starts it.
     let span = tests
         .first()
-        .and_then(|(_, f)| unit.funcs[f.0 as usize].span)
+        .and_then(|t| unit.funcs[t.func.0 as usize].span)
         .or(unit.funcs[runner.0 as usize].span);
     // The runner's own parameter says what a table of tests looks like: it takes
     // `[]Case`, so the slice type and the case type are read off the signature
@@ -464,17 +478,17 @@ fn test_main(
     // that returns a `Result` is not one of those, and gets a wrapper that turns
     // the `.err` it may return into the failure it means (see [`result_thunk`]).
     let mut elements = Vec::new();
-    for (name, func) in tests {
-        let call = if unit.funcs[func.0 as usize].ret == Ty::Void {
-            *func
-        } else {
-            result_thunk(unit, *func, failed, name)
+    for test in tests {
+        let call = match (unit.funcs[test.func.0 as usize].ret == Ty::Void, test.wrapper) {
+            (true, _) => test.func,
+            (false, Some(w)) => wrapper_thunk(unit, test.func, w, sources, &test.name),
+            (false, None) => result_thunk(unit, test.func, failed, &test.name),
         };
-        let bytes = bytes_global(unit, name.as_bytes(), span);
+        let bytes = bytes_global(unit, test.name.as_bytes(), span);
         elements.push(Constant::Aggregate(vec![
             Constant::Aggregate(vec![
                 Constant::Global(bytes),
-                Constant::Int((name.len() as i128).into()),
+                Constant::Int((test.name.len() as i128).into()),
             ]),
             Constant::Func(call),
         ]));
@@ -546,13 +560,122 @@ fn test_main(
     id
 }
 
-/// A `func () -> void` around a test that returns `Result.<void, E>`.
+/// A `func () -> void` around a test that returns `Result.<void, E>`, built out
+/// of the `#lang("test_result")` instantiation for that `E`.
 ///
-/// The runner calls one shape of function, and a test may be written in two
-/// (`ir::check::declarations` is what allows exactly those two). The difference
-/// is this wrapper: call the test, and if what came back is the `.err` variant,
-/// fail through whatever claimed `#lang("test_failed")` — an ordinary Nest
-/// function, so that what a returned error *says* stays out of the compiler.
+/// The thunk exists because the runner calls **one** shape of function and the
+/// wrapper takes two arguments. Both are constants: the test's address, and a
+/// `Location` built from the test's own span — so a failure reports the `@test`
+/// line rather than the line inside `core` that raised it. Everything else
+/// about failing, the message included, is written in Nest.
+fn wrapper_thunk(
+    unit: &mut Unit,
+    test: FuncId,
+    wrapper: FuncId,
+    sources: &SourceMap,
+    name: &str,
+) -> FuncId {
+    let span = unit.funcs[test.0 as usize].span;
+    // The wrapper's own second parameter says what a `Location` is, the way the
+    // runner's first says what a table of tests is: the type is read off the
+    // signature rather than rebuilt from a shape this file would have to agree
+    // with.
+    let loc_ty = unit.funcs[wrapper.0 as usize]
+        .locals
+        .get(1)
+        .map(|l| l.ty.clone())
+        .unwrap_or(Ty::Void);
+    let text_ty = match &loc_ty {
+        Ty::Named(id) => unit.types[id.0 as usize]
+            .members
+            .first()
+            .map(|m| m.ty.clone())
+            .unwrap_or(Ty::Void),
+        _ => Ty::Void,
+    };
+    let (file, line, column) = match span.and_then(|s| {
+        sources
+            .file(s.file)
+            .map(|f| (f.name.clone(), f.line_col(s.span.start)))
+    }) {
+        Some((name, at)) => (name, at.line, at.column),
+        None => (String::new(), 0, 0),
+    };
+    let bytes = bytes_global(unit, file.as_bytes(), span);
+
+    let id = FuncId(unit.funcs.len() as u32);
+    let mut locals: Vec<Local> = Vec::new();
+    let path = push_local(&mut locals, text_ty.clone(), span);
+    let at = push_local(&mut locals, loc_ty.clone(), span);
+    let mut stmts = Vec::new();
+    // The file name, then the location around it. Both are assembled in locals
+    // for the reason the test table is: an operand is a value, and these are
+    // aggregates (§7b).
+    if let Ty::Named(text_id) = text_ty {
+        stmts.push(Stmt::new(
+            StmtKind::Assign {
+                place: Place::local(path),
+                value: Rvalue::Aggregate {
+                    kind: super::Aggregate::Struct(text_id),
+                    fields: vec![
+                        Operand::Const(Constant::Global(bytes)),
+                        Operand::int(file.len() as i128),
+                    ],
+                },
+            },
+            span,
+        ));
+    }
+    if let Ty::Named(loc_id) = loc_ty {
+        stmts.push(Stmt::new(
+            StmtKind::Assign {
+                place: Place::local(at),
+                value: Rvalue::Aggregate {
+                    kind: super::Aggregate::Struct(loc_id),
+                    fields: vec![
+                        Operand::local(path),
+                        Operand::int(line as i128),
+                        Operand::int(column as i128),
+                    ],
+                },
+            },
+            span,
+        ));
+    }
+    stmts.push(Stmt::new(
+        StmtKind::Call {
+            dest: None,
+            callee: Callee::Static(wrapper),
+            args: vec![Operand::Const(Constant::Func(test)), Operand::local(at)],
+        },
+        span,
+    ));
+    unit.funcs.push(Function {
+        name: format!("test.run({name})"),
+        symbol: Symbol::new(&format!("_NEtestrun{}", id.0)),
+        locals,
+        params: 0,
+        ret: Ty::Void,
+        blocks: vec![Block {
+            id: BlockId(0),
+            stmts,
+            term: Terminator::new(TermKind::Return(None), span),
+            label: Some("run it".to_string()),
+        }],
+        extern_abi: None,
+        span,
+        attrs: FunctionAttrs::default(),
+    });
+    id
+}
+
+/// [`wrapper_thunk`]'s **fallback**: the same shape, for a `core` that claims no
+/// `#lang("test_result")`.
+///
+/// It can say only *that* an error came back — it is built here, after
+/// monomorphization, where there is no `Debug` left to reach for, which is the
+/// whole reason the wrapper above is instantiated instead. Failing still goes
+/// through Nest: whatever claimed `#lang("test_failed")`.
 ///
 /// An enum is `{ tag, payload }` after §7b, so which variant it holds is member
 /// zero, and which number `.ok` is comes from the type table rather than from an
