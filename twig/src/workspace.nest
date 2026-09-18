@@ -19,7 +19,7 @@ fs :: import <std/fs>
 s :: import <std/str>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
-path :: import "path.nest"
+path :: import <std/path>
 manifest :: import "manifest.nest"
 { Manifest } :: import "manifest.nest"
 toolchain :: import "toolchain.nest"

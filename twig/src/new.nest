@@ -1,7 +1,7 @@
 // `twig new` and `twig init`: a package with one target, ready to build.
 
 fs :: import <std/fs>
-path :: import "path.nest"
+path :: import <std/path>
 manifest :: import "manifest.nest"
 
 // Lay a package called `name` out in `dir`, which must exist. Nothing already

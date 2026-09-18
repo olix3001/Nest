@@ -1,13 +1,21 @@
 // Paths as text.
 //
-// Everything twig does with a path is lexical: join two, cut one down to its
-// directory, and fold `.` and `..` out of one so that a package reached through
-// two spellings of its directory is recognised as one package. Nothing here
-// touches the filesystem, so a symlink is a different path from its target.
+// Everything here is **lexical**: join two paths, cut one down to its directory,
+// and fold `.` and `..` out of one so that a place reached through two spellings
+// of its directory is recognised as one place. Nothing here touches the
+// filesystem — so a symlink is a different path from its target, and
+// `normalize` is not `realpath`.
+//
+// That is a deliberate split rather than a missing feature. A lexical answer is
+// the one a build tool, a manifest reader or a language server wants: it is the
+// same on every machine, it needs no syscall, and it cannot fail. What needs the
+// filesystem lives in `<std/fs>`.
+//
+// The separator is `/`. Windows paths are not handled yet.
 
-s :: import <std/str>
-collections :: import <std/collections>
-{ Vec } :: import <std/collections>
+s :: import "str.nest"
+collections :: import "collections.nest"
+{ Vec } :: import "collections.nest"
 
 SLASH: u8 :: 47
 
@@ -81,10 +89,9 @@ SLASH: u8 :: 47
 // The tests, in a namespace of their own.
 //
 // They sit beside what they test — an inner namespace sees the file's private
-// names, so `normalize` is reachable here and not from outside twig — and they
-// are gathered rather than scattered, so that what a reader skips is one block
-// and not every third declaration. When there is conditional compilation, this
-// is the namespace to compile only in a test build.
+// names — and they are gathered rather than scattered, so that what a reader
+// skips is one block and not every third declaration. When there is conditional
+// compilation, this is the namespace to compile only in a test build.
 tests :: namespace {
     @test
     joining :: func () {

@@ -11,7 +11,7 @@ process :: import <std/process>
 s :: import <std/str>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
-path :: import "path.nest"
+path :: import <std/path>
 
 // The compiler: `$NESTC` when it is set, otherwise `nestc` from `PATH`.
 @public nestc :: func () -> str {

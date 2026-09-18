@@ -10,7 +10,7 @@ process :: import <std/process>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
 { String } :: import <std/string>
-path :: import "path.nest"
+path :: import <std/path>
 build :: import "build.nest"
 { Profile, Target } :: import "build.nest"
 workspace :: import "workspace.nest"
@@ -240,7 +240,7 @@ run_test :: func (o: *Options) -> Result.<i32, str> {
   let mut p: Profile := build.profile(&ws.root.manifest, o.release)
   p.emit = o.emit.as_slice()
   p.verbose = o.verbose
-  let t: Target := build.tests(&ws).?
+  let t: Target := build.test_target(&ws).?
   compile_deps(&ws, p).?
   compiling(&ws.root)
   build.compile(&ws, p, t).?

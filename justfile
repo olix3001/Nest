@@ -107,13 +107,13 @@ build-twig: build-nestc
 
 # ===< Testing >===
 
-# Every suite: the compiler, the server, the grammar, and twig.
+# Every suite: the compiler, the server, the grammar, `std` and twig.
 #
 # One recipe rather than a list a reader has to assemble, because "did I break
 # anything" is one question. Each part is also its own recipe, for the times it
 # is not.
-[doc("Every suite: the compiler, the server, the grammar, and twig.")]
-test: test-nestc test-lsp test-grammar test-twig
+[doc("Every suite: the compiler, the server, the grammar, `std` and twig.")]
+test: test-nestc test-lsp test-grammar test-std test-twig
     @just _step "All suites passed"
 
 # The compiler: inference, lowering, codegen, and the programs in examples/.
@@ -135,6 +135,18 @@ test-grammar:
         cd {{ root }}/editors/tree-sitter-nest && npx tree-sitter test; \
     else \
         echo "npx not found — skipping the grammar corpus"; \
+    fi
+
+# `std`'s own tests, run the way any package's are. `core` has none yet: its
+# test runner is the thing under test, so a failing one there has nowhere to be
+# reported from.
+[doc("`std`'s own tests, through `twig test`.")]
+test-std:
+    @just _step "Testing std"
+    @if [ -x "{{ twig }}" ]; then \
+        cd {{ root }}/packages/std && {{ twig }} test; \
+    else \
+        echo "twig is not built — skipping std's tests"; \
     fi
 
 # twig's own tests: `@test` functions in twig's sources, run by `twig test`.

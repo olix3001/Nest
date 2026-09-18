@@ -31,7 +31,7 @@ toml :: import <std/serialize/toml>
 { rename } :: import <std/serialize>
 { HashMap } :: import <std/collections>
 { make } :: import <core/mem>
-path :: import "path.nest"
+path :: import <std/path>
 
 @public FILE_NAME: str :: "nest.toml"
 

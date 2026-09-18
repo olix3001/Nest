@@ -33,7 +33,7 @@ fs :: import <std/fs>
 process :: import <std/process>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
-path :: import "path.nest"
+path :: import <std/path>
 { Bin, Manifest, ProfileSettings } :: import "manifest.nest"
 { Workspace, Member } :: import "workspace.nest"
 toolchain :: import "toolchain.nest"
@@ -129,7 +129,7 @@ library :: func (m: *Member) -> Target {
 // entries reaches a given file is not a question anyone writing a test is
 // asking. A package with neither a `[lib]` nor a `[[bin]]` is already refused by
 // the manifest check.
-@public tests :: func (ws: *Workspace) -> Result.<Target, str> {
+@public test_target :: func (ws: *Workspace) -> Result.<Target, str> {
   let root: *Member := &ws.root
   return root.lib_root().match {
     .some(entry) => .ok(Target { name: root.name, entry: entry, lib: true, test: true }),
@@ -319,4 +319,23 @@ run :: func (program: str, args: []str) -> Result.<process.Status, str> {
     .ok(s) => .ok(s),
     .err(e) => .err(f"could not run `{program}`: {e.describe()}"),
   }
+}
+
+// The tests, in a namespace of their own (spec §9.2). They cover the part of
+// this file that is a *translation* — twig's vocabulary into `nestc`'s — which
+// is where a silent mistake produces a build that runs and writes the wrong
+// thing rather than one that fails.
+tests :: namespace {
+    @test
+    dump_names :: func () {
+        assert(known_emit("lir"))
+        assert(known_emit("llvm-ir"))
+        assert(known_emit("obj") == false, "`obj` is an output, not a dump")
+        // What twig calls a dump is not always what `nestc` calls it.
+        assert(emit_kind("llvm-ir") == "backend-ir")
+        assert(emit_kind("lir") == "lir")
+        assert(extension("llvm-ir") == "ll")
+        assert(extension("asm") == "s")
+        assert(extension("mono") == "mono")
+    }
 }
