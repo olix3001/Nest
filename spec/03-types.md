@@ -468,7 +468,7 @@ literal that fills it.
 
 ```
 enum = [ directive ]* 'enum' [ generics ] '{' { variant } '}'
-variant = [ attribute ]* variant_name [ payload ] ','
+variant = [ attribute ]* variant_name [ payload ] [ '=' const_expr ] ','
 variant_name = snake_case_identifier
 payload =
     '(' type { ',' type } ')'      // tuple payload
@@ -505,6 +505,55 @@ return .rect { w: 3.0, h: 4.0 }     // record-payload variant
 Enums are consumed by `match` (see
 [07-patterns-and-matching.md](07-patterns-and-matching.md)). `Result` and
 `Option` are ordinary enums provided by the prelude.
+
+#### Explicit discriminants
+
+Every enum value stores a **discriminant** — the number that says which variant
+it holds. By default a variant's discriminant is its position, counting from
+zero. A variant may state one instead:
+
+```
+Errno :: enum {
+  ok      = 0,
+  perm    = 1,
+  noent   = 2,
+  io      = 5,
+  again   = 11,
+}
+
+Signed :: enum {
+  invalid = -1,
+  ready,              // 0
+  done,               // 1
+}
+
+Bits :: enum {
+  read  = 1 << 0,
+  write = 1 << 1,
+  exec  = 1 << 2,
+}
+```
+
+- The value is a **constant expression**: a literal, a named `::` constant, or
+  arithmetic over them, evaluated at compile time exactly as an array length is.
+- A variant with no `= value` takes **one more than the variant before it**, the
+  first being zero. So an enum nobody wrote a discriminant on has its positions,
+  and `a = 3, b` makes `b` four.
+- Two variants may not share a discriminant: a `match` could not tell them
+  apart.
+- Only a variant with **no payload** may be given one. A discriminant exists so
+  that an enum can be given the numbering a C enumeration has, and a C
+  enumeration has no payload to number.
+
+The discriminant is what the value stores; the position is what
+[12-reflection.md](12-reflection.md)'s `Variant.index` reports. They are the same
+number only for an enum with no explicit discriminant in it, and `Variant` has
+carried both since before this existed.
+
+The **tag's type** follows from the discriminants: the narrowest integer that
+holds every one of them, signed exactly when some variant's is negative. An enum
+of fewer than 256 positional variants therefore still has a one-byte tag, and
+`invalid = -1` above costs a sign rather than a wider tag.
 
 ### Tuples
 

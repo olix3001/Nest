@@ -68,6 +68,17 @@ struct LoopFrame {
 /// [`builtin`](OpResolution::builtin) is `Some` iff the resolved impl was a
 /// builtin primitive op (see [`super::builtins`]); codegen keys on it to emit
 /// the machine instruction in O(1) rather than a real call.
+/// The discriminant one enum variant stores, stamped on the variant's own node
+/// (§3.3).
+///
+/// It is the position for an enum nobody wrote a `= value` on, which is why the
+/// two were one number until now; an explicit discriminant is what separates
+/// them, and the tag is the one that reaches a value. Lowering copies it onto
+/// the IR's [`crate::ir::Variant`], which is where every later pass reads it —
+/// including for a *foreign* enum, whose tree this compilation does not have.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct VariantTag(pub i128);
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct OpResolution {
     /// The trait method the operator dispatches to (the `#lang` trait's method
@@ -603,6 +614,13 @@ pub fn infer_file(
     {
         let mut cx = fresh!();
         cx.stamp_member_types();
+    }
+    // Declaration-level too: what tag each enum variant's values store. It runs
+    // after the member types because a discriminant is only legal on a variant
+    // with **no** payload, and the payload is the thing that says so.
+    {
+        let mut cx = fresh!();
+        cx.stamp_variant_tags();
     }
     // Declaration-level, and the last of them: expand every type alias the file
     // declares.
@@ -5856,6 +5874,104 @@ impl Inferer<'_> {
         for at in positions {
             let t = self.ty_from_node(at);
             self.ast.set_meta(at, t);
+        }
+    }
+
+    /// The tag every variant of every enum this file declares stores, stamped on
+    /// the variant's own node as a [`VariantTag`] (§3.3).
+    ///
+    /// A variant with no `= value` takes one more than the variant before it,
+    /// counting from zero — so an enum nobody wrote a discriminant on gets its
+    /// positions, exactly as it did before there was a discriminant to write.
+    ///
+    /// Only a variant with **no payload** may have one. A discriminant exists so
+    /// that an enum can be given C's numbering, and a C enumeration has no
+    /// payload to number; a tagged union whose tag the program chose would be a
+    /// different feature with different rules.
+    fn stamp_variant_tags(&mut self) {
+        use crate::parser::ast::VariantPayload;
+        let enums: Vec<Vec<NodeId>> = self
+            .ast
+            .ids()
+            .filter_map(|id| match &self.ast.node(id).kind {
+                NodeKind::EnumType { variants, .. } => Some(variants.clone()),
+                _ => None,
+            })
+            .collect();
+        for variants in enums {
+            // Where the implicit numbering has got to, and what has been used —
+            // two variants sharing a tag are two variants a `match` cannot tell
+            // apart, so the enum is refused rather than compiled into one that
+            // loses values.
+            let mut next: i128 = 0;
+            let mut seen: Vec<(i128, Symbol)> = Vec::new();
+            for v in variants {
+                let NodeKind::Variant {
+                    name,
+                    payload,
+                    value,
+                    ..
+                } = self.ast.node(v).kind.clone()
+                else {
+                    continue;
+                };
+                let tag = match value {
+                    Some(expr) if !matches!(payload, VariantPayload::None) => {
+                        let msg = format!(
+                            "`{name}` carries a payload, so it may not be given an \
+                             explicit discriminant"
+                        );
+                        self.report_in(self.file, expr, msg);
+                        next
+                    }
+                    Some(expr) => self.variant_tag_value(expr).unwrap_or(next),
+                    None => next,
+                };
+                if let Some((_, other)) = seen.iter().find(|(t, _)| *t == tag) {
+                    let msg = format!("the discriminant {tag} is already `{other}`'s");
+                    self.report_in(self.file, v, msg);
+                }
+                seen.push((tag, name));
+                self.ast.set_meta(v, VariantTag(tag));
+                // A tag at the very top of the range has no successor to give
+                // the next variant. Saying so where the *next* variant is
+                // written would be a diagnostic about the wrong line, so the
+                // count saturates and the variant that has no room is the one
+                // that reports.
+                next = match tag.checked_add(1) {
+                    Some(n) => n,
+                    None => {
+                        let msg = "the discriminant after this one would not fit in 128 bits";
+                        self.report_in(self.file, v, msg.to_string());
+                        tag
+                    }
+                };
+            }
+        }
+    }
+
+    /// One written discriminant, folded to the integer it is.
+    ///
+    /// The same fold every other compile-time value in a declaration goes
+    /// through ([`Self::const_operand`]), so a named constant and `1 << 3` are
+    /// each as good as a literal. `None` means a diagnostic was reported.
+    fn variant_tag_value(&mut self, expr: NodeId) -> Option<i128> {
+        let what = "an enum discriminant";
+        let value = self.const_operand(self.file, expr, what, 0)?;
+        match &value {
+            ConstValue::Int(n) => match n.to_i128() {
+                Some(n) => Some(n),
+                None => {
+                    let msg = format!("{what} must fit in 128 bits, and {n} does not");
+                    self.report_const_in(self.file, expr, msg);
+                    None
+                }
+            },
+            other => {
+                let msg = format!("{what} must be an integer, not `{}`", other.display());
+                self.report_const_in(self.file, expr, msg);
+                None
+            }
         }
     }
 

@@ -720,6 +720,31 @@ fn a_program_links_and_runs() {
              }\n",
             42,
         ),
+        // Explicit discriminants, end to end: a `match` switching on the tags
+        // the program chose rather than on positions, the implicit numbering
+        // continuing from the last written one, and a negative discriminant —
+        // which makes the tag a *signed* byte, so `variant_of` finding `bad`
+        // is the sign extension and the descriptor's `u64` agreeing. 5 + 37.
+        (
+            "r :: import <core/reflect>\n\
+             E :: enum { ok = 0, io = 5, again, bad = -1 }\n\
+             code :: func (e: E) -> i32 {\n\
+            \x20 return e.match { .ok => 0, .io => 5, .again => 6, .bad => -1 }\n\
+             }\n\
+             main :: func () -> i32 {\n\
+            \x20 let again: E := .again\n\
+            \x20 if r.variant_tag.<E>(&again) != 6 { return 1 }\n\
+            \x20 let got: r.Variant := r.variant_of.<E>(&again).!\n\
+            \x20 if got.name != \"again\" || got.index != 2 || got.tag != 6 { return 2 }\n\
+            \x20 let bad: E := .bad\n\
+            \x20 if code(bad) != -1 { return 3 }\n\
+            \x20 if r.variant_of.<E>(&bad).!.name != \"bad\" { return 4 }\n\
+            \x20 if r.type_info.<E>().size != 1 { return 5 }\n\
+            \x20 let io: E := .io\n\
+            \x20 return code(io) + 37\n\
+             }\n",
+            42,
+        ),
         // `member_dyn` over an **enum**: the table it indexes holds one vtable
         // per payload member of every variant, flattened in variant order, so
         // the descriptor a `variant_of` handed back reaches its own impl. 3 + 4

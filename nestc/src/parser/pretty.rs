@@ -148,13 +148,16 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         }
         Field { name, .. } => format!("Field {name}:"),
         EnumType { .. } => "EnumType".into(),
-        Variant { name, payload, .. } => {
+        Variant {
+            name, payload, value, ..
+        } => {
             let tag = match payload {
                 VariantPayload::None => "",
                 VariantPayload::Tuple(_) => " (tuple)",
                 VariantPayload::Record(_) => " (record)",
             };
-            format!("Variant {name}{tag}")
+            let disc = if value.is_some() { " = " } else { "" };
+            format!("Variant {name}{tag}{disc}")
         }
         TraitType { .. } => "TraitType".into(),
         AssocType { .. } => "AssocType type".into(),

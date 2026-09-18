@@ -498,11 +498,18 @@ pub enum NodeKind {
         generics: Vec<NodeId>,
         variants: Vec<NodeId>,
     },
-    /// `[attrs] name [payload]` — one enum variant declaration.
+    /// `[attrs] name [payload] ['=' value]` — one enum variant declaration.
+    ///
+    /// `value` is an explicit discriminant: the tag the variant's values store,
+    /// rather than the one its position would give it (§3.3). It is a constant
+    /// expression, and only a variant with **no payload** may have one — a
+    /// discriminant is a C-compatibility feature and a C enumeration has no
+    /// payload to go with it.
     Variant {
         attrs: Vec<NodeId>,
         name: Symbol,
         payload: VariantPayload,
+        value: Option<NodeId>,
     },
     /// `[directives] trait { members }` — members are `::` bindings
     /// ([`NodeKind::ConstBind`]) and comptime items. A method signature is a
@@ -827,9 +834,15 @@ impl NodeKind {
                 out.extend_from_slice(generics);
                 out.extend_from_slice(variants);
             }
-            Variant { attrs, payload, .. } => {
+            Variant {
+                attrs,
+                payload,
+                value,
+                ..
+            } => {
                 out.extend_from_slice(attrs);
                 payload.collect_children(out);
+                out.extend(value.iter().copied());
             }
             TraitType {
                 directives,

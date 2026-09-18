@@ -811,7 +811,7 @@ impl Cx<'_> {
                                 name: Symbol::new("tag"),
                                 ty: LirTy::Int {
                                     bits: (e.tag.size * 8) as u16,
-                                    signed: false,
+                                    signed: e.tag_signed,
                                 },
                                 offset: 0,
                             },
@@ -834,7 +834,7 @@ impl Cx<'_> {
                                 let vty = self.variant_type(ty, i, &v.name, depth);
                                 VariantDef {
                                     name: v.name.clone(),
-                                    tag: i as i128,
+                                    tag: v.tag,
                                     ty: vty,
                                     tuple: v.tuple,
                                 }
@@ -1464,7 +1464,7 @@ impl Cx<'_> {
         };
         // The names and shapes first, owned: building a descriptor needs `self`
         // and the type table is what they were read from.
-        let shape: Vec<(Symbol, bool, Vec<Option<DefId>>)> = match ty {
+        let shape: Vec<(Symbol, bool, Vec<Option<DefId>>, i128)> = match ty {
             Ty::Nominal { def, .. } => match self.linked.ty(*def).map(|t| &t.kind) {
                 Some(TypeDefKind::Enum { variants }) => variants
                     .iter()
@@ -1473,6 +1473,7 @@ impl Cx<'_> {
                             v.name.clone(),
                             v.tuple,
                             v.members.iter().map(|m| m.def).collect(),
+                            v.tag,
                         )
                     })
                     .collect(),
@@ -1491,7 +1492,7 @@ impl Cx<'_> {
         let member_lty = self.lir(&member_ty);
         let mut parts: Vec<Constant> = Vec::new();
         let mut flat = 0usize;
-        for (i, (name, tuple, defs_of)) in shape.iter().enumerate() {
+        for (i, (name, tuple, defs_of, tag)) in shape.iter().enumerate() {
             let members = self.layouts.variant_member_types(ty, i).unwrap_or_default();
             let offsets = enum_layout
                 .as_ref()
@@ -1517,12 +1518,14 @@ impl Cx<'_> {
                 format!("reflect.payload:{key}:{i}"),
             );
             let name_const = self.text_data(name.as_str().as_bytes(), &text);
-            // The tag is the declaration index, which is what [`Self::variant_info`]
-            // says when it builds a value of one. `core`'s `Variant` carries both
-            // anyway: explicit discriminants are what would separate them.
+            // `tag` is what a value of the variant stores and `index` is where it
+            // sits in this table — the two `core`'s `Variant` has always kept
+            // apart, and which an explicit discriminant now separates (§3.3). A
+            // negative tag arrives here as its two's-complement bit pattern,
+            // because `Variant.tag` is a `u64`.
             parts.push(Constant::Aggregate(vec![
                 name_const,
-                Constant::Int((i as i128).into()),
+                Constant::Int(tag_as_u64(*tag).into()),
                 Constant::Aggregate(vec![
                     Constant::Global(table),
                     Constant::Int((n as i128).into()),
@@ -1653,8 +1656,20 @@ impl Cx<'_> {
             .variant_member_types(ty, i)
             .map(|ms| ms.into_iter().map(|(_, t)| t).collect())
             .unwrap_or_default();
-        (i as i128, tys)
+        // The **tag**, which is the position only for an enum nobody wrote a
+        // discriminant on (§3.3): this is what a value of the variant stores.
+        (variants[i].tag, tys)
     }
+}
+
+/// A discriminant as `core`'s `Variant.tag` holds it: a `u64`.
+///
+/// A negative discriminant is its two's-complement pattern at 64 bits, which is
+/// the same pattern the tag member holds when it is narrower — an `i8` tag of
+/// `-1` read as a `u64` is `0xffff_ffff_ffff_ffff` either way, so a reflective
+/// comparison against `variant_tag` still finds its variant.
+fn tag_as_u64(tag: i128) -> i128 {
+    (tag as u64) as i128
 }
 
 /// What a function's directives *mean*, decided once (§7).
@@ -2661,15 +2676,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// own. What a decision tree switches on is the value in that field, read
     /// **once** (§4) into a slot the groups share.
     fn tag_of(&mut self, place: &Place, ty: &Ty, span: Option<FileSpan>) -> Operand {
-        let width = match self.cx.layouts.enum_layout(ty) {
-            Some(Ok(e)) => (e.tag.size * 8) as u16,
-            _ => 8,
+        let (width, signed) = match self.cx.layouts.enum_layout(ty) {
+            Some(Ok(e)) => ((e.tag.size * 8) as u16, e.tag_signed),
+            _ => (8, false),
         };
         let tag = place.clone().then(Projection::Field {
             index: 0,
             name: Symbol::new("tag"),
         });
-        self.into_temp(Rvalue::Use(Operand::Copy(tag)), Ty::int(width, false), span)
+        self.into_temp(Rvalue::Use(Operand::Copy(tag)), Ty::int(width, signed), span)
     }
 
     // ===< Calls >===
@@ -3419,8 +3434,8 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // variants for a tag to be looked up in and answers zero.
             "variant_tag" if args.len() == 1 => {
                 let owner = self.type_argument(e.id)?;
-                let width = match self.cx.layouts.enum_layout(&owner) {
-                    Some(Ok(l)) => (l.tag.size * 8) as u16,
+                let (width, signed) = match self.cx.layouts.enum_layout(&owner) {
+                    Some(Ok(l)) => ((l.tag.size * 8) as u16, l.tag_signed),
                     _ => return Some(Rvalue::Use(Operand::Const(Constant::Int(0.into())))),
                 };
                 let at = self.temp(
@@ -3438,7 +3453,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                         index: 0,
                         name: Symbol::new("tag"),
                     });
-                let from = self.cx.lir(&Ty::int(width, false));
+                // Widened **at the tag's own signedness**, so a negative
+                // discriminant reaches the `u64` as the same bit pattern the
+                // descriptor in `TypeInfo.variants` carries (see `tag_as_u64`);
+                // zero-extending `-1` would give a number no variant claims.
+                let from = self.cx.lir(&Ty::int(width, signed));
                 let to = self.cx.lir(&Ty::int(64, false));
                 if from == to {
                     return Some(Rvalue::Use(Operand::Copy(tag)));
@@ -4262,14 +4281,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
 
     /// The width an enum's tag is switched at.
     fn tag_ty(&mut self, ty: &Ty) -> LirTy {
-        let bits = match self.cx.layouts.enum_layout(ty) {
-            Some(Ok(e)) => (e.tag.size * 8) as u16,
-            _ => 8,
+        let (bits, signed) = match self.cx.layouts.enum_layout(ty) {
+            Some(Ok(e)) => ((e.tag.size * 8) as u16, e.tag_signed),
+            _ => (8, false),
         };
-        LirTy::Int {
-            bits,
-            signed: false,
-        }
+        LirTy::Int { bits, signed }
     }
 
     /// A constant, as something an instruction can read.
@@ -4391,6 +4407,24 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 _ => Vec::new(),
             },
             _ => Vec::new(),
+        }
+    }
+
+    /// The discriminant the `index`th variant of an enum stores (§3.3).
+    ///
+    /// The position for an enum nobody wrote a discriminant on, and what the
+    /// program wrote where it did — which is why every switch and every
+    /// constructed value asks for it rather than using the position it already
+    /// has in hand.
+    fn variant_tag(&self, ty: &Ty, index: u32) -> i128 {
+        let Ty::Nominal { def, .. } = ty else {
+            return index as i128;
+        };
+        match self.cx.linked.ty(*def).map(|t| &t.kind) {
+            Some(TypeDefKind::Enum { variants }) => variants
+                .get(index as usize)
+                .map_or(index as i128, |v| v.tag),
+            _ => index as i128,
         }
     }
 
@@ -4574,9 +4608,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         span: Option<FileSpan>,
     ) {
         let Ty::Nominal { def, .. } = sty else { return };
-        let variants: Vec<Symbol> = match self.cx.linked.ty(*def).map(|t| &t.kind) {
+        // The name *and* the tag: the name is what an arm's pattern gives, the
+        // tag is what the switch compares against, and an explicit discriminant
+        // is what makes them two different numbers (§3.3).
+        let variants: Vec<(Symbol, i128)> = match self.cx.linked.ty(*def).map(|t| &t.kind) {
             Some(TypeDefKind::Enum { variants }) => {
-                variants.iter().map(|v| v.name.clone()).collect()
+                variants.iter().map(|v| (v.name.clone(), v.tag)).collect()
             }
             _ => return,
         };
@@ -4600,9 +4637,9 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         let dead = self.new_block(Some("unreachable".to_string()));
 
         let mut targets = Vec::new();
-        for (i, v) in variants.iter().enumerate() {
+        for (i, (v, tag)) in variants.iter().enumerate() {
             let head = self.new_block(Some(format!(".{v}")));
-            targets.push((i as i128, head));
+            targets.push((*tag, head));
             let candidates: Vec<usize> = arms
                 .iter()
                 .enumerate()
@@ -4827,11 +4864,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 let disc = self.tag_of(place, ty, span);
                 let ok = self.new_block(None);
                 let tag_ty = self.tag_ty(ty);
+                let tag = self.variant_tag(ty, index);
                 self.terminate(Terminator::new(
                     TermKind::Switch {
                         value: disc,
                         ty: tag_ty,
-                        arms: vec![(index as i128, ok)],
+                        arms: vec![(tag, ok)],
                         otherwise: fail,
                     },
                     span,

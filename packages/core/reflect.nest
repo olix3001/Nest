@@ -124,9 +124,10 @@ impl Eq for TypeId {
 // the same reason: that is the table `member_dyn` indexes.
 //
 // `tag` is what the value stores and `index` is the position in
-// `TypeInfo.variants`. The two agree today; they are kept apart because
-// explicit discriminants (§3) are what would make them differ, and code that
-// assumed a tag was a position would be wrong the day they land.
+// `TypeInfo.variants`. They agree for an enum nobody wrote a discriminant on,
+// and explicit discriminants (§3) are what separates them: `io = 5` is the
+// third variant of its enum and stores 5. A negative discriminant arrives here
+// as its two's-complement pattern, which is what `variant_tag` reads back.
 @public Variant :: #lang("reflect_variant") struct {
     name: str,
     tag: u64,

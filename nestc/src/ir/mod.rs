@@ -287,6 +287,14 @@ pub struct Variant {
     /// record (`.c { x: U }`). It does not affect layout — it is what a pattern
     /// and a dump need in order to print the variant the way it was written.
     pub tuple: bool,
+    /// The discriminant a value of this variant stores: its position, or what an
+    /// explicit `= value` said instead (§3.3).
+    ///
+    /// It is **not** the position in this list, and the two are the same number
+    /// only for an enum nobody wrote a discriminant on. Every pass that emits or
+    /// tests a tag reads this; the position stays what indexes the layout
+    /// tables, which is the other half of why they are two fields.
+    pub tag: i128,
 }
 
 /// One lowered function.

@@ -527,12 +527,21 @@ impl Lowerer<'_> {
                 false,
             ),
         };
+        // Inference decided the tag (`infer::stamp_variant_tags`): the position
+        // for a variant nobody gave a discriminant, and the written value where
+        // one was. Reading it back here is what puts it on the IR, which is the
+        // only place a *foreign* enum's tags can be read from.
+        let tag = self
+            .ast
+            .meta::<crate::sema::infer::VariantTag>(node)
+            .map_or(0, |t| t.0);
         Some(Variant {
             id: self.id(node),
             def,
             name,
             members,
             tuple,
+            tag,
         })
     }
 

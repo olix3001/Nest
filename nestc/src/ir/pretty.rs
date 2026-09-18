@@ -158,8 +158,8 @@ impl Printer<'_> {
             TypeDefKind::Enum { variants } => {
                 self.line(&format!("enum {}{tags} {{", t.name));
                 self.indent += 1;
-                for v in variants {
-                    self.variant(v);
+                for (i, v) in variants.iter().enumerate() {
+                    self.variant(v, i);
                 }
                 self.indent -= 1;
                 self.line(&format!("}}{lay}"));
@@ -212,9 +212,17 @@ impl Printer<'_> {
         self.line(&format!("{}: {ty}", m.name));
     }
 
-    fn variant(&mut self, v: &Variant) {
+    /// One variant. `index` is its position, and is here only so that a
+    /// discriminant which is *not* the position can be printed — an enum nobody
+    /// wrote one on reads the same as it always did (§3.3).
+    fn variant(&mut self, v: &Variant, index: usize) {
+        let tag = if v.tag == index as i128 {
+            String::new()
+        } else {
+            format!(" = {}", v.tag)
+        };
         if v.members.is_empty() {
-            self.line(&format!(".{}", v.name));
+            self.line(&format!(".{}{tag}", v.name));
             return;
         }
         if v.tuple {
@@ -224,7 +232,7 @@ impl Printer<'_> {
                 .map(|m| self.ty(m.id))
                 .collect::<Vec<_>>()
                 .join(", ");
-            self.line(&format!(".{}({tys})", v.name));
+            self.line(&format!(".{}({tys}){tag}", v.name));
             return;
         }
         self.line(&format!(".{} {{", v.name));

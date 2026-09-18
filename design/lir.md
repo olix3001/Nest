@@ -1002,8 +1002,10 @@ Five of these earn a word:
 - **An enum's payload overlaps.** One variant is live at a time, so the space is
   shared; laying them end to end would make an enum as big as all of them
   together, which is not a trade anyone wants for a type whose whole point is
-  that it is one of them. The tag is the smallest unsigned integer that tells the
-  variants apart — one byte for anything up to 256 of them.
+  that it is one of them. The tag is the smallest integer that holds
+  every discriminant the variants store — one byte for anything up to 256 of
+  them, and signed exactly when some variant's discriminant is negative (§3.3's
+  explicit discriminants are what puts a number other than a position there).
 - **A `distinct T` has exactly `T`'s layout.** Not "the same size as": the same
   bytes (§2.4). That is what makes a `usize` and its `uint.<64>` interchangeable
   in memory and different in the type system.

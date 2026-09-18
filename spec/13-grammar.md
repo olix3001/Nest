@@ -89,7 +89,7 @@ struct_body   = '{' { field | comptime_item } '}'      // record
                                                        // (absent) => unit struct
 field         = { attribute } identifier ':' type ','    // no default; see 3.4
 enum_type     = { directive } 'enum' [ generics ] '{' { variant } '}'
-variant       = { attribute } snake_ident [ variant_payload ] ','
+variant       = { attribute } snake_ident [ variant_payload ] [ '=' expr ] ','
 variant_payload = '(' type { ',' type } ')' | '{' { field } '}'
 trait_expr    = { directive } 'trait' [ generics ] '{' { trait_member } '}'
 trait_member  = method_sig | assoc_type | assoc_const

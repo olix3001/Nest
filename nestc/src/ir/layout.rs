@@ -581,15 +581,23 @@ impl<'a> Layouts<'a> {
     /// Lay out an enum: a tag, then a payload big enough for any variant.
     fn enum_of(&self, ty: &Ty, def: DefId, variants: &[Variant], depth: u32) -> Result<EnumLayout> {
         let subst = self.substitution(def, ty);
-        // The tag is the smallest unsigned integer that can tell the variants
-        // apart. One byte for anything up to 256 of them, which is every enum
-        // anyone writes; the wider cases exist so that a generated enum does not
-        // hit a wall.
-        let tag = Layout::scalar(match variants.len() as u64 {
-            0..=0x100 => 1,
-            0x101..=0x1_0000 => 2,
-            0x1_0001..=0x1_0000_0000 => 4,
-            _ => 8,
+        // The tag is the smallest integer that holds every discriminant the
+        // variants actually store — their positions, unless the program wrote
+        // some (§3.3). One byte for anything up to 256 of them, which is every
+        // enum anyone writes; the wider cases exist for a generated enum and for
+        // the discriminants an FFI binding copies out of a header.
+        //
+        // Signed exactly when some discriminant is negative. An enum with none
+        // is laid out the way it always was, which is what keeps `-1` from
+        // costing every other enum a byte.
+        let signed = variants.iter().any(|v| v.tag < 0);
+        let bound = variants.iter().map(|v| tag_bits(v.tag, signed)).max();
+        let tag = Layout::scalar(match bound.unwrap_or(1) {
+            0..=8 => 1,
+            9..=16 => 2,
+            17..=32 => 4,
+            33..=64 => 8,
+            _ => 16,
         });
 
         let mut payload = Layout::ZERO;
@@ -627,6 +635,7 @@ impl<'a> Layouts<'a> {
                 align,
             },
             tag,
+            tag_signed: signed,
             payload_at,
             payload,
             variants: payloads,
@@ -700,12 +709,37 @@ pub struct EnumLayout {
     pub layout: Layout,
     /// The discriminant, at offset zero.
     pub tag: Layout,
+    /// Whether the discriminant is **signed** — it is, exactly when some variant
+    /// was given a negative one (§3.3). It travels with the tag's size because
+    /// the two together are the integer type a tag is read and switched at, and
+    /// reading a negative tag as unsigned would make `-1` a very large number
+    /// that no arm claims.
+    pub tag_signed: bool,
     /// Where the shared payload starts.
     pub payload_at: u64,
     /// The payload as a whole: big enough and aligned enough for every variant.
     pub payload: Layout,
     /// Each variant's own members, at offsets **relative to the payload**.
     pub variants: Vec<Fields>,
+}
+
+/// How many bits a discriminant needs, at the signedness the enum settled on.
+///
+/// For an unsigned tag that is the position of its highest set bit; for a signed
+/// one it is that plus the sign bit, which is why `128` needs eight bits
+/// unsigned and nine signed — and why an enum with a negative discriminant in it
+/// can be one byte wider than the same enum without.
+fn tag_bits(tag: i128, signed: bool) -> u32 {
+    if !signed {
+        // A negative tag cannot appear here: `signed` is true if any variant has
+        // one, and then this branch is not taken.
+        return 128 - (tag.max(0) as u128).leading_zeros();
+    }
+    // `!n` for a negative number is its magnitude minus one, which is exactly
+    // the range a two's-complement width of that many bits plus the sign covers:
+    // -128 fits in eight bits, -129 does not.
+    let magnitude = if tag < 0 { !tag } else { tag };
+    128 - (magnitude as u128).leading_zeros() + 1
 }
 
 /// Round `n` up to the next multiple of `align` (a power of two).

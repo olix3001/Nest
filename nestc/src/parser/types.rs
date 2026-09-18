@@ -514,7 +514,7 @@ impl Parser {
         )
     }
 
-    /// `[attrs] name [ payload ]` — one enum variant declaration.
+    /// `[attrs] name [ payload ] [ '=' expr ]` — one enum variant declaration.
     fn parse_variant(&mut self) -> NodeId {
         let start = self.cur_span();
         let attrs = self.parse_attributes();
@@ -533,12 +533,23 @@ impl Parser {
             }
             _ => VariantPayload::None,
         };
+        // `= expr` — an explicit discriminant (§3.3). It is parsed wherever it is
+        // written, payload or not: a payload variant with one is a diagnostic
+        // with a span, which is better than a parse error naming a token.
+        let value = if self.eat(&TokenKind::Eq) {
+            let v = self.parse_expr();
+            end = self.node_span(v);
+            Some(v)
+        } else {
+            None
+        };
         self.alloc(
             start.to(end),
             NodeKind::Variant {
                 attrs,
                 name,
                 payload,
+                value,
             },
         )
     }

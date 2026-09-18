@@ -1709,6 +1709,76 @@ fn a_tuple_struct_has_positional_members() {
 }
 
 #[test]
+fn an_enum_variant_takes_the_discriminant_it_was_given() {
+    // The tag is what a value stores; the position is what indexes the tables.
+    // A variant with no `= value` continues from the one before it, so `io = 5`
+    // makes the variant after it 6 — and the enum's own order never changes.
+    use crate::ir::TypeDefKind;
+    let src = "\
+BITS :: 1
+E :: enum { ok = 0, perm, io = 5, again, shifted = BITS << 4, invalid = -1 }
+f :: func (e: E) -> i32 { return e.match { .ok => 0, _ => 1 } }
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let file = entry_file(&session);
+    let t = session.ir[&file]
+        .types
+        .iter()
+        .find(|t| t.name.as_str() == "E")
+        .expect("E is in the IR");
+    let TypeDefKind::Enum { variants } = &t.kind else {
+        panic!("E is not an enum: {:#?}", t.kind);
+    };
+    let tags: Vec<(String, i128)> = variants
+        .iter()
+        .map(|v| (v.name.to_string(), v.tag))
+        .collect();
+    assert_eq!(
+        tags,
+        vec![
+            ("ok".to_string(), 0),
+            ("perm".to_string(), 1),
+            ("io".to_string(), 5),
+            ("again".to_string(), 6),
+            ("shifted".to_string(), 16),
+            ("invalid".to_string(), -1),
+        ]
+    );
+}
+
+#[test]
+fn a_discriminant_must_be_an_integer_nobody_else_has() {
+    // Two variants at one tag are two variants a `match` cannot tell apart, and
+    // a discriminant that is not an integer is not a tag at all.
+    let dup = messages("E :: enum { a = 1, b = 1 }\nf :: func () -> E { return .a }\n");
+    assert!(
+        dup.iter().any(|m| m.contains("already `a`'s")),
+        "{dup:#?}"
+    );
+    // The variant after an explicit one continues from it, and 2 is nobody's.
+    let implied = messages("E :: enum { a = 1, b }\nf :: func () -> E { return .b }\n");
+    assert!(implied.is_empty(), "{implied:#?}");
+    let text = messages("E :: enum { a = \"one\" }\nf :: func () -> E { return .a }\n");
+    assert!(
+        text.iter().any(|m| m.contains("must be an integer")),
+        "{text:#?}"
+    );
+}
+
+#[test]
+fn only_a_payloadless_variant_may_state_a_discriminant() {
+    // A discriminant is there to give an enum C's numbering, and a C enumeration
+    // has no payload to number.
+    let out = messages("E :: enum { a = 1, b(i32) = 2 }\nf :: func () -> E { return .a }\n");
+    assert!(
+        out.iter()
+            .any(|m| m.contains("may not be given an explicit discriminant")),
+        "{out:#?}"
+    );
+}
+
+#[test]
 fn the_ir_carries_enum_variants_and_their_payloads() {
     // Exhaustiveness needs every variant and the arity of each payload; the
     // decision-tree lowering needs the same. Both read them here.
