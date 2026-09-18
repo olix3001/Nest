@@ -33,25 +33,28 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, select};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
-    Cancel, DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
+    Cancel, DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument,
+    DidOpenTextDocument, DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{Completion, GotoDefinition, HoverRequest, RegisterCapability, Request as _};
+use lsp_types::request::{
+    Completion, GotoDefinition, HoverRequest, RegisterCapability, Request as _,
+};
 use lsp_types::{
-    CancelParams, CompletionList, CompletionOptions, CompletionParams, DidChangeWatchedFilesParams,
-    DidChangeWatchedFilesRegistrationOptions, FileChangeType, FileSystemWatcher, GlobPattern,
-    Registration, RegistrationParams, CompletionResponse, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    CancelParams, CompletionList, CompletionOptions, CompletionParams, CompletionResponse,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, FileChangeType, FileSystemWatcher,
+    GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, Location, MarkupContent, MarkupKind, NumberOrString, OneOf, Position,
-    PublishDiagnosticsParams, Range, SaveOptions, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    PublishDiagnosticsParams, Range, Registration, RegistrationParams, SaveOptions,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, Uri,
 };
 
 use crate::analysis::{self, Outcome, path_to_uri, uri_to_path};
 use crate::log;
-use crate::{complete, ide};
 use crate::workspace::{self, Metadata, Toolchain};
+use crate::{complete, ide};
 
 /// Run the server over `conn` until the client says to exit. `toolchain` makes
 /// one from the `initializationOptions`.
@@ -61,14 +64,16 @@ pub fn run(
 ) -> Result<(), String> {
     log::open();
     let capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
-            open_close: Some(true),
-            change: Some(TextDocumentSyncKind::FULL),
-            save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
-                include_text: Some(false),
-            })),
-            ..Default::default()
-        })),
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::FULL),
+                save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                    include_text: Some(false),
+                })),
+                ..Default::default()
+            },
+        )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
@@ -80,26 +85,37 @@ pub fn run(
     let params = conn
         .initialize(serde_json::to_value(capabilities).expect("capabilities serialize"))
         .map_err(|e| e.to_string())?;
-    let options = params.get("initializationOptions").cloned().unwrap_or_default();
+    let options = params
+        .get("initializationOptions")
+        .cloned()
+        .unwrap_or_default();
     // Files change on disk without the editor having them open — a checkout, a
     // formatter, another editor — so the client is asked to say when, where it
     // can be asked.
-    if params.pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration") == Some(&serde_json::Value::Bool(true)) {
+    if params.pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration")
+        == Some(&serde_json::Value::Bool(true))
+    {
         let watchers: Vec<FileSystemWatcher> = ["**/*.nest", "**/nest.toml"]
             .iter()
-            .map(|glob| FileSystemWatcher { glob_pattern: GlobPattern::String(glob.to_string()), kind: None })
+            .map(|glob| FileSystemWatcher {
+                glob_pattern: GlobPattern::String(glob.to_string()),
+                kind: None,
+            })
             .collect();
         let registration = Registration {
             id: "nest-files".to_string(),
             method: DidChangeWatchedFiles::METHOD.to_string(),
             register_options: Some(
-                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers }).expect("options serialize"),
+                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers })
+                    .expect("options serialize"),
             ),
         };
         let request = Request::new(
             RequestId::from("nest-files".to_string()),
             RegisterCapability::METHOD.to_string(),
-            RegistrationParams { registrations: vec![registration] },
+            RegistrationParams {
+                registrations: vec![registration],
+            },
         );
         let _ = conn.sender.send(request.into());
     }
@@ -188,7 +204,11 @@ pub fn run(
             if let Message::Request(req) = &msg
                 && cancelled.contains(&req.id)
             {
-                let response = Response::new_err(req.id.clone(), ErrorCode::RequestCanceled as i32, "cancelled".to_string());
+                let response = Response::new_err(
+                    req.id.clone(),
+                    ErrorCode::RequestCanceled as i32,
+                    "cancelled".to_string(),
+                );
                 server.send(response.into());
                 continue;
             }
@@ -239,7 +259,9 @@ struct Unit {
 /// A unit named as the file it is rooted at, which is what a log is read by.
 fn unit_name(key: &UnitKey) -> String {
     let entry = key.args.first().map(String::as_str).unwrap_or("?");
-    Path::new(entry).file_name().map_or(entry.to_string(), |n| n.to_string_lossy().into_owned())
+    Path::new(entry)
+        .file_name()
+        .map_or(entry.to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// A message's parameters as one short line: what it is about, not all of it. A
@@ -250,9 +272,13 @@ fn brief(params: &serde_json::Value) -> String {
         .and_then(|u| u.as_str())
         .and_then(|u| u.rsplit('/').next())
         .unwrap_or("");
-    let version = params.pointer("/textDocument/version").and_then(|v| v.as_u64());
+    let version = params
+        .pointer("/textDocument/version")
+        .and_then(|v| v.as_u64());
     let line = params.pointer("/position/line").and_then(|v| v.as_u64());
-    let column = params.pointer("/position/character").and_then(|v| v.as_u64());
+    let column = params
+        .pointer("/position/character")
+        .and_then(|v| v.as_u64());
     let mut out = file.to_string();
     if let Some(v) = version {
         out.push_str(&format!(" v{v}"));
@@ -366,17 +392,34 @@ impl Server {
         // A question is about the text as it is now, so it waits for the
         // analysis of it. Completion is asked as a key is typed, and answers from
         // the analysis before that key, unless the file is in none yet.
-        let path = req.params.pointer("/textDocument/uri").and_then(|u| u.as_str()?.parse::<Uri>().ok()).and_then(|u| uri_to_path(&u));
+        let path = req
+            .params
+            .pointer("/textDocument/uri")
+            .and_then(|u| u.as_str()?.parse::<Uri>().ok())
+            .and_then(|u| uri_to_path(&u));
         if req.method != Completion::METHOD || path.is_none_or(|p| !self.covers(&p)) {
             self.settle();
         }
         let result = match req.method.as_str() {
-            HoverRequest::METHOD => serde_json::from_value::<HoverParams>(req.params)
-                .map(|p| to_value(self.hover(&p.text_document_position_params.text_document.uri, p.text_document_position_params.position))),
+            HoverRequest::METHOD => serde_json::from_value::<HoverParams>(req.params).map(|p| {
+                to_value(self.hover(
+                    &p.text_document_position_params.text_document.uri,
+                    p.text_document_position_params.position,
+                ))
+            }),
             GotoDefinition::METHOD => serde_json::from_value::<GotoDefinitionParams>(req.params)
-                .map(|p| to_value(self.definition(&p.text_document_position_params.text_document.uri, p.text_document_position_params.position))),
-            Completion::METHOD => serde_json::from_value::<CompletionParams>(req.params)
-                .map(|p| to_value(self.completion(&p.text_document_position.text_document.uri, p.text_document_position.position))),
+                .map(|p| {
+                    to_value(self.definition(
+                        &p.text_document_position_params.text_document.uri,
+                        p.text_document_position_params.position,
+                    ))
+                }),
+            Completion::METHOD => serde_json::from_value::<CompletionParams>(req.params).map(|p| {
+                to_value(self.completion(
+                    &p.text_document_position.text_document.uri,
+                    p.text_document_position.position,
+                ))
+            }),
             _ => {
                 let response = Response::new_err(
                     req.id,
@@ -405,7 +448,10 @@ impl Server {
 
     /// What completion in `path` asks: the unit that read it, and its last
     /// outcome in which `path` parsed.
-    fn parsed_for(&self, path: &Path) -> Option<(&Outcome, nestc::common::source::FileId, complete::Edits)> {
+    fn parsed_for(
+        &self,
+        path: &Path,
+    ) -> Option<(&Outcome, nestc::common::source::FileId, complete::Edits)> {
         self.units.values().find_map(|unit| {
             let latest = unit.outcome.as_ref().ok()?;
             ide::file_of(&latest.session, path)?;
@@ -475,11 +521,19 @@ impl Server {
         let offset = analysis::offset(text, position);
         // Incomplete, because what an import would bring in is offered by what
         // is typed so far.
-        let list = |items| Some(CompletionResponse::List(CompletionList { is_incomplete: true, items }));
+        let list = |items| {
+            Some(CompletionResponse::List(CompletionList {
+                is_incomplete: true,
+                items,
+            }))
+        };
         if let Some((o, file, edits)) = self.parsed_for(&path)
             && let Some(items) = complete::from_analysis(&o.session, file, text, offset, &edits)
         {
-            log::line!("  completion: {} items from the analysis already made", items.len());
+            log::line!(
+                "  completion: {} items from the analysis already made",
+                items.len()
+            );
             return list(items);
         }
         log::line!("  completion: analyzing again, with a name written at the cursor");
@@ -500,26 +554,37 @@ impl Server {
     fn notification(&mut self, n: Notification) {
         match n.method.as_str() {
             DidOpenTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(n.params) else { return };
+                let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(n.params) else {
+                    return;
+                };
                 self.set(&p.text_document.uri, Some(p.text_document.text));
             }
             DidChangeTextDocument::METHOD => {
-                let Ok(mut p) = serde_json::from_value::<DidChangeTextDocumentParams>(n.params) else { return };
+                let Ok(mut p) = serde_json::from_value::<DidChangeTextDocumentParams>(n.params)
+                else {
+                    return;
+                };
                 // Full synchronization: the last change is the whole text.
                 if let Some(change) = p.content_changes.pop() {
                     self.set(&p.text_document.uri, Some(change.text));
                 }
             }
             DidCloseTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else { return };
+                let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else {
+                    return;
+                };
                 self.set(&p.text_document.uri, None);
             }
             DidChangeWatchedFiles::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else { return };
+                let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else {
+                    return;
+                };
                 self.changed_on_disk(p);
             }
             DidSaveTextDocument::METHOD => {
-                let Ok(_) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else { return };
+                let Ok(_) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else {
+                    return;
+                };
                 let roots: Vec<PathBuf> = self.workspaces.keys().cloned().collect();
                 for root in roots {
                     self.prepare(&root);
@@ -538,13 +603,16 @@ impl Server {
     fn changed_on_disk(&mut self, p: DidChangeWatchedFilesParams) {
         let mut any = false;
         for change in p.changes {
-            let Some(path) = uri_to_path(&change.uri) else { continue };
+            let Some(path) = uri_to_path(&change.uri) else {
+                continue;
+            };
             if self.docs.contains_key(&path) {
                 continue;
             }
             any = true;
             if change.typ != FileChangeType::CHANGED {
-                self.units.retain(|key, _| !key.root.as_ref().is_some_and(|root| path.starts_with(root)));
+                self.units
+                    .retain(|key, _| !key.root.as_ref().is_some_and(|root| path.starts_with(root)));
             }
             *self.versions.entry(path).or_default() += 1;
         }
@@ -623,7 +691,8 @@ impl Server {
 
     /// What `root`'s workspace was last prepared as, and how many times it was.
     fn generation(&self, root: Option<&PathBuf>) -> u64 {
-        root.and_then(|r| self.workspaces.get(r)).map_or(0, |ws| ws.generation)
+        root.and_then(|r| self.workspaces.get(r))
+            .map_or(0, |ws| ws.generation)
     }
 
     /// Whether `unit`, analyzed as `key`, was analyzed over text that changed
@@ -633,7 +702,9 @@ impl Server {
             return true;
         }
         let Ok(o) = &unit.outcome else { return false };
-        o.files.iter().any(|f| self.versions.get(f) != unit.versions.get(f))
+        o.files
+            .iter()
+            .any(|f| self.versions.get(f) != unit.versions.get(f))
     }
 
     /// Analyze whatever is out of date and wait for it, publishing as it goes.
@@ -647,7 +718,10 @@ impl Server {
         self.analyze();
         loop {
             if self.busy {
-                let (job, outcome) = self.analyzed.recv().expect("the analyzing thread runs while the server does");
+                let (job, outcome) = self
+                    .analyzed
+                    .recv()
+                    .expect("the analyzing thread runs while the server does");
                 self.finished(job, outcome);
                 continue;
             }
@@ -678,14 +752,26 @@ impl Server {
             ),
             Err(why) => log::line!("  analyzing {} failed: {why}", unit_name(&job.key)),
         }
-        let clean = |o: &Result<Outcome, String>| o.as_ref().is_ok_and(|o| o.files.iter().filter(|f| self.docs.contains_key(*f)).all(|f| o.parsed.contains(f)));
+        let clean = |o: &Result<Outcome, String>| {
+            o.as_ref().is_ok_and(|o| {
+                o.files
+                    .iter()
+                    .filter(|f| self.docs.contains_key(*f))
+                    .all(|f| o.parsed.contains(f))
+            })
+        };
         let parsed = match self.units.remove(&job.key) {
             _ if clean(&outcome) => None,
             Some(old) if clean(&old.outcome) => old.outcome.ok().map(|o| (o, old.versions)),
             Some(old) => old.parsed,
             None => None,
         };
-        let unit = Unit { outcome, parsed, versions: job.versions, generation: job.generation };
+        let unit = Unit {
+            outcome,
+            parsed,
+            versions: job.versions,
+            generation: job.generation,
+        };
         self.units.insert(job.key, unit);
         self.analyze();
     }
@@ -707,7 +793,12 @@ impl Server {
             let versions = self.versions.clone();
             let generation = self.generation(key.root.as_ref());
             log::line!("  analyzing {}", unit_name(&key));
-            let job = Job { key, buffers: Arc::new(self.docs.clone()), versions, generation };
+            let job = Job {
+                key,
+                buffers: Arc::new(self.docs.clone()),
+                versions,
+                generation,
+            };
             self.busy = self.jobs.send(job).is_ok();
         }
         self.publish();
@@ -724,7 +815,10 @@ impl Server {
                 continue;
             }
             let Some(root) = workspace::find_root(path) else {
-                let key = UnitKey { root: None, args: vec![path.display().to_string()] };
+                let key = UnitKey {
+                    root: None,
+                    args: vec![path.display().to_string()],
+                };
                 if self.units.contains_key(&key) {
                     continue;
                 }
@@ -738,8 +832,16 @@ impl Server {
                     continue;
                 }
                 Some(Err(why)) => {
-                    let key = UnitKey { root: Some(root.clone()), args: Vec::new() };
-                    let unit = Unit { outcome: Err(why.clone()), parsed: None, versions: HashMap::new(), generation: self.generation(Some(&root)) };
+                    let key = UnitKey {
+                        root: Some(root.clone()),
+                        args: Vec::new(),
+                    };
+                    let unit = Unit {
+                        outcome: Err(why.clone()),
+                        parsed: None,
+                        versions: HashMap::new(),
+                        generation: self.generation(Some(&root)),
+                    };
                     self.units.insert(key, unit);
                     continue;
                 }
@@ -748,23 +850,35 @@ impl Server {
             // The first of its candidates not analyzed yet; one that was, and
             // did not read it, is not the one.
             for args in workspace::candidates(&meta, path) {
-                let key = UnitKey { root: Some(root.clone()), args };
+                let key = UnitKey {
+                    root: Some(root.clone()),
+                    args,
+                };
                 if !self.units.contains_key(&key) {
                     return Some(key);
                 }
             }
         }
 
-        let mut stale: Vec<UnitKey> = self.units.iter().filter(|(k, u)| self.is_stale(k, u)).map(|(k, _)| k.clone()).collect();
+        let mut stale: Vec<UnitKey> = self
+            .units
+            .iter()
+            .filter(|(k, u)| self.is_stale(k, u))
+            .map(|(k, _)| k.clone())
+            .collect();
         stale.sort_by(|a, b| (&a.root, &a.args).cmp(&(&b.root, &b.args)));
         for key in stale {
-            let Some(root) = &key.root else { return Some(key) };
+            let Some(root) = &key.root else {
+                return Some(key);
+            };
             let still = match self.workspaces.get(root).and_then(|ws| ws.meta.as_ref()) {
                 // Being prepared: it is analyzed once that is done.
                 None => continue,
                 Some(Err(_)) => false,
                 Some(Ok(meta)) => match &self.units[&key].outcome {
-                    Ok(o) => paths.iter().any(|p| o.files.contains(p) && workspace::candidates(meta, p).contains(&key.args)),
+                    Ok(o) => paths.iter().any(|p| {
+                        o.files.contains(p) && workspace::candidates(meta, p).contains(&key.args)
+                    }),
                     Err(_) => false,
                 },
             };
@@ -793,7 +907,9 @@ impl Server {
 
     /// Whether some unit already read `path`.
     fn covers(&self, path: &Path) -> bool {
-        self.units.values().any(|u| u.outcome.as_ref().is_ok_and(|o| o.files.contains(path)))
+        self.units
+            .values()
+            .any(|u| u.outcome.as_ref().is_ok_and(|o| o.files.contains(path)))
     }
 
     /// Publish every file's diagnostics that changed, and clear the ones that
@@ -804,19 +920,23 @@ impl Server {
             match &unit.outcome {
                 Ok(o) => {
                     for (path, diags) in &o.diagnostics {
-                        all.entry(path.clone()).or_default().extend(diags.iter().cloned());
+                        all.entry(path.clone())
+                            .or_default()
+                            .extend(diags.iter().cloned());
                     }
                 }
                 // No file to pin it to, so it goes on every open document it
                 // is about, at the top.
                 Err(why) => {
                     for doc in self.docs.keys().filter(|d| key.is_about(d)) {
-                        all.entry(doc.clone()).or_default().push(lsp_types::Diagnostic {
-                            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
-                            source: Some("nest-lsp".to_string()),
-                            message: why.clone(),
-                            ..Default::default()
-                        });
+                        all.entry(doc.clone())
+                            .or_default()
+                            .push(lsp_types::Diagnostic {
+                                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                                source: Some("nest-lsp".to_string()),
+                                message: why.clone(),
+                                ..Default::default()
+                            });
                     }
                 }
             }
@@ -824,7 +944,12 @@ impl Server {
         for diags in all.values_mut() {
             diags.dedup();
         }
-        let mut gone: Vec<PathBuf> = self.published.keys().filter(|p| !all.contains_key(*p)).cloned().collect();
+        let mut gone: Vec<PathBuf> = self
+            .published
+            .keys()
+            .filter(|p| !all.contains_key(*p))
+            .cloned()
+            .collect();
         gone.sort();
         for path in gone {
             self.publish_one(&path, Vec::new());
@@ -843,10 +968,17 @@ impl Server {
         let Some(uri) = path_to_uri(path) else { return };
         log::line!(
             "> diagnostics {} ({})",
-            path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned()),
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned()
+            ),
             diagnostics.len()
         );
-        let params = PublishDiagnosticsParams { uri, diagnostics, version: None };
+        let params = PublishDiagnosticsParams {
+            uri,
+            diagnostics,
+            version: None,
+        };
         self.send(Notification::new(PublishDiagnostics::METHOD.to_string(), params).into());
     }
 

@@ -41,7 +41,9 @@ pub enum FloatWidth {
 }
 
 /// An inference variable: an index into [`InferCtxt::subst`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct TyVar(pub u32);
 
 /// What a fresh [`TyVar`] may unify with, and how it defaults if left unsolved.
@@ -68,7 +70,9 @@ pub enum TyVarKind {
 
 /// A **const-generic** inference variable: an index into
 /// [`InferCtxt::const_subst`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct ConstVar(pub u32);
 
 /// A compile-time *value* appearing inside a type — an array length (§3.2
@@ -401,10 +405,7 @@ impl Ty {
     /// argument would put structural equality of arbitrary values into type
     /// identity — a much larger promise.
     pub fn is_primitive(&self) -> bool {
-        matches!(
-            self,
-            Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Char
-        )
+        matches!(self, Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Char)
     }
 
     /// A short, human-readable rendering (`i32`, `*mut Foo`, `(A, B)`, `?3`).
@@ -1177,8 +1178,7 @@ impl InferCtxt {
             // Both sides are sorted by name, so equal field *sets* line up
             // position by position and a single zip decides it.
             (Ty::Struct(xs), Ty::Struct(ys))
-                if xs.len() == ys.len()
-                    && xs.iter().zip(ys).all(|((n, _), (m, _))| n == m) =>
+                if xs.len() == ys.len() && xs.iter().zip(ys).all(|((n, _), (m, _))| n == m) =>
             {
                 for ((_, x), (_, y)) in xs.iter().zip(ys) {
                     self.unify(x, y)?;
@@ -1692,14 +1692,8 @@ mod tests {
 
     #[test]
     fn primitive_parsing() {
-        assert_eq!(
-            primitive_ty("i32"),
-            Some(Ty::int(32, true))
-        );
-        assert_eq!(
-            primitive_ty("u7"),
-            Some(Ty::int(7, false))
-        );
+        assert_eq!(primitive_ty("i32"), Some(Ty::int(32, true)));
+        assert_eq!(primitive_ty("u7"), Some(Ty::int(7, false)));
         // `usize` is no longer a primitive: it is a `distinct` declared in
         // `core` (§3.1), reached by name through the prelude like `str`.
         assert_eq!(primitive_ty("usize"), None);

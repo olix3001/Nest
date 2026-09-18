@@ -218,14 +218,24 @@ impl Escape {
             },
             // A place path: the base is reached *through*, not handed out —
             // unless the path's address is what is being taken.
-            ExprKind::Deref { base } | ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => {
-                let inner = if ctx == Ctx::Addressed { Ctx::Addressed } else { Ctx::Projected };
+            ExprKind::Deref { base }
+            | ExprKind::Field { base, .. }
+            | ExprKind::TupleIndex { base, .. } => {
+                let inner = if ctx == Ctx::Addressed {
+                    Ctx::Addressed
+                } else {
+                    Ctx::Projected
+                };
                 self.uses_expr(base, inner)
             }
             // A sub-slice of an array is the array's own storage.
-            ExprKind::Intrinsic { name, args, .. } if name.as_str() == "slice" && !args.is_empty() => {
+            ExprKind::Intrinsic { name, args, .. }
+                if name.as_str() == "slice" && !args.is_empty() =>
+            {
                 self.uses_expr(&args[0], Ctx::Addressed);
-                args[1..].iter().for_each(|a| self.uses_expr(a, Ctx::Escaping));
+                args[1..]
+                    .iter()
+                    .for_each(|a| self.uses_expr(a, Ctx::Escaping));
             }
             _ => {
                 each_block(e, &mut |b| self.uses_block(b));
@@ -318,9 +328,9 @@ fn each_child(e: &Expr, f: &mut impl FnMut(&Expr)) {
         }
         ExprKind::Unary { operand, .. } => f(operand),
         ExprKind::Ref { place, .. } => f(place),
-        ExprKind::Deref { base } | ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => {
-            f(base)
-        }
+        ExprKind::Deref { base }
+        | ExprKind::Field { base, .. }
+        | ExprKind::TupleIndex { base, .. } => f(base),
         ExprKind::Tuple { elems } => elems.iter().for_each(f),
         ExprKind::If { cond, .. } => f(cond),
         ExprKind::Match { scrutinee, arms } => {
@@ -333,7 +343,9 @@ fn each_child(e: &Expr, f: &mut impl FnMut(&Expr)) {
             }
         }
         ExprKind::Construct { fields, .. } => fields.iter().for_each(|(_, e)| f(e)),
-        ExprKind::Variant { args, .. } | ExprKind::Intrinsic { args, .. } => args.iter().for_each(f),
+        ExprKind::Variant { args, .. } | ExprKind::Intrinsic { args, .. } => {
+            args.iter().for_each(f)
+        }
         ExprKind::DynCast { value, .. } => f(value),
     }
 }

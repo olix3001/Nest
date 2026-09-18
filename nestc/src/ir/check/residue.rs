@@ -39,11 +39,13 @@ pub fn check(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagno
         if let Some(span) = meta.span(id) {
             d = d.with_primary(span, "this expression has no type");
         }
-        out.push(d.with_note(
-            "nothing was reported about it, so inference produced an error type without \
+        out.push(
+            d.with_note(
+                "nothing was reported about it, so inference produced an error type without \
              a diagnostic \u{2014} this is a compiler defect"
-                .to_string(),
-        ));
+                    .to_string(),
+            ),
+        );
     }
 }
 

@@ -600,7 +600,10 @@ fn lex_interp_string(lex: &mut logos::Lexer<TokenKind>) -> Result<Vec<InterpPiec
     }
 
     while i < rest.len() {
-        let c = rest[i..].chars().next().expect("in bounds and on a boundary");
+        let c = rest[i..]
+            .chars()
+            .next()
+            .expect("in bounds and on a boundary");
         match c {
             '"' => {
                 flush!(i);

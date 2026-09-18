@@ -36,7 +36,11 @@ fn main() {
     let archive = out.join("libnest_runtime.a");
 
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    if !Command::new(&cc).arg("--version").output().is_ok_and(|o| o.status.success()) {
+    if !Command::new(&cc)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
         return;
     }
     let Some(gc) = find_gc() else {
@@ -100,12 +104,21 @@ fn find_gc() -> Option<Gc> {
         for dir in &dirs {
             let archive = dir.join("libgc.a");
             if archive.exists() {
-                return Some(Gc { include, lib: with_threads(archive.display().to_string()) });
+                return Some(Gc {
+                    include,
+                    lib: with_threads(archive.display().to_string()),
+                });
             }
         }
         for dir in &dirs {
-            if ["libgc.dylib", "libgc.so"].iter().any(|l| dir.join(l).exists()) {
-                return Some(Gc { include, lib: with_threads(format!("-L{}\t-lgc", dir.display())) });
+            if ["libgc.dylib", "libgc.so"]
+                .iter()
+                .any(|l| dir.join(l).exists())
+            {
+                return Some(Gc {
+                    include,
+                    lib: with_threads(format!("-L{}\t-lgc", dir.display())),
+                });
             }
         }
     }

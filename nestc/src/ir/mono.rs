@@ -915,9 +915,9 @@ impl Mono<'_> {
         // for T` claim it at `T = *X` before `impl Trait for X` was tried, so the
         // pointer comes off exactly when the declaration says it is there.
         let by_ptr = match linked.ty(trait_def).map(|t| &t.kind) {
-            Some(super::TypeDefKind::Trait { methods, .. }) => methods
-                .iter()
-                .any(|m| m.def == method && matches!(m.recv, super::Recv::Ptr | super::Recv::MutPtr)),
+            Some(super::TypeDefKind::Trait { methods, .. }) => methods.iter().any(|m| {
+                m.def == method && matches!(m.recv, super::Recv::Ptr | super::Recv::MutPtr)
+            }),
             _ => false,
         };
         let matched = match self_ty {

@@ -11,12 +11,13 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidOpenTextDocument, Exit, Initialized, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, GotoDefinition, HoverRequest, Initialize, Request as _, Shutdown};
+use lsp_types::request::{
+    Completion, GotoDefinition, HoverRequest, Initialize, Request as _, Shutdown,
+};
 use lsp_types::{
-    DiagnosticSeverity, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
-    InitializeParams, Position, PublishDiagnosticsParams, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    VersionedTextDocumentIdentifier,
+    DiagnosticSeverity, DidChangeTextDocumentParams, DidOpenTextDocumentParams, InitializeParams,
+    Position, PublishDiagnosticsParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, VersionedTextDocumentIdentifier,
 };
 
 use super::run;
@@ -65,7 +66,12 @@ impl Client {
         let (server, conn) = Connection::memory();
         let toolchain: Arc<dyn Toolchain> = Arc::new(toolchain);
         let handle = std::thread::spawn(move || run(&server, |_| toolchain));
-        let client = Client { conn, server: Some(handle), version: 0, published: Vec::new() };
+        let client = Client {
+            conn,
+            server: Some(handle),
+            version: 0,
+            published: Vec::new(),
+        };
         client.request(1, Initialize::METHOD, InitializeParams::default());
         client.expect_response(1);
         client.notify(Initialized::METHOD, serde_json::json!({}));
@@ -108,7 +114,8 @@ impl Client {
                     return r.response_result.expect("an answer");
                 }
                 Message::Notification(n) if n.method == PublishDiagnostics::METHOD => {
-                    self.published.push(serde_json::from_value(n.params).unwrap());
+                    self.published
+                        .push(serde_json::from_value(n.params).unwrap());
                 }
                 _ => {}
             }
@@ -131,13 +138,21 @@ impl Client {
             self.version,
             text.to_string(),
         );
-        self.notify(DidOpenTextDocument::METHOD, DidOpenTextDocumentParams { text_document: item });
+        self.notify(
+            DidOpenTextDocument::METHOD,
+            DidOpenTextDocumentParams {
+                text_document: item,
+            },
+        );
     }
 
     fn change(&mut self, path: &Path, text: &str) {
         self.version += 1;
         let params = DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier::new(path_to_uri(path).unwrap(), self.version),
+            text_document: VersionedTextDocumentIdentifier::new(
+                path_to_uri(path).unwrap(),
+                self.version,
+            ),
             content_changes: vec![TextDocumentContentChangeEvent {
                 range: None,
                 range_length: None,
@@ -174,7 +189,12 @@ impl Client {
     /// change is.
     fn current(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
         let uri = path_to_uri(path).unwrap();
-        self.published.iter().rev().find(|p| p.uri == uri).map(|p| p.diagnostics.clone()).unwrap_or_default()
+        self.published
+            .iter()
+            .rev()
+            .find(|p| p.uri == uri)
+            .map(|p| p.diagnostics.clone())
+            .unwrap_or_default()
     }
 
     /// Everything published within `wait`, which is nothing when the server
@@ -197,13 +217,19 @@ impl Client {
     /// Every message published for `path` so far.
     fn messages(&self, path: &Path) -> Vec<String> {
         let uri = path_to_uri(path).unwrap();
-        self.published.iter().filter(|p| p.uri == uri).flat_map(|p| p.diagnostics.iter().map(|d| d.message.clone())).collect()
+        self.published
+            .iter()
+            .filter(|p| p.uri == uri)
+            .flat_map(|p| p.diagnostics.iter().map(|d| d.message.clone()))
+            .collect()
     }
 }
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let Some(server) = self.server.take() else { return };
+        let Some(server) = self.server.take() else {
+            return;
+        };
         if std::thread::panicking() {
             return;
         }
@@ -230,7 +256,12 @@ fn a_buffer_s_errors_come_and_go() {
     client.open(&file, WRONG);
     let diags = client.diagnostics(&file);
     assert!(!diags.is_empty(), "the buffer has an error");
-    assert!(diags.iter().any(|d| d.severity == Some(DiagnosticSeverity::ERROR)), "{diags:?}");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.severity == Some(DiagnosticSeverity::ERROR)),
+        "{diags:?}"
+    );
     assert_eq!(diags[0].range.start.line, 0, "{diags:?}");
 
     client.change(&file, RIGHT);
@@ -254,7 +285,11 @@ fn a_workspace_file_is_analyzed_as_its_target() {
             targets: vec![Target {
                 entry: file.clone(),
                 lib: false,
-                args: vec![file.display().to_string(), "-C".to_string(), "profile=release".to_string()],
+                args: vec![
+                    file.display().to_string(),
+                    "-C".to_string(),
+                    "profile=release".to_string(),
+                ],
             }],
         }],
     };
@@ -304,7 +339,11 @@ main :: func () -> i32 {
 
 /// Where the `nth` `needle` in `text` starts, plus `past` columns.
 fn position(text: &str, needle: &str, nth: usize, past: u32) -> Position {
-    let offset = text.match_indices(needle).nth(nth).expect("the needle is there").0;
+    let offset = text
+        .match_indices(needle)
+        .nth(nth)
+        .expect("the needle is there")
+        .0;
     let pos = crate::analysis::position(text, offset);
     Position::new(pos.line, pos.character + past)
 }
@@ -320,7 +359,10 @@ fn program() -> (Scratch, PathBuf, Client) {
 }
 
 fn hover_text(v: &serde_json::Value) -> String {
-    v["contents"]["value"].as_str().unwrap_or_default().to_string()
+    v["contents"]["value"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// A hover shows a function's declaration without its body, a method's
@@ -329,24 +371,47 @@ fn hover_text(v: &serde_json::Value) -> String {
 fn a_hover_shows_the_declaration_and_its_documentation() {
     let (_dir, file, mut client) = program();
 
-    let add = hover_text(&client.at(HoverRequest::METHOD, &file, position(PROGRAM, "add(p.x", 0, 1)));
-    assert!(add.contains("add :: func (a: i32, b: i32) -> i32\n```"), "{add}");
+    let add = hover_text(&client.at(
+        HoverRequest::METHOD,
+        &file,
+        position(PROGRAM, "add(p.x", 0, 1),
+    ));
+    assert!(
+        add.contains("add :: func (a: i32, b: i32) -> i32\n```"),
+        "{add}"
+    );
 
-    let sum = hover_text(&client.at(HoverRequest::METHOD, &file, position(PROGRAM, "sum()", 0, 2)));
+    let sum = hover_text(&client.at(
+        HoverRequest::METHOD,
+        &file,
+        position(PROGRAM, "sum()", 0, 2),
+    ));
     assert!(sum.contains("sum :: func (self: *Self) -> i32"), "{sum}");
     assert!(sum.contains("Point"), "{sum}");
     assert!(sum.contains("Both coordinates, added."), "{sum}");
 
-    let p = hover_text(&client.at(HoverRequest::METHOD, &file, position(PROGRAM, "p.sum", 0, 0)));
+    let p = hover_text(&client.at(
+        HoverRequest::METHOD,
+        &file,
+        position(PROGRAM, "p.sum", 0, 0),
+    ));
     assert!(p.contains("p: Point"), "{p}");
 
     // On a definition's own name, past its attribute.
-    let point = hover_text(&client.at(HoverRequest::METHOD, &file, position(PROGRAM, "Point ::", 0, 1)));
+    let point = hover_text(&client.at(
+        HoverRequest::METHOD,
+        &file,
+        position(PROGRAM, "Point ::", 0, 1),
+    ));
     assert!(point.contains("A point on a plane."), "{point}");
     assert!(point.contains("x: i32"), "{point}");
 
     // A function's body is not its name.
-    let body = client.at(HoverRequest::METHOD, &file, position(PROGRAM, "{ return a + b }", 0, 0));
+    let body = client.at(
+        HoverRequest::METHOD,
+        &file,
+        position(PROGRAM, "{ return a + b }", 0, 0),
+    );
     assert!(body.is_null(), "{body}");
 }
 
@@ -355,16 +420,38 @@ fn a_hover_shows_the_declaration_and_its_documentation() {
 fn a_definition_is_its_name() {
     let (_dir, file, mut client) = program();
 
-    let add = client.at(GotoDefinition::METHOD, &file, position(PROGRAM, "add(p.x", 0, 0));
-    assert_eq!(add["range"]["start"], serde_json::to_value(position(PROGRAM, "add ::", 0, 0)).unwrap());
-    assert_eq!(add["uri"], serde_json::to_value(path_to_uri(&file)).unwrap());
+    let add = client.at(
+        GotoDefinition::METHOD,
+        &file,
+        position(PROGRAM, "add(p.x", 0, 0),
+    );
+    assert_eq!(
+        add["range"]["start"],
+        serde_json::to_value(position(PROGRAM, "add ::", 0, 0)).unwrap()
+    );
+    assert_eq!(
+        add["uri"],
+        serde_json::to_value(path_to_uri(&file)).unwrap()
+    );
 
-    let x = client.at(GotoDefinition::METHOD, &file, position(PROGRAM, "p.x", 0, 2));
-    assert_eq!(x["range"]["start"], serde_json::to_value(position(PROGRAM, "x: i32", 0, 0)).unwrap());
+    let x = client.at(
+        GotoDefinition::METHOD,
+        &file,
+        position(PROGRAM, "p.x", 0, 2),
+    );
+    assert_eq!(
+        x["range"]["start"],
+        serde_json::to_value(position(PROGRAM, "x: i32", 0, 0)).unwrap()
+    );
 }
 
 fn labels(v: &serde_json::Value) -> Vec<String> {
-    v["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["label"].as_str().unwrap().to_string())
+        .collect()
 }
 
 /// After a `.` the members of the value's type are offered, and elsewhere the
@@ -372,7 +459,10 @@ fn labels(v: &serde_json::Value) -> Vec<String> {
 #[test]
 fn completion_offers_members_and_names_in_scope() {
     let (_dir, file, mut client) = program();
-    let text = PROGRAM.replace("  return p.sum() + n", "  let m: i32 := p.\n  return p.sum() + n");
+    let text = PROGRAM.replace(
+        "  return p.sum() + n",
+        "  let m: i32 := p.\n  return p.sum() + n",
+    );
     client.change(&file, &text);
 
     let members = labels(&client.at(Completion::METHOD, &file, position(&text, "p.\n", 0, 2)));
@@ -385,7 +475,10 @@ fn completion_offers_members_and_names_in_scope() {
     for want in ["add", "p", "Point", "main", "let"] {
         assert!(names.contains(&want.to_string()), "{want} in {names:?}");
     }
-    assert!(!names.contains(&"n".to_string()), "`n` is declared later: {names:?}");
+    assert!(
+        !names.contains(&"n".to_string()),
+        "`n` is declared later: {names:?}"
+    );
 }
 
 /// A file a unit read, changed on disk while not open, is analyzed again when
@@ -398,14 +491,25 @@ fn a_file_changed_on_disk_is_analyzed_again() {
     std::fs::write(&other, "@public g :: func () -> i32 { return true }\n").unwrap();
     let mut client = Client::start(Fake(Err("no workspace here".to_string())));
 
-    client.open(&main, "{ g } :: import \"other.nest\"\nf :: func () -> i32 { return g() }\n");
-    assert!(!client.diagnostics(&other).is_empty(), "`other.nest` is wrong on disk");
+    client.open(
+        &main,
+        "{ g } :: import \"other.nest\"\nf :: func () -> i32 { return g() }\n",
+    );
+    assert!(
+        !client.diagnostics(&other).is_empty(),
+        "`other.nest` is wrong on disk"
+    );
 
     std::fs::write(&other, "@public g :: func () -> i32 { return 1 }\n").unwrap();
-    let change = lsp_types::FileEvent::new(path_to_uri(&other).unwrap(), lsp_types::FileChangeType::CHANGED);
+    let change = lsp_types::FileEvent::new(
+        path_to_uri(&other).unwrap(),
+        lsp_types::FileChangeType::CHANGED,
+    );
     client.notify(
         lsp_types::notification::DidChangeWatchedFiles::METHOD,
-        lsp_types::DidChangeWatchedFilesParams { changes: vec![change] },
+        lsp_types::DidChangeWatchedFilesParams {
+            changes: vec![change],
+        },
     );
     assert_eq!(client.diagnostics(&other), Vec::new());
     // And analyzing it once is enough: a question waits for nothing more.
@@ -426,11 +530,21 @@ fn completion_knows_primitives_slices_and_variants() {
     let ints = labels(&client.at(Completion::METHOD, &file, position(&text, "n.\n", 0, 2)));
     assert!(ints.contains(&"wrapping_add".to_string()), "{ints:?}");
 
-    let made = labels(&client.at(Completion::METHOD, &file, position(&text, "Color := .", 0, 10)));
-    assert!(made.contains(&"red".to_string()) && made.contains(&"green".to_string()), "{made:?}");
+    let made = labels(&client.at(
+        Completion::METHOD,
+        &file,
+        position(&text, "Color := .", 0, 10),
+    ));
+    assert!(
+        made.contains(&"red".to_string()) && made.contains(&"green".to_string()),
+        "{made:?}"
+    );
 
     let arms = labels(&client.at(Completion::METHOD, &file, position(&text, "{ . =>", 0, 3)));
-    assert!(arms.contains(&"red".to_string()) && arms.contains(&"green".to_string()), "{arms:?}");
+    assert!(
+        arms.contains(&"red".to_string()) && arms.contains(&"green".to_string()),
+        "{arms:?}"
+    );
 }
 
 /// A name no import brings in is offered with the import that does, and
@@ -439,17 +553,31 @@ fn completion_knows_primitives_slices_and_variants() {
 fn completion_imports_what_it_offers() {
     let (_dir, file, mut client) = program();
     let text = "io :: import <std/io>\n".to_string()
-        + &PROGRAM.replace("  return p.sum() + n", "  let h := HashM\n  return p.sum() + n");
+        + &PROGRAM.replace(
+            "  return p.sum() + n",
+            "  let h := HashM\n  return p.sum() + n",
+        );
     client.change(&file, &text);
 
     let answer = client.at(Completion::METHOD, &file, position(&text, "HashM\n", 0, 5));
     let items = answer["items"].as_array().unwrap();
-    let map = items.iter().find(|i| i["label"] == "HashMap").expect("`HashMap` is offered");
+    let map = items
+        .iter()
+        .find(|i| i["label"] == "HashMap")
+        .expect("`HashMap` is offered");
     let edit = &map["additionalTextEdits"][0];
-    assert_eq!(edit["newText"], "{ HashMap } :: import <std/collections>\n", "{map}");
+    assert_eq!(
+        edit["newText"], "{ HashMap } :: import <std/collections>\n",
+        "{map}"
+    );
     assert_eq!(edit["range"]["start"]["line"], 1, "{map}");
     // What is imported already is not offered again.
-    assert!(!items.iter().any(|i| i["label"] == "io" && i.get("additionalTextEdits").is_some()), "{answer}");
+    assert!(
+        !items
+            .iter()
+            .any(|i| i["label"] == "io" && i.get("additionalTextEdits").is_some()),
+        "{answer}"
+    );
 }
 
 /// Deleting most of a file and asking for completion in what is left still
@@ -467,10 +595,18 @@ fn completion_after_most_of_the_file_is_deleted_answers() {
     let short = "io :: import <std/io>\nf :: func () -> i32 {\n  let h := HashM\n  return 0\n}\n";
     client.change(&file, short);
     let answer = client.at(Completion::METHOD, &file, position(short, "HashM\n", 0, 5));
-    let items = answer["items"].as_array().expect("an answer, rather than a server that died");
-    let map = items.iter().find(|i| i["label"] == "HashMap").expect("`HashMap` is offered");
+    let items = answer["items"]
+        .as_array()
+        .expect("an answer, rather than a server that died");
+    let map = items
+        .iter()
+        .find(|i| i["label"] == "HashMap")
+        .expect("`HashMap` is offered");
     let edit = &map["additionalTextEdits"][0];
-    assert_eq!(edit["newText"], "{ HashMap } :: import <std/collections>\n", "{map}");
+    assert_eq!(
+        edit["newText"], "{ HashMap } :: import <std/collections>\n",
+        "{map}"
+    );
 }
 
 /// Saving prepares the workspace again, and when twig says what it said before,
@@ -498,7 +634,10 @@ fn saving_with_the_same_metadata_analyzes_nothing_again() {
     let mut client = Client::start(Fake(Ok(meta)));
     // An error of its own, so that the first analysis is waited for by waiting
     // for what it publishes.
-    client.open(&main, "{ g } :: import \"other.nest\"\nf :: func () -> i32 { return g() + \"x\" }\n");
+    client.open(
+        &main,
+        "{ g } :: import \"other.nest\"\nf :: func () -> i32 { return g() + \"x\" }\n",
+    );
     assert_eq!(client.diagnostics(&main).len(), 1);
 
     // Broken, and nothing told the server: only analyzing it again would find
@@ -509,8 +648,15 @@ fn saving_with_the_same_metadata_analyzes_nothing_again() {
         serde_json::json!({ "textDocument": { "uri": path_to_uri(&main).unwrap() } }),
     );
     let said = client.quiet(Duration::from_secs(2));
-    assert!(said.is_empty(), "a save analyzed everything again: {said:?}");
-    assert!(client.current(&other).is_empty(), "{:?}", client.messages(&other));
+    assert!(
+        said.is_empty(),
+        "a save analyzed everything again: {said:?}"
+    );
+    assert!(
+        client.current(&other).is_empty(),
+        "{:?}",
+        client.messages(&other)
+    );
 }
 
 /// An impl whose generics are bounded applies only where the bounds hold: a
@@ -549,7 +695,10 @@ impl Shape for Square {
 
     let point = labels(&client.at(Completion::METHOD, &file, position(&text, "p.\n", 0, 2)));
     assert!(point.contains(&"sum".to_string()), "{point:?}");
-    assert!(!point.contains(&"describe".to_string()), "`Point` is not a `Shape`: {point:?}");
+    assert!(
+        !point.contains(&"describe".to_string()),
+        "`Point` is not a `Shape`: {point:?}"
+    );
 }
 
 const GENERIC: &str = "\
@@ -616,8 +765,16 @@ fn a_half_deleted_call_says_what_is_wrong_with_it() {
     client.change(&file, &GENERIC.replace("slot.decode(r)", "slot(r)"));
     client.settle(&file);
     let messages = client.messages(&file);
-    assert!(messages.iter().any(|m| m.contains("`*mut T` is not a function")), "{messages:?}");
-    assert!(!messages.iter().any(|m| m.contains("internal")), "{messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`*mut T` is not a function")),
+        "{messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|m| m.contains("internal")),
+        "{messages:?}"
+    );
 }
 
 /// A line that does not parse elsewhere in the function does not stop the
@@ -628,7 +785,10 @@ fn completion_answers_while_another_line_does_not_parse() {
     let broken = GENERIC.replace("  return q + p.y", "  let = \n  return q + p.y");
     client.change(&file, &broken);
     client.settle(&file);
-    assert!(!client.current(&file).is_empty(), "the broken line is reported");
+    assert!(
+        !client.current(&file).is_empty(),
+        "the broken line is reported"
+    );
 
     let typed = broken.replace("let q: i32 := p.x", "let q: i32 := p.");
     client.change(&file, &typed);
@@ -643,10 +803,15 @@ fn completion_answers_while_another_line_does_not_parse() {
 #[test]
 fn a_hover_after_edits_sees_them() {
     let (_dir, file, mut client) = generic();
-    let text = GENERIC.replace("main :: func", "// one\n// two\n\nadd :: func (a: i32) -> i32 { return a }\n\nmain :: func")
+    let text = GENERIC
+        .replace(
+            "main :: func",
+            "// one\n// two\n\nadd :: func (a: i32) -> i32 { return a }\n\nmain :: func",
+        )
         .replace("return q + p.y", "return add(q) + p.y");
     client.change(&file, &text);
-    let hover = hover_text(&client.at(HoverRequest::METHOD, &file, position(&text, "add(q)", 0, 1)));
+    let hover =
+        hover_text(&client.at(HoverRequest::METHOD, &file, position(&text, "add(q)", 0, 1)));
     assert!(hover.contains("add :: func (a: i32) -> i32"), "{hover}");
 }
 

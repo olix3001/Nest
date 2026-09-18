@@ -242,7 +242,9 @@ impl<'a> Layouts<'a> {
     /// different question and is answered by its element's [`Layout`].
     pub fn fields(&self, ty: &Ty) -> Option<Result<Fields>> {
         match ty {
-            Ty::Tuple(elems) => Some(self.aggregate(ty, &elems.iter().collect::<Vec<_>>(), None, 0)),
+            Ty::Tuple(elems) => {
+                Some(self.aggregate(ty, &elems.iter().collect::<Vec<_>>(), None, 0))
+            }
             Ty::Struct(fields) => Some(self.aggregate(
                 ty,
                 &fields.iter().map(|(_, t)| t).collect::<Vec<_>>(),
@@ -295,7 +297,12 @@ impl<'a> Layouts<'a> {
         Some(
             members
                 .iter()
-                .map(|m| (m.name.clone(), subst_ty(&subst, &self.meta.ty_or_error(m.id))))
+                .map(|m| {
+                    (
+                        m.name.clone(),
+                        subst_ty(&subst, &self.meta.ty_or_error(m.id)),
+                    )
+                })
                 .collect(),
         )
     }
@@ -318,7 +325,12 @@ impl<'a> Layouts<'a> {
         Some(
             v.members
                 .iter()
-                .map(|m| (m.name.clone(), subst_ty(&subst, &self.meta.ty_or_error(m.id))))
+                .map(|m| {
+                    (
+                        m.name.clone(),
+                        subst_ty(&subst, &self.meta.ty_or_error(m.id)),
+                    )
+                })
                 .collect(),
         )
     }
@@ -422,7 +434,12 @@ impl<'a> Layouts<'a> {
             // order a named struct promises is a promise about a *declaration*,
             // and an anonymous struct has none.
             Ty::Struct(fields) => Ok(self
-                .aggregate(ty, &fields.iter().map(|(_, t)| t).collect::<Vec<_>>(), None, depth)?
+                .aggregate(
+                    ty,
+                    &fields.iter().map(|(_, t)| t).collect::<Vec<_>>(),
+                    None,
+                    depth,
+                )?
                 .layout),
             Ty::Nominal { def, .. } => self.nominal(ty, *def, depth),
             Ty::Dyn(_) => Err(LayoutError::Unsized(self.show(ty))),
@@ -550,8 +567,8 @@ impl<'a> Layouts<'a> {
         if let Some(n) = owner.and_then(|d| self.align_of_def(d)) {
             align = align.max(n);
         }
-        let size = round_up_checked(offset, align)
-            .ok_or_else(|| LayoutError::TooLarge(self.show(at)))?;
+        let size =
+            round_up_checked(offset, align).ok_or_else(|| LayoutError::TooLarge(self.show(at)))?;
         Ok(Fields {
             layout: Layout {
                 size: self.within_target(size, at)?,

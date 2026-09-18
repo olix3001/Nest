@@ -165,7 +165,10 @@ impl Printer<'_> {
         if g.linkage == super::Linkage::Imported {
             // Another unit defines it; this one only needs the linker to know
             // the name and the shape (§11).
-            self.line(&format!("  extern {kind} {}: {ty}  // {}", g.name, g.symbol));
+            self.line(&format!(
+                "  extern {kind} {}: {ty}  // {}",
+                g.name, g.symbol
+            ));
             return;
         }
         let init = match &g.init {

@@ -243,7 +243,9 @@ fn only_the_prelude_is_globbed_into_every_file() {
     // The operator traits are deliberately *not* in it: the name is needed only
     // in order to write an impl.
     assert_eq!(
-        first_error("impl Add for i32 { Output :: i32  add :: func (self: i32, rhs: i32) -> i32 { return self } }\n"),
+        first_error(
+            "impl Add for i32 { Output :: i32  add :: func (self: i32, rhs: i32) -> i32 { return self } }\n"
+        ),
         "cannot resolve name `Add`"
     );
 
@@ -278,7 +280,10 @@ fn the_prelude_is_found_by_tag_not_by_name_or_path() {
     // so a `core` that spells it differently — a binding called `bag`, in a file
     // called `misc.nest` — still globs.
     let loader = MemLoader::new()
-        .with("main", "f :: func () -> Widget { return Widget { n: 1 } }\n")
+        .with(
+            "main",
+            "f :: func () -> Widget { return Widget { n: 1 } }\n",
+        )
         .with(
             "fakecore",
             "@public\n#lang(\"prelude\")\nbag :: import \"misc.nest\"\n",
@@ -292,7 +297,10 @@ fn the_prelude_is_found_by_tag_not_by_name_or_path() {
 
     // A `core` with no prelude tag at all is not an error — it globs nothing.
     let loader = MemLoader::new()
-        .with("main", "f :: func () -> Widget { return Widget { n: 1 } }\n")
+        .with(
+            "main",
+            "f :: func () -> Widget { return Widget { n: 1 } }\n",
+        )
         .with("fakecore", "@public Widget :: struct { n: i32 }\n");
     let mut session = Session::with_loader(Box::new(loader));
     session.register_package("core", "fakecore");
@@ -312,7 +320,10 @@ fn a_package_member_import_sees_the_targets_own_re_exports() {
     // import order for exactly this reason; an arbitrary order found `ops`
     // roughly half the time.
     let loader = MemLoader::new()
-        .with("main", "{ triple } :: import <pkg/math>\nf :: func () -> isize { return triple(1) }\n")
+        .with(
+            "main",
+            "{ triple } :: import <pkg/math>\nf :: func () -> isize { return triple(1) }\n",
+        )
         .with("pkgroot", "@public math :: import \"mathfile.nest\"\n")
         .with(
             "mathfile",
@@ -627,10 +638,7 @@ fn literal_takes_annotated_type() {
         file,
         |k| matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 7.into()),
     );
-    assert_eq!(
-        ty,
-        Ty::int(32, true)
-    );
+    assert_eq!(ty, Ty::int(32, true));
 }
 
 #[test]
@@ -702,10 +710,7 @@ f :: func () { const y := g(3) }
         file,
         |k| matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 3.into()),
     );
-    assert_eq!(
-        ty,
-        Ty::int(16, true)
-    );
+    assert_eq!(ty, Ty::int(16, true));
 }
 
 // ===< IR lowering >===
@@ -2584,9 +2589,15 @@ fn the_two_package_example_analyzes_cleanly() {
 fn files_outside_a_package_are_named_from_the_entry() {
     let session = analyze_mem(
         &[
-            ("main", "a :: import \"a.nest\"\nb :: import \"b.nest\"\nmain :: func () -> i32 { return a.message() + b.message(1) }\n"),
+            (
+                "main",
+                "a :: import \"a.nest\"\nb :: import \"b.nest\"\nmain :: func () -> i32 { return a.message() + b.message(1) }\n",
+            ),
             ("a", "@public message :: func () -> i32 { return 1 }\n"),
-            ("b", "@public message :: func (n: i32) -> i32 { return n }\n"),
+            (
+                "b",
+                "@public message :: func (n: i32) -> i32 { return n }\n",
+            ),
         ],
         "main",
     );
@@ -2866,7 +2877,10 @@ fn an_impl_member_must_match_the_declaration_it_supplies() {
         ),
     ] {
         let e = first_error(src);
-        assert!(e.contains("does not match the declaration in"), "{src}: {e}");
+        assert!(
+            e.contains("does not match the declaration in"),
+            "{src}: {e}"
+        );
         assert!(e.contains(needle), "{src}: {e}");
     }
 }
@@ -3790,7 +3804,9 @@ fn assert_is_the_run_time_one_and_an_ordinary_function() {
     // intrinsic — it is a `panic` with a condition in front of it, so a false
     // one is a run-time failure rather than a compile-time one. A condition the
     // compiler could fold is still not its business.
-    analyze_clean("f :: func (n: i32) -> i32 { assert(n > 0, \"n must be positive\")\n  return n }\n");
+    analyze_clean(
+        "f :: func (n: i32) -> i32 { assert(n > 0, \"n must be positive\")\n  return n }\n",
+    );
     let s = analyze1("f :: func () -> i32 { assert(1 + 1 == 3)\n  return 0 }\n");
     assert!(!diag_contains(&s, "assertion failed at compile time"));
 }
@@ -3992,10 +4008,7 @@ fn operator_mixed_widths() {
         file,
         |k| matches!(k, NodeKind::Lit(crate::parser::ast::Lit::Int(v)) if *v == 1.into()),
     );
-    assert_eq!(
-        ty,
-        Ty::int(64, true)
-    );
+    assert_eq!(ty, Ty::int(64, true));
 }
 
 #[test]
@@ -4005,10 +4018,7 @@ fn operator_result_pinned_late_by_return() {
     let s = analyze1("f :: func () -> i16 { let x := 1; let y := x + 2; return y }");
     assert!(!s.has_errors(), "{:#?}", s.diagnostics);
     let file = entry_file(&s);
-    assert_eq!(
-        binop_ty(&s, file, BinOp::Add),
-        Ty::int(16, true)
-    );
+    assert_eq!(binop_ty(&s, file, BinOp::Add), Ty::int(16, true));
 }
 
 #[test]
@@ -4303,7 +4313,10 @@ fn only_in_scope_traits_are_selection_candidates() {
     // `Add` lives in `core.ops`, which the prelude does not export (§4.6), so it
     // is *not* a nameable trait here — and `a + b` still works, because operator
     // selection reaches it by `#lang` tag rather than through this set.
-    assert!(!set.contains(&add), "core.ops is not globbed into every file");
+    assert!(
+        !set.contains(&add),
+        "core.ops is not globbed into every file"
+    );
     assert!(
         !set.contains(&mytrait),
         "a merely-loaded trait is not in scope"
@@ -4343,7 +4356,10 @@ fn only_in_scope_traits_are_selection_candidates() {
 #[test]
 fn a_trait_named_by_a_dyn_or_a_bound_selects_where_it_is_not_imported() {
     let files = [
-        ("tr", "@public Speak :: trait { speak :: func (self: *Self) -> i32 }\n"),
+        (
+            "tr",
+            "@public Speak :: trait { speak :: func (self: *Self) -> i32 }\n",
+        ),
         (
             "dog",
             "{ Speak } :: import \"tr.nest\"\n\
@@ -4705,8 +4721,10 @@ fn the_intrinsics_needing_more_than_a_signature_are_two() {
     // `len(x)` takes an array or a slice and nothing else — also unsayable, so
     // the check lives in the compiler beside the declaration's unbounded `T`.
     assert!(
-        first_error("{ len } :: import <core/slice>\nf :: func (n: i32) -> usize { return len(n) }\n")
-            .contains("`len` needs an array or a slice"),
+        first_error(
+            "{ len } :: import <core/slice>\nf :: func (n: i32) -> usize { return len(n) }\n"
+        )
+        .contains("`len` needs an array or a slice"),
     );
 
     // Everything else is its signature and nothing more. `panic` returns
@@ -4726,7 +4744,10 @@ fn the_prelude_carries_three_intrinsics_and_no_more() {
     );
     for (name, src) in [
         ("new", "f :: func () { const p := new.<i32>() }\n"),
-        ("transmute", "f :: func (n: i32) { const b := transmute.<u32>(n) }\n"),
+        (
+            "transmute",
+            "f :: func (n: i32) { const b := transmute.<u32>(n) }\n",
+        ),
         ("gc_collect", "f :: func () { gc_collect() }\n"),
         ("len", "f :: func (s: []i32) -> usize { return len(s) }\n"),
     ] {
@@ -4798,7 +4819,10 @@ fn caller_location_is_only_a_default_argument() {
         );
     }
     // No other directive is an expression.
-    assert!(first_error("f :: func () { const x := #inline }\n").contains("`#inline` is not an expression"));
+    assert!(
+        first_error("f :: func () { const x := #inline }\n")
+            .contains("`#inline` is not an expression")
+    );
 }
 
 #[test]
@@ -4833,7 +4857,9 @@ f :: func () -> P { return P { x: 5, ..Default.default() } }
     assert!(ir.contains("z: (__spread1: P.z)"), "{ir}");
 
     // Any value of the type works; `Default` is a convention, not a requirement.
-    analyze_clean("P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return P { x: 5, ..b } }\n");
+    analyze_clean(
+        "P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return P { x: 5, ..b } }\n",
+    );
     analyze_clean("P :: struct { x: i32, y: i32 }\nf :: func (b: P) -> P { return P { ..b } }\n");
 
     // And the **inferred** literal spreads too. The fields a spread fills come
@@ -4978,10 +5004,7 @@ fn a_static_takes_the_runtime_operator_and_a_constant_does_not() {
     assert!(
         first_error("#static G: i32 :: 0\n").contains("a `#static` is a region, not a constant")
     );
-    assert!(
-        first_error("G: i32 := 0\n")
-            .contains("a constant is bound with `::`")
-    );
+    assert!(first_error("G: i32 := 0\n").contains("a constant is bound with `::`"));
     analyze_clean("#static G: i32 := 0\nK: i32 :: 0\n");
 }
 
@@ -5137,7 +5160,10 @@ fn len_is_an_inherent_method_the_receiver_type_picks() {
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("let n: usize = 3: usize"), "{ir}");
-    assert!(ir.contains("$len(") && ir.contains("(&s: []i32): *[]i32"), "{ir}");
+    assert!(
+        ir.contains("$len(") && ir.contains("(&s: []i32): *[]i32"),
+        "{ir}"
+    );
     assert!(!ir.contains("#virtual") && !ir.contains("#generic"), "{ir}");
 }
 
@@ -5167,8 +5193,10 @@ fn len_works_through_a_mutable_slice() {
 #[test]
 fn the_len_intrinsic_rejects_a_type_with_no_length() {
     assert!(
-        first_error("{ len } :: import <core/slice>\nf :: func (n: i32) -> usize { return len(n) }\n")
-            .contains("`len` needs an array or a slice"),
+        first_error(
+            "{ len } :: import <core/slice>\nf :: func (n: i32) -> usize { return len(n) }\n"
+        )
+        .contains("`len` needs an array or a slice"),
     );
 }
 
@@ -5695,7 +5723,9 @@ fn a_const_generic_parameter_must_be_a_primitive() {
         assert!(diag_contains(&s, needle), "{:#?}", s.diagnostics);
     }
     // The integer case that the language actually uses stays clean.
-    let s = analyze_clean("{ len } :: import <core/slice>\nf :: func <const N: usize> (a: [N]i32) -> usize { return len(a) }\n");
+    let s = analyze_clean(
+        "{ len } :: import <core/slice>\nf :: func <const N: usize> (a: [N]i32) -> usize { return len(a) }\n",
+    );
     assert!(!s.has_errors(), "{:#?}", s.diagnostics);
 }
 
@@ -5927,7 +5957,10 @@ fn try_propagate_across_unrelated_residuals_is_reported() {
     let msg = first_error(
         "read :: func () -> Result.<i32, str> { return .ok(1) }\nf :: func () -> Option.<i32> {\n  const v := read().?\n  return .some(v)\n}\n",
     );
-    assert!(msg.contains("core.control.FromResidual.<core.str.str>"), "{msg}");
+    assert!(
+        msg.contains("core.control.FromResidual.<core.str.str>"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -6100,10 +6133,13 @@ fn a_pointer_sized_constant_is_checked_against_the_target() {
 main :: func () {}
 ";
     assert!(messages_for(src, Target::HOST_64).is_empty());
-    let msgs = messages_for(src, Target {
+    let msgs = messages_for(
+        src,
+        Target {
             pointer_bits: 32,
             ..Target::HOST_64
-        });
+        },
+    );
     assert!(msgs.iter().any(|m| m.contains("does not fit")), "{msgs:#?}");
 }
 
@@ -6181,14 +6217,9 @@ fn a_constants_type_goes_before_the_binder() {
     );
 
     // The retired spelling is named rather than left as "unexpected".
-    assert!(
-        first_error("VALUE :: u8 := 100\n")
-            .contains("a constant's type goes before the `::`")
-    );
+    assert!(first_error("VALUE :: u8 := 100\n").contains("a constant's type goes before the `::`"));
     // And a written type needs a value to pin.
-    assert!(
-        first_error("VALUE: u8\n").contains("a typed constant needs a value")
-    );
+    assert!(first_error("VALUE: u8\n").contains("a typed constant needs a value"));
 }
 
 /// §2.6: a `#static` is a region, so its type is required — a region whose size
@@ -6216,9 +6247,7 @@ fn a_static_names_a_region_and_must_say_how_wide() {
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(!ir.contains("static A"), "{ir}");
 
-    assert!(
-        first_error("#static COUNT :: 0\n").contains("a `#static` needs an explicit type")
-    );
+    assert!(first_error("#static COUNT :: 0\n").contains("a `#static` needs an explicit type"));
     assert!(first_error("#static let G: i32 := 0\n").contains("`#static` is not a `let`"));
 }
 
@@ -6227,9 +6256,7 @@ fn a_static_names_a_region_and_must_say_how_wide() {
 #[test]
 fn an_associated_constant_writes_its_type_before_the_binder() {
     // Requirement, default, and both impl spellings.
-    analyze_clean(
-        "T :: trait { MAX: i32 }\nS :: struct { n: i32 }\nimpl T for S { MAX :: 100 }\n",
-    );
+    analyze_clean("T :: trait { MAX: i32 }\nS :: struct { n: i32 }\nimpl T for S { MAX :: 100 }\n");
     analyze_clean(
         "T :: trait { MAX: i32 }\nS :: struct { n: i32 }\nimpl T for S { MAX: i32 :: 100 }\n",
     );
@@ -6370,7 +6397,10 @@ fn a_byte_string_is_a_byte_slice() {
     assert!(ir.contains("// = b\"\\x00\\xffok\""), "{ir}");
     // It is not a `str`, and no conversion makes it one implicitly.
     let msg = first_error("f :: func (s: str) {}\nmain :: func () { f(b\"hi\") }\n");
-    assert!(msg.contains("expected `core.str.str`, found `[]u8`"), "{msg}");
+    assert!(
+        msg.contains("expected `core.str.str`, found `[]u8`"),
+        "{msg}"
+    );
 }
 
 // ===< What a conversion promises (§6.5) >===
@@ -6476,8 +6506,7 @@ fn a_constant_arithmetic_result_must_fit_its_type() {
         "{msgs:#?}"
     );
     // A `distinct` numeric is checked against what it stands over.
-    let msgs =
-        messages("HttpPort :: distinct u16\nQ: HttpPort :: 400 * 200\nmain :: func () {}\n");
+    let msgs = messages("HttpPort :: distinct u16\nQ: HttpPort :: 400 * 200\nmain :: func () {}\n");
     assert!(
         msgs.iter()
             .any(|m| m.contains("`80000` does not fit in `HttpPort`")),
@@ -6511,7 +6540,9 @@ fn a_defer_captures_its_arguments_where_it_is_registered() {
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     // The capture is a binding in front of the `defer`, in the same scope: one
     // of its own would end immediately and run the body there.
-    let ir = ir_text("sink :: func (n: i32) {}\nf :: func () { let mut x: i32 := 1; defer sink(x); x = 2 }\n");
+    let ir = ir_text(
+        "sink :: func (n: i32) {}\nf :: func () { let mut x: i32 := 1; defer sink(x); x = 2 }\n",
+    );
     assert!(ir.contains("__defer"), "{ir}");
 }
 
@@ -6554,14 +6585,12 @@ fn a_qualified_name_heads_a_composite_literal() {
 #[test]
 fn a_trait_named_in_a_bound_is_in_scope_for_it() {
     let session = analyze_mem(
-        &[
-            (
-                "main",
-                "cmp :: import <core/cmp>\n\
+        &[(
+            "main",
+            "cmp :: import <core/cmp>\n\
                  same :: func <T: cmp.Eq> (a: T, b: T) -> bool { return a.eq(b) }\n\
                  f :: func () -> bool { return same(1, 1) }\n",
-            ),
-        ],
+        )],
         "main",
     );
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
@@ -6577,14 +6606,8 @@ fn a_trait_named_in_a_bound_is_in_scope_for_it() {
 #[test]
 fn a_test_function_takes_nothing_and_returns_nothing_that_matters() {
     for (src, want) in [
-        (
-            "@test\nt :: func (n: i32) {}\n",
-            "takes no parameters",
-        ),
-        (
-            "@test\nt :: func <T> () {}\n",
-            "is not generic",
-        ),
+        ("@test\nt :: func (n: i32) {}\n", "takes no parameters"),
+        ("@test\nt :: func <T> () {}\n", "is not generic"),
         (
             "@test\nt :: func () -> i32 { return 1 }\n",
             "returns `void` or `Result.<void, E>`",
@@ -6820,7 +6843,10 @@ fn a_family_impl_gives_every_width_the_method() {
     // The impl's `N` is solved per call site, so each one is at its own width.
     assert!(ir.contains("$wrapping_add(x: u8, y: u8): u8"), "{ir}");
     assert!(ir.contains("$wrapping_sub(x: i64, y: i64): i64"), "{ir}");
-    assert!(ir.contains("$wrapping_add(x: u4096, y: u4096): u4096"), "{ir}");
+    assert!(
+        ir.contains("$wrapping_add(x: u4096, y: u4096): u4096"),
+        "{ir}"
+    );
 
     // A method is reachable from inside a family impl's own generic too: `N` is
     // symbolic there and stays symbolic.
@@ -7262,8 +7288,14 @@ fn a_generic_impl_is_matched_against_the_concrete_self_type() {
          }\n",
     );
     let names = instances(&session);
-    assert!(names.contains(&"Wrap.<i32>.<as Show>.tag".to_string()), "{names:?}");
-    assert!(names.contains(&"Wrap.<bool>.<as Show>.tag".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"Wrap.<i32>.<as Show>.tag".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"Wrap.<bool>.<as Show>.tag".to_string()),
+        "{names:?}"
+    );
 }
 
 /// A `const` generic parameter has no storage: it *is* the value the
@@ -7335,7 +7367,10 @@ fn a_dyn_coercion_reaches_the_impls_its_vtable_will_hold() {
          }\n",
     );
     let names = instances(&session);
-    assert!(names.contains(&"Rock.<as Describe>.weight".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"Rock.<as Describe>.weight".to_string()),
+        "{names:?}"
+    );
 }
 
 /// Every function carries the name it will have in the binary — reached or not.
@@ -7364,7 +7399,11 @@ fn every_function_has_a_symbol() {
         // two cases are told apart by whether there were arguments to
         // substitute, not by whether the program looked generic.
         if i.args.is_empty() {
-            assert_eq!(i.origin, f.def, "`{}` is concrete but not its own origin", f.name);
+            assert_eq!(
+                i.origin, f.def,
+                "`{}` is concrete but not its own origin",
+                f.name
+            );
         } else {
             assert_ne!(i.origin, f.def, "`{}` is an instance of nothing", f.name);
         }
@@ -7447,8 +7486,7 @@ fn no_mangle_and_link_name_together_are_refused() {
          @public main :: func () { const a := f() }\n",
     );
     assert!(
-        msgs.iter()
-            .any(|m| m.contains("both name the symbol")),
+        msgs.iter().any(|m| m.contains("both name the symbol")),
         "{msgs:#?}"
     );
 }
@@ -7462,7 +7500,8 @@ fn no_mangle_takes_no_arguments() {
          @public main :: func () { const a := f() }\n",
     );
     assert!(
-        msgs.iter().any(|m| m.contains("`@no_mangle` takes no arguments")),
+        msgs.iter()
+            .any(|m| m.contains("`@no_mangle` takes no arguments")),
         "{msgs:#?}"
     );
 }
@@ -7694,8 +7733,14 @@ fn an_operator_on_a_generic_impl_instantiates_per_argument() {
          }\n",
     );
     let names = instances(&session);
-    assert!(names.contains(&"Vec2.<i32>.<as core.ops.Add.<Vec2.<i32>>>.add".to_string()), "{names:?}");
-    assert!(names.contains(&"Vec2.<u8>.<as core.ops.Add.<Vec2.<u8>>>.add".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"Vec2.<i32>.<as core.ops.Add.<Vec2.<i32>>>.add".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"Vec2.<u8>.<as core.ops.Add.<Vec2.<u8>>>.add".to_string()),
+        "{names:?}"
+    );
 }
 
 /// The invariant that keeps not-eliminating-dead-code honest: a generic
@@ -7770,10 +7815,7 @@ fn an_array_length_may_be_a_constant_expression() {
         &session.ir_meta,
         &session.ir[&entry_file(&session)],
     );
-    assert!(
-        ir.contains("buf(x: [8]i32, y: [9]u8, z: [8]i32)"),
-        "{ir}"
-    );
+    assert!(ir.contains("buf(x: [8]i32, y: [9]u8, z: [8]i32)"), "{ir}");
 }
 
 /// A folded length is the same **type** as the literal it works out to: the
@@ -8280,7 +8322,8 @@ fn soa_says_it_is_not_consumed_yet() {
         .map(|d| d.message.as_str())
         .collect();
     assert!(
-        msgs.iter().any(|m| m.contains("`#soa`") && m.contains("not consumed yet")),
+        msgs.iter()
+            .any(|m| m.contains("`#soa`") && m.contains("not consumed yet")),
         "{msgs:?}"
     );
 }
@@ -8484,7 +8527,10 @@ main :: func () {}
 fn only_the_entry_files_main_is_the_entry_point() {
     let session = analyze_mem(
         &[
-            ("main", "other :: import \"other.nest\"\nmain :: func () { other.main() }\n"),
+            (
+                "main",
+                "other :: import \"other.nest\"\nmain :: func () { other.main() }\n",
+            ),
             ("other", "@public main :: func () { }\n"),
         ],
         "main",
@@ -8502,10 +8548,7 @@ fn only_the_entry_files_main_is_the_entry_point() {
 
 /// A directory with a package in it, and a file importing that package.
 fn search_path_fixture(name: &str, package: &str, entry: &str) -> (std::path::PathBuf, String) {
-    let root = std::env::temp_dir().join(format!(
-        "nestc-search-{}-{name}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("nestc-search-{}-{name}", std::process::id()));
     let dir = root.join("libs").join("greet");
     std::fs::create_dir_all(&dir).expect("a temp package directory");
     std::fs::write(dir.join("package.nest"), package).expect("the package's root file");
@@ -8569,11 +8612,30 @@ fn a_broken_import_is_reported_once() {
         )],
         "main",
     );
-    let messages: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    let messages: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
     assert_eq!(messages.len(), 4, "{messages:#?}");
-    assert!(messages.iter().any(|m| m.contains("unknown package `deep`")), "{messages:#?}");
-    assert!(messages.iter().any(|m| m.contains("unknown package `nope`")), "{messages:#?}");
-    assert!(messages.iter().any(|m| m.contains("`core` has no public namespace `nope`")), "{messages:#?}");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("unknown package `deep`")),
+        "{messages:#?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("unknown package `nope`")),
+        "{messages:#?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`core` has no public namespace `nope`")),
+        "{messages:#?}"
+    );
 }
 
 /// A `{ name }` import of something the namespace does not publish is reported
@@ -8596,15 +8658,23 @@ fn importing_a_name_a_namespace_does_not_publish_is_reported() {
         )],
         "main",
     );
-    let messages: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    let messages: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
     assert_eq!(messages.len(), 2, "{messages:#?}");
     assert!(
-        messages.iter().any(|m| m.contains("`core.num` has no member `wrapping_sub`")
-            && m.contains("a method is reached through a value of its type")),
+        messages
+            .iter()
+            .any(|m| m.contains("`core.num` has no member `wrapping_sub`")
+                && m.contains("a method is reached through a value of its type")),
         "{messages:#?}"
     );
     assert!(
-        messages.iter().any(|m| m.contains("`core.mem` has no member `no_such_thing`")),
+        messages
+            .iter()
+            .any(|m| m.contains("`core.mem` has no member `no_such_thing`")),
         "{messages:#?}"
     );
 }
@@ -8628,9 +8698,18 @@ fn an_unknown_member_is_reported_once() {
         )],
         "main",
     );
-    let messages: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    let messages: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
     assert_eq!(messages.len(), 3, "{messages:#?}");
-    assert!(messages.iter().all(|m| m.contains("is not a public member of `core.mem`")), "{messages:#?}");
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.contains("is not a public member of `core.mem`")),
+        "{messages:#?}"
+    );
 }
 
 /// **Every file is a namespace of its own.** Two files of one package may each
@@ -8651,8 +8730,11 @@ fn every_file_of_a_package_is_its_own_namespace() {
          main :: func () { }\n",
     );
     let pkg = libs.join("greet");
-    std::fs::write(pkg.join("io.nest"), "@public Error :: struct { code: i32 }\n")
-        .expect("io.nest");
+    std::fs::write(
+        pkg.join("io.nest"),
+        "@public Error :: struct { code: i32 }\n",
+    )
+    .expect("io.nest");
     std::fs::create_dir_all(pkg.join("wire")).expect("wire/");
     std::fs::write(
         pkg.join("wire").join("wire.nest"),
@@ -8691,8 +8773,11 @@ fn a_file_and_a_directory_of_the_same_name_are_refused() {
     );
     let pkg = libs.join("greet");
     std::fs::create_dir_all(pkg.join("wire")).expect("wire/");
-    std::fs::write(pkg.join("wire").join("wire.nest"), "@public A :: struct { }\n")
-        .expect("wire/wire.nest");
+    std::fs::write(
+        pkg.join("wire").join("wire.nest"),
+        "@public A :: struct { }\n",
+    )
+    .expect("wire/wire.nest");
     std::fs::write(pkg.join("wire.nest"), "@public B :: struct { }\n").expect("wire.nest");
 
     let mut session = Session::new();
@@ -8859,7 +8944,10 @@ fn a_bare_self_is_self_by_value() {
          }\n",
     ] {
         let msgs = messages(src);
-        assert!(msgs.is_empty(), "unexpected diagnostics for {src:?}: {msgs:#?}");
+        assert!(
+            msgs.is_empty(),
+            "unexpected diagnostics for {src:?}: {msgs:#?}"
+        );
     }
 }
 
@@ -8948,10 +9036,32 @@ fn a_private_import_is_not_a_member_to_other_files() {
         ],
         "main",
     );
-    let messages: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    let messages: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
     assert_eq!(messages.len(), 2, "{messages:#?}");
-    assert!(messages.iter().any(|m| m.contains("`helper` is not a public member")), "{messages:#?}");
-    assert!(messages.iter().any(|m| m.contains("`b` is not a public member")), "{messages:#?}");
-    let again = session.defs.iter().find(|d| d.name.as_str() == "again").expect("the alias");
-    assert_eq!(again.vis, super::def::Visibility::Public, "a re-exporting binding is public");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`helper` is not a public member")),
+        "{messages:#?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`b` is not a public member")),
+        "{messages:#?}"
+    );
+    let again = session
+        .defs
+        .iter()
+        .find(|d| d.name.as_str() == "again")
+        .expect("the alias");
+    assert_eq!(
+        again.vis,
+        super::def::Visibility::Public,
+        "a re-exporting binding is public"
+    );
 }

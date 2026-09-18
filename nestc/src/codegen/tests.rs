@@ -18,7 +18,11 @@ fn a_backend_is_selected_by_its_name() {
     let mut sorted = names.clone();
     sorted.sort_unstable();
     sorted.dedup();
-    assert_eq!(sorted.len(), names.len(), "two backends share a name: {names:?}");
+    assert_eq!(
+        sorted.len(),
+        names.len(),
+        "two backends share a name: {names:?}"
+    );
 
     for name in &names {
         let picked = select(Some(name)).expect("a listed backend is selectable");

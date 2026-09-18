@@ -337,7 +337,10 @@ impl Parser {
                 _ => {
                     let at = self.cur_span();
                     let found = self.describe_next();
-                    self.error(at, format!("expected the rest of the string, found {found}"));
+                    self.error(
+                        at,
+                        format!("expected the rest of the string, found {found}"),
+                    );
                     self.bump();
                 }
             }
@@ -1089,7 +1092,10 @@ impl Parser {
             self.pos = body_start;
             let _ = self.parse_block();
         }
-        self.alloc(start.to(self.cur_span()), NodeKind::Block { stmts, tail: None })
+        self.alloc(
+            start.to(self.cur_span()),
+            NodeKind::Block { stmts, tail: None },
+        )
     }
 
     /// The values an `a..<b` / `a..=b` of integer literals stands for.

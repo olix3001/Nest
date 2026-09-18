@@ -339,12 +339,7 @@ pub fn analyze(session: &mut Session, entry: FileId) {
             &session.linked,
             session.options.target,
         );
-        crate::ir::check::run(
-            &session.defs,
-            &session.ir_meta,
-            &session.linked,
-            &layouts,
-        )
+        crate::ir::check::run(&session.defs, &session.ir_meta, &session.linked, &layouts)
     };
     session.diagnostics.extend(diags);
 

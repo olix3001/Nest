@@ -71,10 +71,9 @@ use crate::sema::ty::Ty;
 
 use super::{
     Aggregate, Base, Block, BlockId, Callee, CastKind, Constant, FuncId, Function, FunctionAttrs,
-    Global,
-    GlobalId, Inline, Intrinsic, Local, LocalId, Op, Operand, Origin, Place, Program, Projection,
-    Rvalue, Stmt, StmtKind as LirStmtKind, TermKind, Terminator, Ty as LirTy, TypeDef, TypeId,
-    TypeMember, VariantDef,
+    Global, GlobalId, Inline, Intrinsic, Local, LocalId, Op, Operand, Origin, Place, Program,
+    Projection, Rvalue, Stmt, StmtKind as LirStmtKind, TermKind, Terminator, Ty as LirTy, TypeDef,
+    TypeId, TypeMember, VariantDef,
 };
 
 /// How long a `value ; count` array may be before it is filled by a loop
@@ -98,7 +97,17 @@ pub fn lower(
     lang: &LangItems,
     sources: &SourceMap,
 ) -> Program {
-    lower_against_libraries(defs, meta, linked, layouts, options, lang, sources, &[], &|_| false)
+    lower_against_libraries(
+        defs,
+        meta,
+        linked,
+        layouts,
+        options,
+        lang,
+        sources,
+        &[],
+        &|_| false,
+    )
 }
 
 /// [`lower`], for a program some of whose definitions came from libraries.
@@ -387,12 +396,9 @@ impl Cx<'_> {
                 mutable: false,
                 inner: Box::new(self.strip_at(inner, depth + 1)),
             },
-            Ty::Tuple(elems) => Ty::Tuple(
-                elems
-                    .iter()
-                    .map(|t| self.strip_at(t, depth + 1))
-                    .collect(),
-            ),
+            Ty::Tuple(elems) => {
+                Ty::Tuple(elems.iter().map(|t| self.strip_at(t, depth + 1)).collect())
+            }
             _ => ty.clone(),
         }
     }
@@ -431,12 +437,8 @@ impl Cx<'_> {
     /// A fresh evaluator per question, for the reason [`Self::const_index`]
     /// gives: the answer is a property of the expression, not of the walk.
     fn const_value(&self, e: &Expr) -> Option<ConstValue> {
-        let mut cx = crate::ir::const_eval::ConstEval::new(
-            self.defs,
-            self.meta,
-            self.linked,
-            self.layouts,
-        );
+        let mut cx =
+            crate::ir::const_eval::ConstEval::new(self.defs, self.meta, self.linked, self.layouts);
         cx.eval(e).ok()
     }
 
@@ -466,7 +468,10 @@ impl Cx<'_> {
                 .meta
                 .with::<crate::ir::mono::Instance, _>(f.id, |i| !i.args.is_empty())
                 .unwrap_or(false),
-            ..attrs_of(&self.meta.directives(f.id), self.defs.get(f.def).vis.is_public())
+            ..attrs_of(
+                &self.meta.directives(f.id),
+                self.defs.get(f.def).vis.is_public(),
+            )
         }
     }
 
@@ -1118,7 +1123,10 @@ impl Cx<'_> {
             // own, and the value is its address and length.
             ConstValue::Aggregate(items) if let Ty::Slice { inner, .. } = &ty => {
                 let (g, len) = self.slice_storage(v, items, inner);
-                Constant::Aggregate(vec![Constant::Global(g), Constant::Int((len as i128).into())])
+                Constant::Aggregate(vec![
+                    Constant::Global(g),
+                    Constant::Int((len as i128).into()),
+                ])
             }
             ConstValue::Aggregate(items) => {
                 let tys = self.member_tys(&ty);
@@ -1152,11 +1160,22 @@ impl Cx<'_> {
     }
 
     /// The global holding a slice constant's elements, `[N]inner`, and `N`.
-    fn slice_storage(&mut self, v: &ConstValue, items: &[ConstValue], inner: &Ty) -> (GlobalId, u64) {
+    fn slice_storage(
+        &mut self,
+        v: &ConstValue,
+        items: &[ConstValue],
+        inner: &Ty,
+    ) -> (GlobalId, u64) {
         let elems = items.iter().map(|x| self.const_data(x, inner)).collect();
-        let lty = LirTy::Array { len: items.len() as u64, elem: Box::new(self.lir(inner)) };
+        let lty = LirTy::Array {
+            len: items.len() as u64,
+            elem: Box::new(self.lir(inner)),
+        };
         let key = format!("[{}]{}:{}", items.len(), self.key(inner), v.display());
-        (self.data_global("data", lty, Constant::Aggregate(elems), key), items.len() as u64)
+        (
+            self.data_global("data", lty, Constant::Aggregate(elems), key),
+            items.len() as u64,
+        )
     }
 
     /// A run of bytes at the type it is being used as.
@@ -1364,7 +1383,10 @@ impl Cx<'_> {
             format!("reflect.members:{key}"),
         );
 
-        let layout = self.layouts.of(ty).unwrap_or(crate::ir::layout::Layout::ZERO);
+        let layout = self
+            .layouts
+            .of(ty)
+            .unwrap_or(crate::ir::layout::Layout::ZERO);
         let name_const = self.text_data(ty.display(self.defs).as_bytes(), &text);
         let own = match ty {
             Ty::Nominal { def, .. } => Some(*def),
@@ -1538,10 +1560,7 @@ impl Cx<'_> {
         // address belongs has nowhere to be converted. The empty table is a
         // `[0]Attr` global, exactly as a zero-length string is a `[0]u8` one.
         let Some(attr_ty) = self.lang_nominal("reflect_attr") else {
-            return Constant::Aggregate(vec![
-                Constant::Undef,
-                Constant::Int(0.into()),
-            ]);
+            return Constant::Aggregate(vec![Constant::Undef, Constant::Int(0.into())]);
         };
         let written = match def {
             Some(d) => self.defs.get(d).attrs.clone(),
@@ -1669,7 +1688,6 @@ fn attrs_of(directives: &[Directive], public: bool) -> FunctionAttrs {
     }
     attrs
 }
-
 
 // ===< One function >===
 
@@ -1949,7 +1967,9 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             .map(|(i, b)| Block {
                 id: BlockId(i as u32),
                 stmts: b.stmts,
-                term: b.term.unwrap_or(Terminator::new(TermKind::Unreachable, None)),
+                term: b
+                    .term
+                    .unwrap_or(Terminator::new(TermKind::Unreachable, None)),
                 label: b.label,
             })
             .collect()
@@ -2015,7 +2035,9 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// This path is not a ladder rung, because there is exactly one site that
     /// takes it — the end of the scope — so there is nothing to share it with.
     fn pop_scope(&mut self) {
-        let Some(scope) = self.scopes.pop() else { return };
+        let Some(scope) = self.scopes.pop() else {
+            return;
+        };
         if self.ended() {
             return;
         }
@@ -2126,7 +2148,10 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         let b = self.new_block(Some("return".to_string()));
         let resume = self.at;
         self.at = b;
-        self.terminate(Terminator::new(TermKind::Return(slot.map(Operand::local)), span));
+        self.terminate(Terminator::new(
+            TermKind::Return(slot.map(Operand::local)),
+            span,
+        ));
         self.at = resume;
         self.ret_slot = slot;
         self.ret_block = Some(b);
@@ -2644,11 +2669,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             index: 0,
             name: Symbol::new("tag"),
         });
-        self.into_temp(
-            Rvalue::Use(Operand::Copy(tag)),
-            Ty::int(width, false),
-            span,
-        )
+        self.into_temp(Rvalue::Use(Operand::Copy(tag)), Ty::int(width, false), span)
     }
 
     // ===< Calls >===
@@ -2774,7 +2795,9 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             if !matches!(vals[i], Operand::Const(_)) {
                 continue;
             }
-            let Some(ty) = tys.get(i).cloned() else { continue };
+            let Some(ty) = tys.get(i).cloned() else {
+                continue;
+            };
             let slot = self.temp(ty, span);
             let value = Rvalue::Use(vals[i].clone());
             self.assign(Place::local(slot), value, span);
@@ -3341,9 +3364,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                         .is_some_and(|(a, b)| a == b);
                     if same && let Some(place) = self.place_of(&args[0]) {
                         let id = *id;
-                        return Some(Rvalue::Use(Operand::Copy(
-                            place.then(Projection::Cast(id)),
-                        )));
+                        return Some(Rvalue::Use(Operand::Copy(place.then(Projection::Cast(id)))));
                     }
                 }
                 let v = self.eval(&args[0]);
@@ -4157,7 +4178,6 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         }
     }
 
-
     // ===< Types, constants and aggregates, as LIR spells them >===
 
     /// The aggregate kind for "build a value of this struct type".
@@ -4204,7 +4224,9 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             name: Symbol::new("payload"),
         });
         let lty = self.cx.lir(ty);
-        let LirTy::Named(id) = lty else { return payload };
+        let LirTy::Named(id) = lty else {
+            return payload;
+        };
         let vty = match self.cx.types.get(id.0 as usize).map(|d| &d.origin) {
             Some(Origin::Enum { variants }) => variants.get(index as usize).map(|v| v.ty),
             _ => None,
@@ -4287,7 +4309,10 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 let kind = self.struct_kind(&lty);
                 Rvalue::Aggregate {
                     kind,
-                    fields: vec![Operand::Const(Constant::Global(g)), Operand::int(len as i128)],
+                    fields: vec![
+                        Operand::Const(Constant::Global(g)),
+                        Operand::int(len as i128),
+                    ],
                 }
             }
             // A composite the evaluator folded is data, and data has an address.
@@ -4588,7 +4613,16 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 .map(|(j, _)| j)
                 .collect();
             self.at = head;
-            self.chain(place, sty, arms, &candidates, &bodies, Some(i as u32), dead, span);
+            self.chain(
+                place,
+                sty,
+                arms,
+                &candidates,
+                &bodies,
+                Some(i as u32),
+                dead,
+                span,
+            );
         }
         self.at = switch_at;
         let tag_ty = self.tag_ty(sty);

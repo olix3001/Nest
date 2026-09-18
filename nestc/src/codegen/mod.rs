@@ -208,8 +208,7 @@ pub trait Codegen {
     /// The path is complete, extension included; the driver built it. A backend
     /// that does not produce `kind` says [`CodegenError::Unsupported`] rather
     /// than writing something else.
-    fn emit_unit(&mut self, unit: &Unit, kind: OutputKind, out: &Path)
-    -> Result<(), CodegenError>;
+    fn emit_unit(&mut self, unit: &Unit, kind: OutputKind, out: &Path) -> Result<(), CodegenError>;
 
     /// The extension a file of this kind gets from *this* backend. The default
     /// is the conventional one; a backend whose object files are `.wasm` is why

@@ -340,8 +340,12 @@ impl Desugar<'_> {
     /// answered it would have left a user's own type with nowhere to.
     fn lower_interpolation(&mut self, id: NodeId, parts: Vec<NodeId>) {
         let (Some(start), Some(end)) = (
-            self.lang.get("format_start").map(|d| self.defs.resolve_alias(d)),
-            self.lang.get("format_end").map(|d| self.defs.resolve_alias(d)),
+            self.lang
+                .get("format_start")
+                .map(|d| self.defs.resolve_alias(d)),
+            self.lang
+                .get("format_end")
+                .map(|d| self.defs.resolve_alias(d)),
         ) else {
             self.report(
                 id,

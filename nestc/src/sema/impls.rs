@@ -350,8 +350,8 @@ fn record(
     // a **structural** target the same way `[]T` is, so it gets no head def. That
     // also puts it on the right side of the coherence rule below, which already
     // says the structural types belong to `core`.
-    let self_head = resolved_def(defs, ast, head_of(ast, self_node))
-        .filter(|&d| !defs.get(d).is_int_family());
+    let self_head =
+        resolved_def(defs, ast, head_of(ast, self_node)).filter(|&d| !defs.get(d).is_int_family());
 
     let mut members = HashMap::new();
     let mut assoc = HashMap::new();

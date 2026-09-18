@@ -14,9 +14,13 @@ pub fn header(bytes: &[u8]) -> Result<(Header, &[u8]), String> {
     let rest = bytes
         .strip_prefix(MAGIC.as_slice())
         .ok_or("not Nest library metadata")?;
-    let (len, rest) = rest.split_at_checked(4).ok_or("the metadata is truncated")?;
+    let (len, rest) = rest
+        .split_at_checked(4)
+        .ok_or("the metadata is truncated")?;
     let len = u32::from_le_bytes(len.try_into().expect("four bytes")) as usize;
-    let (header, body) = rest.split_at_checked(len).ok_or("the metadata is truncated")?;
+    let (header, body) = rest
+        .split_at_checked(len)
+        .ok_or("the metadata is truncated")?;
     let header: Header =
         postcard::from_bytes(header).map_err(|e| format!("the header is unreadable: {e}"))?;
     if header.format != FORMAT {
@@ -100,8 +104,8 @@ pub fn load(
     let (parts, _) = codec::decode(decoding, || {
         let meta = postcard::from_bytes::<Meta>(body)
             .map_err(|e| format!("the metadata is unreadable: {e}"))?;
-        let ir = postcard::from_bytes::<Ir>(ir)
-            .map_err(|e| format!("the IR is unreadable: {e}"))?;
+        let ir =
+            postcard::from_bytes::<Ir>(ir).map_err(|e| format!("the IR is unreadable: {e}"))?;
         Ok::<_, String>((meta, ir))
     });
     let (body, ir) = parts?;

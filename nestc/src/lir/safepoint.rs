@@ -97,10 +97,7 @@ fn annotate_function(cx: &Roots, f: &mut Function) {
                 StmtKind::Call {
                     callee: super::Callee::Intrinsic(i),
                     ..
-                } => matches!(
-                    i,
-                    Intrinsic::New | Intrinsic::Make | Intrinsic::GcCollect
-                ),
+                } => matches!(i, Intrinsic::New | Intrinsic::Make | Intrinsic::GcCollect),
                 StmtKind::Call { .. } => true,
                 StmtKind::Assign { .. } | StmtKind::Drop(_) => false,
             };
@@ -349,9 +346,7 @@ impl Roots<'_> {
             return true;
         };
         if let Origin::Enum { variants } = &t.origin {
-            return variants
-                .iter()
-                .any(|v| self.named_is_root(v.ty, depth + 1));
+            return variants.iter().any(|v| self.named_is_root(v.ty, depth + 1));
         }
         t.members.iter().any(|m| self.is_root(&m.ty, depth + 1))
     }

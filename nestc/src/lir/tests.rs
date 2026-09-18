@@ -34,7 +34,11 @@ fn lir_whole_program(src: &str) -> crate::lir::Program {
 
 /// The whole program as **one** unit — what the invariant tests below walk.
 fn lir_unit(src: &str) -> Unit {
-    lir_whole_program(src).units.into_iter().next().expect("a unit")
+    lir_whole_program(src)
+        .units
+        .into_iter()
+        .next()
+        .expect("a unit")
 }
 
 fn lir_whole_program_with(
@@ -840,7 +844,6 @@ sum :: func (xs: []i32, k: usize) -> i32 {
     insta::assert_snapshot!(lir_text_with_spans(src));
 }
 
-
 /// **A codegen unit is self-contained** (§11): what it defines, a declaration for
 /// everything it calls, and its own copy of the types and data it names.
 ///
@@ -1607,7 +1610,11 @@ fn block_ids_are_dense_and_zero_is_the_entry() {
     let unit = lir_unit(BROAD);
     for f in &unit.funcs {
         for (i, b) in f.blocks.iter().enumerate() {
-            assert_eq!(b.id.0 as usize, i, "{}: bb{} is at index {i}", f.name, b.id.0);
+            assert_eq!(
+                b.id.0 as usize, i,
+                "{}: bb{} is at index {i}",
+                f.name, b.id.0
+            );
         }
     }
 }
@@ -1632,7 +1639,15 @@ fn every_direct_call_names_a_function_in_the_unit() {
 /// Every index a unit holds resolves inside that unit: a callee, a global, a
 /// type, a variant's type, a cast's target.
 fn check_unit_is_closed(u: &Unit) {
-    let ty_ok = |t: &Ty| walk_ty(t, &mut |id| assert!((id as usize) < u.types.len(), "unit `{}`: type #{id} is not in its own table", u.name));
+    let ty_ok = |t: &Ty| {
+        walk_ty(t, &mut |id| {
+            assert!(
+                (id as usize) < u.types.len(),
+                "unit `{}`: type #{id} is not in its own table",
+                u.name
+            )
+        })
+    };
     for t in &u.types {
         for m in &t.members {
             ty_ok(&m.ty);
@@ -1789,7 +1804,10 @@ fn one_program_holds_core_and_every_instantiation() {
     let named = |n: &str| unit.funcs.iter().any(|f| f.name == n);
     assert!(named("main"), "the entry file's function");
     assert!(named("core.fail.panic"), "`core`'s, in the same program");
-    assert!(named("f.<i32>"), "and the instantiation, which no file wrote");
+    assert!(
+        named("f.<i32>"),
+        "and the instantiation, which no file wrote"
+    );
     // Bodies and all: `core.panic` is a definition here, not a declaration.
     let panic = unit
         .funcs
@@ -2095,7 +2113,14 @@ fn every_declared_intrinsic_has_a_lir_case() {
     // the build or says nothing, and the call itself becomes no code at all —
     // which is the whole difference between it and the run-time `assert`, an
     // ordinary `core` function that is not an intrinsic in the first place.
-    for name in ["slice", "array", "index_mut", "repeat", "format", "comptime_assert"] {
+    for name in [
+        "slice",
+        "array",
+        "index_mut",
+        "repeat",
+        "format",
+        "comptime_assert",
+    ] {
         let i = Intrinsic::from_name(&Symbol::new(name));
         assert!(
             matches!(i, Intrinsic::Unknown(_)),
@@ -2127,7 +2152,6 @@ fn no_program_contains_an_unknown_intrinsic() {
         }
     }
 }
-
 
 /// **Every conversion names its instruction.**
 ///
@@ -2186,10 +2210,22 @@ fn a_conversion_is_named_by_the_pair_it_runs_between() {
     assert_eq!(K::of(&float(32), &float(64)), K::FloatExtend);
 
     // The signedness in each of these belongs to a *different* side.
-    assert_eq!(K::of(&int(32, true), &float(64)), K::IntToFloat { signed: true });
-    assert_eq!(K::of(&int(32, false), &float(64)), K::IntToFloat { signed: false });
-    assert_eq!(K::of(&float(64), &int(32, true)), K::FloatToInt { signed: true });
-    assert_eq!(K::of(&float(64), &int(32, false)), K::FloatToInt { signed: false });
+    assert_eq!(
+        K::of(&int(32, true), &float(64)),
+        K::IntToFloat { signed: true }
+    );
+    assert_eq!(
+        K::of(&int(32, false), &float(64)),
+        K::IntToFloat { signed: false }
+    );
+    assert_eq!(
+        K::of(&float(64), &int(32, true)),
+        K::FloatToInt { signed: true }
+    );
+    assert_eq!(
+        K::of(&float(64), &int(32, false)),
+        K::FloatToInt { signed: false }
+    );
 
     let ptr = Ty::ptr(int(8, false));
     assert_eq!(K::of(&ptr, &Ty::ptr(int(32, true))), K::PtrCast);
@@ -2282,7 +2318,6 @@ take :: func (v: void, n: i32) -> i32 { return n }
     assert!(!lir.contains("let _0: void"), "{lir}");
 }
 
-
 /// **Two globals never share a symbol.**
 ///
 /// A `#static` written inside a function body has no path to mangle: its name is
@@ -2335,12 +2370,10 @@ fn a_split_defines_every_symbol_exactly_once() {
         let mut options = crate::common::options::Options::default();
         options.codegen_units = units;
         let program = lir_whole_program_with(BROAD, options);
-        let mut seen: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
+        let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         // A linker-visible global is defined once; private data is a copy per
         // unit and is not the linker's business (§11).
-        let mut data: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
+        let mut data: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         for u in &program.units {
             for g in &u.globals {
                 if g.linkage == crate::lir::Linkage::External {
@@ -2349,7 +2382,10 @@ fn a_split_defines_every_symbol_exactly_once() {
             }
         }
         for (sym, n) in &data {
-            assert_eq!(*n, 1, "-C codegen-units={units}: global `{sym}` defined {n} times");
+            assert_eq!(
+                *n, 1,
+                "-C codegen-units={units}: global `{sym}` defined {n} times"
+            );
         }
         for u in &program.units {
             for f in u.funcs.iter().filter(|f| !f.blocks.is_empty()) {
@@ -2432,7 +2468,6 @@ fn a_split_is_deterministic() {
     }
 }
 
-
 /// **Every shipped example lowers to well-formed units, at every split.**
 ///
 /// The invariants above each state one rule over one program. This runs all of
@@ -2460,7 +2495,11 @@ fn every_example_lowers_to_well_formed_units() {
             assert!(errs.is_empty(), "parse errors in {path:?}");
             session.asts.insert(file, ast);
             analyze(&mut session, file);
-            assert!(!session.has_errors(), "{path:?}: {:#?}", session.diagnostics);
+            assert!(
+                !session.has_errors(),
+                "{path:?}: {:#?}",
+                session.diagnostics
+            );
             let layouts = crate::ir::layout::Layouts::new(
                 &session.defs,
                 &session.ir_meta,
@@ -2525,7 +2564,11 @@ fn check_unit_is_emittable(u: &Unit, what: &str) {
     }
     for f in &u.funcs {
         for (i, b) in f.blocks.iter().enumerate() {
-            assert_eq!(b.id.0 as usize, i, "{what}: {}: bb{} is at {i}", f.name, b.id.0);
+            assert_eq!(
+                b.id.0 as usize, i,
+                "{what}: {}: bb{} is at {i}",
+                f.name, b.id.0
+            );
             let targets: Vec<crate::lir::BlockId> = match &b.term.kind {
                 crate::lir::TermKind::Goto(t) => vec![*t],
                 crate::lir::TermKind::Switch {
@@ -2998,7 +3041,10 @@ fn a_structural_impl_is_mangled_by_its_self_type_not_its_label() {
         .map(|f| f.symbol.as_str())
         .collect();
     assert_eq!(into_iter.len(), 2, "{into_iter:?}");
-    assert!(into_iter.iter().all(|s| s.contains("MSG1TI")), "{into_iter:?}");
+    assert!(
+        into_iter.iter().all(|s| s.contains("MSG1TI")),
+        "{into_iter:?}"
+    );
     assert_ne!(into_iter[0], into_iter[1]);
 }
 
@@ -3203,11 +3249,7 @@ f :: func () {
   drop(p)
 }
 ";
-    assert!(
-        messages(captured).is_empty(),
-        "{:#?}",
-        messages(captured)
-    );
+    assert!(messages(captured).is_empty(), "{:#?}", messages(captured));
 }
 
 /// The loop rule is about the loop the value was declared *outside* of, so an
@@ -3296,8 +3338,6 @@ f :: func () -> i32 {
     insta::assert_snapshot!(lir_text(src));
 }
 
-
-
 /// A `distinct` adds **no type** at this level, whatever it is distinct from
 /// (§9). Over a struct it is that struct, over an enum that enum, over another
 /// `distinct` whatever that one ends at — and through a pointer or a slice as
@@ -3339,7 +3379,6 @@ fn a_distinct_scalar_is_the_scalar_and_not_a_wrapper() {
     assert!(!lir.contains("type core.str"), "{lir}");
 }
 
-
 // ===< The entry point (§5.6) >===
 
 /// The entry function of a unit, if it has one.
@@ -3358,16 +3397,23 @@ fn a_program_gets_an_entry_point_that_calls_main() {
     let unit = lir_unit("main :: func () { }\n");
     let entry = entry_of(&unit).expect("an entry point");
     assert_eq!(entry.name, "entry");
-    assert_eq!(entry.ret, crate::lir::Ty::Int { bits: 32, signed: true });
+    assert_eq!(
+        entry.ret,
+        crate::lir::Ty::Int {
+            bits: 32,
+            signed: true
+        }
+    );
     assert!(entry.attrs.public, "the linker has to see it");
 
     let called: Vec<&str> = entry.blocks[0]
         .stmts
         .iter()
         .filter_map(|s| match &s.kind {
-            crate::lir::StmtKind::Call { callee: crate::lir::Callee::Static(id), .. } => {
-                Some(unit.funcs[id.0 as usize].symbol.as_str())
-            }
+            crate::lir::StmtKind::Call {
+                callee: crate::lir::Callee::Static(id),
+                ..
+            } => Some(unit.funcs[id.0 as usize].symbol.as_str()),
             _ => None,
         })
         .collect();
@@ -3413,9 +3459,10 @@ fn a_status_main_returns_its_status() {
         .stmts
         .iter()
         .filter_map(|s| match &s.kind {
-            crate::lir::StmtKind::Assign { value: crate::lir::Rvalue::Cast { kind, .. }, .. } => {
-                Some(*kind)
-            }
+            crate::lir::StmtKind::Assign {
+                value: crate::lir::Rvalue::Cast { kind, .. },
+                ..
+            } => Some(*kind),
             _ => None,
         })
         .collect();
@@ -3434,7 +3481,8 @@ fn a_program_without_main_gets_no_entry_point() {
 /// `ir::check::declarations` applies when it decides whose signature to check.
 #[test]
 fn a_namespaced_main_is_not_the_entry_point() {
-    let unit = lir_unit("app :: namespace { main :: func () { } }\nrun :: func () { app.main() }\n");
+    let unit =
+        lir_unit("app :: namespace { main :: func () { } }\nrun :: func () { app.main() }\n");
     assert!(entry_of(&unit).is_none());
 }
 

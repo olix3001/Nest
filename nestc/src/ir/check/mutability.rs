@@ -97,11 +97,13 @@ impl Walk<'_> {
                     if let Some(span) = self.meta.span(place.id) {
                         d = d.with_primary(span, "this computes a value, it does not name one");
                     }
-                    self.out.push(d.with_note(
-                        "the left side of an assignment has to be a binding, a field, a \
+                    self.out.push(
+                        d.with_note(
+                            "the left side of an assignment has to be a binding, a field, a \
                          tuple element, an index or a dereference"
-                            .to_string(),
-                    ));
+                                .to_string(),
+                        ),
+                    );
                 }
                 // The place's own sub-expressions still hold writes of their
                 // own: `a[f(&mut b)] = 1` has one inside the index.

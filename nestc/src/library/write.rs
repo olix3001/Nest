@@ -52,7 +52,11 @@ struct FileRecord<'a> {
 /// Everything the session holds that did not come from a library is the
 /// package's, so this is only meaningful for a session whose entry was the
 /// package's root: a program's entry file belongs to no package, and is refused.
-pub fn members(session: &Session, package: &str, root: FileId) -> Result<(Vec<u8>, Vec<u8>), String> {
+pub fn members(
+    session: &Session,
+    package: &str,
+    root: FileId,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
     // The package's own files, in id order, numbered from zero.
     let mut own_files: HashMap<FileId, u32> = HashMap::new();
     let mut files = Vec::new();

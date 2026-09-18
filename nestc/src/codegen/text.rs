@@ -40,12 +40,7 @@ impl Codegen for TextBackend {
         parse_triple(&triple)
     }
 
-    fn emit_unit(
-        &mut self,
-        unit: &Unit,
-        kind: OutputKind,
-        out: &Path,
-    ) -> Result<(), CodegenError> {
+    fn emit_unit(&mut self, unit: &Unit, kind: OutputKind, out: &Path) -> Result<(), CodegenError> {
         if kind != OutputKind::Ir {
             return Err(CodegenError::Unsupported(format!(
                 "the `lir` backend writes LIR text, not {}; \

@@ -51,13 +51,7 @@ pub fn check(
     }
 }
 
-fn walk(
-    defs: &DefTable,
-    meta: &Meta,
-    cx: &mut ConstEval,
-    e: &Expr,
-    out: &mut Vec<Diagnostic>,
-) {
+fn walk(defs: &DefTable, meta: &Meta, cx: &mut ConstEval, e: &Expr, out: &mut Vec<Diagnostic>) {
     index_of(e, meta).inspect(|(len, index, ty)| {
         // A failure here means "not a compile-time value", which is the
         // overwhelmingly common case and is not a mistake: the check is the one
@@ -75,11 +69,13 @@ fn walk(
         if let Some(span) = meta.span(index.id) {
             d = d.with_primary(span, format!("this array has {len} elements"));
         }
-        out.push(d.with_note(
-            "a fixed-size array carries its length in its type (§3.2), so an index that is \
+        out.push(
+            d.with_note(
+                "a fixed-size array carries its length in its type (§3.2), so an index that is \
              also known cannot be in range on some other run"
-                .to_string(),
-        ));
+                    .to_string(),
+            ),
+        );
     });
     super::children_of(e, &mut |c| walk(defs, meta, cx, c, out));
 }

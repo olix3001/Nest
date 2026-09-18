@@ -257,9 +257,10 @@ impl Default for Options {
 
 /// Match `value` against a fixed list, returning the `'static` spelling.
 fn one_of(list: &[&'static str], key: &str, value: &str) -> Result<&'static str, String> {
-    list.iter().copied().find(|v| *v == value).ok_or_else(|| {
-        format!("`{key}` must be one of {}, not `{value}`", list.join(", "))
-    })
+    list.iter()
+        .copied()
+        .find(|v| *v == value)
+        .ok_or_else(|| format!("`{key}` must be one of {}, not `{value}`", list.join(", ")))
 }
 
 impl Options {
@@ -287,9 +288,9 @@ impl Options {
             "arch" => self.target.arch = one_of(ARCHES, "arch", value)?,
             "profile" => self.profile = one_of(PROFILES, "profile", value)?,
             "codegen-units" => {
-                let n: usize = value.parse().map_err(|_| {
-                    format!("`codegen-units` must be a number, not `{value}`")
-                })?;
+                let n: usize = value
+                    .parse()
+                    .map_err(|_| format!("`codegen-units` must be a number, not `{value}`"))?;
                 if n == 0 {
                     return Err("`codegen-units` must be at least 1".to_string());
                 }

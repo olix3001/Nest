@@ -169,15 +169,24 @@ fn to_ref(kind: Kind, raw: u32) -> IdRef {
             },
             Kind::Def => {
                 e.unowned.push(format!("def {raw}"));
-                IdRef::Local { package: 0, index: u32::MAX }
+                IdRef::Local {
+                    package: 0,
+                    index: u32::MAX,
+                }
             }
             Kind::File => {
                 e.unowned.push(format!("file {raw}"));
-                IdRef::Local { package: 0, index: u32::MAX }
+                IdRef::Local {
+                    package: 0,
+                    index: u32::MAX,
+                }
             }
             Kind::Ir => {
                 e.unowned.push(format!("IR node {raw}"));
-                IdRef::Local { package: 0, index: u32::MAX }
+                IdRef::Local {
+                    package: 0,
+                    index: u32::MAX,
+                }
             }
         }
     })

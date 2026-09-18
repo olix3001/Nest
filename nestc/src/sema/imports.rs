@@ -275,7 +275,11 @@ fn alias_def(
             let id = defs.alloc(
                 name,
                 DefKind::Import,
-                if reexport { Visibility::Public } else { Visibility::Private },
+                if reexport {
+                    Visibility::Public
+                } else {
+                    Visibility::Private
+                },
                 Some(scope),
                 Some(file),
                 None,

@@ -432,10 +432,7 @@ impl Parser {
             };
             let rhs = self.alloc(
                 self.node_span(ty).to(end),
-                NodeKind::AssocConst {
-                    ty,
-                    default: value,
-                },
+                NodeKind::AssocConst { ty, default: value },
             );
             return self.alloc(start.to(end), NodeKind::ConstBind { pattern, rhs });
         }
@@ -489,9 +486,10 @@ impl Parser {
     /// contains `#name`.
     pub(crate) fn has_directive(&self, directives: &[NodeId], name: &str) -> bool {
         directives.iter().any(|&d| {
-            self.with_kind(d, |k| {
-                matches!(k, NodeKind::Directive { name: n, .. } if n.as_str() == name)
-            })
+            self.with_kind(
+                d,
+                |k| matches!(k, NodeKind::Directive { name: n, .. } if n.as_str() == name),
+            )
         })
     }
 

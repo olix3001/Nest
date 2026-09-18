@@ -234,13 +234,18 @@ impl Dropped<'_> {
             d = d.with_primary(span, "the object this points at has been freed");
         }
         if let Some(Some(span)) = self.at.get(&def) {
-            d = d.with_label(Label::secondary(*span, format!("`{name}` was dropped here")));
+            d = d.with_label(Label::secondary(
+                *span,
+                format!("`{name}` was dropped here"),
+            ));
         }
-        self.out.push(d.with_note(
-            "`drop` releases the object before the collector would have (§6.9); after it, the \
+        self.out.push(
+            d.with_note(
+                "`drop` releases the object before the collector would have (§6.9); after it, the \
              pointer names memory that is gone"
-                .to_string(),
-        ));
+                    .to_string(),
+            ),
+        );
     }
 
     /// A `drop(def)`.
@@ -253,7 +258,10 @@ impl Dropped<'_> {
                 d = d.with_primary(span, "the object was already freed");
             }
             if let Some(Some(first)) = self.at.get(&def) {
-                d = d.with_label(Label::secondary(*first, format!("`{name}` was dropped here")));
+                d = d.with_label(Label::secondary(
+                    *first,
+                    format!("`{name}` was dropped here"),
+                ));
             }
             self.out.push(d);
             return;
@@ -265,11 +273,13 @@ impl Dropped<'_> {
             if let Some(span) = span {
                 d = d.with_primary(span, "this runs again, and the object is freed once");
             }
-            self.out.push(d.with_note(
-                "a value declared outside the loop is the same value on every iteration; \
+            self.out.push(
+                d.with_note(
+                    "a value declared outside the loop is the same value on every iteration; \
                  declare it inside, or drop it after the loop"
-                    .to_string(),
-            ));
+                        .to_string(),
+                ),
+            );
             return;
         }
         state.insert(def);
@@ -286,12 +296,8 @@ impl Dropped<'_> {
             PatternKind::Variant { sub: ps, .. }
             | PatternKind::Tuple(ps)
             | PatternKind::Or(ps)
-            | PatternKind::TupleStruct { elems: ps, .. } => {
-                ps.iter().for_each(|s| self.declare(s))
-            }
-            PatternKind::Struct { fields, .. } => {
-                fields.iter().for_each(|(_, s)| self.declare(s))
-            }
+            | PatternKind::TupleStruct { elems: ps, .. } => ps.iter().for_each(|s| self.declare(s)),
+            PatternKind::Struct { fields, .. } => fields.iter().for_each(|(_, s)| self.declare(s)),
             PatternKind::Slice {
                 prefix,
                 rest,
@@ -300,10 +306,7 @@ impl Dropped<'_> {
                 if let Some(Some(b)) = rest {
                     self.declared.insert(b.def, self.depth);
                 }
-                prefix
-                    .iter()
-                    .chain(suffix)
-                    .for_each(|s| self.declare(s));
+                prefix.iter().chain(suffix).for_each(|s| self.declare(s));
             }
             PatternKind::At { binding, pattern } => {
                 self.declared.insert(binding.def, self.depth);

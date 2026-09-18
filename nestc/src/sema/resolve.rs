@@ -343,9 +343,7 @@ impl Resolver<'_> {
                 // the point of unrolling is that the body may be typed with it
                 // — `[i]u8` is a different type each iteration, and an array
                 // length is a compile-time value or nothing.
-                let is_comptime = directives
-                    .iter()
-                    .any(|&d| self.is_directive(d, "comptime"));
+                let is_comptime = directives.iter().any(|&d| self.is_directive(d, "comptime"));
                 let outer = std::mem::replace(&mut self.decl_static, is_static);
                 let outer_ct = std::mem::replace(&mut self.decl_comptime, is_comptime);
                 self.resolve_node(item);
@@ -667,7 +665,9 @@ impl Resolver<'_> {
         };
         let def = self.defs.resolve_alias(def);
         if !self.defs.get(def).attribute {
-            let msg = format!("`{name}` is not an `@attribute`; declare it `@attribute {name} :: struct {{ ... }}`");
+            let msg = format!(
+                "`{name}` is not an `@attribute`; declare it `@attribute {name} :: struct {{ ... }}`"
+            );
             self.report(id, msg);
             return;
         }
@@ -793,7 +793,11 @@ impl Resolver<'_> {
         // What a namespace imported without `@public` is its own business:
         // another file reaches its members, never its imports.
         let ns = &self.defs.get(base).ns;
-        let d = if same_file { ns.get_direct(name)? } else { *ns.members.get(name)? };
+        let d = if same_file {
+            ns.get_direct(name)?
+        } else {
+            *ns.members.get(name)?
+        };
         let d = self.defs.resolve_alias(d);
         if same_file || self.defs.get(d).vis.is_public() {
             Some(d)

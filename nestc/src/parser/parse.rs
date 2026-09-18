@@ -177,12 +177,7 @@ impl Parser {
         matches!(self.peek(), Some(TokenKind::Ident(_)))
             && matches!(
                 self.peek_nth(1),
-                Some(
-                    TokenKind::LParen
-                        | TokenKind::Dot
-                        | TokenKind::DotLt
-                        | TokenKind::LBracket
-                )
+                Some(TokenKind::LParen | TokenKind::Dot | TokenKind::DotLt | TokenKind::LBracket)
             )
     }
 

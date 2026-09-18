@@ -41,7 +41,10 @@ pub struct Found {
 /// The file a session read from `path`, and not from a library.
 pub fn file_of(s: &Session, path: &std::path::Path) -> Option<FileId> {
     (0..s.sources.len() as u32).map(FileId).find(|&id| {
-        !s.is_foreign_file(id) && s.sources.file(id).is_some_and(|f| std::path::Path::new(&f.name) == path)
+        !s.is_foreign_file(id)
+            && s.sources
+                .file(id)
+                .is_some_and(|f| std::path::Path::new(&f.name) == path)
     })
 }
 
@@ -76,10 +79,16 @@ pub fn find(s: &Session, file: FileId, offset: usize) -> Option<Found> {
             let n = ast.node(id);
             (n.span, n.kind.clone())
         };
-        let found = |def: DefId, at: Span| Found { def, span: at, node: Some(id) };
+        let found = |def: DefId, at: Span| Found {
+            def,
+            span: at,
+            node: Some(id),
+        };
         match &kind {
             NodeKind::Path { segments } => {
-                let Some((i, at)) = segment_at(&src, span, segments.iter().map(|s| s.as_str()), offset) else {
+                let Some((i, at)) =
+                    segment_at(&src, span, segments.iter().map(|s| s.as_str()), offset)
+                else {
                     continue;
                 };
                 let res = if i + 1 == segments.len() {
@@ -117,7 +126,11 @@ pub fn find(s: &Session, file: FileId, offset: usize) -> Option<Found> {
             && let Some(at) = name_span(s, d)
             && contains(at, offset)
         {
-            return Some(Found { def: d, span: at, node: None });
+            return Some(Found {
+                def: d,
+                span: at,
+                node: None,
+            });
         }
     }
     None
@@ -158,11 +171,20 @@ pub fn hover(s: &Session, file: FileId, found: Found) -> String {
 /// Where `d` lives, when that says more than its name: `std.io` for
 /// `std.io.print`.
 fn container(d: &Def) -> Option<String> {
-    if matches!(d.kind, DefKind::Local | DefKind::Param | DefKind::TypeParam | DefKind::ConstParam) {
+    if matches!(
+        d.kind,
+        DefKind::Local | DefKind::Param | DefKind::TypeParam | DefKind::ConstParam
+    ) {
         return None;
     }
     let path = &d.canonical;
-    (path.len() > 1).then(|| path[..path.len() - 1].iter().map(|s| s.as_str()).collect::<Vec<_>>().join("."))
+    (path.len() > 1).then(|| {
+        path[..path.len() - 1]
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    })
 }
 
 /// How many lines of a declaration a hover shows.
@@ -193,7 +215,14 @@ pub fn declaration(s: &Session, def: DefId, use_ty: Option<Ty>) -> String {
     })();
     match (text, d.kind) {
         (Some(text), _) if !text.is_empty() => text,
-        (_, DefKind::Namespace) => format!("namespace {}", d.canonical.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".")),
+        (_, DefKind::Namespace) => format!(
+            "namespace {}",
+            d.canonical
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        ),
         _ => typed(use_ty),
     }
 }
@@ -205,7 +234,9 @@ fn body_start(ast: &Ast, node: NodeId) -> Option<usize> {
         _ => node,
     };
     match &ast.node(rhs).kind {
-        NodeKind::FuncExpr { body: Some(body), .. } => Some(ast.node(*body).span.start),
+        NodeKind::FuncExpr {
+            body: Some(body), ..
+        } => Some(ast.node(*body).span.start),
         _ => None,
     }
 }

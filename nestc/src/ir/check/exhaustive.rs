@@ -64,20 +64,11 @@ use crate::ir::{
 };
 
 /// Report every non-exhaustive `match` and every unreachable arm.
-pub fn check(
-    defs: &DefTable,
-    meta: &Meta,
-    linked: &Linked,
-    out: &mut Vec<Diagnostic>,
-) {
+pub fn check(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagnostic>) {
     for func in linked.funcs() {
         let Some(body) = &func.body else { continue };
         let mut w = Walk {
-            cx: Cx {
-                defs,
-                meta,
-                linked,
-            },
+            cx: Cx { defs, meta, linked },
             out,
         };
         w.block(body);

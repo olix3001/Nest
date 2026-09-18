@@ -195,10 +195,7 @@ pub enum Ty {
     Array { len: u64, elem: Box<Ty> },
     /// The type of a function *pointer*: what a vtable slot holds and what an
     /// indirect call goes through. There is no way to have a `func` by value.
-    Func {
-        params: Vec<Ty>,
-        ret: Box<Ty>,
-    },
+    Func { params: Vec<Ty>, ret: Box<Ty> },
     /// A struct in this unit's type table — which after §7b's flattening is
     /// every aggregate the program has: a struct, a tuple, an enum, a slice, a
     /// trait object's fat pointer, a vtable.
@@ -793,7 +790,6 @@ impl Operand {
     pub fn int(n: impl Into<BigInt>) -> Operand {
         Operand::Const(Constant::Int(n.into()))
     }
-
 }
 
 /// A value that needs no code to produce.
@@ -859,11 +855,7 @@ pub enum Rvalue {
     /// a flag on an instruction — it is a second block, an extra edge and a call
     /// that diverges, and every pass after this one has to see that edge to be
     /// correct.
-    Op {
-        op: Op,
-        ty: Ty,
-        args: Vec<Operand>,
-    },
+    Op { op: Op, ty: Ty, args: Vec<Operand> },
     /// A conversion between primitives, and `kind` says **which** conversion.
     ///
     /// The two types travel beside it and are not redundant with it: `kind` is

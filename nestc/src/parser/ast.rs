@@ -925,9 +925,7 @@ impl CompositeBody {
                 out.extend_from_slice(fields);
                 push_opt(out, spread);
             }
-            CompositeBody::Positional(ids) => {
-                out.extend_from_slice(ids)
-            }
+            CompositeBody::Positional(ids) => out.extend_from_slice(ids),
             CompositeBody::Repeat { value, count } => out.extend_from_slice(&[*value, *count]),
         }
     }

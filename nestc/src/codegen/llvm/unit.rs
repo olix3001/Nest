@@ -59,10 +59,9 @@ use inkwell::values::{
 
 use crate::codegen::CodegenError;
 use crate::lir::{
-    Aggregate, Base, CastKind, Callee, Constant, Function, Global, Intrinsic, Linkage, Local, Op,
+    Aggregate, Base, Callee, CastKind, Constant, Function, Global, Intrinsic, Linkage, Local, Op,
     Operand, Place, Projection, Rvalue, StmtKind, TermKind, Ty, TypeId, Unit,
 };
-
 
 type Result<T> = std::result::Result<T, CodegenError>;
 
@@ -169,8 +168,8 @@ impl<'ctx> Cx<'ctx, '_> {
     /// type has — `void` is erased from every slot (§9) — so reaching it is a
     /// bug rather than a program.
     fn int_type(&self, bits: u32) -> Result<inkwell::types::IntType<'ctx>> {
-        let bits = std::num::NonZero::new(bits)
-            .ok_or_else(|| failed("an integer type of no bits"))?;
+        let bits =
+            std::num::NonZero::new(bits).ok_or_else(|| failed("an integer type of no bits"))?;
         self.context
             .custom_width_int_type(bits)
             .map_err(|e| unsupported(format!("LLVM has no integer type of {bits} bits: {e}")))
@@ -192,9 +191,7 @@ impl<'ctx> Cx<'ctx, '_> {
             // Opaque pointers (LLVM 15 and later): every address is `ptr`, which
             // is also what LIR says — mutability is erased and a pointee type is
             // a fact about the load, not about the address (§9).
-            Ty::Ptr(_) | Ty::Func { .. } => {
-                self.context.ptr_type(AddressSpace::default()).into()
-            }
+            Ty::Ptr(_) | Ty::Func { .. } => self.context.ptr_type(AddressSpace::default()).into(),
             Ty::Array { len, elem } => self.llty(elem)?.array_type(*len as u32).into(),
             Ty::Named(id) => self
                 .types
@@ -261,9 +258,9 @@ impl<'ctx> Cx<'ctx, '_> {
     fn declare_globals(&mut self) -> Result<()> {
         for g in &self.unit.globals {
             let ty = self.llty(&g.ty).map_err(|e| within(&g.name, e))?;
-            let global = self
-                .module
-                .add_global(ty, Some(AddressSpace::default()), g.symbol.as_str());
+            let global =
+                self.module
+                    .add_global(ty, Some(AddressSpace::default()), g.symbol.as_str());
             global.set_linkage(match g.linkage {
                 // A `#static`: one definition, and other units name it.
                 Linkage::External => LlvmLinkage::External,
@@ -294,7 +291,9 @@ impl<'ctx> Cx<'ctx, '_> {
                 None => self.zeroed(&g.ty).map_err(|e| within(&g.name, e))?,
             };
             let declared = self.globals[i];
-            if declared.get_value_type() != inkwell::types::AnyType::as_any_type_enum(&value.get_type()) {
+            if declared.get_value_type()
+                != inkwell::types::AnyType::as_any_type_enum(&value.get_type())
+            {
                 // A constant holding an address inside an enum payload has no
                 // value of the enum's own LLVM type (§7b's payload is bytes), so
                 // it is built as a packed struct with the same bytes and the
@@ -366,7 +365,9 @@ impl<'ctx> Cx<'ctx, '_> {
             } else {
                 LlvmLinkage::External
             };
-            let value = self.module.add_function(f.symbol.as_str(), sig, Some(linkage));
+            let value = self
+                .module
+                .add_function(f.symbol.as_str(), sig, Some(linkage));
             if f.blocks.is_empty() {
                 // A declaration. Nothing more to say about it.
             } else {
@@ -468,11 +469,9 @@ impl<'ctx> Cx<'ctx, '_> {
                 byte.const_array(&vals).into()
             }
             Constant::Aggregate(fields) => self.aggregate_constant(ty, fields, None)?,
-            Constant::Variant {
-                tag,
-                name,
-                payload,
-            } => self.variant_constant(ty, *tag, name, payload)?,
+            Constant::Variant { tag, name, payload } => {
+                self.variant_constant(ty, *tag, name, payload)?
+            }
             // `undef` is a value the program never reads — the `()` a call
             // returns, a slot before its first write.
             Constant::Undef => match self.llty(ty)? {
@@ -627,7 +626,10 @@ impl<'ctx> Cx<'ctx, '_> {
             // Member 0 is the tag; everything after it is the payload, which is
             // zero for a variant that has none.
             if i == 0 {
-                values.push(self.int_constant(&m.ty, &num_bigint::BigInt::from(tag))?.into());
+                values.push(
+                    self.int_constant(&m.ty, &num_bigint::BigInt::from(tag))?
+                        .into(),
+                );
             } else if payload.is_empty() {
                 values.push(self.zeroed(&m.ty)?);
             } else {
@@ -697,7 +699,11 @@ impl<'ctx> Cx<'ctx, '_> {
     }
 
     fn zero_bytes(&self, n: u64) -> BasicValueEnum<'ctx> {
-        self.context.i8_type().array_type(n as u32).const_zero().into()
+        self.context
+            .i8_type()
+            .array_type(n as u32)
+            .const_zero()
+            .into()
     }
 }
 
@@ -707,7 +713,10 @@ fn basic<'ctx>(site: inkwell::values::CallSiteValue<'ctx>) -> Option<BasicValueE
 }
 
 /// `const_array`, dispatched on the element type — inkwell's is per-type.
-fn const_array<'ctx>(elem: BasicTypeEnum<'ctx>, vals: &[BasicValueEnum<'ctx>]) -> BasicValueEnum<'ctx> {
+fn const_array<'ctx>(
+    elem: BasicTypeEnum<'ctx>,
+    vals: &[BasicValueEnum<'ctx>],
+) -> BasicValueEnum<'ctx> {
     match elem {
         BasicTypeEnum::IntType(t) => {
             let v: Vec<IntValue<'ctx>> = vals.iter().map(|x| x.into_int_value()).collect();
@@ -835,7 +844,9 @@ impl<'ctx> Cx<'ctx, '_> {
             StmtKind::Drop(operand) => {
                 let v = self.operand(fx, f, operand, &Ty::ptr(Ty::Bool))?;
                 let free = self.runtime("nest_free", &[self.ptr().into()], None);
-                self.builder.build_call(free, &[v.into()], "").map_err(failed)?;
+                self.builder
+                    .build_call(free, &[v.into()], "")
+                    .map_err(failed)?;
                 Ok(())
             }
         }
@@ -845,7 +856,13 @@ impl<'ctx> Cx<'ctx, '_> {
 /// A name LLVM will not choke on in IR text.
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -955,7 +972,15 @@ impl<'ctx> Cx<'ctx, '_> {
                     };
                     let stride = self.size_of(&elem);
                     let index = self
-                        .operand(fx, f, operand, &Ty::Int { bits: self.pointer_bytes as u16 * 8, signed: false })?
+                        .operand(
+                            fx,
+                            f,
+                            operand,
+                            &Ty::Int {
+                                bits: self.pointer_bytes as u16 * 8,
+                                signed: false,
+                            },
+                        )?
                         .into_int_value();
                     ptr = self.at_dynamic(ptr, index, stride)?;
                     ty = elem;
@@ -1081,7 +1106,15 @@ impl<'ctx> Cx<'ctx, '_> {
                     .operand(fx, f, base, &Ty::ptr(Ty::Bool))?
                     .into_pointer_value();
                 let index = self
-                    .operand(fx, f, index, &Ty::Int { bits: self.pointer_bytes as u16 * 8, signed: false })?
+                    .operand(
+                        fx,
+                        f,
+                        index,
+                        &Ty::Int {
+                            bits: self.pointer_bytes as u16 * 8,
+                            signed: false,
+                        },
+                    )?
                     .into_int_value();
                 let v = self.at_dynamic(base, index, *stride)?;
                 self.store(ptr, v.into(), &ty)
@@ -1141,12 +1174,24 @@ impl<'ctx> Cx<'ctx, '_> {
                 Op::Neg => b.build_float_neg(x, "").map_err(failed)?.into(),
                 // Ordered comparisons: a NaN compares false, which is IEEE and
                 // is what every language that does not special-case NaN wants.
-                Op::Eq => self.as_bool(b.build_float_compare(P::OEQ, x, y(), "").map_err(failed)?)?,
-                Op::Ne => self.as_bool(b.build_float_compare(P::UNE, x, y(), "").map_err(failed)?)?,
-                Op::Lt => self.as_bool(b.build_float_compare(P::OLT, x, y(), "").map_err(failed)?)?,
-                Op::Le => self.as_bool(b.build_float_compare(P::OLE, x, y(), "").map_err(failed)?)?,
-                Op::Gt => self.as_bool(b.build_float_compare(P::OGT, x, y(), "").map_err(failed)?)?,
-                Op::Ge => self.as_bool(b.build_float_compare(P::OGE, x, y(), "").map_err(failed)?)?,
+                Op::Eq => {
+                    self.as_bool(b.build_float_compare(P::OEQ, x, y(), "").map_err(failed)?)?
+                }
+                Op::Ne => {
+                    self.as_bool(b.build_float_compare(P::UNE, x, y(), "").map_err(failed)?)?
+                }
+                Op::Lt => {
+                    self.as_bool(b.build_float_compare(P::OLT, x, y(), "").map_err(failed)?)?
+                }
+                Op::Le => {
+                    self.as_bool(b.build_float_compare(P::OLE, x, y(), "").map_err(failed)?)?
+                }
+                Op::Gt => {
+                    self.as_bool(b.build_float_compare(P::OGT, x, y(), "").map_err(failed)?)?
+                }
+                Op::Ge => {
+                    self.as_bool(b.build_float_compare(P::OGE, x, y(), "").map_err(failed)?)?
+                }
                 other => {
                     return Err(failed(format!(
                         "{}: {} is not an operation on floats",
@@ -1193,10 +1238,18 @@ impl<'ctx> Cx<'ctx, '_> {
                 .into(),
             Op::Eq => self.as_bool(b.build_int_compare(P::EQ, x, y(), "").map_err(failed)?)?,
             Op::Ne => self.as_bool(b.build_int_compare(P::NE, x, y(), "").map_err(failed)?)?,
-            Op::Lt if signed => self.as_bool(b.build_int_compare(P::SLT, x, y(), "").map_err(failed)?)?,
-            Op::Le if signed => self.as_bool(b.build_int_compare(P::SLE, x, y(), "").map_err(failed)?)?,
-            Op::Gt if signed => self.as_bool(b.build_int_compare(P::SGT, x, y(), "").map_err(failed)?)?,
-            Op::Ge if signed => self.as_bool(b.build_int_compare(P::SGE, x, y(), "").map_err(failed)?)?,
+            Op::Lt if signed => {
+                self.as_bool(b.build_int_compare(P::SLT, x, y(), "").map_err(failed)?)?
+            }
+            Op::Le if signed => {
+                self.as_bool(b.build_int_compare(P::SLE, x, y(), "").map_err(failed)?)?
+            }
+            Op::Gt if signed => {
+                self.as_bool(b.build_int_compare(P::SGT, x, y(), "").map_err(failed)?)?
+            }
+            Op::Ge if signed => {
+                self.as_bool(b.build_int_compare(P::SGE, x, y(), "").map_err(failed)?)?
+            }
             Op::Lt => self.as_bool(b.build_int_compare(P::ULT, x, y(), "").map_err(failed)?)?,
             Op::Le => self.as_bool(b.build_int_compare(P::ULE, x, y(), "").map_err(failed)?)?,
             Op::Gt => self.as_bool(b.build_int_compare(P::UGT, x, y(), "").map_err(failed)?)?,
@@ -1309,15 +1362,22 @@ impl<'ctx> Cx<'ctx, '_> {
         let target = self.llty(to)?;
         let b = &self.builder;
         Ok(match kind {
-            CastKind::Truncate | CastKind::ZeroExtend | CastKind::SignExtend | CastKind::Reinterpret => {
+            CastKind::Truncate
+            | CastKind::ZeroExtend
+            | CastKind::SignExtend
+            | CastKind::Reinterpret => {
                 let x = v.into_int_value();
                 let t = target.into_int_type();
                 match x.get_type().get_bit_width().cmp(&t.get_bit_width()) {
-                    std::cmp::Ordering::Greater => b.build_int_truncate(x, t, "").map_err(failed)?.into(),
+                    std::cmp::Ordering::Greater => {
+                        b.build_int_truncate(x, t, "").map_err(failed)?.into()
+                    }
                     std::cmp::Ordering::Less if matches!(kind, CastKind::SignExtend) => {
                         b.build_int_s_extend(x, t, "").map_err(failed)?.into()
                     }
-                    std::cmp::Ordering::Less => b.build_int_z_extend(x, t, "").map_err(failed)?.into(),
+                    std::cmp::Ordering::Less => {
+                        b.build_int_z_extend(x, t, "").map_err(failed)?.into()
+                    }
                     // Same width: a register is a register, and signedness is
                     // not a property an LLVM integer has.
                     std::cmp::Ordering::Equal => x.into(),
@@ -1401,7 +1461,10 @@ impl<'ctx> Cx<'ctx, '_> {
             }
             Aggregate::Array => {
                 let Ty::Array { elem, .. } = dest_ty else {
-                    return Err(failed(format!("{}: an array built into a {dest_ty:?}", f.name)));
+                    return Err(failed(format!(
+                        "{}: an array built into a {dest_ty:?}",
+                        f.name
+                    )));
                 };
                 let stride = self.size_of(elem);
                 for (i, value) in fields.iter().enumerate() {
@@ -1426,7 +1489,8 @@ impl<'ctx> Cx<'ctx, '_> {
                     .members
                     .first()
                     .ok_or_else(|| failed(format!("`{}` has no tag", def.name)))?;
-                let tag_value = self.int_constant(&tag_member.ty, &num_bigint::BigInt::from(*tag))?;
+                let tag_value =
+                    self.int_constant(&tag_member.ty, &num_bigint::BigInt::from(*tag))?;
                 self.store(
                     self.at(dest, tag_member.offset)?,
                     tag_value.into(),
@@ -1436,7 +1500,10 @@ impl<'ctx> Cx<'ctx, '_> {
                     return Ok(());
                 }
                 let payload = def.members.get(1).ok_or_else(|| {
-                    failed(format!("`{}.{name}` has a payload and `{}` has no payload member", def.name, def.name))
+                    failed(format!(
+                        "`{}.{name}` has a payload and `{}` has no payload member",
+                        def.name, def.name
+                    ))
                 })?;
                 let vdef = self.unit.ty(*variant);
                 for (i, value) in fields.iter().enumerate() {
@@ -1499,9 +1566,7 @@ impl<'ctx> Cx<'ctx, '_> {
             .module
             .get_function("llvm.frameaddress.p0")
             .unwrap_or_else(|| {
-                let sig = self
-                    .ptr()
-                    .fn_type(&[self.context.i32_type().into()], false);
+                let sig = self.ptr().fn_type(&[self.context.i32_type().into()], false);
                 self.module.add_function("llvm.frameaddress.p0", sig, None)
             });
         let here = self
@@ -1580,15 +1645,17 @@ impl<'ctx> Cx<'ctx, '_> {
                     // why the front end has already promoted it.
                     let want = match target.locals.get(i) {
                         Some(l) if i < target.params => l.ty.clone(),
-                        _ if target.attrs.c_variadic && i >= target.params => self
-                            .operand_ty(fx, f, a)
-                            .ok_or_else(|| failed(format!("{}: a variadic argument with no type", f.name)))?,
+                        _ if target.attrs.c_variadic && i >= target.params => {
+                            self.operand_ty(fx, f, a).ok_or_else(|| {
+                                failed(format!("{}: a variadic argument with no type", f.name))
+                            })?
+                        }
                         Some(l) => l.ty.clone(),
                         None => {
                             return Err(failed(format!(
                                 "{}: `{}` takes no argument {i}",
                                 f.name, target.name
-                            )))
+                            )));
                         }
                     };
                     built.push(self.operand(fx, f, a, &want)?.into());
@@ -1599,9 +1666,9 @@ impl<'ctx> Cx<'ctx, '_> {
             Callee::Indirect(operand) => {
                 // The signature comes from the pointer's own type, which is the
                 // only place it is written down at this level.
-                let ty = self
-                    .operand_ty(fx, f, operand)
-                    .ok_or_else(|| failed(format!("{}: an indirect call through a constant", f.name)))?;
+                let ty = self.operand_ty(fx, f, operand).ok_or_else(|| {
+                    failed(format!("{}: an indirect call through a constant", f.name))
+                })?;
                 let (params, ret) = match &ty {
                     Ty::Func { params, ret } => (params.clone(), (**ret).clone()),
                     Ty::Ptr(inner) => match &**inner {
@@ -1610,9 +1677,7 @@ impl<'ctx> Cx<'ctx, '_> {
                     },
                     other => return Err(failed(format!("{}: calling a {other:?}", f.name))),
                 };
-                let pointer = self
-                    .operand(fx, f, operand, &ty)?
-                    .into_pointer_value();
+                let pointer = self.operand(fx, f, operand, &ty)?.into_pointer_value();
                 let mut metadata: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
                 for p in &params {
                     metadata.push(self.llty(p)?.into());
@@ -1680,7 +1745,8 @@ impl<'ctx> Cx<'ctx, '_> {
             // from the destination's pointee, which is where the type argument
             // ended up by this level.
             Intrinsic::New => {
-                let place = dest.ok_or_else(|| failed(format!("{}: `new` with no destination", f.name)))?;
+                let place =
+                    dest.ok_or_else(|| failed(format!("{}: `new` with no destination", f.name)))?;
                 let (ptr, ty) = self.place(fx, f, place)?;
                 let Ty::Ptr(inner) = &ty else {
                     return Err(failed(format!("{}: `new` assigns to a {ty:?}", f.name)));
@@ -1691,7 +1757,8 @@ impl<'ctx> Cx<'ctx, '_> {
             }
             // `make.<[]T>(n)` — `n` elements, and the slice header over them.
             Intrinsic::Make => {
-                let place = dest.ok_or_else(|| failed(format!("{}: `make` with no destination", f.name)))?;
+                let place =
+                    dest.ok_or_else(|| failed(format!("{}: `make` with no destination", f.name)))?;
                 let (ptr, ty) = self.place(fx, f, place)?;
                 let (elem, ptr_member, len_member) = self.slice_shape(&ty, &f.name)?;
                 let len = self
@@ -1703,7 +1770,11 @@ impl<'ctx> Cx<'ctx, '_> {
                     .build_int_mul(len_word, word.const_int(self.size_of(&elem), false), "")
                     .map_err(failed)?;
                 let data = self.alloc(bytes)?;
-                self.store(self.at(ptr, ptr_member.offset)?, data.into(), &ptr_member.ty)?;
+                self.store(
+                    self.at(ptr, ptr_member.offset)?,
+                    data.into(),
+                    &ptr_member.ty,
+                )?;
                 self.store(self.at(ptr, len_member.offset)?, len.into(), &len_member.ty)
             }
             // One call, whatever the length — see [`Intrinsic::Memset`]. LLVM
@@ -1714,10 +1785,22 @@ impl<'ctx> Cx<'ctx, '_> {
                     .operand(fx, f, &args[0], &Ty::ptr(Ty::Bool))?
                     .into_pointer_value();
                 let byte = self
-                    .operand(fx, f, &args[1], &Ty::Int { bits: 8, signed: false })?
+                    .operand(
+                        fx,
+                        f,
+                        &args[1],
+                        &Ty::Int {
+                            bits: 8,
+                            signed: false,
+                        },
+                    )?
                     .into_int_value();
-                let len = self.operand(fx, f, &args[2], &self.word_ty())?.into_int_value();
-                self.builder.build_memset(dest, 1, byte, len).map_err(failed)?;
+                let len = self
+                    .operand(fx, f, &args[2], &self.word_ty())?
+                    .into_int_value();
+                self.builder
+                    .build_memset(dest, 1, byte, len)
+                    .map_err(failed)?;
                 Ok(())
             }
             // The source and destination are addresses and the length is in
@@ -1732,7 +1815,9 @@ impl<'ctx> Cx<'ctx, '_> {
                 let src = self
                     .operand(fx, f, &args[1], &Ty::ptr(Ty::Bool))?
                     .into_pointer_value();
-                let len = self.operand(fx, f, &args[2], &self.word_ty())?.into_int_value();
+                let len = self
+                    .operand(fx, f, &args[2], &self.word_ty())?
+                    .into_int_value();
                 self.builder
                     .build_memcpy(dest, 1, src, 1, len)
                     .map_err(failed)?;
@@ -1753,14 +1838,18 @@ impl<'ctx> Cx<'ctx, '_> {
             Intrinsic::GcLeak => {
                 let v = self.operand(fx, f, &args[0], &Ty::ptr(Ty::Bool))?;
                 let leak = self.runtime("nest_gc_leak", &[self.ptr().into()], None);
-                self.builder.build_call(leak, &[v.into()], "").map_err(failed)?;
+                self.builder
+                    .build_call(leak, &[v.into()], "")
+                    .map_err(failed)?;
                 Ok(())
             }
             // "Reinterpret as whatever this slot holds" — so the bytes are
             // written to the destination and read back at its type, which is
             // exactly what the operation says and needs no instruction.
             Intrinsic::Transmute => {
-                let place = dest.ok_or_else(|| failed(format!("{}: `transmute` with no destination", f.name)))?;
+                let place = dest.ok_or_else(|| {
+                    failed(format!("{}: `transmute` with no destination", f.name))
+                })?;
                 let (ptr, ty) = self.place(fx, f, place)?;
                 let from = self
                     .operand_ty(fx, f, &args[0])
@@ -1795,11 +1884,7 @@ impl<'ctx> Cx<'ctx, '_> {
 
     /// `nest_alloc(bytes)` — the collector's allocator, behind the shim.
     fn alloc(&self, bytes: IntValue<'ctx>) -> Result<PointerValue<'ctx>> {
-        let alloc = self.runtime(
-            "nest_alloc",
-            &[self.word().into()],
-            Some(self.ptr().into()),
-        );
+        let alloc = self.runtime("nest_alloc", &[self.word().into()], Some(self.ptr().into()));
         Ok(self
             .builder
             .build_call(alloc, &[bytes.into()], "")

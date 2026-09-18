@@ -751,7 +751,8 @@ impl Lowerer<'_> {
             // `a[..]`, with its two bounds written out — see [`Self::lower_slice`]
             // for why a slice never builds a `Range`.
             let index = self.bound_ty(&sc.range);
-            let start = self.derived_expr(value.id, index.clone(), ExprKind::Lit(Lit::Int(0.into())));
+            let start =
+                self.derived_expr(value.id, index.clone(), ExprKind::Lit(Lit::Int(0.into())));
             let end = self.len_expr(value.clone(), index);
             return self.expr(
                 node,
@@ -1166,10 +1167,14 @@ impl Lowerer<'_> {
                 .enumerate()
                 .map(|(i, e)| (Symbol::new(&i.to_string()), e))
                 .collect();
-            return self.expr(node, ty, ExprKind::Construct {
-                def: Some(def),
-                fields,
-            });
+            return self.expr(
+                node,
+                ty,
+                ExprKind::Construct {
+                    def: Some(def),
+                    fields,
+                },
+            );
         }
         let target = self.resolved_def(head);
         // A call to an `#intrinsic` declaration has no body to call: the
@@ -1235,7 +1240,12 @@ impl Lowerer<'_> {
     /// declaration owns. Here there is no such conflict — the default is lowered
     /// once against its declaration and the result is *cloned* into each site,
     /// so a default like `.{}` still builds a fresh value per call.
-    fn lower_args(&mut self, callee: Option<DefId>, slots: &[Option<NodeId>], at: NodeId) -> Vec<Expr> {
+    fn lower_args(
+        &mut self,
+        callee: Option<DefId>,
+        slots: &[Option<NodeId>],
+        at: NodeId,
+    ) -> Vec<Expr> {
         let mut out = Vec::with_capacity(slots.len());
         for (i, slot) in slots.iter().enumerate() {
             match slot {
@@ -1786,7 +1796,10 @@ impl Lowerer<'_> {
             // decides is whether this `a[i]` is being written, which only the
             // statement knew — see [`IndexWrite`].
             Ty::Array { .. } => {
-                mutable = self.ast.meta::<crate::sema::infer::IndexWrite>(node).is_some()
+                mutable = self
+                    .ast
+                    .meta::<crate::sema::infer::IndexWrite>(node)
+                    .is_some()
             }
             _ => {}
         }
@@ -2244,7 +2257,8 @@ impl Lowerer<'_> {
                 // `..=b` includes `b`, and every bound below this line is
                 // exclusive. One convention, settled here.
                 if kind == RangeKind::Closed {
-                    let one = self.derived_expr(e.id, index.clone(), ExprKind::Lit(Lit::Int(1.into())));
+                    let one =
+                        self.derived_expr(e.id, index.clone(), ExprKind::Lit(Lit::Int(1.into())));
                     self.derived_expr(
                         e.id,
                         index.clone(),

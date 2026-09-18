@@ -1140,7 +1140,10 @@ impl Inferer<'_> {
                 let dispatch = match m.dispatch.clone() {
                     MethodDispatch::Generic { trait_def, args } => MethodDispatch::Generic {
                         trait_def,
-                        args: args.iter().map(|a| self.cx.finalize(a, &mut || {})).collect(),
+                        args: args
+                            .iter()
+                            .map(|a| self.cx.finalize(a, &mut || {}))
+                            .collect(),
                     },
                     other => other,
                 };
@@ -3461,7 +3464,13 @@ impl Inferer<'_> {
             other if is_var(&other) => Ty::Error,
             // A value that is not a function, which nothing else reports.
             other => {
-                self.report(callee, format!("`{}` is not a function, so it cannot be called", other.display(self.defs)));
+                self.report(
+                    callee,
+                    format!(
+                        "`{}` is not a function, so it cannot be called",
+                        other.display(self.defs)
+                    ),
+                );
                 Ty::Error
             }
         }
@@ -3698,7 +3707,8 @@ impl Inferer<'_> {
                 match (d.file, d.node) {
                     (Some(file), Some(node)) => match self.asts[&file].node(node).kind.clone() {
                         NodeKind::GenericTypeParam {
-                            constraint: Some(c), ..
+                            constraint: Some(c),
+                            ..
                         } => Some((file, self.bound_nodes(file, c))),
                         _ => None,
                     },
@@ -4351,9 +4361,7 @@ impl Inferer<'_> {
         // site's arguments and the declaration's parameters stay one list.
         self.close_over_projections(&mut order);
         for &d in &order {
-            map.tys
-                .entry(d)
-                .or_insert_with(|| self.cx.fresh());
+            map.tys.entry(d).or_insert_with(|| self.cx.fresh());
         }
         // Record what this call site bound each parameter to. The arguments are
         // still variables here — `id(x)`'s `T` is solved by the argument below,
@@ -6039,7 +6047,11 @@ impl Inferer<'_> {
         match width.value() {
             Some(1) if !signed => Ty::Bool,
             Some(1) => {
-                self.report_in(file, *arg, "a 1-bit signed integer is not a type".to_string());
+                self.report_in(
+                    file,
+                    *arg,
+                    "a 1-bit signed integer is not a type".to_string(),
+                );
                 Ty::Error
             }
             Some(n) if n == 0 || n > 65535 => {
@@ -6646,7 +6658,11 @@ impl Inferer<'_> {
             (ConstValue::Int(n), Ty::Float(_)) => match n.to_f64() {
                 Some(f) => ConstValue::Float(f),
                 None => {
-                    self.report_const_in(file, node, "this integer is not representable as a float");
+                    self.report_const_in(
+                        file,
+                        node,
+                        "this integer is not representable as a float",
+                    );
                     return Const::Error;
                 }
             },
@@ -6889,8 +6905,7 @@ impl Inferer<'_> {
         if self.is_ptr_sized(&got) || self.is_ptr_sized(&want) {
             return false;
         }
-        let (Some(from), Some(to)) = (got.int_parts(), want.int_parts())
-        else {
+        let (Some(from), Some(to)) = (got.int_parts(), want.int_parts()) else {
             return false;
         };
         if !super::ty::int_widens(from, to) {
@@ -7289,7 +7304,6 @@ fn subst_const(c: &Const, map: &Subst) -> Const {
         other => other.clone(),
     }
 }
-
 
 /// Whether `ty` is `usize` / `isize` — a pointer-sized `distinct` whose width is
 /// the target's rather than one the program wrote.

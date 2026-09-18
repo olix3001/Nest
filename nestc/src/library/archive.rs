@@ -48,23 +48,32 @@ pub fn read(bytes: &[u8]) -> Result<Vec<(String, &[u8])>, String> {
     let mut rest = bytes.strip_prefix(GLOBAL).ok_or("not an archive")?;
     let mut members = Vec::new();
     while !rest.is_empty() {
-        let (header, after) = rest.split_at_checked(60).ok_or("the archive is truncated")?;
+        let (header, after) = rest
+            .split_at_checked(60)
+            .ok_or("the archive is truncated")?;
         let text = std::str::from_utf8(header).map_err(|_| "a member header is not text")?;
         let name = text[..16].trim_end().trim_end_matches('/').to_string();
         let size: usize = text[48..58]
             .trim()
             .parse()
             .map_err(|_| format!("the member `{name}` has no size"))?;
-        let (data, after) = after.split_at_checked(size).ok_or("the archive is truncated")?;
+        let (data, after) = after
+            .split_at_checked(size)
+            .ok_or("the archive is truncated")?;
         members.push((name, data));
-        rest = if size % 2 == 1 { after.get(1..).unwrap_or(&[]) } else { after };
+        rest = if size % 2 == 1 {
+            after.get(1..).unwrap_or(&[])
+        } else {
+            after
+        };
     }
     Ok(members)
 }
 
 /// The member `name` of the library at `path`.
 fn member_of(path: &Path, name: &str) -> Result<Vec<u8>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
     if !bytes.starts_with(GLOBAL) {
         return Err(format!("`{}` is not a Nest library", path.display()));
     }
@@ -90,7 +99,8 @@ pub fn ir_of(path: &Path) -> Result<Vec<u8>, String> {
 
 /// The objects inside the library at `path`, by member name.
 pub fn objects_of(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
     if !bytes.starts_with(GLOBAL) {
         return Ok(Vec::new());
     }

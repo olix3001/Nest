@@ -47,8 +47,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::common::source::{FileId, SourceMap};
 
 use super::{
-    Aggregate, Base, Callee, Constant, FuncId, Function, Global, GlobalId, Linkage, Operand, Origin,
-    Place, Program, Rvalue, Stmt, StmtKind, TermKind, Ty, TypeDef, TypeId, Unit,
+    Aggregate, Base, Callee, Constant, FuncId, Function, Global, GlobalId, Linkage, Operand,
+    Origin, Place, Program, Rvalue, Stmt, StmtKind, TermKind, Ty, TypeDef, TypeId, Unit,
 };
 
 /// Cut the whole-program unit into at most `n` codegen units.
@@ -224,8 +224,7 @@ fn build(whole: &Unit, group: &Group, index: usize, only: bool) -> Unit {
             let g = &whole.globals[g as usize];
             // Private data belongs to every unit that uses it; a `#static`
             // belongs to one, and the rest import it.
-            let mine =
-                g.linkage == Linkage::Internal || home_unit(whole, g, index, group);
+            let mine = g.linkage == Linkage::Internal || home_unit(whole, g, index, group);
             remap_global(g, &m, !mine)
         })
         .collect();
@@ -251,7 +250,9 @@ fn build(whole: &Unit, group: &Group, index: usize, only: bool) -> Unit {
 /// no unit — which only happens when its file defined no functions at all —
 /// lands in the first unit, so that exactly one unit defines it.
 fn home_unit(whole: &Unit, g: &Global, index: usize, group: &Group) -> bool {
-    let Some(span) = g.span else { return index == 0 };
+    let Some(span) = g.span else {
+        return index == 0;
+    };
     let mine = group.funcs.iter().any(|f| {
         whole.funcs[f.0 as usize]
             .span

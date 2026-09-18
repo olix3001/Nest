@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::codegen::{self, Codegen, OutputKind};
+use crate::common;
 use crate::common::diagnostic::{Diagnostic, Severity};
 use crate::common::emitter::{render, render_json};
 use crate::common::options::Options;
-use crate::common;
 use crate::sema::session::{FileLoader, Session};
 use crate::{ir, library, lir, parser, sema};
 
@@ -153,7 +153,10 @@ impl Emit {
 
     /// Where the output `name` was asked to go, when a path was given.
     fn path(&self, name: &str) -> Option<&Path> {
-        self.paths.iter().find(|(n, _)| n == name).map(|(_, p)| p.as_path())
+        self.paths
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, p)| p.as_path())
     }
 
     fn parse(list: &str) -> Result<Emit, String> {
@@ -163,7 +166,10 @@ impl Emit {
             // writes. A link, a library and metadata already follow `-o`.
             let name = match item.split_once('=') {
                 Some((name, path)) => {
-                    if !matches!(name, "ast" | "ir" | "mono" | "lir" | "obj" | "asm" | "backend-ir") {
+                    if !matches!(
+                        name,
+                        "ast" | "ir" | "mono" | "lir" | "obj" | "asm" | "backend-ir"
+                    ) {
                         return Err(format!("`--emit {name}` takes no path; it follows `-o`"));
                     }
                     e.paths.push((name.to_string(), PathBuf::from(path)));
@@ -330,8 +336,7 @@ impl Invocation {
                 if let Some(v) = arg.strip_prefix(&format!("{flag}=")) {
                     return Ok(v.to_string());
                 }
-                args.next()
-                    .ok_or_else(|| format!("`{flag}` wants a value"))
+                args.next().ok_or_else(|| format!("`{flag}` wants a value"))
             };
             match arg.as_str() {
                 "-h" | "--help" => {
@@ -359,8 +364,16 @@ impl Invocation {
                         .ok_or_else(|| format!("`--package {spec}` is not a `name=path` pair"))?;
                     packages.push((name.to_string(), root.to_string()));
                 }
-                a if a == "--extern" || a.starts_with("--extern=") || a == "--indirect" || a.starts_with("--indirect=") => {
-                    let flag = if a.starts_with("--extern") { "--extern" } else { "--indirect" };
+                a if a == "--extern"
+                    || a.starts_with("--extern=")
+                    || a == "--indirect"
+                    || a.starts_with("--indirect=") =>
+                {
+                    let flag = if a.starts_with("--extern") {
+                        "--extern"
+                    } else {
+                        "--indirect"
+                    };
                     let spec = value(flag, &mut args)?;
                     let (name, lib) = spec
                         .split_once('=')
@@ -417,7 +430,9 @@ impl Invocation {
                         "print" if val == "options" => print_options = true,
                         "print" if val == "packages" => print_packages = true,
                         "print" => {
-                            return Err(format!("`print` takes `options` or `packages`, not `{val}`"));
+                            return Err(format!(
+                                "`print` takes `options` or `packages`, not `{val}`"
+                            ));
                         }
                         "backend" => backend_name = Some(val.to_string()),
                         "linker" => link_options.linker = val.to_string(),
@@ -542,7 +557,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
     }
 
     if inv.up_to_date {
-        let out = out.ok_or("`--up-to-date` asks about the library at `-o`, and there is no `-o`")?;
+        let out =
+            out.ok_or("`--up-to-date` asks about the library at `-o`, and there is no `-o`")?;
         let mut probe = Session::new();
         probe.options = options;
         return Ok(if library_is_fresh(&probe, &out, externs) {
@@ -581,7 +597,9 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
     }
 
     // The lowered IR of the entry file.
-    if emit.ir && let Some(program) = session.ir.get(&file) {
+    if emit.ir
+        && let Some(program) = session.ir.get(&file)
+    {
         let text = ir::pretty::program_to_string(&session.defs, &session.ir_meta, program);
         dump(&emit, "ir", "\n===< IR >===\n", &text)?;
     }
@@ -665,7 +683,14 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
                 // assembly of anything — a real merge is what `ld -r` does, and
                 // it does it to objects.
                 kind => {
-                    write_units(backend.as_mut(), &program, *kind, out.as_deref(), &path, exact)?;
+                    write_units(
+                        backend.as_mut(),
+                        &program,
+                        *kind,
+                        out.as_deref(),
+                        &path,
+                        exact,
+                    )?;
                 }
             }
         }
@@ -722,7 +747,12 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
 /// The line closing a run that reported something: how many errors and warnings,
 /// and — when there were errors — that nothing was built.
 fn summary(diagnostics: &[Diagnostic]) -> Option<Diagnostic> {
-    let count = |severity| diagnostics.iter().filter(|d| d.severity == severity).count();
+    let count = |severity| {
+        diagnostics
+            .iter()
+            .filter(|d| d.severity == severity)
+            .count()
+    };
     let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));
     Some(match (errors, warnings) {
@@ -904,12 +934,14 @@ fn link_program(
         backend,
         program,
         OutputKind::Object,
-        Some(&scratch.dir.join(
-            program_path
-                .file_name()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("out")),
-        )),
+        Some(
+            &scratch.dir.join(
+                program_path
+                    .file_name()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("out")),
+            ),
+        ),
         entry,
         // With the extension, since the objects may be kept beside others.
         false,
@@ -974,7 +1006,10 @@ fn library_is_fresh(session: &Session, out: &Path, externs: &[(String, PathBuf, 
         settings: &settings,
         package: &header.name,
         files: contents.iter().map(|(n, b)| (*n, b.as_slice())).collect(),
-        libraries: libraries.iter().map(|(n, f, i)| (n.as_str(), *f, *i)).collect(),
+        libraries: libraries
+            .iter()
+            .map(|(n, f, i)| (n.as_str(), *f, *i))
+            .collect(),
     });
     fingerprint == header.fingerprint
 }
@@ -984,12 +1019,15 @@ fn library_is_fresh(session: &Session, out: &Path, externs: &[(String, PathBuf, 
 ///
 /// The order on the command line is not that order and does not have to be: the
 /// headers say which packages each one names, and that is sorted here.
-fn load_libraries(session: &mut Session, externs: &[(String, PathBuf, bool)]) -> Result<(), String> {
+fn load_libraries(
+    session: &mut Session,
+    externs: &[(String, PathBuf, bool)],
+) -> Result<(), String> {
     let mut pending = Vec::with_capacity(externs.len());
     for (name, path, importable) in externs {
         let bytes = library::archive::metadata_of(path)?;
-        let (header, _) = library::read::header(&bytes)
-            .map_err(|e| format!("`{}`: {e}", path.display()))?;
+        let (header, _) =
+            library::read::header(&bytes).map_err(|e| format!("`{}`: {e}", path.display()))?;
         if &header.name != name {
             return Err(format!(
                 "`{}` is the library `{}`, not `{name}`",
@@ -1014,7 +1052,11 @@ fn load_libraries(session: &mut Session, externs: &[(String, PathBuf, bool)]) ->
             return Err(format!(
                 "`{}` was compiled against {}, which {} not given (with --extern or --indirect)",
                 path.display(),
-                missing.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", "),
+                missing
+                    .iter()
+                    .map(|p| format!("`{p}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 if missing.len() == 1 { "was" } else { "were" }
             ));
         };
@@ -1081,7 +1123,8 @@ fn dump(emit: &Emit, name: &str, header: &str, text: &str) -> Result<(), String>
     match emit.path(name) {
         Some(path) => {
             if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-                std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
             }
             std::fs::write(path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))
         }
@@ -1105,9 +1148,15 @@ impl Scratch {
             Some(dir) => {
                 std::fs::create_dir_all(dir)
                     .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-                Ok(Scratch { dir: dir.to_path_buf(), keep: true })
+                Ok(Scratch {
+                    dir: dir.to_path_buf(),
+                    keep: true,
+                })
             }
-            None => Ok(Scratch { dir: temp_dir(entry)?, keep: false }),
+            None => Ok(Scratch {
+                dir: temp_dir(entry)?,
+                keep: false,
+            }),
         }
     }
 
@@ -1132,8 +1181,7 @@ fn temp_dir(entry: &str) -> Result<PathBuf, String> {
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
     let dir = std::env::temp_dir().join(format!("nestc-{}-{safe}", std::process::id()));
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     Ok(dir)
 }
 

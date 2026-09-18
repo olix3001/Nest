@@ -441,7 +441,10 @@ fn test_return_ok(defs: &DefTable, ret: &Ty) -> bool {
     match ret {
         Ty::Void | Ty::Never | Ty::Error => true,
         Ty::Nominal { def, args } => {
-            defs.get(*def).lang.as_ref().is_some_and(|l| l.as_str() == "result")
+            defs.get(*def)
+                .lang
+                .as_ref()
+                .is_some_and(|l| l.as_str() == "result")
                 && matches!(args.first(), Some(Ty::Void))
         }
         _ => false,
@@ -481,10 +484,12 @@ fn visit_named(defs: &DefTable, meta: &Meta, e: &crate::ir::Expr, out: &mut Vec<
         if let Some(span) = meta.span(e.id) {
             d = d.with_primary(span, "");
         }
-        out.push(d.with_note(
-            "tests are run by `twig test`, which is the only place a failing one is reported"
-                .to_string(),
-        ));
+        out.push(
+            d.with_note(
+                "tests are run by `twig test`, which is the only place a failing one is reported"
+                    .to_string(),
+            ),
+        );
     }
     super::children_of(e, &mut |c| visit_named(defs, meta, c, out));
 }

@@ -43,39 +43,102 @@ use crate::analysis;
 use crate::ide::{self, contains, target};
 
 const KEYWORDS: &[&str] = &[
-    "func", "extern", "struct", "enum", "trait", "impl", "namespace", "distinct", "let", "const",
-    "mut", "return", "defer", "match", "import", "if", "else", "for", "in", "while", "loop", "break",
-    "continue", "dyn", "true", "false",
+    "func",
+    "extern",
+    "struct",
+    "enum",
+    "trait",
+    "impl",
+    "namespace",
+    "distinct",
+    "let",
+    "const",
+    "mut",
+    "return",
+    "defer",
+    "match",
+    "import",
+    "if",
+    "else",
+    "for",
+    "in",
+    "while",
+    "loop",
+    "break",
+    "continue",
+    "dyn",
+    "true",
+    "false",
 ];
 
 /// What could be written at `offset` of `text`, the document as the editor has
 /// it, asked of `s`, which analyzed it with `placeholder` written at `offset`.
-pub fn complete(s: &Session, file: FileId, text: &str, offset: usize, placeholder: &str) -> Vec<CompletionItem> {
+pub fn complete(
+    s: &Session,
+    file: FileId,
+    text: &str,
+    offset: usize,
+    placeholder: &str,
+) -> Vec<CompletionItem> {
     let Some(ast) = s.asts.get(&file) else {
         return Vec::new();
     };
     // What follows the placeholder is where it would be without it.
-    let edits = Edits(vec![Edit { at: offset, removed: placeholder.len(), inserted: 0 }]);
-    let cx = Cx { s, file, ast, text, cursor: offset, offset, edits: &edits, placeholder, visible: visible(s, file) };
+    let edits = Edits(vec![Edit {
+        at: offset,
+        removed: placeholder.len(),
+        inserted: 0,
+    }]);
+    let cx = Cx {
+        s,
+        file,
+        ast,
+        text,
+        cursor: offset,
+        offset,
+        edits: &edits,
+        placeholder,
+        visible: visible(s, file),
+    };
     cx.run()
 }
 
 /// What could be written at `cursor` of `text`, the document as the editor has
 /// it, answered from `s`, which analyzed the text `edits` made it into `text`.
 /// `None` when the edits touch what is completed.
-pub fn from_analysis(s: &Session, file: FileId, text: &str, cursor: usize, edits: &Edits) -> Option<Vec<CompletionItem>> {
+pub fn from_analysis(
+    s: &Session,
+    file: FileId,
+    text: &str,
+    cursor: usize,
+    edits: &Edits,
+) -> Option<Vec<CompletionItem>> {
     let ast = s.asts.get(&file)?;
     let analyzed = ide::source(s, file)?;
     let cursor = text.floor_char_boundary(cursor.min(text.len()));
     let before = &text[..cursor];
-    let start = before.trim_end_matches(|c: char| c == '_' || c.is_alphanumeric()).len();
+    let start = before
+        .trim_end_matches(|c: char| c == '_' || c.is_alphanumeric())
+        .len();
     // After a `.`, what it follows ends where the text before it does, which may
     // be on the line above.
-    let base = before[..start].strip_suffix('.').map(|rest| rest.trim_end().len());
+    let base = before[..start]
+        .strip_suffix('.')
+        .map(|rest| rest.trim_end().len());
     let from = base.unwrap_or(start);
     let offset = edits.back(from)?;
 
-    let cx = Cx { s, file, ast, text, cursor, offset, edits, placeholder: "", visible: visible(s, file) };
+    let cx = Cx {
+        s,
+        file,
+        ast,
+        text,
+        cursor,
+        offset,
+        edits,
+        placeholder: "",
+        visible: visible(s, file),
+    };
     let Some(end) = base else {
         return Some(cx.scope());
     };
@@ -84,16 +147,17 @@ pub fn from_analysis(s: &Session, file: FileId, text: &str, cursor: usize, edits
     let same = |start: usize| {
         let len = offset - start + usize::from(start > 0);
         let old = analyzed.as_bytes().get(offset - len..offset);
-        old.is_some() && old == end.checked_sub(len).and_then(|at| text.as_bytes().get(at..end))
+        old.is_some()
+            && old
+                == end
+                    .checked_sub(len)
+                    .and_then(|at| text.as_bytes().get(at..end))
     };
     let mut nodes: Vec<NodeId> = ast
         .ids()
         .filter(|&id| {
             let n = ast.node(id);
-            n.file == file
-                && n.span.start < offset
-                && n.span.end == offset
-                && same(n.span.start)
+            n.file == file && n.span.start < offset && n.span.end == offset && same(n.span.start)
         })
         .collect();
     nodes.sort_by_key(|&id| {
@@ -124,11 +188,21 @@ impl Edit {
             at -= 1;
         }
         let most = a.len().min(b.len()) - at;
-        let mut same = a.iter().rev().zip(b.iter().rev()).take(most).take_while(|(x, y)| x == y).count();
+        let mut same = a
+            .iter()
+            .rev()
+            .zip(b.iter().rev())
+            .take(most)
+            .take_while(|(x, y)| x == y)
+            .count();
         while !old.is_char_boundary(a.len() - same) || !new.is_char_boundary(b.len() - same) {
             same -= 1;
         }
-        Edit { at, removed: a.len() - same - at, inserted: b.len() - same - at }
+        Edit {
+            at,
+            removed: a.len() - same - at,
+            inserted: b.len() - same - at,
+        }
     }
 }
 
@@ -157,7 +231,11 @@ impl Edits {
             if offset <= e.at {
                 continue;
             }
-            offset = if offset < e.at + e.removed { e.at + e.inserted } else { offset + e.inserted - e.removed };
+            offset = if offset < e.at + e.removed {
+                e.at + e.inserted
+            } else {
+                offset + e.inserted - e.removed
+            };
         }
         offset
     }
@@ -201,8 +279,12 @@ impl Via {
     /// namespace `name` itself.
     fn line(&self, name: &str, namespace: bool) -> String {
         match (self, namespace) {
-            (Via::Package(segments), true) => format!("{name} :: import <{}/{name}>", segments.join("/")),
-            (Via::Package(segments), false) => format!("{{ {name} }} :: import <{}>", segments.join("/")),
+            (Via::Package(segments), true) => {
+                format!("{name} :: import <{}/{name}>", segments.join("/"))
+            }
+            (Via::Package(segments), false) => {
+                format!("{{ {name} }} :: import <{}>", segments.join("/"))
+            }
             (Via::File(path), _) => format!("{{ {name} }} :: import \"{path}\""),
         }
     }
@@ -254,11 +336,15 @@ impl Cx<'_> {
                 NodeKind::FieldAccess { base, name } if ends(name.as_str()) => {
                     return self.after_dot(base).unwrap_or_default();
                 }
-                NodeKind::Path { segments } if segments.last().is_some_and(|l| ends(l.as_str())) => {
+                NodeKind::Path { segments }
+                    if segments.last().is_some_and(|l| ends(l.as_str())) =>
+                {
                     if segments.len() == 1 {
                         return self.scope();
                     }
-                    let before = ast.meta::<PathRes>(id).and_then(|p| p.0.get(segments.len() - 2).cloned());
+                    let before = ast
+                        .meta::<PathRes>(id)
+                        .and_then(|p| p.0.get(segments.len() - 2).cloned());
                     return match before {
                         Some(Resolution::Def(d)) => self.plain(members(self.s, target(self.s, d))),
                         _ => Vec::new(),
@@ -301,7 +387,9 @@ impl Cx<'_> {
                         return ast.meta::<Ty>(*scrutinee);
                     }
                 }
-                NodeKind::IfMatch { pattern, value, .. } if *pattern == pat => return ast.meta::<Ty>(*value),
+                NodeKind::IfMatch { pattern, value, .. } if *pattern == pat => {
+                    return ast.meta::<Ty>(*value);
+                }
                 _ => {}
             }
         }
@@ -318,7 +406,11 @@ impl Cx<'_> {
             return Vec::new();
         };
         let d = self.s.defs.get(def);
-        let variants = d.ns.members.values().copied().filter(|&m| self.s.defs.get(m).kind == DefKind::Variant);
+        let variants =
+            d.ns.members
+                .values()
+                .copied()
+                .filter(|&m| self.s.defs.get(m).kind == DefKind::Variant);
         self.plain(variants)
     }
 
@@ -334,12 +426,22 @@ impl Cx<'_> {
         loop {
             if let Ty::Nominal { def, .. } = &ty {
                 let fields = s.defs.get(*def).ns.members.values().copied();
-                found.extend(fields.filter(|&m| s.defs.get(m).kind == DefKind::Field).map(|m| (m, None)));
+                found.extend(
+                    fields
+                        .filter(|&m| s.defs.get(m).kind == DefKind::Field)
+                        .map(|m| (m, None)),
+                );
                 // A generic parameter has what its bounds declare.
                 if s.defs.get(*def).kind == DefKind::TypeParam {
                     for t in bounds(s, *def) {
                         let declared = s.defs.get(t).ns.members.values().copied();
-                        found.extend(declared.filter(|&m| s.defs.get(m).kind == DefKind::Func && takes_self(s, m)).map(|m| (m, Some(t))));
+                        found.extend(
+                            declared
+                                .filter(|&m| {
+                                    s.defs.get(m).kind == DefKind::Func && takes_self(s, m)
+                                })
+                                .map(|m| (m, Some(t))),
+                        );
                     }
                 }
             }
@@ -372,14 +474,22 @@ impl Cx<'_> {
             if !seen.insert(s.defs.get(m).name.to_string()) {
                 continue;
             }
-            let import = trait_def.filter(|t| !self.visible.contains(t)).and_then(|t| {
-                let (via, name) = importable.get(&t)?;
-                Some((self.import_edit(&via.line(name, false)), via.describe() + "." + name))
-            });
+            let import = trait_def
+                .filter(|t| !self.visible.contains(t))
+                .and_then(|t| {
+                    let (via, name) = importable.get(&t)?;
+                    Some((
+                        self.import_edit(&via.line(name, false)),
+                        via.describe() + "." + name,
+                    ))
+                });
             let mut it = item(s, m);
             if let Some((edit, from)) = import {
                 it.additional_text_edits = Some(vec![edit]);
-                it.label_details = Some(CompletionItemLabelDetails { detail: None, description: Some(from) });
+                it.label_details = Some(CompletionItemLabelDetails {
+                    detail: None,
+                    description: Some(from),
+                });
             }
             out.push(it);
         }
@@ -391,7 +501,10 @@ impl Cx<'_> {
         match ty {
             Ty::ComptimeInt => Ty::int(32, true),
             Ty::ComptimeStr => match self.s.lang_items.get("str") {
-                Some(def) => Ty::Nominal { def, args: Vec::new() },
+                Some(def) => Ty::Nominal {
+                    def,
+                    args: Vec::new(),
+                },
                 None => ty,
             },
             other => other,
@@ -410,7 +523,9 @@ impl Cx<'_> {
             return false;
         }
         imp.generics.iter().all(|g| match bound.get(g) {
-            Some(arg) => bounds(s, *g).into_iter().all(|t| self.implements(arg, t, depth + 1)),
+            Some(arg) => bounds(s, *g)
+                .into_iter()
+                .all(|t| self.implements(arg, t, depth + 1)),
             None => true,
         })
     }
@@ -427,15 +542,22 @@ impl Cx<'_> {
                 map.entry(*def).or_insert_with(|| ty.clone());
                 true
             }
-            (Ty::Nominal { def: a, args: x }, Ty::Nominal { def: b, args: y }) => a == b && all(x, y, map),
+            (Ty::Nominal { def: a, args: x }, Ty::Nominal { def: b, args: y }) => {
+                a == b && all(x, y, map)
+            }
             (Ty::Int { signed: a, .. }, Ty::Int { signed: b, .. }) => a == b,
             (Ty::Float(a), Ty::Float(b)) => a == b,
             (Ty::Bool, Ty::Bool) | (Ty::Char, Ty::Char) | (Ty::Void, Ty::Void) => true,
-            (Ty::Slice { inner: a, .. }, Ty::Slice { inner: b, .. } | Ty::Array { inner: b, .. })
+            (
+                Ty::Slice { inner: a, .. },
+                Ty::Slice { inner: b, .. } | Ty::Array { inner: b, .. },
+            )
             | (Ty::Array { inner: a, .. }, Ty::Array { inner: b, .. })
             | (Ty::Ptr { inner: a, .. }, Ty::Ptr { inner: b, .. }) => self.bind(a, b, map),
             (Ty::Tuple(a), Ty::Tuple(b)) => all(a, b, map),
-            (Ty::Func { params: a, ret: r }, Ty::Func { params: b, ret: q }) => all(a, b, map) && self.bind(r, q, map),
+            (Ty::Func { params: a, ret: r }, Ty::Func { params: b, ret: q }) => {
+                all(a, b, map) && self.bind(r, q, map)
+            }
             (Ty::Dyn(a), Ty::Dyn(b)) => a == b,
             _ => false,
         }
@@ -459,7 +581,12 @@ impl Cx<'_> {
         {
             return true;
         }
-        let builtin = s.defs.get(trait_def).lang.as_ref().and_then(|l| builtins::row_for_lang(l.as_str()));
+        let builtin = s
+            .defs
+            .get(trait_def)
+            .lang
+            .as_ref()
+            .and_then(|l| builtins::row_for_lang(l.as_str()));
         if builtin.is_some_and(|row| row.applies.matches(&ty)) {
             return true;
         }
@@ -467,7 +594,8 @@ impl Cx<'_> {
             .any(|i| s.impls.impls[i].trait_def == Some(trait_def) && self.applies(i, &ty, depth));
         direct
             || match &ty {
-                Ty::Nominal { def, .. } => representation(s, *def).is_some_and(|r| self.implements(&r, trait_def, depth + 1)),
+                Ty::Nominal { def, .. } => representation(s, *def)
+                    .is_some_and(|r| self.implements(&r, trait_def, depth + 1)),
                 _ => false,
             }
     }
@@ -497,13 +625,19 @@ impl Cx<'_> {
                 .map(|(def, (via, name))| (def, via, name))
                 .collect();
             // Nearest the surface first, and alphabetical for the same depth.
-            offers.sort_by(|a, b| (a.1.len(), &a.2, a.1.describe()).cmp(&(b.1.len(), &b.2, b.1.describe())));
+            offers.sort_by(|a, b| {
+                (a.1.len(), &a.2, a.1.describe()).cmp(&(b.1.len(), &b.2, b.1.describe()))
+            });
             for (def, via, name) in offers {
                 let namespace = s.defs.get(def).kind == DefKind::Namespace;
                 let mut it = item(s, def);
                 it.label = name.clone();
-                it.additional_text_edits = Some(vec![self.import_edit(&via.line(&name, namespace))]);
-                it.label_details = Some(CompletionItemLabelDetails { detail: None, description: Some(via.describe()) });
+                it.additional_text_edits =
+                    Some(vec![self.import_edit(&via.line(&name, namespace))]);
+                it.label_details = Some(CompletionItemLabelDetails {
+                    detail: None,
+                    description: Some(via.describe()),
+                });
                 out.push(it);
             }
         }
@@ -536,7 +670,9 @@ impl Cx<'_> {
             .ids()
             .filter(|&id| {
                 let n = ast.node(id);
-                matches!(n.kind, NodeKind::FuncExpr { .. }) && n.span.start <= offset && offset <= n.span.end
+                matches!(n.kind, NodeKind::FuncExpr { .. })
+                    && n.span.start <= offset
+                    && offset <= n.span.end
             })
             .min_by_key(|&id| {
                 let span = ast.node(id).span;
@@ -549,9 +685,17 @@ impl Cx<'_> {
         let mut locals: Vec<&Def> = s
             .defs
             .iter()
-            .filter(|d| matches!(d.kind, DefKind::Local | DefKind::Param | DefKind::TypeParam | DefKind::ConstParam))
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    DefKind::Local | DefKind::Param | DefKind::TypeParam | DefKind::ConstParam
+                )
+            })
             .filter(|d| d.file == Some(self.file))
-            .filter(|d| d.span.is_some_and(|sp| function.start <= sp.start && sp.start < offset))
+            .filter(|d| {
+                d.span
+                    .is_some_and(|sp| function.start <= sp.start && sp.start < offset)
+            })
             .filter(|d| in_scope(ast, d, offset))
             .collect();
         locals.sort_by_key(|d| std::cmp::Reverse(d.span.map_or(0, |sp| sp.start)));
@@ -578,7 +722,9 @@ impl Cx<'_> {
             .ids()
             .filter(|&id| ast.node(id).file == self.file)
             .filter_map(|id| match ast.node(id).kind {
-                NodeKind::ConstBind { rhs, .. } if matches!(ast.node(rhs).kind, NodeKind::Import { .. }) => {
+                NodeKind::ConstBind { rhs, .. }
+                    if matches!(ast.node(rhs).kind, NodeKind::Import { .. }) =>
+                {
                     Some(ast.node(id).span.end)
                 }
                 _ => None,
@@ -587,7 +733,9 @@ impl Cx<'_> {
         // Offsets into the analyzed text, which is not quite the editor's.
         let analyzed = ide::source(self.s, self.file).unwrap_or_default();
         let at = match last {
-            Some(end) => analyzed[end..].find('\n').map_or(analyzed.len(), |i| end + i + 1),
+            Some(end) => analyzed[end..]
+                .find('\n')
+                .map_or(analyzed.len(), |i| end + i + 1),
             None => {
                 let mut at = 0;
                 for l in analyzed.split_inclusive('\n') {
@@ -602,9 +750,16 @@ impl Cx<'_> {
         // Into the editor's text, which the analyzed one may reach past: the
         // edits since can have made it shorter.
         let at = self.edits.forward(at).min(self.text.len());
-        let at = (0..=at).rev().find(|&i| self.text.is_char_boundary(i)).unwrap_or(0);
+        let at = (0..=at)
+            .rev()
+            .find(|&i| self.text.is_char_boundary(i))
+            .unwrap_or(0);
         let position = analysis::position(self.text, at);
-        let prefix = if at > 0 && !self.text[..at].ends_with('\n') { "\n" } else { "" };
+        let prefix = if at > 0 && !self.text[..at].ends_with('\n') {
+            "\n"
+        } else {
+            ""
+        };
         TextEdit::new(Range::new(position, position), format!("{prefix}{line}\n"))
     }
 }
@@ -617,7 +772,9 @@ fn public(s: &Session, def: DefId) -> bool {
 
 /// Whether `name` is one a program wrote, rather than one the compiler made.
 fn written(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c == '_' || c.is_alphabetic())
+    name.chars()
+        .next()
+        .is_some_and(|c| c == '_' || c.is_alphabetic())
 }
 
 fn starts_with(name: &str, typed: &str) -> bool {
@@ -633,14 +790,22 @@ fn bounds(s: &Session, param: DefId) -> Vec<DefId> {
     let Some(ast) = s.asts.get(&file) else {
         return Vec::new();
     };
-    let NodeKind::GenericTypeParam { constraint: Some(constraint), .. } = ast.node(node).kind else {
+    let NodeKind::GenericTypeParam {
+        constraint: Some(constraint),
+        ..
+    } = ast.node(node).kind
+    else {
         return Vec::new();
     };
     let nodes = match &ast.node(constraint).kind {
         NodeKind::Bounds { bounds } => bounds.clone(),
         _ => vec![constraint],
     };
-    nodes.into_iter().filter_map(|n| trait_of(ast, n)).map(|t| target(s, t)).collect()
+    nodes
+        .into_iter()
+        .filter_map(|n| trait_of(ast, n))
+        .map(|t| target(s, t))
+        .collect()
 }
 
 /// The trait a bound's type node names: `Eq`, `Add.<f64>`, `core.cmp.Eq`.
@@ -686,7 +851,9 @@ fn takes_self(s: &Session, def: DefId) -> bool {
     let NodeKind::FuncExpr { params, .. } = &ast.node(rhs).kind else {
         return true;
     };
-    params.first().is_some_and(|&p| matches!(&ast.node(p).kind, NodeKind::Param { name, .. } if name.as_str() == "self"))
+    params.first().is_some_and(
+        |&p| matches!(&ast.node(p).kind, NodeKind::Param { name, .. } if name.as_str() == "self"),
+    )
 }
 
 /// The members of a namespace or a type that a `.` reaches: every member of a
@@ -696,14 +863,19 @@ fn takes_self(s: &Session, def: DefId) -> bool {
 fn members(s: &Session, def: DefId) -> Vec<DefId> {
     let d = s.defs.get(def);
     let namespace = d.kind == DefKind::Namespace;
-    let mut out: Vec<DefId> = d
-        .ns
-        .members
-        .values()
-        .copied()
-        .filter(|&m| !namespace || public(s, m))
-        .collect();
-    out.extend(s.impls.impls.iter().filter(|i| i.self_head == Some(def)).flat_map(|i| i.members.values().copied()));
+    let mut out: Vec<DefId> =
+        d.ns.members
+            .values()
+            .copied()
+            .filter(|&m| !namespace || public(s, m))
+            .collect();
+    out.extend(
+        s.impls
+            .impls
+            .iter()
+            .filter(|i| i.self_head == Some(def))
+            .flat_map(|i| i.members.values().copied()),
+    );
     out
 }
 
@@ -742,7 +914,11 @@ fn importable(s: &Session, file: FileId) -> HashMap<DefId, (Via, String)> {
             roots.push((lib.name.clone(), meta.ns));
         }
     }
-    let mut from_source: Vec<(&FileId, &String)> = s.pkg_of.iter().filter(|(f, _)| !s.is_foreign_file(**f)).collect();
+    let mut from_source: Vec<(&FileId, &String)> = s
+        .pkg_of
+        .iter()
+        .filter(|(f, _)| !s.is_foreign_file(**f))
+        .collect();
     from_source.sort();
     for (f, name) in from_source {
         if let Some(meta) = s.files.get(f)
@@ -763,7 +939,8 @@ fn importable(s: &Session, file: FileId) -> HashMap<DefId, (Via, String)> {
         let mut own = false;
         while let Some((ns, segments)) = queue.pop_front() {
             own |= Some(ns) == here;
-            let mut members: Vec<(&nestc::common::symbol::Symbol, &DefId)> = s.defs.get(ns).ns.members.iter().collect();
+            let mut members: Vec<(&nestc::common::symbol::Symbol, &DefId)> =
+                s.defs.get(ns).ns.members.iter().collect();
             members.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
             for (member, &id) in members {
                 if !public(s, id) || !written(member.as_str()) {
@@ -798,8 +975,12 @@ fn importable(s: &Session, file: FileId) -> HashMap<DefId, (Via, String)> {
         if f == file || s.is_foreign_file(f) || reached.contains(&meta.ns) {
             continue;
         }
-        let (Some(here_path), Some(there)) = (&here_path, s.sources.file(f)) else { continue };
-        let Some(path) = relative(here_path, Path::new(&there.name)) else { continue };
+        let (Some(here_path), Some(there)) = (&here_path, s.sources.file(f)) else {
+            continue;
+        };
+        let Some(path) = relative(here_path, Path::new(&there.name)) else {
+            continue;
+        };
         for (member, &id) in &s.defs.get(meta.ns).ns.members {
             let t = target(s, id);
             if !public(s, id)
@@ -808,7 +989,8 @@ fn importable(s: &Session, file: FileId) -> HashMap<DefId, (Via, String)> {
             {
                 continue;
             }
-            out.entry(t).or_insert_with(|| (Via::File(path.clone()), member.to_string()));
+            out.entry(t)
+                .or_insert_with(|| (Via::File(path.clone()), member.to_string()));
         }
     }
     out
@@ -823,7 +1005,11 @@ fn relative(from: &Path, to: &Path) -> Option<String> {
         return None;
     }
     let mut parts: Vec<String> = vec!["..".to_string(); base.len() - common];
-    parts.extend(target[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    parts.extend(
+        target[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
     Some(parts.join("/"))
 }
 
@@ -837,7 +1023,9 @@ fn in_scope(ast: &Ast, d: &Def, offset: usize) -> bool {
     for id in ast.ids() {
         let n = ast.node(id);
         match &n.kind {
-            NodeKind::LocalDecl { pattern, .. } if *pattern == node && offset < n.span.end => return false,
+            NodeKind::LocalDecl { pattern, .. } if *pattern == node && offset < n.span.end => {
+                return false;
+            }
             NodeKind::Block { .. } if n.span.start <= span.start && span.end <= n.span.end => {
                 if block.is_none_or(|b| n.span.end - n.span.start < b.end - b.start) {
                     block = Some(n.span);
@@ -871,8 +1059,12 @@ fn item(s: &Session, def: DefId) -> CompletionItem {
         label: s.defs.get(def).name.to_string(),
         kind: Some(kind),
         detail: declared.lines().next().map(str::to_string),
-        documentation: ide::docs(s, real)
-            .map(|value| Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value })),
+        documentation: ide::docs(s, real).map(|value| {
+            Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value,
+            })
+        }),
         ..Default::default()
     }
 }
@@ -920,7 +1112,9 @@ main :: func () -> i32 {
     /// `‸` where the cursor is: what completion at the cursor in the last says
     /// from that one analysis, sorted.
     fn stale(after: &[&str]) -> Option<Vec<String>> {
-        let path = std::env::temp_dir().join("nest-lsp-stale").join("main.nest");
+        let path = std::env::temp_dir()
+            .join("nest-lsp-stale")
+            .join("main.nest");
         let buffers = Arc::new(HashMap::from([(path.clone(), PROGRAM.to_string())]));
         let o = analysis::analyze(&[path.display().to_string()], buffers).unwrap();
         assert!(o.diagnostics.is_empty(), "{:#?}", o.diagnostics);
@@ -928,7 +1122,12 @@ main :: func () -> i32 {
 
         let mut texts = vec![PROGRAM.to_string()];
         texts.extend(after.iter().map(|t| t.replace('‸', "")));
-        let edits = Edits(texts.windows(2).map(|w| Edit::between(&w[0], &w[1])).collect());
+        let edits = Edits(
+            texts
+                .windows(2)
+                .map(|w| Edit::between(&w[0], &w[1]))
+                .collect(),
+        );
         let cursor = after.last()?.find('‸')?;
         let items = from_analysis(&o.session, file, texts.last()?, cursor, &edits)?;
         let mut labels: Vec<String> = items.into_iter().map(|i| i.label).collect();
@@ -955,7 +1154,10 @@ main :: func () -> i32 {
         let steps: Vec<&str> = steps.iter().map(String::as_str).collect();
         let labels = stale(&steps);
         has(&labels, &["decode"]);
-        assert!(!labels.unwrap().contains(&"sum".to_string()), "a `T` is not a `Point`");
+        assert!(
+            !labels.unwrap().contains(&"sum".to_string()),
+            "a `T` is not a `Point`"
+        );
     }
 
     /// Lines added and removed elsewhere move the cursor, not what it completes.
@@ -974,12 +1176,18 @@ main :: func () -> i32 {
     /// A `.` at the start of a line continues the expression on the line above.
     #[test]
     fn a_dot_on_the_next_line_completes_the_line_above() {
-        has(&stale(&[&PROGRAM.replace("    .sum())", "    .‸)")]), &["x", "sum"]);
+        has(
+            &stale(&[&PROGRAM.replace("    .sum())", "    .‸)")]),
+            &["x", "sum"],
+        );
     }
 
     #[test]
     fn a_namespace_offers_its_public_members() {
-        has(&stale(&[&PROGRAM.replace("geo.origin()", "geo.‸()")]), &["origin"]);
+        has(
+            &stale(&[&PROGRAM.replace("geo.origin()", "geo.‸()")]),
+            &["origin"],
+        );
     }
 
     /// A word typed where a name goes: what is in scope there.
@@ -987,7 +1195,10 @@ main :: func () -> i32 {
     fn a_name_is_offered_from_the_analysis() {
         let labels = stale(&[&PROGRAM.replace("  return add(q, p", "  ad‸\n  return add(q, p")]);
         has(&labels, &["add", "p", "q", "Point", "main", "return"]);
-        assert!(!labels.unwrap().contains(&"a".to_string()), "`a` is `add`'s parameter");
+        assert!(
+            !labels.unwrap().contains(&"a".to_string()),
+            "`a` is `add`'s parameter"
+        );
     }
 
     /// When what is completed was itself edited, or a `.` has nothing before it,
@@ -995,21 +1206,54 @@ main :: func () -> i32 {
     #[test]
     fn what_the_analysis_cannot_say_is_left_to_analyzing() {
         // `p` became `pp`, which the analysis never saw.
-        assert_eq!(stale(&[&PROGRAM.replace("let q: i32 := p.x", "let q: i32 := pp.‸")]), None);
+        assert_eq!(
+            stale(&[&PROGRAM.replace("let q: i32 := p.x", "let q: i32 := pp.‸")]),
+            None
+        );
         // A variant, whose enum is what the context expects.
-        assert_eq!(stale(&[&PROGRAM.replace("let q: i32 := p.x", "let c: Color := .‸")]), None);
+        assert_eq!(
+            stale(&[&PROGRAM.replace("let q: i32 := p.x", "let c: Color := .‸")]),
+            None
+        );
         // A name that only ends the way one the analysis had does.
         let longer = PROGRAM.replace("return add(q, p", "return add(q, sop");
-        assert_eq!(stale(&[&longer, &longer.replace("add(q, sop", "add(q, sop.‸")]), None);
+        assert_eq!(
+            stale(&[&longer, &longer.replace("add(q, sop", "add(q, sop.‸")]),
+            None
+        );
     }
 
     #[test]
     fn an_offset_maps_back_through_the_edits_around_it() {
         // `slot.decode(r)` → `slot(r)` → `slot.(r)`, and a line added above.
-        let texts = ["x\nslot.decode(r)", "x\nslot(r)", "x\nslot.(r)", "x\ny\nslot.(r)"];
-        let edits = Edits(texts.windows(2).map(|w| Edit::between(w[0], w[1])).collect());
-        assert_eq!(edits.0[0], Edit { at: 6, removed: 7, inserted: 0 });
-        assert_eq!(edits.0[2], Edit { at: 2, removed: 0, inserted: 2 });
+        let texts = [
+            "x\nslot.decode(r)",
+            "x\nslot(r)",
+            "x\nslot.(r)",
+            "x\ny\nslot.(r)",
+        ];
+        let edits = Edits(
+            texts
+                .windows(2)
+                .map(|w| Edit::between(w[0], w[1]))
+                .collect(),
+        );
+        assert_eq!(
+            edits.0[0],
+            Edit {
+                at: 6,
+                removed: 7,
+                inserted: 0
+            }
+        );
+        assert_eq!(
+            edits.0[2],
+            Edit {
+                at: 2,
+                removed: 0,
+                inserted: 2
+            }
+        );
         // The end of `slot` is where it was; inside the added line is nowhere.
         assert_eq!(edits.back(8), Some(6));
         assert_eq!(edits.back(3), None);
@@ -1024,17 +1268,32 @@ main :: func () -> i32 {
     #[test]
     fn a_relative_path_climbs_to_the_common_directory() {
         let from = Path::new("/w/app/src/main.nest");
-        assert_eq!(relative(from, Path::new("/w/app/src/build.nest")).as_deref(), Some("build.nest"));
-        assert_eq!(relative(from, Path::new("/w/app/src/cli/args.nest")).as_deref(), Some("cli/args.nest"));
-        assert_eq!(relative(from, Path::new("/w/util/lib.nest")).as_deref(), Some("../../util/lib.nest"));
+        assert_eq!(
+            relative(from, Path::new("/w/app/src/build.nest")).as_deref(),
+            Some("build.nest")
+        );
+        assert_eq!(
+            relative(from, Path::new("/w/app/src/cli/args.nest")).as_deref(),
+            Some("cli/args.nest")
+        );
+        assert_eq!(
+            relative(from, Path::new("/w/util/lib.nest")).as_deref(),
+            Some("../../util/lib.nest")
+        );
     }
 
     #[test]
     fn an_import_line_names_what_it_binds() {
         let std = Via::Package(vec!["std".to_string(), "collections".to_string()]);
-        assert_eq!(std.line("HashMap", false), "{ HashMap } :: import <std/collections>");
+        assert_eq!(
+            std.line("HashMap", false),
+            "{ HashMap } :: import <std/collections>"
+        );
         let io = Via::Package(vec!["std".to_string()]);
         assert_eq!(io.line("io", true), "io :: import <std/io>");
-        assert_eq!(Via::File("build.nest".to_string()).line("Profile", false), "{ Profile } :: import \"build.nest\"");
+        assert_eq!(
+            Via::File("build.nest".to_string()).line("Profile", false),
+            "{ Profile } :: import \"build.nest\""
+        );
     }
 }

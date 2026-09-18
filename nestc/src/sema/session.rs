@@ -16,10 +16,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::diagnostic::Diagnostic;
+use crate::common::options::Options;
 use crate::common::source::{FileId, FileSpan, SourceMap};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
-use crate::common::options::Options;
 use crate::parser::ast::Ast;
 use crate::parser::parse::Parser;
 
@@ -39,7 +39,10 @@ pub fn default_core_path() -> String {
     }
     // `nestc/` sits next to `packages/` in the repository, which is where
     // every shipped package (`core`, and later `std`, `c`, ...) lives.
-    format!("{}/../packages/core/package.nest", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../packages/core/package.nest",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 /// Where to find the `std` package when nothing says otherwise.
@@ -57,7 +60,10 @@ pub fn default_std_path() -> String {
     if let Ok(p) = std::env::var("NEST_STD") {
         return p;
     }
-    format!("{}/../packages/std/package.nest", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../packages/std/package.nest",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 /// The fixed-name primitive types the prelude makes available without an import
@@ -681,7 +687,9 @@ impl Session {
     /// wherever either is loaded.
     pub fn module_twin(&self, pkg: &str, file_name: &str) -> Option<String> {
         let dir = self.pkg_dir.get(pkg)?;
-        let rel = file_name.strip_prefix(dir.as_str())?.trim_start_matches('/');
+        let rel = file_name
+            .strip_prefix(dir.as_str())?
+            .trim_start_matches('/');
         let stem = rel.strip_suffix(".nest")?;
         let (parent, last) = match stem.rfind('/') {
             Some(i) => (&stem[..i], &stem[i + 1..]),

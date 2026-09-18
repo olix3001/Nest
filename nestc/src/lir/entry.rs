@@ -41,8 +41,8 @@
 //! `environ` instead, which is the live one.
 
 use super::{
-    Block, BlockId, CastKind, Callee, Constant, FuncId, Function, FunctionAttrs, Global, GlobalId,
-    Linkage, Local, LocalId, Operand, Place, Rvalue, Stmt, StmtKind, Terminator, TermKind, Ty,
+    Block, BlockId, Callee, CastKind, Constant, FuncId, Function, FunctionAttrs, Global, GlobalId,
+    Linkage, Local, LocalId, Operand, Place, Rvalue, Stmt, StmtKind, TermKind, Terminator, Ty,
     Unit,
 };
 use crate::common::options::Target;
@@ -162,7 +162,10 @@ pub fn synthesize(unit: &mut Unit, entry: FuncId, start: Option<FuncId>, target:
             unit,
             locals,
             stmts,
-            Terminator::new(TermKind::Return(Some(Operand::Copy(Place::local(status)))), span),
+            Terminator::new(
+                TermKind::Return(Some(Operand::Copy(Place::local(status)))),
+                span,
+            ),
             span,
         );
         return;
@@ -230,10 +233,7 @@ pub fn synthesize(unit: &mut Unit, entry: FuncId, start: Option<FuncId>, target:
                 },
                 span,
             ));
-            Terminator::new(
-                TermKind::Return(Some(Operand::int(0))),
-                span,
-            )
+            Terminator::new(TermKind::Return(Some(Operand::int(0))), span)
         }
     };
 
@@ -479,7 +479,10 @@ fn test_main(
     // the `.err` it may return into the failure it means (see [`result_thunk`]).
     let mut elements = Vec::new();
     for test in tests {
-        let call = match (unit.funcs[test.func.0 as usize].ret == Ty::Void, test.wrapper) {
+        let call = match (
+            unit.funcs[test.func.0 as usize].ret == Ty::Void,
+            test.wrapper,
+        ) {
             (true, _) => test.func,
             (false, Some(w)) => wrapper_thunk(unit, test.func, w, sources, &test.name),
             (false, None) => result_thunk(unit, test.func, failed, &test.name),
@@ -547,10 +550,7 @@ fn test_main(
         blocks: vec![Block {
             id: BlockId(0),
             stmts,
-            term: Terminator::new(
-                TermKind::Return(Some(Operand::local(status))),
-                span,
-            ),
+            term: Terminator::new(TermKind::Return(Some(Operand::local(status))), span),
             label: Some("run the tests".to_string()),
         }],
         extern_abi: None,
@@ -818,4 +818,3 @@ fn push_local(locals: &mut Vec<Local>, ty: Ty, span: Option<FileSpan>) -> LocalI
     });
     id
 }
-

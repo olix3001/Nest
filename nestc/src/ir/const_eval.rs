@@ -856,10 +856,7 @@ impl<'a> ConstEval<'a> {
             StmtKind::Continue => Ok(Flow::Continue),
             // Unreachable: `block` refuses a block that registers one before
             // running any of its statements.
-            StmtKind::Defer(_) => Err(ConstError::new(
-                s.id,
-                "`defer` has no compile-time meaning",
-            )),
+            StmtKind::Defer(_) => Err(ConstError::new(s.id, "`defer` has no compile-time meaning")),
         }
     }
 

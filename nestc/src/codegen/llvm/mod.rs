@@ -144,12 +144,7 @@ impl Codegen for LlvmBackend {
         self.cpu = Some(options.target_cpu.to_string());
     }
 
-    fn emit_unit(
-        &mut self,
-        unit: &Unit,
-        kind: OutputKind,
-        out: &Path,
-    ) -> Result<(), CodegenError> {
+    fn emit_unit(&mut self, unit: &Unit, kind: OutputKind, out: &Path) -> Result<(), CodegenError> {
         // A `Context` owns every type and value built against it and everything
         // here borrows from it, so it is created per unit rather than held on
         // the backend. That is also what a unit *is* (§11) — an independent
@@ -187,9 +182,9 @@ impl Codegen for LlvmBackend {
         // lowering or in this file, and the message it gives naming the
         // instruction is the whole diagnostic; writing the file first and
         // failing later would throw that away.
-        module
-            .verify()
-            .map_err(|e| CodegenError::Failed(format!("LLVM rejected unit `{}`:\n{e}", unit.name)))?;
+        module.verify().map_err(|e| {
+            CodegenError::Failed(format!("LLVM rejected unit `{}`:\n{e}", unit.name))
+        })?;
 
         // The new pass manager's standard pipeline for the level, after
         // verification so a rejected module is still reported as what was built.
@@ -198,7 +193,9 @@ impl Codegen for LlvmBackend {
             let pipeline = format!("default<O{}>", self.opt_level.name());
             module
                 .run_passes(&pipeline, &machine, PassBuilderOptions::create())
-                .map_err(|e| CodegenError::Failed(format!("optimizing unit `{}`: {e}", unit.name)))?;
+                .map_err(|e| {
+                    CodegenError::Failed(format!("optimizing unit `{}`: {e}", unit.name))
+                })?;
         }
 
         match kind {

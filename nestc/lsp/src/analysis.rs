@@ -55,7 +55,9 @@ pub struct Outcome {
 pub fn analyze(args: &[String], buffers: Buffers) -> Result<Outcome, String> {
     let inv = Invocation::parse(args.iter().cloned())?;
     let entry = inv.path.clone().ok_or("the command line names no file")?;
-    let mut session = inv.session(Box::new(Overlay { buffers: buffers.clone() }))?;
+    let mut session = inv.session(Box::new(Overlay {
+        buffers: buffers.clone(),
+    }))?;
     if let Some(file) = session.load_entry(&entry) {
         sema::analyze(&mut session, file);
     }
@@ -78,18 +80,32 @@ pub fn analyze(args: &[String], buffers: Buffers) -> Result<Outcome, String> {
     }
     let parsed = buffers
         .iter()
-        .filter(|(path, text)| files.contains(*path) && Parser::parse_file(text, FileId(0)).1.is_empty())
+        .filter(|(path, text)| {
+            files.contains(*path) && Parser::parse_file(text, FileId(0)).1.is_empty()
+        })
         .map(|(path, _)| path.clone())
         .collect();
-    Ok(Outcome { files, diagnostics, parsed, session })
+    Ok(Outcome {
+        files,
+        diagnostics,
+        parsed,
+        session,
+    })
 }
 
 /// `diag` as the protocol has it, and the file it belongs in: its primary
 /// label's, and the entry's when it has no label at all.
-fn convert(diag: &Diagnostic, sources: &SourceMap, entry: &Path) -> (PathBuf, lsp_types::Diagnostic) {
+fn convert(
+    diag: &Diagnostic,
+    sources: &SourceMap,
+    entry: &Path,
+) -> (PathBuf, lsp_types::Diagnostic) {
     let located = |span: &FileSpan| {
         let file = sources.file(span.file)?;
-        Some((PathBuf::from(&file.name), range(&file.src, span.span.start, span.span.end)))
+        Some((
+            PathBuf::from(&file.name),
+            range(&file.src, span.span.start, span.span.end),
+        ))
     };
     let label = diag.primary_label().or(diag.labels.first());
     let (path, range) = label

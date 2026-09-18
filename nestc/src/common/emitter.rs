@@ -54,7 +54,11 @@ pub fn render(diag: &Diagnostic, sources: &SourceMap, color: bool) -> String {
         report = report.with_code(code);
     }
     for label in &labels {
-        let colour = if label.primary { tint(diag.severity) } else { Color::Blue };
+        let colour = if label.primary {
+            tint(diag.severity)
+        } else {
+            Color::Blue
+        };
         // ariadne draws an underline only for a label with a message, so every
         // label gets one — empty if it had none, and `bare_underline` below
         // takes the arrow to nothing back out.
@@ -68,7 +72,10 @@ pub fn render(diag: &Diagnostic, sources: &SourceMap, color: bool) -> String {
     }
 
     let mut out = Vec::new();
-    let cache = MapCache { sources, loaded: Default::default() };
+    let cache = MapCache {
+        sources,
+        loaded: Default::default(),
+    };
     if report.finish().write(cache, &mut out).is_err() {
         return render_bare(diag, color);
     }
@@ -301,7 +308,9 @@ pub fn render_json(diag: &Diagnostic, sources: &SourceMap) -> String {
     // failure is reported in the one format that cannot fail.
     match serde_json::to_string(&value) {
         Ok(line) => format!("{line}\n"),
-        Err(e) => format!("{{\"severity\":\"error\",\"message\":\"cannot serialize a diagnostic: {e}\"}}\n"),
+        Err(e) => format!(
+            "{{\"severity\":\"error\",\"message\":\"cannot serialize a diagnostic: {e}\"}}\n"
+        ),
     }
 }
 
@@ -325,11 +334,20 @@ mod tests {
             .with_note("statements end at a newline");
 
         let rendered = render(&diag, &sources, false);
-        assert!(rendered.starts_with("[E0001] error: expected an expression\n"), "got:\n{rendered}");
+        assert!(
+            rendered.starts_with("[E0001] error: expected an expression\n"),
+            "got:\n{rendered}"
+        );
         assert!(rendered.contains("main.nest:1:9"), "got:\n{rendered}");
         assert!(rendered.contains("1 │ let x = ;"), "got:\n{rendered}");
-        assert!(rendered.contains("expected an expression"), "got:\n{rendered}");
-        assert!(rendered.contains("Note: statements end at a newline"), "got:\n{rendered}");
+        assert!(
+            rendered.contains("expected an expression"),
+            "got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Note: statements end at a newline"),
+            "got:\n{rendered}"
+        );
     }
 
     /// Offsets are **bytes**, which is what a [`Span`] holds; read as characters
@@ -338,7 +356,8 @@ mod tests {
     fn spans_are_byte_offsets() {
         let mut sources = SourceMap::new();
         let file = sources.add("t.nest", "é bad\n");
-        let diag = Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(3, 6)), "here");
+        let diag =
+            Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(3, 6)), "here");
         let rendered = render(&diag, &sources, false);
         assert!(rendered.contains("t.nest:1:3"), "got:\n{rendered}");
     }
@@ -352,7 +371,10 @@ mod tests {
         let diag = Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(3, 5)), "");
         for color in [false, true] {
             let rendered = strip_ansi(&render(&diag, &sources, color));
-            assert!(!rendered.contains('╰') && !rendered.contains('┬'), "got:\n{rendered}");
+            assert!(
+                !rendered.contains('╰') && !rendered.contains('┬'),
+                "got:\n{rendered}"
+            );
             assert!(rendered.contains("│    ──"), "got:\n{rendered}");
         }
     }
@@ -364,17 +386,24 @@ mod tests {
         let file = sources.add("t.nest", "let a: i32 := b\n");
         let diag = Diagnostic::error("type mismatch")
             .with_primary(FileSpan::new(file, Span::new(14, 15)), "this is a `bool`")
-            .with_label(Label::secondary(FileSpan::new(file, Span::new(7, 10)), "expected because of this"));
+            .with_label(Label::secondary(
+                FileSpan::new(file, Span::new(7, 10)),
+                "expected because of this",
+            ));
         let rendered = render(&diag, &sources, false);
         assert!(rendered.contains("this is a `bool`"), "got:\n{rendered}");
-        assert!(rendered.contains("expected because of this"), "got:\n{rendered}");
+        assert!(
+            rendered.contains("expected because of this"),
+            "got:\n{rendered}"
+        );
     }
 
     #[test]
     fn colour_is_only_written_when_asked_for() {
         let mut sources = SourceMap::new();
         let file = sources.add("t.nest", "ab cd\n");
-        let diag = Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(0, 2)), "here");
+        let diag =
+            Diagnostic::error("x").with_primary(FileSpan::new(file, Span::new(0, 2)), "here");
         assert!(!render(&diag, &sources, false).contains('\u{1b}'));
         assert!(render(&diag, &sources, true).contains('\u{1b}'));
     }
@@ -406,8 +435,14 @@ mod tests {
         assert_eq!(label["file"], "main.nest");
         assert_eq!(label["primary"], true);
         assert_eq!(label["message"], "here");
-        assert_eq!(label["start"], serde_json::json!({"offset": 8, "line": 1, "column": 9}));
-        assert_eq!(label["end"], serde_json::json!({"offset": 9, "line": 1, "column": 10}));
+        assert_eq!(
+            label["start"],
+            serde_json::json!({"offset": 8, "line": 1, "column": 9})
+        );
+        assert_eq!(
+            label["end"],
+            serde_json::json!({"offset": 9, "line": 1, "column": 10})
+        );
 
         // A tool that just wants to show the compiler's own text has it, and
         // does not have to reimplement the renderer to stay readable.
@@ -431,7 +466,10 @@ mod tests {
             serde_json::from_str(&render_json(&diag, &sources)).expect("valid JSON");
         assert_eq!(v["message"], "boom");
         assert_eq!(v["labels"].as_array().expect("an array").len(), 0);
-        assert!(v.get("code").is_none(), "an absent code is absent, not null");
+        assert!(
+            v.get("code").is_none(),
+            "an absent code is absent, not null"
+        );
     }
 
     #[test]

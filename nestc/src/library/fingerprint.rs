@@ -72,7 +72,9 @@ pub fn compute(inputs: &Inputs) -> u64 {
     libraries.sort_by(|a, b| a.0.cmp(b.0));
     h.u64(libraries.len() as u64);
     for (name, fingerprint, importable) in libraries {
-        h.bytes(name.as_bytes()).u64(fingerprint).u64(u64::from(importable));
+        h.bytes(name.as_bytes())
+            .u64(fingerprint)
+            .u64(u64::from(importable));
     }
     h.finish()
 }

@@ -76,7 +76,10 @@ fn unique() -> u64 {
 #[test]
 fn a_function_is_emitted_under_its_symbol() {
     let text = ir("@public add :: func (a: i32, b: i32) -> i32 { return a + b }\n");
-    assert!(text.contains("define i32 @_NC3add(i32 %0, i32 %1)"), "{text}");
+    assert!(
+        text.contains("define i32 @_NC3add(i32 %0, i32 %1)"),
+        "{text}"
+    );
 }
 
 /// **A `-C overflow=trap` build really does check.**
@@ -100,11 +103,10 @@ fn a_checked_add_is_llvms_overflow_intrinsic() {
 /// wrapping program becomes undefined behaviour.
 #[test]
 fn a_wrapping_add_is_a_plain_add_with_no_overflow_flag() {
-    let mut session =
-        Session::with_loader(Box::new(MemLoader::new().with(
-            "main",
-            "@public add :: func (a: i32, b: i32) -> i32 { return a + b }\n",
-        )));
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with(
+        "main",
+        "@public add :: func (a: i32, b: i32) -> i32 { return a + b }\n",
+    )));
     session.options.overflow = crate::common::options::OverflowMode::Wrap;
     let file = session.load_entry("main").expect("entry loads");
     analyze(&mut session, file);
@@ -129,10 +131,15 @@ fn a_wrapping_add_is_a_plain_add_with_no_overflow_flag() {
     let dir = std::env::temp_dir().join("nestc-llvm-tests");
     std::fs::create_dir_all(&dir).unwrap();
     let out = dir.join("wrapping.ll");
-    backend.emit_unit(program.unit(), OutputKind::Ir, &out).unwrap();
+    backend
+        .emit_unit(program.unit(), OutputKind::Ir, &out)
+        .unwrap();
     let text = std::fs::read_to_string(&out).unwrap();
 
-    assert!(!text.contains("with.overflow"), "a wrapping build checked:\n{text}");
+    assert!(
+        !text.contains("with.overflow"),
+        "a wrapping build checked:\n{text}"
+    );
     assert!(text.contains("add i32"), "{text}");
     assert!(
         !text.contains("add nsw") && !text.contains("add nuw"),
@@ -184,11 +191,20 @@ P :: struct { a: u8, b: i32 }
 #[test]
 fn a_bool_is_a_byte_and_a_comparison_is_widened_into_one() {
     let text = ir("@public less :: func (a: i32, b: i32) -> bool { return a < b }\n");
-    assert!(text.contains("define i8 @_NC4less"), "a bool is not a byte:\n{text}");
-    assert!(text.contains("zext i1"), "the comparison was not widened:\n{text}");
+    assert!(
+        text.contains("define i8 @_NC4less"),
+        "a bool is not a byte:\n{text}"
+    );
+    assert!(
+        text.contains("zext i1"),
+        "the comparison was not widened:\n{text}"
+    );
     // The comma matters: `alloca i1` is a prefix of `alloca i128`, and `core`
     // has a 128-bit local in it (`reflect.TypeId`).
-    assert!(!text.contains("alloca i1,"), "an i1 reached a slot:\n{text}");
+    assert!(
+        !text.contains("alloca i1,"),
+        "an i1 reached a slot:\n{text}"
+    );
 }
 
 /// **A `-> void` function returns nothing**, rather than an `undef` of a type no
@@ -244,7 +260,8 @@ impl Describe for Rock { weight :: func (self: *Rock) -> i32 { return self.kg } 
 ");
     assert!(text.contains("vtable"), "no vtable at all:\n{text}");
     assert!(
-        text.lines().any(|l| l.contains("vtable") && l.contains("constant")),
+        text.lines()
+            .any(|l| l.contains("vtable") && l.contains("constant")),
         "the vtable is not an immutable global:\n{text}"
     );
 }
@@ -264,9 +281,15 @@ fn every_branch_is_a_switch() {
 }
 ");
     assert!(text.contains("switch i8"), "{text}");
-    assert!(text.contains("icmp eq i32"), "the arms were not compared:\n{text}");
+    assert!(
+        text.contains("icmp eq i32"),
+        "the arms were not compared:\n{text}"
+    );
     // No conditional branch anywhere: the switch is the only branching form.
-    assert!(!text.contains("br i1"), "a second branching form appeared:\n{text}");
+    assert!(
+        !text.contains("br i1"),
+        "a second branching form appeared:\n{text}"
+    );
 }
 
 /// **A string's bytes are a private constant**, and a `str` is the header over
@@ -346,7 +369,11 @@ fn every_example_emits_an_object() {
         assert!(errs.is_empty(), "parse errors in {path:?}");
         session.asts.insert(file, ast);
         analyze(&mut session, file);
-        assert!(!session.has_errors(), "{path:?}: {:#?}", session.diagnostics);
+        assert!(
+            !session.has_errors(),
+            "{path:?}: {:#?}",
+            session.diagnostics
+        );
         let layouts = crate::ir::layout::Layouts::new(
             &session.defs,
             &session.ir_meta,
@@ -406,8 +433,14 @@ fn a_program_links_and_runs() {
     // A status `main`, so the answer travels out through the process's exit
     // code; and a `void` one, which is a program that exits successfully.
     for (src, status) in [
-        ("add :: func (a: i32, b: i32) -> i32 { return a + b }\nmain :: func () -> i32 { return add(2, 3) }\n", 5),
-        ("main :: func () { let mut n := 0\n  while n < 3 { n = n + 1 } }\n", 0),
+        (
+            "add :: func (a: i32, b: i32) -> i32 { return a + b }\nmain :: func () -> i32 { return add(2, 3) }\n",
+            5,
+        ),
+        (
+            "main :: func () { let mut n := 0\n  while n < 3 { n = n + 1 } }\n",
+            0,
+        ),
         // `value ; count` in both shapes: an aggregate over an array whose
         // length is in its type, and a `make` plus a loop over a slice whose
         // count is a run-time value. 7 + 5 + 3.
@@ -1361,7 +1394,11 @@ fn memory_nothing_reaches_is_collected() {
         return;
     };
     let out = run_on_host(include_str!("../../../../examples/gc/collects.nest"));
-    assert_eq!(out.status.code(), Some(0), "the heap grew past 64 MB: {out:?}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the heap grew past 64 MB: {out:?}"
+    );
 }
 
 /// No allocation escape analysis frees is still reachable, however it left its
@@ -1376,7 +1413,11 @@ fn nothing_is_freed_while_something_still_reaches_it() {
         &[],
         &[("NEST_GC_POISON", "1")],
     );
-    assert_eq!(out.status.code(), Some(0), "the case numbered by the status read freed memory: {out:?}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the case numbered by the status read freed memory: {out:?}"
+    );
 }
 
 /// A leaked object outlives everything that reached it, until it is dropped,
@@ -1387,7 +1428,11 @@ fn a_leaked_object_lives_until_it_is_dropped() {
         return;
     };
     let out = run_on_host(include_str!("../../../../examples/gc/leak.nest"));
-    assert_eq!(out.status.code(), Some(0), "a leaked node was collected: {out:?}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a leaked node was collected: {out:?}"
+    );
 }
 
 /// **Recursion too deep to fit is a trap, not a segmentation fault.**
@@ -1409,15 +1454,26 @@ fn recursion_past_the_end_of_the_stack_traps() {
         "f :: func (n: i32) -> i32 { if n == 0 { return 0 }; return f(n - 1) }\n\
          main :: func () -> i32 { return f(100000) }\n",
     );
-    assert_eq!(deep.status.code(), None, "it exited instead of trapping: {deep:?}");
+    assert_eq!(
+        deep.status.code(),
+        None,
+        "it exited instead of trapping: {deep:?}"
+    );
     let said = String::from_utf8_lossy(&deep.stderr);
-    assert!(said.contains("stack overflow"), "it did not say what happened: {said}");
+    assert!(
+        said.contains("stack overflow"),
+        "it did not say what happened: {said}"
+    );
 
     let shallow = run_on_host(
         "f :: func (n: i32) -> i32 { if n == 0 { return 0 }; return f(n - 1) + 1 }\n\
          main :: func () -> i32 { return f(1000) - 990 }\n",
     );
-    assert_eq!(shallow.status.code(), Some(10), "a recursion that fits ran wrong: {shallow:?}");
+    assert_eq!(
+        shallow.status.code(),
+        Some(10),
+        "a recursion that fits ran wrong: {shallow:?}"
+    );
 }
 
 /// **A test binary runs every test, and one failing test does not end the run.**
@@ -1457,7 +1513,10 @@ fn a_test_binary_runs_every_test_and_survives_a_failure() {
     assert!(said.contains("2 passed; 2 failed"), "{said}");
     // The failures said what they were, through the ordinary panic report.
     assert!(said.contains("division by zero"), "{said}");
-    assert!(said.contains("the test returned an error: \"nope\""), "{said}");
+    assert!(
+        said.contains("the test returned an error: \"nope\""),
+        "{said}"
+    );
     // A failing suite is a failing process.
     assert_eq!(ran.status.code(), Some(1), "{ran:?}");
 }
@@ -1484,12 +1543,18 @@ fn a_failing_result_test_reports_its_error() {
          main :: func () -> i32 { return 0 }\n",
     );
     let said = String::from_utf8_lossy(&ran.stderr);
-    assert!(said.contains("the test returned an error: E.NotFound(7)"), "{said}");
+    assert!(
+        said.contains("the test returned an error: E.NotFound(7)"),
+        "{said}"
+    );
     assert!(
         said.contains("the test returned an error: E.Broken { why: \"no reason\" }"),
         "{said}"
     );
-    assert!(said.contains("the test returned an error: \"nope\""), "{said}");
+    assert!(
+        said.contains("the test returned an error: \"nope\""),
+        "{said}"
+    );
     // The entry file, which is what the program was written in — not `core`.
     // `mem:` is the in-memory loader's prefix on a file's name.
     assert!(said.contains("\n  at mem:main:"), "{said}");
@@ -1529,10 +1594,12 @@ fn a_test_function_changes_nothing_about_an_ordinary_build() {
     assert_eq!(ran.status.code(), Some(9), "{ran:?}");
     assert!(String::from_utf8_lossy(&ran.stderr).is_empty());
 
-    let failed = run_on_host(
-        "main :: func () -> i32 { assert(false); return 0 }\n",
+    let failed = run_on_host("main :: func () -> i32 { assert(false); return 0 }\n");
+    assert_eq!(
+        failed.status.code(),
+        None,
+        "it exited instead of trapping: {failed:?}"
     );
-    assert_eq!(failed.status.code(), None, "it exited instead of trapping: {failed:?}");
     assert!(
         String::from_utf8_lossy(&failed.stderr).contains("assertion failed"),
         "{failed:?}"
@@ -1562,8 +1629,15 @@ fn every_opt_level_runs_the_same_program() {
                }\n";
     for level in ["0", "1", "2", "3", "s", "z"] {
         let ran = run_on_host_with(src, &[("opt-level", level), ("target-cpu", "native")]);
-        assert_eq!(String::from_utf8_lossy(&ran.stdout), "sum=45\n", "at opt-level={level}");
-        assert!(!ran.status.success(), "the overflow trapped at opt-level={level}");
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stdout),
+            "sum=45\n",
+            "at opt-level={level}"
+        );
+        assert!(
+            !ran.status.success(),
+            "the overflow trapped at opt-level={level}"
+        );
     }
 }
 
@@ -1659,7 +1733,12 @@ main :: func () -> i32 {
     );
     let ran = run_on_host(&src);
     let stdout = String::from_utf8_lossy(&ran.stdout);
-    assert_eq!(ran.status.code(), Some(0), "exited {}, stdout:\n{stdout}", ran.status);
+    assert_eq!(
+        ran.status.code(),
+        Some(0),
+        "exited {}, stdout:\n{stdout}",
+        ran.status
+    );
     assert_eq!(
         stdout,
         "{\"title\":\"t\",\"max-count\":-3,\"tags\":[\"a\",\"b \\\"c\\\"\\n\"],\"server\":{\"host\":\"localhost\",\"port\":8080,\"ratio\":0.1},\"deps\":[{\"name\":\"core\",\"optional\":false},{\"name\":\"é☃\",\"optional\":true}],\"maybe\":4,\"nothing\":null,\"pair\":[1,true],\"id\":42,\"letter\":\"λ\"}\n\
@@ -1719,7 +1798,12 @@ main :: func () -> i32 {
     );
     let ran = run_on_host(&src);
     let stdout = String::from_utf8_lossy(&ran.stdout);
-    assert_eq!(ran.status.code(), Some(0), "exited {}, stdout:\n{stdout}", ran.status);
+    assert_eq!(
+        ran.status.code(),
+        Some(0),
+        "exited {}, stdout:\n{stdout}",
+        ran.status
+    );
     assert_eq!(
         stdout,
         "title = \"t\"\n\

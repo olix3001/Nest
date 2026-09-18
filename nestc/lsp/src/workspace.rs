@@ -63,7 +63,8 @@ impl Toolchain for Twig {
     fn prepare(&self, root: &Path) -> Result<Metadata, String> {
         self.run(root, &["build", "--deps"])?;
         let out = self.run(root, &["metadata"])?;
-        serde_json::from_slice(&out).map_err(|e| format!("`twig metadata` printed something unreadable: {e}"))
+        serde_json::from_slice(&out)
+            .map_err(|e| format!("`twig metadata` printed something unreadable: {e}"))
     }
 }
 
@@ -74,10 +75,20 @@ impl Twig {
         if let Some(nestc) = &self.nestc {
             command.env("NESTC", nestc);
         }
-        let out = command
-            .output()
-            .map_err(|e| format!("could not run `{}` in `{}`: {e}", self.program, root.display()))?;
-        eprintln!("nest-lsp: `{} {}` in `{}`: {}", self.program, args.join(" "), root.display(), out.status);
+        let out = command.output().map_err(|e| {
+            format!(
+                "could not run `{}` in `{}`: {e}",
+                self.program,
+                root.display()
+            )
+        })?;
+        eprintln!(
+            "nest-lsp: `{} {}` in `{}`: {}",
+            self.program,
+            args.join(" "),
+            root.display(),
+            out.status
+        );
         if !out.status.success() {
             return Err(format!(
                 "`twig {}` failed:\n{}",
@@ -136,7 +147,11 @@ mod tests {
     }
 
     fn target(entry: &str, lib: bool, args: &[&str]) -> Target {
-        Target { entry: PathBuf::from(entry), lib, args: strings(args) }
+        Target {
+            entry: PathBuf::from(entry),
+            lib,
+            args: strings(args),
+        }
     }
 
     /// The binary a file is the root of comes first, then the library, and a
@@ -149,17 +164,48 @@ mod tests {
                 name: "app".to_string(),
                 dir: PathBuf::from("/app"),
                 targets: vec![
-                    target("/app/src/lib.nest", true, &["/app/src/lib.nest", "--extern", "std=/app/build/debug/deps/std.nlib"]),
-                    target("/app/src/a.nest", false, &["/app/src/a.nest", "--extern", "app=/app/build/debug/app.nlib"]),
-                    target("/app/src/b.nest", false, &["/app/src/b.nest", "--extern", "app=/app/build/debug/app.nlib"]),
+                    target(
+                        "/app/src/lib.nest",
+                        true,
+                        &[
+                            "/app/src/lib.nest",
+                            "--extern",
+                            "std=/app/build/debug/deps/std.nlib",
+                        ],
+                    ),
+                    target(
+                        "/app/src/a.nest",
+                        false,
+                        &[
+                            "/app/src/a.nest",
+                            "--extern",
+                            "app=/app/build/debug/app.nlib",
+                        ],
+                    ),
+                    target(
+                        "/app/src/b.nest",
+                        false,
+                        &[
+                            "/app/src/b.nest",
+                            "--extern",
+                            "app=/app/build/debug/app.nlib",
+                        ],
+                    ),
                 ],
             }],
         };
         let found = candidates(&meta, Path::new("/app/src/b.nest"));
-        assert_eq!(found, vec![
-            strings(&["/app/src/b.nest", "--package", "app=/app/src/lib.nest"]),
-            strings(&["/app/src/lib.nest", "--extern", "std=/app/build/debug/deps/std.nlib"]),
-            strings(&["/app/src/a.nest", "--package", "app=/app/src/lib.nest"]),
-        ]);
+        assert_eq!(
+            found,
+            vec![
+                strings(&["/app/src/b.nest", "--package", "app=/app/src/lib.nest"]),
+                strings(&[
+                    "/app/src/lib.nest",
+                    "--extern",
+                    "std=/app/build/debug/deps/std.nlib"
+                ]),
+                strings(&["/app/src/a.nest", "--package", "app=/app/src/lib.nest"]),
+            ]
+        );
     }
 }
