@@ -58,6 +58,7 @@ use inkwell::values::{
 };
 
 use crate::codegen::CodegenError;
+use crate::sema::ty::CallConv;
 use crate::lir::{
     Aggregate, Base, Callee, CastKind, Constant, Function, Global, Intrinsic, Linkage, Local, Op,
     Operand, Place, Projection, Rvalue, StmtKind, TermKind, Ty, TypeId, Unit,
@@ -71,6 +72,24 @@ fn unsupported(what: impl std::fmt::Display) -> CodegenError {
 }
 
 /// Say which function or global a failure was in.
+/// A [`CallConv`] as LLVM numbers it (`llvm::CallingConv`).
+///
+/// The numbers are LLVM's own and are stable in its bitcode, which is why they
+/// are written out rather than read from a header this compiler does not include.
+fn llvm_conv(conv: CallConv) -> u32 {
+    match conv {
+        CallConv::C => 0,
+        CallConv::StdCall => 64,
+        CallConv::FastCall => 65,
+        CallConv::Aapcs => 67,
+        CallConv::AapcsVfp => 68,
+        CallConv::ThisCall => 70,
+        CallConv::SysV64 => 78,
+        CallConv::Win64 => 79,
+        CallConv::VectorCall => 80,
+    }
+}
+
 fn within(who: &str, e: CodegenError) -> CodegenError {
     match e {
         CodegenError::Unsupported(m) => CodegenError::Unsupported(format!("{who}: {m}")),
@@ -368,6 +387,12 @@ impl<'ctx> Cx<'ctx, '_> {
             let value = self
                 .module
                 .add_function(f.symbol.as_str(), sig, Some(linkage));
+            // The calling convention, on the declaration *and* on every call —
+            // LLVM keeps them per site, and a site that disagrees with the
+            // function it calls is a miscompile rather than a diagnostic. The
+            // sites read it back off this value (see `call`), so this is the one
+            // place it is decided.
+            value.set_call_conventions(llvm_conv(f.attrs.conv));
             if f.blocks.is_empty() {
                 // A declaration. Nothing more to say about it.
             } else {
@@ -1661,6 +1686,10 @@ impl<'ctx> Cx<'ctx, '_> {
                     built.push(self.operand(fx, f, a, &want)?.into());
                 }
                 let site = self.builder.build_call(value, &built, "").map_err(failed)?;
+                // The callee's convention, read off the declaration: a call site
+                // LLVM leaves at the default would pass its arguments one way
+                // and the callee would read them another.
+                site.set_call_convention(value.get_call_conventions());
                 self.take(fx, f, dest, basic(site))
             }
             Callee::Indirect(operand) => {

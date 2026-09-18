@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use crate::common::diagnostic::Diagnostic;
 use crate::sema::def::{DefId, DefTable, DirectiveArg};
-use crate::sema::ty::Ty;
+use crate::sema::ty::{CallConv, Ty};
 
 use crate::ir::{IrId, Linked, Meta, TypeDef, TypeDefKind};
 
@@ -199,6 +199,10 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
                     t.kind,
                     TypeDefKind::Struct { .. } | TypeDefKind::Enum { .. }
                 ),
+                // A convention is how a *function* is called. On a function type
+                // it is legal and meaningful (§9), but that is a directive on a
+                // type expression, not on a declaration of a nominal type.
+                "callconv" => false,
                 _ => true,
             };
             if !ok {
@@ -319,6 +323,30 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
                     diag = diag.with_primary(span, "");
                 }
                 out.push(diag);
+            }
+            // `#callconv("...")`: a convention nothing implements is one a
+            // backend would silently compile as C, and a caller and a callee
+            // disagreeing about the protocol is not a thing that fails loudly.
+            if name == "callconv" {
+                let named = match d.args.first() {
+                    Some(DirectiveArg::Str(s) | DirectiveArg::Name(s)) => Some(s.clone()),
+                    _ => None,
+                };
+                if !named
+                    .as_ref()
+                    .is_some_and(|s| CallConv::parse(s.as_str()).is_some())
+                {
+                    let message = match &named {
+                        Some(s) => format!("`{s}` is not a calling convention"),
+                        None => "`#callconv` needs the convention it asks for".to_string(),
+                    };
+                    let mut diag = Diagnostic::error(message);
+                    if let Some(span) = meta.span(f.id) {
+                        diag = diag.with_primary(span, "");
+                    }
+                    let all: Vec<&str> = CallConv::ALL.iter().map(|c| c.name()).collect();
+                    out.push(diag.with_note(format!("the conventions are: {}", all.join(", "))));
+                }
             }
         }
     }

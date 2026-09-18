@@ -40,6 +40,96 @@ pub enum FloatWidth {
     F128,
 }
 
+/// A **calling convention**: how arguments reach a function and who saves what
+/// (§9's `#callconv`, §11.3).
+///
+/// It is not the same question as `extern("c")`, which says a symbol is external
+/// and which ABI's *types* are in play. A convention is the register and stack
+/// protocol, and the two come apart on exactly the platform that needs them to:
+/// a Win32 declaration is a C function with C types called `__stdcall`.
+///
+/// [`C`](CallConv::C) is the default and is what every Nest function has, so a
+/// program that never writes the directive is compiled exactly as it was before
+/// there was one to write.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum CallConv {
+    /// The platform's C convention — the default everywhere.
+    #[default]
+    C,
+    /// x86: the callee pops the arguments. Win32's own.
+    StdCall,
+    /// x86: the first two integer arguments in registers, the callee popping the
+    /// rest.
+    FastCall,
+    /// x86: `this` in a register, otherwise `stdcall`. A C++ member function.
+    ThisCall,
+    /// x86: vector arguments in vector registers (Microsoft's `__vectorcall`).
+    VectorCall,
+    /// The System V AMD64 convention, named outright — for a function that must
+    /// use it on a target whose C convention is not it.
+    SysV64,
+    /// The Microsoft x64 convention, named outright, for the same reason.
+    Win64,
+    /// ARM's standard: AAPCS.
+    Aapcs,
+    /// AAPCS with floating-point arguments in VFP registers.
+    AapcsVfp,
+}
+
+impl CallConv {
+    /// The convention a `#callconv("...")` argument names, or `None` for a name
+    /// that is not one.
+    ///
+    /// The spellings are the ones the platforms use, lower-cased, so that what a
+    /// header says (`__stdcall`) and what the directive takes (`"stdcall"`) are
+    /// the same word.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "c" => Some(Self::C),
+            "stdcall" => Some(Self::StdCall),
+            "fastcall" => Some(Self::FastCall),
+            "thiscall" => Some(Self::ThisCall),
+            "vectorcall" => Some(Self::VectorCall),
+            "sysv64" => Some(Self::SysV64),
+            "win64" => Some(Self::Win64),
+            "aapcs" => Some(Self::Aapcs),
+            "aapcs-vfp" => Some(Self::AapcsVfp),
+            _ => None,
+        }
+    }
+
+    /// How the convention is written, which is how a diagnostic and a dump name
+    /// it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::C => "c",
+            Self::StdCall => "stdcall",
+            Self::FastCall => "fastcall",
+            Self::ThisCall => "thiscall",
+            Self::VectorCall => "vectorcall",
+            Self::SysV64 => "sysv64",
+            Self::Win64 => "win64",
+            Self::Aapcs => "aapcs",
+            Self::AapcsVfp => "aapcs-vfp",
+        }
+    }
+
+    /// Every convention there is, for a diagnostic that has to list them.
+    pub const ALL: &'static [CallConv] = &[
+        Self::C,
+        Self::StdCall,
+        Self::FastCall,
+        Self::ThisCall,
+        Self::VectorCall,
+        Self::SysV64,
+        Self::Win64,
+        Self::Aapcs,
+        Self::AapcsVfp,
+    ];
+}
+
 /// An inference variable: an index into [`InferCtxt::subst`].
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,

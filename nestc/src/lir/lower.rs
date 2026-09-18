@@ -67,7 +67,7 @@ use crate::ir::{
 use crate::parser::ast::{BinOp, Lit, UnOp};
 use crate::sema::builtins::BuiltinOp;
 use crate::sema::def::{DefId, DefTable, Directive, DirectiveArg, LangItems};
-use crate::sema::ty::Ty;
+use crate::sema::ty::{CallConv, Ty};
 
 use super::{
     Aggregate, Base, Block, BlockId, Callee, CastKind, Constant, FuncId, Function, FunctionAttrs,
@@ -1698,6 +1698,14 @@ fn attrs_of(directives: &[Directive], public: bool) -> FunctionAttrs {
             }
             "unsafe" => attrs.unchecked = true,
             "c_vararg" => attrs.c_variadic = true,
+            // A name that is not a convention was refused at the declaration
+            // (`ir::check::declarations`), so the fallback here is the default
+            // rather than a second diagnostic.
+            "callconv" => {
+                if let Some(DirectiveArg::Str(s) | DirectiveArg::Name(s)) = d.args.first() {
+                    attrs.conv = CallConv::parse(s.as_str()).unwrap_or_default();
+                }
+            }
             _ => {}
         }
     }

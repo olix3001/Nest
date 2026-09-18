@@ -259,6 +259,11 @@ impl Printer<'_> {
         if f.attrs.c_variadic {
             tags.push_str(" #c_vararg");
         }
+        // For the same reason: the convention is the protocol a call has to use,
+        // so a dump that left it out would show a call that cannot be read.
+        if f.attrs.conv != crate::sema::ty::CallConv::C {
+            let _ = write!(tags, " #callconv(\"{}\")", f.attrs.conv.name());
+        }
         let ret = self.ty(&f.ret);
         let decl = if f.blocks.is_empty() { "declare " } else { "" };
         self.line(&format!(

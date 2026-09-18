@@ -139,6 +139,17 @@ qsort  :: extern("c") func (base: c.ptr.<c.void>, n: c.size_t, size: c.size_t,
   `@public` and works the same on a member inside an `extern("c") { ... }` block.
 - Which library provides the symbol (link flags, header association) is a
   build-system concern layered on this syntax.
+- The **calling convention** is C's unless `#callconv("name")` says otherwise
+  (§9). The two are different questions and Win32 is where that shows: a
+  `__stdcall` entry point is an `extern("c")` declaration with C types, called by
+  a protocol in which the callee pops the arguments.
+
+  ```
+  @link_name("MessageBoxW")
+  message_box :: #callconv("stdcall") extern("c") func (
+    owner: c.ptr.<c.void>, text: c.ptr.<u16>, caption: c.ptr.<u16>, flags: c.uint
+  ) -> c.int
+  ```
 
 Many externals sharing one ABI may be grouped in an `extern("c") { ... }` block
 instead of repeating the modifier. The block is pure surface sugar: each member is

@@ -75,6 +75,7 @@ use num_bigint::BigInt;
 use crate::common::source::FileSpan;
 use crate::common::symbol::Symbol;
 use crate::ir::layout::Layout;
+use crate::sema::ty::CallConv;
 
 pub mod entry;
 pub mod escape;
@@ -370,6 +371,13 @@ pub struct FunctionAttrs {
     /// act on it; it is carried because a profiler and a debugger both want to
     /// say so (§9).
     pub unchecked: bool,
+    /// `#callconv("...")` — the convention the function is called with (§9).
+    ///
+    /// A backend **must** act on it: a caller and a callee that disagree about
+    /// who pops the arguments corrupt the stack, and nothing before run time
+    /// would say so. It defaults to [`CallConv::C`], which is what every Nest
+    /// function has.
+    pub conv: CallConv,
     /// `#c_vararg` — a C declaration whose parameters are the **fixed** ones and
     /// which accepts a variadic tail beyond them (§9).
     ///

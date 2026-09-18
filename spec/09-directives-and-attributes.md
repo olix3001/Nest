@@ -392,6 +392,30 @@ guarantee.
 - **`extern("abi")`** — a keyword (not a `#`-directive) placed immediately before
   `func`, selecting an ABI / calling convention (currently `"c"`) for external
   declarations and exported symbols. Detailed in [11-c-ffi.md](11-c-ffi.md).
+- **`#callconv("name")`** — the **calling convention** a function is called with:
+  which arguments travel in which registers, who pops them, and who saves what.
+  It applies to a function, a declaration or a definition alike.
+
+  ```
+  // A Win32 entry point: a C function, C types, called __stdcall.
+  @link_name("MessageBoxW")
+  message_box :: #callconv("stdcall") extern("c") func (
+    owner: c.ptr.<c.void>, text: c.ptr.<u16>, caption: c.ptr.<u16>, flags: c.uint
+  ) -> c.int
+  ```
+
+  The conventions are `"c"` (the default, and what every function has without
+  the directive), `"stdcall"`, `"fastcall"`, `"thiscall"`, `"vectorcall"`,
+  `"sysv64"`, `"win64"`, `"aapcs"` and `"aapcs-vfp"`. A name that is not one of
+  them is an error rather than a directive that is quietly ignored: a caller and
+  a callee that disagree about the protocol corrupt the stack, and nothing before
+  run time would say so.
+
+  `#callconv` is **not** `extern("abi")`. `extern` says the symbol is external
+  and which ABI's types are in play; the convention is the register and stack
+  protocol, and the two come apart on exactly the platform that needs them to.
+  Where both are written the directive decides the convention.
+
 
 > The layout/codegen/safety directives above are the "basic" set. Deliberately
 > out of scope for now: vectorization/SIMD directives and other

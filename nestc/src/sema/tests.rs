@@ -8290,6 +8290,48 @@ fn an_enum_is_a_tag_and_an_overlapping_payload() {
     assert_eq!(e.payload.size, 8);
 }
 
+/// A calling convention nothing implements is one a backend would silently
+/// compile as C, and a caller and a callee that disagree about the protocol
+/// corrupt the stack — so a name that is not a convention is refused where it is
+/// written (§9). So is the directive on a type, which is not a thing that is
+/// called.
+#[test]
+fn callconv_takes_a_convention_and_only_a_function_has_one() {
+    let unknown = messages(
+        "f :: #callconv(\"pascal\") func () -> i32 { return 1 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    assert!(
+        unknown
+            .iter()
+            .any(|m| m.contains("`pascal` is not a calling convention")),
+        "{unknown:#?}"
+    );
+    let empty = messages(
+        "f :: #callconv func () -> i32 { return 1 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    assert!(
+        empty
+            .iter()
+            .any(|m| m.contains("`#callconv` needs the convention it asks for")),
+        "{empty:#?}"
+    );
+    let on_type = messages(
+        "S :: #callconv(\"stdcall\") struct { x: i32 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    assert!(
+        on_type.iter().any(|m| m.contains("does not apply")),
+        "{on_type:#?}"
+    );
+    let ok = messages(
+        "f :: #callconv(\"stdcall\") func () -> i32 { return 1 }\n\
+         @public main :: func () -> i32 { return f() }\n",
+    );
+    assert!(ok.is_empty(), "{ok:#?}");
+}
+
 /// `#repr("C")` is a promise about the representation (§9). On a struct the
 /// language was already keeping it — declaration order, natural alignment — so
 /// the layout is the same with and without. On an enum it is not: a C

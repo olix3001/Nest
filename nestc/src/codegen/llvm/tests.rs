@@ -1879,6 +1879,31 @@ main :: func () -> i32 {
     );
 }
 
+/// `#callconv("...")` reaches LLVM on the function **and** on every call to it
+/// (§9). Both halves matter: LLVM keeps the convention per call site, so a site
+/// left at the default would pass its arguments one way and the callee would
+/// read them another — a miscompile nothing before run time reports.
+#[test]
+fn a_calling_convention_is_set_on_the_function_and_on_its_calls() {
+    let text = ir(
+        "helper :: #callconv(\"stdcall\") func (a: i32) -> i32 { return a + 1 }\n\
+         @public go :: func () -> i32 { return helper(1) }\n",
+    );
+    // 64 is `llvm::CallingConv::X86_StdCall`.
+    assert!(
+        text.contains("define x86_stdcallcc i32"),
+        "the definition is not stdcall:\n{text}"
+    );
+    assert!(
+        text.contains("call x86_stdcallcc i32"),
+        "the call site is not stdcall:\n{text}"
+    );
+    // And a function with no directive is left alone: C is the default, and
+    // LLVM prints nothing for it.
+    let plain = ir("@public go :: func (a: i32) -> i32 { return a + 1 }\n");
+    assert!(!plain.contains("stdcallcc"), "{plain}");
+}
+
 /// A `#repr("C")` enum reaches the backend with C's own discriminant type: the
 /// tag member is an `i32`, where the same enum without the directive would have
 /// the one byte its two discriminants fit in (§9, §11).
