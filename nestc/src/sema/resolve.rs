@@ -46,7 +46,7 @@ pub fn resolve_file(
         scopes: Vec::new(),
         ns_stack: vec![file_ns],
         self_ty: Vec::new(),
-        dyn_ok: HashSet::new(),
+        unsized_ok: HashSet::new(),
         decl_static: false,
         decl_comptime: false,
     };
@@ -70,9 +70,15 @@ struct Resolver<'a> {
     ns_stack: Vec<DefId>,
     /// `Self` targets for the enclosing `impl`/`trait` bodies.
     self_ty: Vec<DefId>,
-    /// Type nodes that sit directly under a pointer, and may therefore be a
-    /// `dyn Trait` (§3.4). Filled in on the way down, so the `dyn` sees it.
-    dyn_ok: HashSet<NodeId>,
+    /// Type nodes that sit directly under a pointer, and may therefore name a
+    /// **sizeless** type: a `dyn Trait` (§3.4) or an `opaque` (§3.1, §11).
+    /// Filled in on the way down, so the type node sees it.
+    ///
+    /// The two are one rule because they are one situation — a type that has no
+    /// size is a type only behind a pointer — and keeping one set means a new
+    /// sizeless type gets the position rule by naming it here rather than by
+    /// growing a parallel mechanism.
+    unsized_ok: HashSet<NodeId>,
     /// Whether the `::` binding currently being walked carries `#static`.
     ///
     /// Set by the enclosing [`NodeKind::Decl`] on the way down. A block-local
@@ -401,17 +407,29 @@ impl Resolver<'_> {
 
             // ===< type nodes with a position rule >===
             //
-            // `dyn Trait` is unsized: it is a type only *behind a pointer*, so
-            // `*dyn ToJson` names one and a bare `dyn ToJson` — as a variable's
-            // type, a field, a parameter, a slice element — names nothing that
-            // has a size (§3.4). The permission is granted on the way down, by
-            // the pointer, to exactly its own pointee.
+            // `dyn Trait` and `opaque` are unsized: each is a type only
+            // *behind a pointer*, so `*dyn ToJson` and `*opaque` name one and a
+            // bare `dyn ToJson` or `opaque` — as a variable's type, a field, a
+            // parameter, a slice element — names nothing that has a size (§3.4,
+            // §3.1). The permission is granted on the way down, by the pointer,
+            // to exactly its own pointee.
             NodeKind::PtrType { inner, .. } => {
-                self.dyn_ok.insert(inner);
+                self.unsized_ok.insert(inner);
+                self.resolve_node(inner);
+            }
+            // `Handle :: distinct opaque` is how a library gets a nominal handle
+            // of its own, so that its `*Handle` does not interchange with every
+            // other `*opaque`. The `distinct` stands *over* a type rather than
+            // holding a value of it, so naming a sizeless one here is not a
+            // value position — `Handle` is then as sizeless as what it stands
+            // over, and a use of `Handle` by value is refused by this same rule
+            // when the layout is asked for.
+            NodeKind::DistinctType { inner, .. } => {
+                self.unsized_ok.insert(inner);
                 self.resolve_node(inner);
             }
             NodeKind::DynType { inner } => {
-                if !self.dyn_ok.contains(&id) {
+                if !self.unsized_ok.contains(&id) {
                     self.report(
                         id,
                         "`dyn Trait` is unsized: use it behind a pointer, as `*dyn Trait`",
@@ -446,6 +464,24 @@ impl Resolver<'_> {
                 // find nothing here.
                 if let Some(res) = self.ast.meta::<PathRes>(path) {
                     self.ast.set_meta(id, res);
+                }
+                // `opaque` obeys the same position rule as `dyn Trait`: no size,
+                // so it is a type only behind a pointer. It is checked here
+                // rather than beside the `dyn` because it arrives as an ordinary
+                // name — a `DefKind::Primitive` — and not as a node kind of its
+                // own.
+                //
+                // `distinct opaque` is how a library mints a nominal handle, and
+                // it is not this: the `distinct` declaration names `opaque` as
+                // the type it stands over, which is a use behind the
+                // declaration, not a value position. That case is let through by
+                // the same permission the pointer grants, extended by `Distinct`
+                // on the way down.
+                if !self.unsized_ok.contains(&id) && self.names_opaque(path) {
+                    self.report(
+                        id,
+                        "`opaque` has no size: use it behind a pointer, as `*opaque`",
+                    );
                 }
                 for a in generic_args {
                     self.resolve_node(a);
@@ -1153,6 +1189,21 @@ impl Resolver<'_> {
             }
             _ => None,
         }
+    }
+
+    /// Whether `path` resolved to the `opaque` primitive.
+    ///
+    /// Keyed on the definition rather than on the spelling: `opaque` is a
+    /// builtin and cannot be shadowed, but `c.void` is an alias for it and an
+    /// alias resolves to the same def, so the position rule reaches the name a
+    /// C programmer actually writes.
+    fn names_opaque(&self, path: NodeId) -> bool {
+        let Some(Resolution::Def(d)) = self.ast.meta::<Resolution>(path) else {
+            return false;
+        };
+        let d = self.defs.resolve_alias(d);
+        let def = self.defs.get(d);
+        def.kind == DefKind::Primitive && def.name.as_str() == "opaque"
     }
 
     fn report(&mut self, node: NodeId, message: impl Into<String>) {

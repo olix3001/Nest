@@ -3712,6 +3712,66 @@ fn a_trait_object_is_only_a_type_behind_a_pointer() {
 }
 
 #[test]
+fn an_opaque_is_only_a_type_behind_a_pointer() {
+    // `opaque` has no size and no values (§3.1, §11): it names a pointee the
+    // program is not allowed to describe, so every position that needs a size
+    // rejects it. Same rule as `dyn Trait`, and for the same reason.
+    for src in [
+        "f :: func (x: opaque) -> i32 { return 0 }\n",
+        "S :: struct { f: opaque }\n",
+        "f :: func (xs: []opaque) -> i32 { return 0 }\n",
+        "S :: struct { f: [4]opaque }\n",
+        "{ size_of } :: import <core/mem>\nf :: func () -> usize { return size_of.<opaque>() }\n",
+        "{ new } :: import <core/mem>\nf :: func () -> i32 { let p := new.<opaque>()\n  return 0 }\n",
+    ] {
+        assert!(first_error(src).contains("opaque"), "{src}");
+    }
+    // Behind a pointer it is an ordinary type, in every position a pointer is.
+    analyze_clean("f :: func (p: *opaque, q: *mut opaque, xs: []*opaque) -> i32 { return 0 }\n");
+}
+
+#[test]
+fn an_opaque_by_value_is_refused_through_an_alias_too() {
+    // The resolver's rule reads the *spelling*, which an alias hides: `A ::
+    // opaque` puts the name behind an ordinary path. The layout pass is the
+    // backstop, so that "there is no such thing as an opaque value" holds for
+    // every way of writing one rather than for the ones with a syntax to look
+    // at.
+    for src in [
+        "A :: opaque\nS :: struct { f: A }\n",
+        "c :: import <core/c>\nS :: struct { f: c.void }\n",
+        "Handle :: distinct opaque\nS :: struct { h: Handle }\n",
+    ] {
+        assert!(first_error(src).contains("has no size"), "{src}");
+    }
+}
+
+#[test]
+fn a_distinct_over_an_opaque_is_a_nominal_handle() {
+    // The sanctioned way for an FFI binding to get a handle type of its own, so
+    // that its `*Sqlite` does not interchange with every other `*opaque`. The
+    // `distinct` does not *hold* an opaque — it is one, with a name — so the
+    // declaration itself is legal and only its uses by value are refused.
+    analyze_clean(
+        "Handle :: distinct opaque\nopen :: func () -> *Handle { return cast.<*Handle>(cast.<*opaque>(&0)) }\n",
+    );
+    // `c.void` is the alias a C programmer looks for, and it is the same type.
+    analyze_clean(
+        "c :: import <core/c>\nf :: func (p: *c.void) -> *opaque { return cast.<*opaque>(p) }\n",
+    );
+}
+
+#[test]
+fn reading_through_an_opaque_pointer_is_refused() {
+    // The one thing an opaque pointer exists to refuse: there is no value to
+    // load, because the type is the statement that we do not know what is
+    // there. One diagnostic, not a cascade behind it.
+    let s = analyze1("f :: func (p: *opaque) -> i32 { return cast.<i32>(p.*) }\n");
+    assert!(diag_contains(&s, "cannot read through `*opaque`"));
+    assert!(!diag_contains(&s, "type annotations needed"));
+}
+
+#[test]
 fn dyn_needs_a_trait() {
     assert!(
         first_error("f :: func (x: *dyn i32) -> i32 { return 0 }\n").contains("is not a trait"),

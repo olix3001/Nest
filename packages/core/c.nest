@@ -68,6 +68,23 @@
 @public float     :: f32
 @public double    :: f64
 
+// ===< `void` >===
+
+// C's `void` as a pointee: `void *` is `*c.void`, and `FILE`, `sqlite3` or any
+// other handle a C library hands back is a `*c.void` too when the library does
+// not publish the struct.
+//
+// It is an alias for the `opaque` primitive, which is the language's name for a
+// type with no size and no values. The alias exists because `void` is the name
+// a C programmer looks for; the rule is `opaque`'s, unchanged: `*T` and
+// `*c.void` convert only through an explicit `cast`, in both directions, and
+// nothing reads through one.
+//
+// A binding that wants its own handle type — so that its `*Sqlite` does not
+// interchange with every other C pointer — writes `Sqlite :: distinct opaque`
+// rather than using this.
+@public void :: opaque
+
 // ===< The raw pointer >===
 
 // A raw, nullable, untraced pointer to a `T` — what a C function takes and what

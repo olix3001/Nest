@@ -576,6 +576,12 @@ impl Cx<'_> {
             },
             // Unsized on its own, and never the type of a slot.
             Ty::Dyn(_) => LirTy::ptr(LirTy::Void),
+            // `opaque` has no size, so there is nothing for LIR to describe and
+            // nothing it would ever be asked to load. It reaches here only as
+            // the pointee of a `*opaque`, which becomes `ptr(void)` — the same
+            // stand-in a name with no shape behind it already gets, so LIR
+            // learns no new case for a type no slot can hold.
+            Ty::Opaque => LirTy::Void,
             // A literal's type survives only until inference is done with it
             // (§6.5); one here is a fold that did not happen, and the widest
             // machine type is the honest answer.

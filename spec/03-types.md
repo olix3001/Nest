@@ -17,6 +17,7 @@ Boolean:           bool   (an alias for u1)
 Text:              char   (Unicode scalar, 32-bit)   str      (UTF-8, borrowed — see below)
 Unit:              void   (the empty tuple; a function with no `-> T` returns void)
 Uninhabited:       never  (the type of an expression that does not return)
+Sizeless:          opaque (a pointee this program does not describe — see below)
 ```
 
 Integers are **two generic families**, and `i32` and friends are sugar for them:
@@ -188,6 +189,50 @@ with no `break`, or a `match` all of whose arms diverge.
 `never` is not `void`. `void` is the unit type: it has exactly one value, and a
 function returning it *does* return. `never` has zero values and its functions do
 not return at all.
+
+### `opaque`
+
+`opaque` is a type with **no size and no values**. It exists for the foreign
+cases where the pointee is not ours to describe: C's `FILE`, a `sqlite3`, any
+handle a library hands back without publishing the struct behind it.
+
+> `opaque` is a type only **behind a pointer**. `*opaque` and `*mut opaque` are
+> ordinary types; a bare `opaque` in any position that needs a size — a
+> variable, a field, a parameter, an array or slice element, a generic argument
+> to `new` or `size_of` — is an error.
+
+This is the same rule `dyn Trait` obeys (§3.4) and it holds for the same reason:
+a type with no size has no values, so there is nothing a value position could
+hold. It is enforced on the spelling, where the message can point at what was
+written, and again on the laid-out type, so that an alias (`A :: opaque`) or a
+generic argument cannot smuggle one into a value position.
+
+Conversions are **explicit in both directions**:
+
+```
+p := cast.<*opaque>(q)      // *T   -> *opaque
+q := cast.<*T>(p)           // *opaque -> *T
+```
+
+There is no implicit conversion into or out of `*opaque`. The one implicit move
+is the ordinary mutability one that every pointer has, `*mut opaque` ->
+`*opaque` (§3.2). Reading through a `*opaque` is an error: there is no value to
+load, which is the whole of what the type says.
+
+`opaque` is **one built-in type**, not a declaration form. A library that wants
+a nominal handle — so that its pointer does not interchange with every other
+`*opaque` — writes:
+
+```
+Sqlite :: distinct opaque
+```
+
+`distinct` (§3.7) already mints a fresh nominal type, and a `distinct` standing
+over `opaque` does not hold one, it *is* one with a name of its own: the
+declaration is legal, `*Sqlite` is a type, and `Sqlite` by value is refused
+exactly as `opaque` is. `std/c` spells it `c.void`, which is the name a C
+programmer looks for; it is an alias, so it is the same type and obeys the same
+rules (§11).
 
 Integer literals have type `comptime_int` and float literals `comptime_float`
 until context assigns a concrete type (see

@@ -22,7 +22,7 @@ c.short  c.ushort c.int    c.uint   c.long  c.ulong  c.longlong c.ulonglong
 c.float  c.double
 c.bool
 c.size_t c.ssize_t c.ptrdiff_t c.intptr_t c.uintptr_t
-c.void                          // the C `void` (as a return type)
+c.void                          // an alias for `opaque` — the pointee of a `void *`
 c.ptr.<T>                       // a raw, nullable, non-GC C pointer to T
 c.func                          // a C function-pointer type constructor
 ```
@@ -40,6 +40,43 @@ language and owed nothing to the platform. That a language primitive happens to
 match a C type on mainstream targets is a property of those targets, not a
 promise — so a type crossing the C boundary is spelled with a `core/c` name, and
 the coercions of §11.4 are what carry a language value into one.
+
+### `c.void` and opaque pointees
+
+A C `void *`, and every handle a C library hands back without publishing the
+struct behind it — `FILE`, `sqlite3`, an `SDL_Window` — is a pointer to
+something this program does not describe. `c.void` is the name for that
+pointee: an alias for the `opaque` primitive (§3.1), which has no size and no
+values.
+
+```
+c :: import <core/c>
+
+fopen  :: extern("c") func (path: c.cstr, mode: c.cstr) -> *c.void
+fclose :: extern("c") func (f: *c.void) -> c.int
+```
+
+`opaque`'s rules hold unchanged here, and they are what make the declaration
+honest: it is a type only behind a pointer, nothing reads through it, and
+`*T` <-> `*c.void` is an explicit `cast` in both directions. A program cannot
+accidentally acquire a `c.void` by value, because there is no such value.
+
+A binding that wants each handle kept apart — so that a `*Sqlite` cannot be
+passed where a `*SDL_Window` is expected — declares its own nominal handle
+instead, which is a `distinct` over the same type:
+
+```
+Sqlite :: distinct opaque
+sqlite3_close :: extern("c") func (db: *Sqlite) -> c.int
+```
+
+Both spellings compile to the same pointer; the difference is entirely in what
+the type checker will let the program confuse with what.
+
+Note that a C function *returning* `void` returns nothing, which is the
+language's `void` (the unit type, §3.1) and not this. The two are different
+types with the same C spelling: `void` is what a function with no result
+returns, `c.void` is what a `void *` points at.
 
 ## 11.2 C pointers (`c.ptr.<T>`)
 

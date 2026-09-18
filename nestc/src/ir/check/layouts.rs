@@ -33,8 +33,17 @@
 //! this compiler rather than in the program; the place to catch that is a test,
 //! and there is one.
 //!
-//! **One failure is not like the others**, and it is the one this pass does
-//! report: a type the target cannot address
+//! **Two failures are not like the others**, and they are the ones this pass
+//! does report.
+//!
+//! The first is an `opaque` held by value. The resolver refuses it where it is
+//! written, which is the diagnostic worth having; but an alias (`A :: opaque`)
+//! and a generic argument both put one into a member without a spelling for the
+//! resolver to look at, and an opaque type by value has no meaning at all. The
+//! rule is enforced in both places deliberately: on the spelling for the
+//! message, here for the guarantee.
+//!
+//! The second is a type the target cannot address
 //! ([`LayoutError::TooLarge`](crate::ir::layout::LayoutError::TooLarge)).
 //! `struct { a: [1 << 62]u64, b: [1 << 62]u64 }` is well-typed, its members are
 //! well-typed, it contains itself nowhere, and nothing above this point has any
@@ -62,6 +71,17 @@ pub fn check(
         if matches!(t.kind, TypeDefKind::Trait { .. }) {
             continue;
         }
+        // `Handle :: distinct opaque` is how a library mints a nominal handle,
+        // so that its `*Handle` does not interchange with every other
+        // `*opaque`. A `distinct` over an opaque type does not *hold* one — it
+        // **is** one, with a name of its own — so it is as sizeless as what it
+        // stands over, and refusing it here would refuse the sanctioned
+        // spelling. Its own uses by value are refused wherever they are
+        // written, by the same rule as `opaque`'s, because the layout of
+        // `Handle` fails in exactly the same way.
+        if is_distinct_opaque(meta, t) {
+            continue;
+        }
         soa_is_not_consumed_yet(meta, t, out);
 
         // A type that contains itself has no size, and the declaration check
@@ -77,6 +97,28 @@ pub fn check(
         match layouts.of(&ty) {
             Ok(layout) => {
                 meta.set(t.id, layout);
+            }
+            // `opaque` by value. The resolver refuses it where it is *written*
+            // — `struct { f: opaque }`, a parameter, a slice element — and that
+            // is the diagnostic a program normally gets, because it points at
+            // the spelling. It cannot be the whole rule, though: a `::` binding
+            // over `opaque` puts the name behind an alias the resolver sees as
+            // an ordinary path, and a generic argument substitutes one in long
+            // after resolution. The layout query sees through both, because by
+            // the time a type is laid out every alias is gone.
+            //
+            // So the position rule is enforced twice on purpose: once on the
+            // spelling, for the message, and once here, for the guarantee. An
+            // opaque type has no size, so a value of one has no meaning — there
+            // must be no way to write it.
+            Err(err @ LayoutError::Opaque(_)) => {
+                let mut d = Diagnostic::error(format!("`{}`: {}", t.name, err.message()));
+                if let Some(span) = meta.span(t.id) {
+                    d = d.with_primary(span, "holds an opaque type by value");
+                }
+                out.push(d.with_note(
+                    "an opaque type has no size and no values; hold a pointer to it (`*opaque`)                      instead",
+                ));
             }
             // Every other error is already somebody's diagnostic; this one is
             // nobody's until it is this one's (see the module docs).
@@ -94,6 +136,17 @@ pub fn check(
             Err(_) => {}
         }
     }
+}
+
+/// Whether `t` is a `distinct` standing directly over an opaque type.
+///
+/// Read off the `distinct`'s single member, which is the type it stands over —
+/// the same place every other pass reads a `distinct`'s representation from.
+fn is_distinct_opaque(meta: &Meta, t: &TypeDef) -> bool {
+    let TypeDefKind::Distinct { repr } = &t.kind else {
+        return false;
+    };
+    matches!(meta.ty(repr.id), Some(Ty::Opaque))
 }
 
 /// Whether `ty` mentions a generic parameter anywhere.

@@ -1389,6 +1389,18 @@ impl Inferer<'_> {
                     inner: Box::new(inner.clone()),
                 };
                 self.expect(base, &bty, &ptr);
+                // Reading through a `*opaque` is the one thing an opaque pointer
+                // is for refusing: there is no value to produce, because the
+                // type is the statement that we do not know what is there
+                // (§3.1, §11). Reported here rather than left to layout — a
+                // load of an unsized type otherwise surfaces as a backend
+                // complaint about a type the program never wrote.
+                if matches!(self.cx.shallow(&inner), Ty::Opaque) {
+                    self.report(
+                        node,
+                        "cannot read through `*opaque`: an opaque type has no value to load",
+                    );
+                }
                 inner
             }
             NodeKind::MatchExpr { scrutinee, arms } => {

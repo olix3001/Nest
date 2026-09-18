@@ -1771,6 +1771,10 @@ fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
         Ty::Char => s.push('c'),
         Ty::Void => s.push('v'),
         Ty::Never => s.push('N'),
+        // `opaque` mangles even though no value of it exists: it is the pointee
+        // of a `*opaque`, and `*opaque` and `*u8` are different types that must
+        // not share a symbol.
+        Ty::Opaque => s.push('O'),
         Ty::Ptr { mutable, inner } => {
             s.push('P');
             if *mutable {

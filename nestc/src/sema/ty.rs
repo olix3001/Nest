@@ -293,6 +293,26 @@ pub enum Ty {
     },
     /// `dyn Trait` — a trait object (the trait's [`DefId`]).
     Dyn(DefId),
+    /// `opaque` — a type with no size and no values, reachable only behind a
+    /// pointer (§3.1, §11).
+    ///
+    /// It exists for the FFI cases where the pointee is not ours to describe:
+    /// `FILE`, `sqlite3`, a handle a C library hands back. The point is that
+    /// there is nothing to describe — not a struct whose fields we have not
+    /// written down yet, but a type the program is never allowed to ask the
+    /// size of, hold by value, or read through.
+    ///
+    /// It is **one built-in type**, not a declaration form. A library that
+    /// wants its own nominal handle writes `Handle :: distinct opaque`; the
+    /// existing `distinct` already mints a fresh nominal type, so an FFI
+    /// binding that does not want `*opaque` to interchange with every other
+    /// `*opaque` has the tool already.
+    ///
+    /// `*T` ↔ `*opaque` is always an explicit `cast`, in both directions; the
+    /// only implicit move is the ordinary mutability one, `*mut opaque` →
+    /// `*opaque`. `std/c` calls it `c.void`, which is the name a C programmer
+    /// looks for.
+    Opaque,
     /// A type that could not be determined; a diagnostic was already reported.
     /// Unifies with anything so one error does not cascade.
     Error,
@@ -419,6 +439,7 @@ impl Ty {
             Ty::Char => "char".into(),
             Ty::Void => "void".into(),
             Ty::Never => "never".into(),
+            Ty::Opaque => "opaque".into(),
             // The pointer-sized integers print by their bare name. They are
             // `distinct` declarations in `core` like any other nominal (§3.1),
             // but they stand exactly where a primitive used to: every program
@@ -1090,6 +1111,9 @@ impl InferCtxt {
             }
             (Ty::Float(x), Ty::Float(y)) if x == y => Ok(()),
             (Ty::Bool, Ty::Bool) | (Ty::Char, Ty::Char) | (Ty::Void, Ty::Void) => Ok(()),
+            // `opaque` is one type, so two of them agree. There is nothing
+            // structural to descend into — that is the point of it.
+            (Ty::Opaque, Ty::Opaque) => Ok(()),
 
             (
                 Ty::Ptr {
@@ -1507,6 +1531,11 @@ pub fn primitive_ty(name: &str) -> Option<Ty> {
         // is what makes a diverging call sit in any expression position without
         // the type checker special-casing it (§3.1).
         "never" => return Some(Ty::Never),
+        // No size and no values: only ever the pointee of a `*opaque` (§3.1).
+        // Every position that would need a layout refuses it by name, so that
+        // the reader is told *why* rather than watching a layout query fail
+        // somewhere further in.
+        "opaque" => return Some(Ty::Opaque),
         _ => {}
     }
     let (signed, digits) = match name.split_at(1) {

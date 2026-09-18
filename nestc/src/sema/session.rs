@@ -94,7 +94,7 @@ pub fn default_std_path() -> String {
 /// package, not between the compiler and a library's vocabulary.
 pub const TARGET_FILE: &str = "target.nest";
 
-pub const PRIMITIVES: &[&str] = &["bool", "char", "int", "never", "uint", "void"];
+pub const PRIMITIVES: &[&str] = &["bool", "char", "int", "never", "opaque", "uint", "void"];
 
 /// Resolves `import "spec"` file specifiers to a stable key and source text.
 ///

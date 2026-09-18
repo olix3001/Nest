@@ -126,6 +126,12 @@ pub enum LayoutError {
     /// An array whose length is not known, or a type the program already got
     /// wrong. A diagnostic exists for it elsewhere.
     Unknown(String),
+    /// An `opaque` (§3.1): no size and no values, by construction rather than
+    /// because something is missing. Its own variant because the advice is its
+    /// own — reach it through a pointer — and because "has no known layout"
+    /// would read as a compiler shortcoming rather than as the point of the
+    /// type.
+    Opaque(String),
     /// The recursion guard fired — see [`DEPTH`].
     TooDeep(String),
     /// The type is bigger than the target can address (see
@@ -145,6 +151,9 @@ impl LayoutError {
             }
             LayoutError::Comptime(t) => {
                 format!("`{t}` is a compile-time type and has no run-time representation")
+            }
+            LayoutError::Opaque(t) => {
+                format!("`{t}` has no size; an opaque type is only reachable through a pointer")
             }
             LayoutError::Unknown(t) => format!("`{t}` has no known layout"),
             LayoutError::TooDeep(t) => format!("`{t}` nests too deeply to lay out"),
@@ -417,6 +426,7 @@ impl<'a> Layouts<'a> {
                 .layout),
             Ty::Nominal { def, .. } => self.nominal(ty, *def, depth),
             Ty::Dyn(_) => Err(LayoutError::Unsized(self.show(ty))),
+            Ty::Opaque => Err(LayoutError::Opaque(self.show(ty))),
             Ty::ComptimeInt | Ty::ComptimeFloat | Ty::ComptimeStr => {
                 Err(LayoutError::Comptime(self.show(ty)))
             }
