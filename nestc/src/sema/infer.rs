@@ -48,7 +48,7 @@ use crate::ir::ConstValue;
 
 use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
-use super::impls::{ImplInfo, ImplTable};
+use super::impls::{ImplInfo, ImplTable, TypedImpl};
 use super::ty::{Const, FloatWidth, InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
 use super::{DefMeta, Resolution};
 
@@ -410,11 +410,106 @@ pub struct ImplTarget {
     pub trait_args: Vec<Ty>,
 }
 
-/// Resolve every impl's target, in [`ImplTable::impls`] order.
+/// Resolve every impl's target and the types it binds, in
+/// [`ImplTable::impls`] order, and record them on the impls themselves.
 ///
-/// Runs after inference for the ordinary reason a stage runs after another: it
-/// borrows the finished [`ImplTable`] and produces a value beside it, rather
-/// than mutating the table every use site is already reading.
+/// It runs **before** inference, and that is the point. Selection trials a
+/// candidate impl by unifying its self type with the obligation, and it does
+/// that for every candidate of every obligation — so resolving the impl's
+/// syntax there meant resolving the same three type expressions thousands of
+/// times over. Resolved once, a trial is a substitution.
+///
+/// Reading syntax is also the half an impl in another package cannot do: its
+/// tree was left behind with its library. What travels is this
+/// (see [`ImplInfo::typed`]).
+pub fn resolve_impl_targets(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    decls: &DeclTable,
+    diags: &mut Vec<Diagnostic>,
+    lang: &LangItems,
+    impls: &mut ImplTable,
+) -> Vec<ImplTarget> {
+    // No selection happens here — only `ty_from_node`, which reads syntax and
+    // the def table. The two trait sets and the context's `#lang` wiring exist
+    // for the solver, so an empty pair and a plain context are the honest
+    // inputs rather than an approximation of a file's scope.
+    let empty: HashSet<DefId> = HashSet::new();
+    let frozen = ImplTable {
+        impls: impls.impls.clone(),
+    };
+    let mut out = Vec::with_capacity(impls.impls.len());
+    for i in 0..frozen.impls.len() {
+        let imp = frozen.impls[i].clone();
+        let Some(ast) = asts.get(&imp.file) else {
+            // An impl whose typed view already arrived with its library: there
+            // is no syntax here to resolve, and none is needed.
+            out.push(match &imp.typed {
+                Some(t) => ImplTarget {
+                    self_ty: t.self_ty.clone(),
+                    trait_args: t.trait_args.clone(),
+                },
+                None => ImplTarget {
+                    self_ty: Ty::Error,
+                    trait_args: Vec::new(),
+                },
+            });
+            continue;
+        };
+        let mut cx = Inferer {
+            defs,
+            asts,
+            decls,
+            ast,
+            diags,
+            lang,
+            impls: &frozen,
+            in_scope_traits: &empty,
+            lang_traits: &empty,
+            in_default: false,
+            file: imp.file,
+            cx: InferCtxt::new(),
+            env: HashMap::new(),
+            types: HashMap::new(),
+            ret: Ty::Void,
+            breaks: Vec::new(),
+            alias_stack: Vec::new(),
+            const_stack: Vec::new(),
+            int_values: HashMap::new(),
+            float_values: HashMap::new(),
+        };
+        let self_ty = cx.ty_from_node_in(imp.file, imp.self_node);
+        let trait_args: Vec<Ty> = imp
+            .trait_args
+            .iter()
+            .map(|&n| cx.ty_from_node_in(imp.file, n))
+            .collect();
+        let assoc: HashMap<Symbol, Ty> = imp
+            .assoc
+            .iter()
+            .map(|(name, &n)| (name.clone(), cx.ty_from_node_in(imp.file, n)))
+            .collect();
+        // A type that still holds a variable is one this context invented and
+        // the next would number differently, so it is not written down: the
+        // syntax answers for that impl, as it did before.
+        let settled = !self_ty.mentions_var()
+            && !trait_args.iter().any(Ty::mentions_var)
+            && !assoc.values().any(Ty::mentions_var);
+        if settled {
+            impls.impls[i].typed = Some(TypedImpl {
+                self_ty: self_ty.clone(),
+                trait_args: trait_args.clone(),
+                assoc,
+            });
+        }
+        out.push(ImplTarget {
+            self_ty,
+            trait_args,
+        });
+    }
+    out
+}
+
 /// The signature of `def`, worked out from the tree the way a call site used to
 /// ask for it — for the test that the recorded one is the same
 /// (`super::decl::tests`).
@@ -461,64 +556,6 @@ pub(crate) fn signature_from_tree(
     cx.cx.resolve(&ty)
 }
 
-pub fn resolve_impl_targets(
-    defs: &DefTable,
-    asts: &HashMap<FileId, Ast>,
-    decls: &DeclTable,
-    diags: &mut Vec<Diagnostic>,
-    lang: &LangItems,
-    impls: &ImplTable,
-) -> Vec<ImplTarget> {
-    // No selection happens here — only `ty_from_node`, which reads syntax and
-    // the def table. The two trait sets and the context's `#lang` wiring exist
-    // for the solver, so an empty pair and a plain context are the honest
-    // inputs rather than an approximation of a file's scope.
-    let empty: HashSet<DefId> = HashSet::new();
-    let mut out = Vec::with_capacity(impls.impls.len());
-    for i in 0..impls.impls.len() {
-        let imp = impls.impls[i].clone();
-        let Some(ast) = asts.get(&imp.file) else {
-            out.push(ImplTarget {
-                self_ty: Ty::Error,
-                trait_args: Vec::new(),
-            });
-            continue;
-        };
-        let mut cx = Inferer {
-            defs,
-            asts,
-            decls,
-            ast,
-            diags,
-            lang,
-            impls,
-            in_scope_traits: &empty,
-            lang_traits: &empty,
-            in_default: false,
-            file: imp.file,
-            cx: InferCtxt::new(),
-            env: HashMap::new(),
-            types: HashMap::new(),
-            ret: Ty::Void,
-            breaks: Vec::new(),
-            alias_stack: Vec::new(),
-            const_stack: Vec::new(),
-            int_values: HashMap::new(),
-            float_values: HashMap::new(),
-        };
-        let self_ty = cx.ty_from_node_in(imp.file, imp.self_node);
-        let trait_args = imp
-            .trait_args
-            .iter()
-            .map(|&n| cx.ty_from_node_in(imp.file, n))
-            .collect();
-        out.push(ImplTarget {
-            self_ty,
-            trait_args,
-        });
-    }
-    out
-}
 
 /// Infer types for every function body in `file`, annotating each expression
 /// node with its resolved [`Ty`]. `asts` is the whole parsed program (read-only)
@@ -584,7 +621,7 @@ pub fn infer_file(
     // Which `distinct` types stand over a numeric representation (§2.4).
     // Computed once for the whole program, because unification needs the answer
     // and has no def table of its own — see `InferCtxt::set_numeric_distincts`.
-    let numeric_distincts = numeric_distincts(defs, asts);
+    let numeric_distincts = numeric_distincts(defs, asts, decls);
     // What a string literal defaults to, for the same reason: unification
     // decides whether a `comptime_str` variable may become a given type, and
     // `str` is found by `#lang` tag, which unification cannot do.
@@ -824,8 +861,13 @@ fn family_inner(
 }
 
 /// which case its name gives the family — or to another type def to follow.
-fn numeric_distincts(defs: &DefTable, asts: &HashMap<FileId, Ast>) -> HashMap<DefId, Ty> {
-    /// The inner type node of `def`, if `def` is a `distinct` type.
+fn numeric_distincts(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    decls: &super::decl::DeclTable,
+) -> HashMap<DefId, Ty> {
+    /// The inner type node of `def`, if `def` is a `distinct` type this
+    /// compilation has the tree of.
     fn distinct_inner(
         defs: &DefTable,
         asts: &HashMap<FileId, Ast>,
@@ -844,44 +886,77 @@ fn numeric_distincts(defs: &DefTable, asts: &HashMap<FileId, Ast>) -> HashMap<De
         }
     }
 
-    let mut out = HashMap::new();
-    for d in defs.iter() {
-        let Some((mut file, mut inner)) = distinct_inner(defs, asts, d.id) else {
-            continue;
-        };
-        // Walk the chain, with a bound: a `distinct` cycle is a separate error
-        // and this pass must not hang on one.
-        let mut kind = None;
+    /// The numeric primitive a **recorded** representation bottoms out at, the
+    /// chain followed on types rather than on trees.
+    ///
+    /// A recorded representation is already a resolved [`Ty`], so a
+    /// `distinct Metres :: Feet` over `distinct Feet :: f64` is two lookups and
+    /// no syntax at all — which is the only form a definition in another
+    /// package comes in.
+    fn numeric_of(decls: &super::decl::Decls, mut ty: Ty) -> Option<Ty> {
         for _ in 0..16 {
-            let Some(ast) = asts.get(&file) else { break };
-            let Some(Resolution::Def(next)) = ast.meta::<Resolution>(inner) else {
-                break;
-            };
-            let next = defs.resolve_alias(next);
-            let nd = defs.get(next);
-            if nd.kind == DefKind::Primitive {
-                // A family constructor carries its width as an argument, so the
-                // name alone does not give the type — `uint.<PTR_BITS>` is what
-                // `usize` stands over, and reading it is what makes that
-                // declaration in `core` real rather than decorative.
-                kind = match nd.name.as_str() {
-                    fam @ ("int" | "uint") => {
-                        family_inner(defs, asts, ast, inner).map(|w| Ty::int(w, fam == "int"))
-                    }
-                    // The primitive itself, not just its family: a literal
-                    // settling on this `distinct` type has to fit that width.
-                    other => match super::ty::primitive_ty(other) {
-                        Some(t @ (Ty::Int { .. } | Ty::Float(_))) => Some(t),
-                        _ => None,
-                    },
-                };
-                break;
-            }
-            match distinct_inner(defs, asts, next) {
-                Some((f, i)) => (file, inner) = (f, i),
-                None => break,
+            match ty {
+                Ty::Int { .. } | Ty::Float(_) => return Some(ty),
+                Ty::Nominal { def, .. } => ty = decls.distinct_repr(def)?,
+                _ => return None,
             }
         }
+        None
+    }
+
+    let q = super::decl::Decls::new(defs, asts, decls);
+    let mut out = HashMap::new();
+    for d in defs.iter() {
+        let kind = match q.distinct_repr(d.id) {
+            Some(t) => numeric_of(&q, t),
+            None => {
+                let Some((mut file, mut inner)) = distinct_inner(defs, asts, d.id) else {
+                    continue;
+                };
+                // Walk the chain, with a bound: a `distinct` cycle is a separate
+                // error and this pass must not hang on one.
+                let mut kind = None;
+                for _ in 0..16 {
+                    let Some(ast) = asts.get(&file) else { break };
+                    let Some(Resolution::Def(next)) = ast.meta::<Resolution>(inner) else {
+                        break;
+                    };
+                    let next = defs.resolve_alias(next);
+                    let nd = defs.get(next);
+                    if nd.kind == DefKind::Primitive {
+                        // A family constructor carries its width as an argument,
+                        // so the name alone does not give the type —
+                        // `uint.<PTR_BITS>` is what `usize` stands over, and
+                        // reading it is what makes that declaration in `core`
+                        // real rather than decorative.
+                        kind = match nd.name.as_str() {
+                            fam @ ("int" | "uint") => {
+                                family_inner(defs, asts, ast, inner).map(|w| Ty::int(w, fam == "int"))
+                            }
+                            // The primitive itself, not just its family: a
+                            // literal settling on this `distinct` type has to
+                            // fit that width.
+                            other => match super::ty::primitive_ty(other) {
+                                Some(t @ (Ty::Int { .. } | Ty::Float(_))) => Some(t),
+                                _ => None,
+                            },
+                        };
+                        break;
+                    }
+                    // The chain may leave this compilation's trees behind: a
+                    // local `distinct` over one a library declares.
+                    if let Some(t) = q.distinct_repr(next) {
+                        kind = numeric_of(&q, t);
+                        break;
+                    }
+                    match distinct_inner(defs, asts, next) {
+                        Some((f, i)) => (file, inner) = (f, i),
+                        None => break,
+                    }
+                }
+                kind
+            }
+        };
         if let Some(k) = kind {
             out.insert(d.id, k);
         }
@@ -2691,10 +2766,10 @@ impl Inferer<'_> {
         let map = self.fresh_impl_map(&imp.generics);
         let impl_self = self.impl_self_ty(&imp, &map);
         let mut ok = !matches!(impl_self, Ty::Error) && self.cx.unify(s, &impl_self).is_ok();
-        if ok && !imp.trait_args.is_empty() && imp.trait_args.len() == args.len() {
-            for (&node, a) in imp.trait_args.iter().zip(args) {
-                let t = self.ty_from_node_in(imp.file, node);
-                let t = self.subst_type_params(&t, &map);
+        let trait_args = self.impl_trait_args(&imp);
+        if ok && !trait_args.is_empty() && trait_args.len() == args.len() {
+            for (t, a) in trait_args.iter().zip(args) {
+                let t = self.subst_type_params(t, &map);
                 if self.cx.unify(&t, a).is_err() {
                     ok = false;
                     break;
@@ -2713,10 +2788,10 @@ impl Inferer<'_> {
         let map = self.fresh_impl_map(&imp.generics);
         let impl_self = self.impl_self_ty(&imp, &map);
         let _ = self.cx.unify(self_ty, &impl_self);
-        if !imp.trait_args.is_empty() && imp.trait_args.len() == args.len() {
-            for (&node, a) in imp.trait_args.iter().zip(args) {
-                let t = self.ty_from_node_in(imp.file, node);
-                let t = self.subst_type_params(&t, &map);
+        let trait_args = self.impl_trait_args(&imp);
+        if !trait_args.is_empty() && trait_args.len() == args.len() {
+            for (t, a) in trait_args.iter().zip(args) {
+                let t = self.subst_type_params(t, &map);
                 let _ = self.cx.unify(&t, a);
             }
         }
@@ -2725,8 +2800,35 @@ impl Inferer<'_> {
 
     /// Build the impl's self [`Ty`] with its generics substituted by `map`.
     fn impl_self_ty(&mut self, imp: &ImplInfo, map: &Subst) -> Ty {
-        let raw = self.ty_from_node_in(imp.file, imp.self_node);
+        let raw = match &imp.typed {
+            Some(t) => t.self_ty.clone(),
+            None => self.ty_from_node_in(imp.file, imp.self_node),
+        };
         self.subst_type_params(&raw, map)
+    }
+
+    /// The impl's trait arguments, generics still rigid.
+    fn impl_trait_args(&mut self, imp: &ImplInfo) -> Vec<Ty> {
+        match &imp.typed {
+            Some(t) => t.trait_args.clone(),
+            None => imp
+                .trait_args
+                .clone()
+                .iter()
+                .map(|&n| self.ty_from_node_in(imp.file, n))
+                .collect(),
+        }
+    }
+
+    /// What the impl binds the associated type `name` to, generics still rigid.
+    fn impl_assoc(&mut self, imp: &ImplInfo, name: &Symbol) -> Option<Ty> {
+        match &imp.typed {
+            Some(t) => t.assoc.get(name).cloned(),
+            None => {
+                let node = *imp.assoc.get(name)?;
+                Some(self.ty_from_node_in(imp.file, node))
+            }
+        }
     }
 
     /// A fresh inference variable per impl generic parameter — a type variable
@@ -2784,11 +2886,8 @@ impl Inferer<'_> {
     /// substituted. Reports if the impl fails to bind it.
     fn user_assoc(&mut self, i: usize, origin: NodeId, assoc: &Symbol, map: &Subst) -> Ty {
         let imp = self.impls.impls[i].clone();
-        match imp.assoc.get(assoc) {
-            Some(&node) => {
-                let t = self.ty_from_node_in(imp.file, node);
-                self.subst_type_params(&t, map)
-            }
+        match self.impl_assoc(&imp, assoc) {
+            Some(t) => self.subst_type_params(&t, map),
             None => {
                 self.report(
                     origin,
@@ -5159,9 +5258,9 @@ impl Inferer<'_> {
         // wrote for them.
         let trait_generics = self.trait_generic_param_defs(trait_def);
         for (idx, &g) in trait_generics.iter().enumerate() {
-            let t = match imp.trait_args.get(idx) {
-                Some(&node) => {
-                    let t = self.ty_from_node_in(imp.file, node);
+            let t = match self.impl_trait_args(&imp).get(idx) {
+                Some(t) => {
+                    let t = t.clone();
                     self.subst_type_params(&t, &map)
                 }
                 // A bare `impl Add for Vec3` names no arguments, which leaves
@@ -5188,11 +5287,8 @@ impl Inferer<'_> {
             .map(|(n, &m)| (n.clone(), m))
             .collect();
         for (name, adef) in assocs {
-            let t = match imp.assoc.get(&name) {
-                Some(&node) => {
-                    let t = self.ty_from_node_in(imp.file, node);
-                    self.subst_type_params(&t, &map)
-                }
+            let t = match self.impl_assoc(&imp, &name) {
+                Some(t) => self.subst_type_params(&t, &map),
                 // An impl that does not bind it is incomplete, reported as such;
                 // a variable keeps this check from adding a second complaint.
                 None => self.cx.fresh(),

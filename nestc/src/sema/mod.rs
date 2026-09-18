@@ -296,7 +296,7 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // over this table (operators, trait methods) per function body. This is also
     // where each impl's coherence is checked — it is the one pass that sees the
     // trait, the self type, and the package all three at once.
-    let impls = {
+    let mut impls = {
         let Session {
             defs,
             asts,
@@ -306,6 +306,23 @@ pub fn analyze(session: &mut Session, entry: FileId) {
             ..
         } = &mut *session;
         impls::build(defs, asts, decls, pkg_of, diagnostics, &all_files)
+    };
+    // Resolve each impl's target into types, **before** inference rather than
+    // after it: selection unifies against these on every trial of every
+    // obligation, and resolving the same syntax each time was the bulk of what
+    // a trial cost. Monomorphization wants the same answers long afterwards —
+    // a `Dispatch::Generic` call is a bound with no impl chosen, and choosing
+    // one is a search over exactly this (see [`infer::ImplTarget`]).
+    let impl_targets = {
+        let Session {
+            defs,
+            asts,
+            decls,
+            diagnostics,
+            lang_items,
+            ..
+        } = &mut *session;
+        infer::resolve_impl_targets(defs, asts, decls, diagnostics, lang_items, &mut impls)
     };
     for &file in &files {
         infer_one(session, &impls, file);
@@ -327,21 +344,6 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     for &file in &files {
         lower_one(session, file);
     }
-    // Resolve each impl's target into types and keep the table. Inference is
-    // done with it; monomorphization is not — choosing the impl for a
-    // `Dispatch::Generic` call is a search over exactly this (see
-    // [`infer::ImplTarget`]).
-    let impl_targets = {
-        let Session {
-            defs,
-            asts,
-            decls,
-            diagnostics,
-            lang_items,
-            ..
-        } = &mut *session;
-        infer::resolve_impl_targets(defs, asts, decls, diagnostics, lang_items, &impls)
-    };
     session.impls = impls;
     session.impl_targets = impl_targets;
     // Everything past this point is whole-program: reachability starts at

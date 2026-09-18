@@ -24,6 +24,7 @@ use crate::parser::ast::{Ast, NodeId, NodeKind};
 
 use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable};
+use super::ty::Ty;
 use super::{DefMeta, Resolution};
 
 /// One recorded `impl` block.
@@ -61,6 +62,28 @@ pub struct ImplInfo {
     pub assoc: HashMap<Symbol, NodeId>,
     /// The file the impl (and its member/assoc nodes) lives in.
     pub file: FileId,
+    /// The same impl with its three type expressions **resolved**, filled in by
+    /// [`super::infer::resolve_impl_targets`] before inference begins.
+    ///
+    /// `None` only where they could not be settled, in which case the nodes
+    /// above still answer. For an impl read out of a **library** it is the
+    /// other way round and there are no nodes: this is all there is.
+    pub typed: Option<TypedImpl>,
+}
+
+/// An impl's type expressions, resolved once — see [`ImplInfo::typed`].
+///
+/// The impl's own generics stay **rigid** here, each a [`Ty`] naming its
+/// parameter, so a selection instantiates them by substituting fresh variables
+/// rather than by resolving the syntax again.
+#[derive(Debug, Clone)]
+pub struct TypedImpl {
+    /// The `for` target (`impl Add for Vec3` → `Vec3`).
+    pub self_ty: Ty,
+    /// The trait's own generic arguments (`impl Add.<f64> for Vec3` → `[f64]`).
+    pub trait_args: Vec<Ty>,
+    /// What each associated-type binding names (`Output :: Vec3` → `Vec3`).
+    pub assoc: HashMap<Symbol, Ty>,
 }
 
 impl ImplInfo {
@@ -369,6 +392,7 @@ fn record(
         members,
         assoc,
         file,
+        typed: None,
     })
 }
 
