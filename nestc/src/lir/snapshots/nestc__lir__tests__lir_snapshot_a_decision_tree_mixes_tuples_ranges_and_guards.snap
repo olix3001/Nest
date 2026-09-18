@@ -8,7 +8,7 @@ unit mem:main {
     1: bool                    // +4
   }
 
-  func pair(t_0: (i32, bool)) -> i32  // _NC4pair
+  internal func pair(t_0: (i32, bool)) -> i32  // _NC4pair
     let _1: i32
     let _2: bool
     let _3: bool
@@ -44,7 +44,7 @@ unit mem:main {
   bb10:
     goto bb3
 
-  func grade(n_0: u8) -> i32  // _NC5grade
+  internal func grade(n_0: u8) -> i32  // _NC5grade
     let _1: i32
     let _2: bool
     let _3: bool

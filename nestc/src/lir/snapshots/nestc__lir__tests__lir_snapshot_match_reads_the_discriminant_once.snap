@@ -20,7 +20,7 @@ unit mem:main {
     h: i32                    // +4
   }
 
-  func area(s_0: Shape) -> i32  // _NC4area
+  internal func area(s_0: Shape) -> i32  // _NC4area
     let _1: i32
     let _2: u8
     let r_3: i32

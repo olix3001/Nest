@@ -16,7 +16,7 @@ unit mem:main {
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
   private const const.str.4: [16]u8 = b"integer overflow"  // _NK4
 
-  func by_value(a_0: i32, b_1: i32) -> i32  // _NC8by_value
+  internal func by_value(a_0: i32, b_1: i32) -> i32  // _NC8by_value
     let _2: bool
     let _3: []u8
     let _4: []u8
@@ -60,7 +60,7 @@ unit mem:main {
     _12 := div.i32 a_0, b_1
     return _12
 
-  func by_constant(a_0: i32) -> i32  // _NC11by_constant
+  internal func by_constant(a_0: i32) -> i32  // _NC11by_constant
     let _1: i32
   bb0:                    // entry
     _1 := rem.i32 a_0, 2

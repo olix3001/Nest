@@ -20,7 +20,7 @@ unit mem:main {
   private const const.str.3: [16]u8 = b"integer overflow"  // _NK3
   private const const.str.4: [8]u8 = b"mem:main"  // _NK4
 
-  func bump() -> u32  // _NC4bump
+  internal func bump() -> u32  // _NC4bump
     let _0: (u32, bool)
     let _1: []u8
     let _2: []u8
@@ -42,7 +42,7 @@ unit mem:main {
     @counter = _0.0
     return @counter
 
-  func at_limit(n_0: i32) -> bool  // _NC8at_limit
+  internal func at_limit(n_0: i32) -> bool  // _NC8at_limit
     let _1: bool
   bb0:                    // entry
     _1 := eq.i32 n_0, 10

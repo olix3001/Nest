@@ -4,7 +4,7 @@ expression: lir_text(src)
 ---
 unit mem:main {
 
-  func both(n_0: i32, c_1: bool) -> i32  // _NC4both
+  internal func both(n_0: i32, c_1: bool) -> i32  // _NC4both
     let _2: i32
     let _3: i32
     let a_4: i32

@@ -25,7 +25,7 @@ unit mem:main {
   private const const.str.2: [19]u8 = b"index out of bounds"  // _NK2
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
-  func reach(o_0: *Outer, xs_1: []i32, k_2: u64) -> void  // _NC5reach
+  internal func reach(o_0: *Outer, xs_1: []i32, k_2: u64) -> void  // _NC5reach
     let _3: *[]i32
     let _4: bool
     let _5: []u8

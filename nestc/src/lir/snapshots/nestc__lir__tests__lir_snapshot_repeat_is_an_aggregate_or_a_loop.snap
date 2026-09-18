@@ -8,13 +8,13 @@ unit mem:main {
     len: u64                    // +8
   }
 
-  func fixed() -> [4]i32  // _NC5fixed
+  internal func fixed() -> [4]i32  // _NC5fixed
     let _0: [4]i32
   bb0:                    // entry
     _0 := array(7, 7, 7, 7)
     return _0
 
-  func grown(n_0: u64) -> []i32  // _NC5grown
+  internal func grown(n_0: u64) -> []i32  // _NC5grown
     let _1: []i32
     let _2: u64
     let _3: bool

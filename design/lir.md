@@ -733,7 +733,30 @@ could do differently. So the ones that still matter are **decided here**, into a
 | `#inline` | `attrs.inline` | a codegen hint, never semantics |
 | `#unsafe` | `attrs.unchecked` | the checks this body was compiled without |
 | `#c_vararg` | `attrs.c_variadic` | the declared parameters are C's **fixed** ones, and a call may pass a tail past them under the platform's variadic convention |
+| `#callconv("...")` | `attrs.conv` | the register and stack protocol a call has to use — C's unless the directive says otherwise |
 | `@public` | `attrs.public` | whether the symbol must be visible outside the program — everything else may be given internal linkage (§11) |
+
+One attribute in `FunctionAttrs` comes from no directive at all: `attrs.internal`,
+which §11 sets once the partition is known and which says nothing outside this
+unit names the symbol.
+
+**`#callconv` is the second entry a backend must act on rather than record**, and
+it has to act on it in *two* places — the function and every call site. A call
+site left at the default passes its arguments one way while the callee reads them
+another, which is a miscompile and not a diagnostic. It is also the reason the
+convention is decided here and nowhere else: a call names its callee by index, so
+the site can read the convention off the function it names.
+
+**The compiler does not invent a convention of its own.** An ordinary function
+gets C's, even though every caller of one is this compiler and a faster protocol
+exists, because *which* functions may take a faster one is a question about
+addresses: a vtable slot, a function pointer, a dependent package not yet
+compiled. Getting it wrong is silent. What this level says instead is
+`attrs.internal` — nothing outside the object file names this — and a backend that
+can see every caller is free to change both together (§11). That is the division
+rustc draws too: its front end emits the C convention, and LLVM's `GlobalOpt`
+promotes an internal function whose every use is a direct call to `fastcc`,
+rewriting the sites in the same pass.
 
 `#packed`, `#align(N)` and `#soa` do not appear: layout consumed them, and what
 they decided is in the offsets the type table already carries. `#raw` is a
@@ -1603,6 +1626,8 @@ unit shapes {
   type Point = struct { x: i32, y: i32 }
   func scale(p_0: Point, k_1: i32) -> Point @public  // _NC5scale
     …
+  internal func half(p_0: Point) -> Point  // _NC4half
+    …
 }
 ```
 
@@ -1611,6 +1636,25 @@ arguments is not self-contained. The two copies are the same type and say so: a
 `TypeDef` carries the mangled key it was interned under, which is the one piece
 of identity that survives the renumbering and is what a backend merging debug
 info across units needs.
+
+**A definition no other unit names is internal.** Once the partition exists, so
+does the question: the split walks every unit's bodies and every global's
+initializer, and a function marked `attrs.internal` is one whose definition is
+here and whose every reference is here too. A backend gives it local linkage.
+
+Five things keep a definition external, and each of them is a name something
+outside can reach: `@public`, an `extern` ABI, `#offset(N)` — a symbol a linker
+script places — a `shared` instantiation several objects may each define, and a
+function whose address sits in a **global's initializer**. The last is the one
+worth naming: a vtable is private data, so every unit that builds a trait object
+carries its own copy, and a copy in another unit is a reference this cut cannot
+enumerate.
+
+The point of it is not the linker's time. An internal function is one a backend
+can see every caller of, which is what lets it rewrite the function itself —
+promote its calling convention, drop an argument nothing reads, pass a parameter
+in a register instead of behind a pointer — rewriting the sites in the same step.
+This compiler states the fact and does none of those things itself.
 
 **What this buys, and what it costs.** It buys parallel code generation — the
 units are independent values, so compiling them is a scheduling question rather

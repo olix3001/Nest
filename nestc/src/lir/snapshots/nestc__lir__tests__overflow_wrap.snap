@@ -4,7 +4,7 @@ expression: "lir_text_with(src, wrap)"
 ---
 unit mem:main {
 
-  func add(a_0: i32, b_1: i32) -> i32  // _NC3add
+  internal func add(a_0: i32, b_1: i32) -> i32  // _NC3add
     let _2: i32
   bb0:                    // entry
     _2 := add.i32 a_0, b_1

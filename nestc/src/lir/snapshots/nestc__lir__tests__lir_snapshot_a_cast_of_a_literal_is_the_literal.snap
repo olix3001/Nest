@@ -4,7 +4,7 @@ expression: lir_text(src)
 ---
 unit mem:main {
 
-  func conv(n_0: i32, u_1: u32, f_2: f64) -> u8  // _NC4conv
+  internal func conv(n_0: i32, u_1: u32, f_2: f64) -> u8  // _NC4conv
     let _3: i64
     let _4: i64
     let wide_5: i64

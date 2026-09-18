@@ -4,11 +4,11 @@ expression: lir_text(src)
 ---
 unit mem:main {
 
-  func cleanup() -> void  // _NC7cleanup
+  internal func cleanup() -> void  // _NC7cleanup
   bb0:                    // entry
     return
 
-  func run(n_0: i32) -> i32  // _NC3run
+  internal func run(n_0: i32) -> i32  // _NC3run
     let _1: bool
     let _2: i32
     let _3: bool

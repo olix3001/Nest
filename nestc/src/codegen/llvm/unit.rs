@@ -79,6 +79,7 @@ fn unsupported(what: impl std::fmt::Display) -> CodegenError {
 fn llvm_conv(conv: CallConv) -> u32 {
     match conv {
         CallConv::C => 0,
+        CallConv::Fast => 8,
         CallConv::StdCall => 64,
         CallConv::FastCall => 65,
         CallConv::Aapcs => 67,
@@ -367,20 +368,35 @@ impl<'ctx> Cx<'ctx, '_> {
     fn declare_funcs(&mut self) -> Result<()> {
         for f in &self.unit.funcs {
             let sig = self.signature(f).map_err(|e| within(&f.name, e))?;
-            // **Every definition is external.** LIR carries `attrs.public`, but
-            // that is a statement about the *language's* visibility, and the
-            // split (§11) is free to put a private function's one definition in
-            // a different unit from its caller. Internal linkage would break
-            // exactly that call. What keeps this sound is the invariant the
-            // split already guarantees: every symbol is defined in exactly one
-            // unit.
+            // A definition nothing outside this unit names is **internal**, and
+            // that is a fact only the split can establish: language visibility
+            // (`attrs.public`) says who may *write* the name, and the split is
+            // free to put a private function's definition in a different unit
+            // from its caller, so it is the split that marks `attrs.internal`
+            // once the partition is known (§11).
+            //
+            // It is worth the trouble because internal is what lets LLVM change
+            // the function: with every caller in front of it, `GlobalOpt`
+            // promotes the calling convention to `fastcc` and rewrites the call
+            // sites to match, and argument promotion and dead-argument
+            // elimination need the same guarantee. A function whose address
+            // escapes is left alone by all of them, which is the soundness this
+            // compiler would otherwise have to argue for itself.
+            //
             // An instantiation may be defined by every object that needed it,
             // and they are the same function (`FunctionAttrs::shared`). `weak_odr`
             // rather than `linkonce_odr`: the one copy the split put in this unit
             // may be the one another unit calls, and a `linkonce` definition
             // nothing in its own module uses is one LLVM is free to drop.
-            let linkage = if f.attrs.shared && !f.blocks.is_empty() {
+            let linkage = if f.blocks.is_empty() {
+                LlvmLinkage::External
+            } else if f.attrs.shared {
                 LlvmLinkage::WeakODR
+            } else if f.attrs.internal {
+                // `internal`, not `private`: the symbol stays in the object's
+                // local table, which is what a debugger and a profiler read a
+                // frame's name out of.
+                LlvmLinkage::Internal
             } else {
                 LlvmLinkage::External
             };

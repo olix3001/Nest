@@ -404,12 +404,25 @@ guarantee.
   ) -> c.int
   ```
 
-  The conventions are `"c"` (the default, and what every function has without
-  the directive), `"stdcall"`, `"fastcall"`, `"thiscall"`, `"vectorcall"`,
-  `"sysv64"`, `"win64"`, `"aapcs"` and `"aapcs-vfp"`. A name that is not one of
-  them is an error rather than a directive that is quietly ignored: a caller and
-  a callee that disagree about the protocol corrupt the stack, and nothing before
-  run time would say so.
+  The conventions are `"c"`, `"fast"`, `"stdcall"`, `"fastcall"`, `"thiscall"`,
+  `"vectorcall"`, `"sysv64"`, `"win64"`, `"aapcs"` and `"aapcs-vfp"`. A name that
+  is not one of them is an error rather than a directive that is quietly ignored:
+  a caller and a callee that disagree about the protocol corrupt the stack, and
+  nothing before run time would say so.
+
+  **The default is `"c"`**, and a function that says nothing is called that way —
+  a function pointer handed to C therefore works without being marked, and a
+  callback needs `#callconv` only where a platform asks for a different protocol.
+
+  `"fast"` is the backend's own convention, in which the arguments travel however
+  it finds best. Writing it says the function is **not** C-callable, so a `"fast"`
+  function whose address reaches C is a mistake nothing before run time reports;
+  it is rarely worth writing by hand, because an implementation already applies it
+  where it is provably safe. A function nothing outside its own object file names
+  is one every caller of which is in front of the compiler, and the convention of
+  such a function may be changed as long as its call sites are changed with it.
+  That is a fact about a whole program, not about a declaration, so it is decided
+  when the program is emitted rather than by anything written here.
 
   `#callconv` is **not** `extern("abi")`. `extern` says the symbol is external
   and which ABI's types are in play; the convention is the register and stack

@@ -19,7 +19,7 @@ unit mem:main {
   private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
-  func add(a_0: i32, b_1: i32) -> i32  // _NC3add
+  internal func add(a_0: i32, b_1: i32) -> i32  // _NC3add
     let _2: (i32, bool)
     let _3: []u8
     let _4: []u8

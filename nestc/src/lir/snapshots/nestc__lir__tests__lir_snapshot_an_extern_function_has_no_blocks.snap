@@ -6,7 +6,7 @@ unit mem:main {
 
   declare extern("c") func puts(s_0: *u8) -> i32  // puts
 
-  func shout(s_0: *u8) -> i32  // _NC5shout
+  internal func shout(s_0: *u8) -> i32  // _NC5shout
     let _1: i32
   bb0:                    // entry
     _1 := call puts(s_0)

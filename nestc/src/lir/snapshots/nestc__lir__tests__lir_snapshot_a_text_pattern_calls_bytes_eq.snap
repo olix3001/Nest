@@ -10,7 +10,7 @@ unit mem:main {
   private const const.str.2: [3]u8 = b"yes"  // _NK2
   private const const.str.3: [2]u8 = b"no"  // _NK3
 
-  func kind(s_0: []u8) -> i32  // _NC4kind
+  internal func kind(s_0: []u8) -> i32  // _NC4kind
     let _1: i32
     let _2: []u8
     let _3: bool
@@ -52,7 +52,7 @@ unit mem:main {
   bb9:
     goto bb3
 
-  func same(a_0: []u8, b_1: []u8) -> bool  // _NC4same
+  internal func same(a_0: []u8, b_1: []u8) -> bool  // _NC4same
     let _2: bool
   bb0:                    // entry
     _2 := call core.str.<impl str>.<as core.cmp.Eq>.eq(a_0, b_1)

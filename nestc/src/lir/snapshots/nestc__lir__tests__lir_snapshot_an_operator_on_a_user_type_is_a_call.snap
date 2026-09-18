@@ -22,13 +22,13 @@ unit mem:main {
   private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
-  func total(a_0: V, b_1: V) -> V  // _NC5total
+  internal func total(a_0: V, b_1: V) -> V  // _NC5total
     let _2: V
   bb0:                    // entry
     _2 := call V.<as core.ops.Add>.add(a_0, b_1)
     return _2
 
-  func V.<as core.ops.Add>.add(self_0: V, rhs_1: V) -> V  // _NC1VXN4core3ops3AddIE3add
+  internal func V.<as core.ops.Add>.add(self_0: V, rhs_1: V) -> V  // _NC1VXN4core3ops3AddIE3add
     let _2: (i32, bool)
     let _3: []u8
     let _4: []u8

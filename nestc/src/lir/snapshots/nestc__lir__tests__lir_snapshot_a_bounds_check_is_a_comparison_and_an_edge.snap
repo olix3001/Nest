@@ -19,7 +19,7 @@ unit mem:main {
   private const const.str.2: [19]u8 = b"index out of bounds"  // _NK2
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
-  func get(s_0: []i32, k_1: u64) -> i32  // _NC3get
+  internal func get(s_0: []i32, k_1: u64) -> i32  // _NC3get
     let _2: *[]i32
     let _3: bool
     let _4: []u8

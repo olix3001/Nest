@@ -27,7 +27,7 @@ unit mem:main {
   private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
-  func letter(c_0: u32) -> i32  // _NC6letter
+  internal func letter(c_0: u32) -> i32  // _NC6letter
     let _1: i32
     let _2: bool
     let _3: bool
@@ -67,7 +67,7 @@ unit mem:main {
   bb13:
     goto bb9
 
-  func scale(f_0: f64) -> i32  // _NC5scale
+  internal func scale(f_0: f64) -> i32  // _NC5scale
     let _1: i32
     let _2: bool
     let _3: bool
@@ -97,7 +97,7 @@ unit mem:main {
   bb9:
     goto bb3
 
-  func flag(b_0: bool) -> i32  // _NC4flag
+  internal func flag(b_0: bool) -> i32  // _NC4flag
     let _1: i32
     let _2: bool
     let _3: bool
@@ -122,7 +122,7 @@ unit mem:main {
   bb7:
     goto bb3
 
-  func ends(xs_0: []i32) -> i32  // _NC4ends
+  internal func ends(xs_0: []i32) -> i32  // _NC4ends
     let _1: i32
     let _2: bool
     let _3: bool
@@ -187,7 +187,7 @@ unit mem:main {
     _1 := _12.0
     goto bb1
 
-  func corner(p_0: Point) -> i32  // _NC6corner
+  internal func corner(p_0: Point) -> i32  // _NC6corner
     let _1: i32
     let _2: bool
     let _3: bool

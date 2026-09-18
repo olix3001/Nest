@@ -8,7 +8,7 @@ unit mem:main {
     len: u64                    // +8
   }
 
-  func raw(s_0: []i32, k_1: u64, d_2: i32) -> i32 #unsafe  // _NC3raw
+  internal func raw(s_0: []i32, k_1: u64, d_2: i32) -> i32 #unsafe  // _NC3raw
     let _3: *[]i32
     let _4: *i32
     let _5: i32

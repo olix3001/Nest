@@ -15,7 +15,7 @@ unit mem:main {
   }
   private const vtable.Speak.for.Dog: vtable.Speak = { &Dog.<as Speak>.say }  // _NVN5SpeakIEN3DogIE
 
-  func heard(d_0: *Dog) -> i32  // _NC5heard
+  internal func heard(d_0: *Dog) -> i32  // _NC5heard
     let _1: *dyn Speak
     let _2: *dyn Speak
     let s_3: *dyn Speak

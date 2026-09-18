@@ -19,7 +19,7 @@ unit mem:main {
   private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
-  func sizes() -> u64  // _NC5sizes
+  internal func sizes() -> u64  // _NC5sizes
     let _0: (u64, bool)
     let _1: []u8
     let _2: []u8

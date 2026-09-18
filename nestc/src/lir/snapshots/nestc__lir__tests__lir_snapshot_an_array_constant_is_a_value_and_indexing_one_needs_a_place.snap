@@ -5,7 +5,7 @@ expression: lir_text(src)
 unit mem:main {
   private const const.data.2: [3]i32 = { 1, 2, 3 }  // _NK2
 
-  func from_constant() -> i32  // _NC13from_constant
+  internal func from_constant() -> i32  // _NC13from_constant
     let _0: *[3]i32
     let _1: *i32
   bb0:                    // entry
@@ -13,7 +13,7 @@ unit mem:main {
     _1 := &_0.*[1]
     return _1.*
 
-  func from_local() -> i32  // _NC10from_local
+  internal func from_local() -> i32  // _NC10from_local
     let _0: [3]i32
     let _1: [3]i32
     let t_2: [3]i32

@@ -15,7 +15,7 @@ unit mem:main {
   type core.option.Option.<i32>.none = struct {           // was a variant of core.option.Option.<i32>; size 0, align 1
   }
 
-  func pick(o_0: core.option.Option.<i32>) -> i32  // _NC4pick
+  internal func pick(o_0: core.option.Option.<i32>) -> i32  // _NC4pick
     let _1: i32
     let _2: u8
     let x_3: i32

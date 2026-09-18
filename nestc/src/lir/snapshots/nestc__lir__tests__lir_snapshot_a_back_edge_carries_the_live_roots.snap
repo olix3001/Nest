@@ -22,11 +22,11 @@ unit mem:main {
   private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
-  func work(n_0: *Node) -> void  // _NC4work
+  internal func work(n_0: *Node) -> void  // _NC4work
   bb0:                    // entry
     return
 
-  func walk(n_0: i32) -> i32  // _NC4walk
+  internal func walk(n_0: i32) -> i32  // _NC4walk
     let _1: *Node
     let _2: *Node
     let p_3: *Node

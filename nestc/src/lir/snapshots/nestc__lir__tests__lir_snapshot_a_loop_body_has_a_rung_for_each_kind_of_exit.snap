@@ -19,11 +19,11 @@ unit mem:main {
   private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
-  func cleanup() -> void  // _NC7cleanup
+  internal func cleanup() -> void  // _NC7cleanup
   bb0:                    // entry
     return
 
-  func scan(n_0: i32) -> i32  // _NC4scan
+  internal func scan(n_0: i32) -> i32  // _NC4scan
     let _1: i32
     let i_2: i32
     let _3: bool

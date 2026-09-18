@@ -18,8 +18,16 @@ use crate::codegen::Codegen;
 use crate::sema::analyze;
 use crate::sema::session::{MemLoader, Session};
 
-/// Compile `src` and hand back the LLVM IR of its one unit.
+/// Compile `src` and hand back the LLVM IR of its one unit, as lowered: no
+/// optimization pipeline has run over it.
 fn ir(src: &str) -> String {
+    ir_at(src, OptLevel::O0)
+}
+
+/// [`ir`], with LLVM's standard pipeline for `level` run over the module first.
+/// What a test wants this for is the *optimizer's* answer to something the
+/// lowering deliberately leaves to it (§11).
+fn ir_at(src: &str, level: OptLevel) -> String {
     let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
     let file = session.load_entry("main").expect("entry loads");
     analyze(&mut session, file);
@@ -42,6 +50,9 @@ fn ir(src: &str) -> String {
 
     let mut backend = LlvmBackend::default();
     backend.target_info(None).expect("the host resolves");
+    let mut options = session.options.clone();
+    options.opt_level = level;
+    backend.configure(&options);
     let dir = std::env::temp_dir().join("nestc-llvm-tests");
     std::fs::create_dir_all(&dir).unwrap();
     let out: PathBuf = dir.join(format!("{:x}.{}.ll", hash(src), unique()));
@@ -1879,6 +1890,64 @@ main :: func () -> i32 {
     );
 }
 
+/// A function **nothing outside its own codegen unit names** is emitted with
+/// internal linkage (§11). That is what the language gets in place of a
+/// calling convention of its own: LLVM promotes an internal function whose
+/// every use is a direct call to `fastcc` and rewrites the sites in the same
+/// step, which is the part a front end must not do by hand.
+///
+/// Everything a name can reach from outside stays external: an `@public`
+/// function, which another compilation may call, and a function whose address
+/// a **vtable** carries, since that data is private to each unit that needs it
+/// and so turns up in units this compilation cannot enumerate.
+#[test]
+fn a_function_only_its_own_unit_calls_is_internal() {
+    let text = ir(
+        "helper :: func (a: i32) -> i32 { return a + 1 }\n\
+         @public exported :: func (a: i32) -> i32 { return a + 2 }\n\
+         Weigh :: trait { weight :: func (self: *Self) -> i32 }\n\
+         Thing :: struct { hp: i32 }\n\
+         impl Weigh for Thing { weight :: func (self: *Thing) -> i32 { return self.hp } }\n\
+         @public go :: func (t: *Thing) -> i32 {\n\
+             const seen: *dyn Weigh := t\n\
+             return helper(1) + exported(2) + seen.weight()\n\
+         }\n",
+    );
+    assert!(
+        text.contains("define internal i32 @_NC6helper"),
+        "a private function only its own unit calls is not internal:\n{text}"
+    );
+    assert!(
+        text.contains("define i32 @_NC8exported"),
+        "an `@public` function is not external:\n{text}"
+    );
+    assert!(
+        text.contains("define i32 @_NC5ThingXN5WeighIE6weight"),
+        "a method a vtable carries is not external:\n{text}"
+    );
+}
+
+/// The other half of the same fact, at `-C opt-level=2`: LLVM takes an internal
+/// function whose every use is a direct call and gives it its **own** fast
+/// convention, definition and call site together. Nothing in this compiler asks
+/// for `fastcc` — the linkage is the whole of what it says (§11).
+#[test]
+fn llvm_gives_an_internal_function_the_fast_convention() {
+    let text = ir_at(
+        "helper :: #inline(never) func (a: i32) -> i32 { return a * a + 1 }\n\
+         @public go :: func (a: i32) -> i32 { return helper(a) + helper(a + 1) }\n",
+        OptLevel::O2,
+    );
+    assert!(
+        text.contains("fastcc i32 @_NC6helper"),
+        "LLVM did not promote the internal function:\n{text}"
+    );
+    assert!(
+        text.contains("call fastcc i32 @_NC6helper"),
+        "the call site was left at the C convention:\n{text}"
+    );
+}
+
 /// `#callconv("...")` reaches LLVM on the function **and** on every call to it
 /// (§9). Both halves matter: LLVM keeps the convention per call site, so a site
 /// left at the default would pass its arguments one way and the callee would
@@ -1891,7 +1960,7 @@ fn a_calling_convention_is_set_on_the_function_and_on_its_calls() {
     );
     // 64 is `llvm::CallingConv::X86_StdCall`.
     assert!(
-        text.contains("define x86_stdcallcc i32"),
+        text.contains("define internal x86_stdcallcc i32"),
         "the definition is not stdcall:\n{text}"
     );
     assert!(

@@ -21,7 +21,7 @@ unit mem:main {
   private const const.str.4: [16]u8 = b"integer overflow"  // _NK4
   private const const.str.5: [35]u8 = b"shift amount is wider than the type"  // _NK5
 
-  func signed(a_0: i32, b_1: i32) -> i32  // _NC6signed
+  internal func signed(a_0: i32, b_1: i32) -> i32  // _NC6signed
     let _2: bool
     let _3: []u8
     let _4: []u8
@@ -65,7 +65,7 @@ unit mem:main {
     _12 := div.i32 a_0, b_1
     return _12
 
-  func unsigned(a_0: u32, b_1: u32) -> u32  // _NC8unsigned
+  internal func unsigned(a_0: u32, b_1: u32) -> u32  // _NC8unsigned
     let _2: bool
     let _3: []u8
     let _4: []u8
@@ -88,7 +88,7 @@ unit mem:main {
     _6 := div.u32 a_0, b_1
     return _6
 
-  func shifted(a_0: u32, b_1: u32) -> u32  // _NC7shifted
+  internal func shifted(a_0: u32, b_1: u32) -> u32  // _NC7shifted
     let _2: bool
     let _3: []u8
     let _4: []u8
@@ -111,13 +111,13 @@ unit mem:main {
     _6 := shl.u32 a_0, b_1
     return _6
 
-  func by_constant(a_0: u32) -> u32  // _NC11by_constant
+  internal func by_constant(a_0: u32) -> u32  // _NC11by_constant
     let _1: u32
   bb0:                    // entry
     _1 := shl.u32 a_0, 3
     return _1
 
-  func negated(a_0: i32) -> i32  // _NC7negated
+  internal func negated(a_0: i32) -> i32  // _NC7negated
     let _1: (i32, bool)
     let _2: []u8
     let _3: []u8

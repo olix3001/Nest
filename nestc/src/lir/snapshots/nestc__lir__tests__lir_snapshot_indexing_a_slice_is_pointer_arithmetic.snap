@@ -24,7 +24,7 @@ unit mem:main {
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
   private const const.str.4: [16]u8 = b"integer overflow"  // _NK4
 
-  func read(s_0: []i32, a_1: [3]i32, k_2: u64) -> i32  // _NC4read
+  internal func read(s_0: []i32, a_1: [3]i32, k_2: u64) -> i32  // _NC4read
     let _3: *[]i32
     let _4: bool
     let _5: []u8

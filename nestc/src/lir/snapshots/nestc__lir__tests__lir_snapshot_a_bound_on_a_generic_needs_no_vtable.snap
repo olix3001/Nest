@@ -7,7 +7,7 @@ unit mem:main {
     n: i32                    // +0
   }
 
-  func call(d_0: *Dog) -> i32  // _NC4call
+  internal func call(d_0: *Dog) -> i32  // _NC4call
     let _1: i32
   bb0:                    // entry
     _1 := call heard.<Dog>(d_0)
@@ -16,7 +16,7 @@ unit mem:main {
       }
     return _1
 
-  func Dog.<as Speak>.say(self_0: *Dog) -> i32  // _NC3DogXN5SpeakIE3say
+  internal func Dog.<as Speak>.say(self_0: *Dog) -> i32  // _NC3DogXN5SpeakIE3say
   bb0:                    // entry
     return self_0.*.n
 

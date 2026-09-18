@@ -7,11 +7,11 @@ unit mem:main {
     x: i32                    // +0
   }
 
-  func report(n_0: i32) -> void  // _NC6report
+  internal func report(n_0: i32) -> void  // _NC6report
   bb0:                    // entry
     return
 
-  func f(c_0: bool) -> i32  // _NC1f
+  internal func f(c_0: bool) -> i32  // _NC1f
     let _1: *Node
     let _2: *Node
     let p_3: *Node

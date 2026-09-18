@@ -26,15 +26,15 @@ unit mem:main {
     len: u64                    // +8
   }
 
-  func take(h_0: Point, s_1: Color, d_2: Point, p_3: *Point, xs_4: []Point) -> i32  // _NC4take
+  internal func take(h_0: Point, s_1: Color, d_2: Point, p_3: *Point, xs_4: []Point) -> i32  // _NC4take
   bb0:                    // entry
     return h_0.x
 
-  func mk(p_0: Point) -> Point  // _NC2mk
+  internal func mk(p_0: Point) -> Point  // _NC2mk
   bb0:                    // entry
     return p_0
 
-  func hue(s_0: Color) -> i32  // _NC3hue
+  internal func hue(s_0: Color) -> i32  // _NC3hue
     let _1: i32
     let _2: u8
     let n_3: i32

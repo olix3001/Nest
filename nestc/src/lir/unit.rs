@@ -52,8 +52,9 @@ use super::{
 };
 
 /// Cut the whole-program unit into at most `n` codegen units.
-pub fn split(whole: Unit, n: usize, sources: &SourceMap) -> Program {
+pub fn split(mut whole: Unit, n: usize, sources: &SourceMap) -> Program {
     let groups = partition(&whole, n.max(1), sources);
+    internalize(&mut whole, &groups);
     let only = groups.len() == 1;
     let units = groups
         .into_iter()
@@ -141,6 +142,79 @@ fn partition(whole: &Unit, n: usize, sources: &SourceMap) -> Vec<Group> {
         g.files.dedup();
     }
     groups
+}
+
+/// Mark every function no other unit names, so a backend can make its symbol
+/// local to the object file (`FunctionAttrs::internal`).
+///
+/// **This is the whole of what the compiler does about calling conventions for
+/// its own functions.** An ordinary Nest function is called the C way, because
+/// C's is the one convention the machine's tools all agree on — and then LLVM
+/// promotes an internal function whose every use is a direct call to its own
+/// fast convention, rewriting the definition and every call site in one step.
+/// Doing it here instead would mean answering "is this address ever taken" for
+/// a vtable slot, a function pointer and a dependent package that has not been
+/// compiled yet, and getting it wrong is a miscompile rather than a diagnostic
+/// (§11). This is the same division rustc draws: its front end emits the C
+/// convention and its partitioning internalizes.
+///
+/// A function stays external when:
+///
+/// - it is `@public` — another compilation may name it;
+/// - it has an `extern` ABI, or `#offset(N)` — a linker or a C caller names it;
+/// - it is [`FunctionAttrs::shared`], an instantiation several objects may each
+///   define and the linker folds;
+/// - its address appears in a **global's initializer** — a vtable, say, which is
+///   private data every unit that needs it gets a copy of, so the reference can
+///   turn up in a unit this cannot name;
+/// - or any function outside its own unit refers to it.
+fn internalize(whole: &mut Unit, groups: &[Group]) {
+    // Which unit each defined function landed in.
+    let mut home: HashMap<u32, usize> = HashMap::new();
+    for (i, g) in groups.iter().enumerate() {
+        for f in &g.funcs {
+            home.insert(f.0, i);
+        }
+    }
+    // Which units refer to each function, and which functions a global's
+    // initializer names.
+    let mut from: HashMap<u32, BTreeSet<usize>> = HashMap::new();
+    for (i, g) in groups.iter().enumerate() {
+        let mut refs = Refs::default();
+        for f in &g.funcs {
+            collect_func(whole, &whole.funcs[f.0 as usize], &mut refs);
+        }
+        for f in refs.funcs {
+            from.entry(f).or_default().insert(i);
+        }
+    }
+    let mut in_data = Refs::default();
+    for g in &whole.globals {
+        if let Some(init) = &g.init {
+            collect_const(&mut in_data, init);
+        }
+    }
+    for (i, f) in whole.funcs.iter_mut().enumerate() {
+        let i = i as u32;
+        // A declaration names a definition in another object, which is exactly
+        // what internal linkage would hide.
+        if f.blocks.is_empty() {
+            continue;
+        }
+        if f.attrs.public
+            || f.attrs.shared
+            || f.extern_abi.is_some()
+            || f.attrs.offset.is_some()
+            || in_data.funcs.contains(&i)
+        {
+            continue;
+        }
+        let Some(&mine) = home.get(&i) else { continue };
+        if from.get(&i).is_some_and(|us| us.iter().any(|&u| u != mine)) {
+            continue;
+        }
+        f.attrs.internal = true;
+    }
 }
 
 /// What one file's unit is called: the file's base name, without its directory,

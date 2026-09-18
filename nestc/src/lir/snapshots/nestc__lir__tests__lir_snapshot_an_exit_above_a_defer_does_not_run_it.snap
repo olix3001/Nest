@@ -4,15 +4,15 @@ expression: lir_text(src)
 ---
 unit mem:main {
 
-  func first() -> void  // _NC5first
+  internal func first() -> void  // _NC5first
   bb0:                    // entry
     return
 
-  func second() -> void  // _NC6second
+  internal func second() -> void  // _NC6second
   bb0:                    // entry
     return
 
-  func run(n_0: i32) -> i32  // _NC3run
+  internal func run(n_0: i32) -> i32  // _NC3run
     let _1: bool
     let _2: bool
     let _3: i32

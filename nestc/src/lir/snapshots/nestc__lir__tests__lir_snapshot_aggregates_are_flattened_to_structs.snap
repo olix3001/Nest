@@ -32,7 +32,7 @@ unit mem:main {
     1: bool                    // +4
   }
 
-  func shapes(p_0: Pair, t_1: Tag, s_2: []i32, a_3: [3]u8, q_4: (i32, bool), m_5: f64) -> void  // _NC6shapes
+  internal func shapes(p_0: Pair, t_1: Tag, s_2: []i32, a_3: [3]u8, q_4: (i32, bool), m_5: f64) -> void  // _NC6shapes
   bb0:                    // entry
     return
 }

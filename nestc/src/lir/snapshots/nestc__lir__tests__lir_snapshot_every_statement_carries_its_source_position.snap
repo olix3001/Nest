@@ -24,7 +24,7 @@ unit mem:main {
   private const const.str.3: [8]u8 = b"mem:main"  // _NK3
   private const const.str.4: [16]u8 = b"integer overflow"  // _NK4
 
-  func sum(xs_0: []i32, k_1: u64) -> i32  // _NC3sum   // mem:main:1:8
+  internal func sum(xs_0: []i32, k_1: u64) -> i32  // _NC3sum   // mem:main:1:8
     let _2: i32   // mem:main:2:3
     let total_3: i32   // mem:main:2:7
     let _4: *[]i32   // mem:main:3:19

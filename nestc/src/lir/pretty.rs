@@ -266,8 +266,14 @@ impl Printer<'_> {
         }
         let ret = self.ty(&f.ret);
         let decl = if f.blocks.is_empty() { "declare " } else { "" };
+        // Linkage, which is a fact about *this unit* rather than about the
+        // function: nothing outside the unit names an `internal` symbol, which
+        // is what leaves the backend free to rewrite the function and its calls
+        // together (§11). It reads before `func` because that is where a reader
+        // of the object file will meet it.
+        let local = if f.attrs.internal { "internal " } else { "" };
         self.line(&format!(
-            "\n  {decl}{abi}func {}({}) -> {ret}{tags}  // {}{}",
+            "\n  {decl}{local}{abi}func {}({}) -> {ret}{tags}  // {}{}",
             f.name,
             params.join(", "),
             f.symbol,

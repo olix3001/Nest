@@ -4,19 +4,19 @@ expression: lir_text(src)
 ---
 unit mem:main {
 
-  func start(m_0: func() -> i32, argc_1: i32, argv_2: u64) -> i32  // _NC5start
+  internal func start(m_0: func() -> i32, argc_1: i32, argv_2: u64) -> i32  // _NC5start
     let _3: i32
   bb0:                    // entry
     _3 := call (m_0)()
     return _3
 
-  func main() -> void  // _NC4main
+  internal func main() -> void  // _NC4main
   bb0:                    // entry
     return
 
   declare extern("c") func nest_init() -> void @public  // nest_init
 
-  func entry.status() -> i32  // _NEstatus
+  internal func entry.status() -> i32  // _NEstatus
   bb0:                    // status
     call main()
     return 0

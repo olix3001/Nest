@@ -378,6 +378,23 @@ pub struct FunctionAttrs {
     /// would say so. It defaults to [`CallConv::C`], which is what every Nest
     /// function has.
     pub conv: CallConv,
+    /// Whether the symbol may be made **local to the object file** that defines
+    /// it: nothing outside the codegen unit this function landed in names it.
+    ///
+    /// Set by [`crate::lir::unit::split`], once the partition is known, and it
+    /// is the split rather than the lowering that can know it — the question is
+    /// "does any *other* unit refer to this", and there are no other units until
+    /// the cut is made.
+    ///
+    /// What it buys is not the linker's time. An internal function is one LLVM
+    /// can see every caller of, which is what lets it change the function
+    /// itself: promote it to a faster calling convention, drop an argument
+    /// nothing reads, or rewrite a parameter passed by pointer into one passed
+    /// by value — each of them rewriting the call sites in the same step, which
+    /// is the part this compiler must not do by hand (§9). A function C can
+    /// reach, one another compilation can name (`@public`), and an
+    /// instantiation several objects may define are each excluded.
+    pub internal: bool,
     /// `#c_vararg` — a C declaration whose parameters are the **fixed** ones and
     /// which accepts a variadic tail beyond them (§9).
     ///

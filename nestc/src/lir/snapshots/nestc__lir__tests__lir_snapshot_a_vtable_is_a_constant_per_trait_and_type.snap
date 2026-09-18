@@ -40,7 +40,7 @@ unit mem:main {
   private const const.str.5: [16]u8 = b"integer overflow"  // _NK5
   private const const.str.6: [8]u8 = b"mem:main"  // _NK6
 
-  func total(sq_0: *Square, ci_1: *Circle, bx_2: *Box.<i32>) -> i32  // _NC5total
+  internal func total(sq_0: *Square, ci_1: *Circle, bx_2: *Box.<i32>) -> i32  // _NC5total
     let _3: *dyn Draw
     let _4: *dyn Draw
     let a_5: *dyn Draw

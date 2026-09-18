@@ -7,7 +7,7 @@ unit mem:main {
     v: i32                    // +0
   }
 
-  func build() -> *Node  // _NC5build
+  internal func build() -> *Node  // _NC5build
     let _0: *Node
     let _1: *Node
     let p_2: *Node

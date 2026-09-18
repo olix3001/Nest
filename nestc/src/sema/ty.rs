@@ -55,9 +55,22 @@ pub enum FloatWidth {
     Debug, Default, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub enum CallConv {
-    /// The platform's C convention — the default everywhere.
+    /// The platform's C convention. The default for anything that crosses the C
+    /// boundary — an `extern("c")` declaration or definition, and whatever else
+    /// is written `#callconv("c")`.
     #[default]
     C,
+    /// The backend's own fast convention: the arguments travel however it finds
+    /// best, and a tail call is available where the shape allows one.
+    ///
+    /// **Rarely worth writing.** A function that says nothing is called the C
+    /// way, and the backend already gives this convention to any function it can
+    /// see every caller of — which it knows from the linkage the codegen-unit
+    /// split decides ([`crate::lir::FunctionAttrs::internal`]), and which it
+    /// applies to the call sites in the same step. Writing it by hand says
+    /// instead that this function is *not* C-callable, and one whose address
+    /// then reaches C is a mistake nothing before run time reports (§11).
+    Fast,
     /// x86: the callee pops the arguments. Win32's own.
     StdCall,
     /// x86: the first two integer arguments in registers, the callee popping the
@@ -88,6 +101,7 @@ impl CallConv {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "c" => Some(Self::C),
+            "fast" => Some(Self::Fast),
             "stdcall" => Some(Self::StdCall),
             "fastcall" => Some(Self::FastCall),
             "thiscall" => Some(Self::ThisCall),
@@ -105,6 +119,7 @@ impl CallConv {
     pub fn name(self) -> &'static str {
         match self {
             Self::C => "c",
+            Self::Fast => "fast",
             Self::StdCall => "stdcall",
             Self::FastCall => "fastcall",
             Self::ThisCall => "thiscall",
@@ -119,6 +134,7 @@ impl CallConv {
     /// Every convention there is, for a diagnostic that has to list them.
     pub const ALL: &'static [CallConv] = &[
         Self::C,
+        Self::Fast,
         Self::StdCall,
         Self::FastCall,
         Self::ThisCall,
