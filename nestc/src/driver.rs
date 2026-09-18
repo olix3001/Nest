@@ -37,10 +37,8 @@ options:
                            link                 an executable, linked (default)
                            ast, ir, mono, lir   the compiler's own dumps, to stdout
                            obj, asm, backend-ir what the backend writes, to files
-                           nmeta                the package's metadata, for
-                                                compiling against it
-                           nlib                 the package compiled: its
-                                                objects and its metadata
+                           nlib                 the package as a library: its
+                                                metadata, its IR and its objects
                          a dump or a backend output written `kind=path` goes
                          to that file instead
   -L <dir>               a directory to search for packages; `<foo/...>` is
@@ -52,7 +50,7 @@ options:
                          on stderr, for a tool that consumes them
   --package <name>=<path>
                          a package pinned to a root file, beating any -L search
-  --extern <name>=<path> a compiled library (.nlib or .nmeta) this compilation
+  --extern <name>=<path> a compiled library (.nlib) this compilation
                          depends on and may import. Repeatable
   --indirect <name>=<path>
                          a library a dependency was compiled against: read, and
@@ -114,9 +112,8 @@ struct Emit {
     backend: Vec<OutputKind>,
     /// An executable: objects, and then the linker over them.
     link: bool,
-    /// The entry package's metadata alone.
-    nmeta: bool,
-    /// The entry package as a library: objects and metadata in one archive.
+    /// The entry package as a library: its metadata, its IR and its objects in
+    /// one archive.
     nlib: bool,
     /// The outputs named with a path, `kind=path`, and where each goes.
     paths: Vec<(String, PathBuf)>,
@@ -144,7 +141,6 @@ impl Emit {
             lir: false,
             backend: Vec::new(),
             link: false,
-            nmeta: false,
             nlib: false,
             paths: Vec::new(),
         }
@@ -179,11 +175,10 @@ impl Emit {
                 "asm" => e.backend.push(OutputKind::Assembly),
                 "backend-ir" => e.backend.push(OutputKind::Ir),
                 "link" => e.link = true,
-                "nmeta" => e.nmeta = true,
                 "nlib" => e.nlib = true,
                 other => {
                     return Err(format!(
-                        "`--emit` does not know `{other}`; it takes link, ast, ir, mono, lir, obj, asm, backend-ir, nmeta, nlib"
+                        "`--emit` does not know `{other}`; it takes link, ast, ir, mono, lir, obj, asm, backend-ir, nlib"
                     ));
                 }
             }
@@ -583,10 +578,10 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
     // decided (`design/lir.md` §1). Like the mono dump it is empty when
     // analysis reported an error, for the same reason — and so, for the same
     // reason, is everything a backend would have been handed.
-    if (emit.nmeta || emit.nlib) && !type_checked && !session.has_errors() {
+    if emit.nlib && !type_checked && !session.has_errors() {
         return Err(format!("{path} declares nothing to make a library of"));
     }
-    if (emit.lir || emit.link || emit.nlib || emit.nmeta || !emit.backend.is_empty()) && type_checked {
+    if (emit.lir || emit.link || emit.nlib || !emit.backend.is_empty()) && type_checked {
         let layouts = ir::layout::Layouts::new(
             &session.defs,
             &session.ir_meta,
@@ -651,7 +646,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
                 }
             }
         }
-        if emit.nmeta || emit.nlib {
+        if emit.nlib {
             write_library(
                 &session,
                 file,
@@ -659,7 +654,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
                 &program,
                 out.as_deref(),
                 &path,
-                &emit,
                 inv.obj_dir.as_deref(),
             )?;
         }
@@ -1002,19 +996,18 @@ fn load_libraries(session: &mut Session, externs: &[(String, PathBuf, bool)]) ->
             ));
         };
         let (_, bytes, path, importable) = pending.remove(i);
-        library::read::load(session, &bytes, path, importable)
+        let ir = library::archive::ir_of(path)?;
+        library::read::load(session, &bytes, &ir, path, importable)
             .map_err(|e| format!("`{}`: {e}", path.display()))?;
     }
     Ok(())
 }
 
-/// Write the entry package as a library: its metadata, and with `nlib` its
-/// objects beside it in one archive.
+/// Write the entry package as a library: its metadata, its IR and its objects
+/// in one archive.
 ///
-/// `-o` names the archive when one is asked for, and the metadata otherwise;
-/// with both, the metadata is the archive's path with `.nmeta` for its
-/// extension.
-#[allow(clippy::too_many_arguments)]
+/// `-o` names the archive; without one it is the package's name with `.nlib`
+/// for its extension.
 fn write_library(
     session: &Session,
     entry_file: common::source::FileId,
@@ -1022,7 +1015,6 @@ fn write_library(
     program: &lir::Program,
     out: Option<&Path>,
     entry: &str,
-    emit: &Emit,
     obj_dir: Option<&Path>,
 ) -> Result<(), String> {
     let Some(package) = session.pkg_of.get(&entry_file) else {
@@ -1031,48 +1023,34 @@ fn write_library(
              name it with `--package <name>={entry}`"
         ));
     };
-    let metadata = library::write::metadata(session, package, entry_file)?;
-    let base = match out {
-        Some(p) => p.to_path_buf(),
-        None => PathBuf::from(package),
-    };
-    let with_ext = |ext: &str| {
-        if out.is_some() && (ext == "nlib" || !emit.nlib) {
-            base.clone()
-        } else {
-            base.with_extension(ext)
+    let (metadata, ir) = library::write::members(session, package, entry_file)?;
+    let scratch = Scratch::new(obj_dir, entry)?;
+    let objects = write_units(
+        backend,
+        program,
+        OutputKind::Object,
+        Some(&scratch.dir.join(package)),
+        entry,
+        false,
+    );
+    let archive = objects.and_then(|objects| {
+        let mut members = vec![
+            (library::archive::METADATA.to_string(), metadata),
+            (library::archive::IR.to_string(), ir),
+        ];
+        for (i, object) in objects.iter().enumerate() {
+            let bytes = std::fs::read(object)
+                .map_err(|e| format!("cannot read {}: {e}", object.display()))?;
+            members.push((format!("u{i}.o"), bytes));
         }
+        library::archive::write(&members)
+    });
+    scratch.finish();
+    let path = match out {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from(package).with_extension("nlib"),
     };
-    if emit.nmeta {
-        let path = with_ext("nmeta");
-        std::fs::write(&path, &metadata)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    }
-    if emit.nlib {
-        let scratch = Scratch::new(obj_dir, entry)?;
-        let objects = write_units(
-            backend,
-            program,
-            OutputKind::Object,
-            Some(&scratch.dir.join(package)),
-            entry,
-            false,
-        );
-        let archive = objects.and_then(|objects| {
-            let mut members = vec![(library::archive::METADATA.to_string(), metadata)];
-            for (i, object) in objects.iter().enumerate() {
-                let bytes = std::fs::read(object)
-                    .map_err(|e| format!("cannot read {}: {e}", object.display()))?;
-                members.push((format!("u{i}.o"), bytes));
-            }
-            library::archive::write(&members)
-        });
-        scratch.finish();
-        let path = with_ext("nlib");
-        std::fs::write(&path, archive?)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    }
-    Ok(())
+    std::fs::write(&path, archive?).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// A dump: to the file `--emit name=path` named, or to stdout after `header`.

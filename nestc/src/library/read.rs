@@ -1,4 +1,4 @@
-//! Reading a `.nmeta` into a session.
+//! Reading a library's members into a session.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -7,7 +7,7 @@ use crate::sema::session::{FileMeta, Session};
 
 use super::codec::{self, Bases, Decoding};
 use super::metas;
-use super::{Body, FORMAT, Header, Loaded, MAGIC};
+use super::{FORMAT, Header, Ir, Loaded, MAGIC, Meta};
 
 /// The header of the metadata in `bytes`, and the body after it.
 pub fn header(bytes: &[u8]) -> Result<(Header, &[u8]), String> {
@@ -28,12 +28,22 @@ pub fn header(bytes: &[u8]) -> Result<(Header, &[u8]), String> {
     Ok((header, body))
 }
 
-/// Read the library in `bytes` into `session`, as a package its files may
-/// import when `importable` is set.
+/// Read a library into `session`, as a package its files may import when
+/// `importable` is set: `bytes` is its metadata member and `ir` its IR member.
+///
+/// The two are decoded together, under one translation, because their ids are
+/// the same ids and the header that says how to translate them is the
+/// metadata's.
 ///
 /// Every package the metadata's ids belong to must already be in the session:
 /// a library is read after the libraries it was compiled against.
-pub fn load(session: &mut Session, bytes: &[u8], path: &Path, importable: bool) -> Result<(), String> {
+pub fn load(
+    session: &mut Session,
+    bytes: &[u8],
+    ir: &[u8],
+    path: &Path,
+    importable: bool,
+) -> Result<(), String> {
     let (header, body) = header(bytes)?;
     if header.compiler != super::compiler_id() {
         return Err(format!(
@@ -87,8 +97,14 @@ pub fn load(session: &mut Session, bytes: &[u8], path: &Path, importable: bool) 
         builtins,
         missing_builtins: Vec::new(),
     };
-    let (body, _) = codec::decode(decoding, || postcard::from_bytes::<Body>(body));
-    let body = body.map_err(|e| format!("the metadata is unreadable: {e}"))?;
+    let (parts, _) = codec::decode(decoding, || {
+        let meta = postcard::from_bytes::<Meta>(body)
+            .map_err(|e| format!("the metadata is unreadable: {e}"))?;
+        let ir = postcard::from_bytes::<Ir>(ir)
+            .map_err(|e| format!("the IR is unreadable: {e}"))?;
+        Ok::<_, String>((meta, ir))
+    });
+    let (body, ir) = parts?;
 
     let name = header.name.clone();
     for (i, file) in body.files.into_iter().enumerate() {
@@ -114,10 +130,10 @@ pub fn load(session: &mut Session, bytes: &[u8], path: &Path, importable: bool) 
     for (tag, def, from_core) in body.lang_items {
         session.lang_items.set(tag, def, from_core);
     }
-    for (file, program) in body.programs {
+    for (file, program) in ir.programs {
         session.ir.insert(file, program);
     }
-    metas::import(session.ir_meta.store(), body.ir_facts);
+    metas::import(session.ir_meta.store(), ir.facts);
 
     session.adopt_library_root(&name, body.root);
     session.libraries.push(Loaded {

@@ -1,4 +1,5 @@
-//! Writing a package's `.nmeta`.
+//! Writing a package's library: the `nest.nmeta` and `nest.nir` members of its
+//! `.nlib`.
 
 use std::collections::HashMap;
 
@@ -15,17 +16,22 @@ use super::codec::{self, Counts, Encoding};
 use super::metas::{self, MetaValue};
 use super::{FORMAT, Header, MAGIC};
 
-/// [`super::Body`], borrowed: what is written is the session's own tables, and
+/// [`super::Meta`], borrowed: what is written is the session's own tables, and
 /// copying a package's every tree to write it would be the whole cost of
-/// writing. The field order is the body's, which is what the format is.
+/// writing. The field order is the member's, which is what the format is.
 #[derive(Serialize)]
-struct Body<'a> {
+struct Meta<'a> {
     files: Vec<FileRecord<'a>>,
     root: FileId,
     defs: Vec<&'a Def>,
     lang_items: Vec<(Symbol, DefId, bool)>,
+}
+
+/// [`super::Ir`], borrowed.
+#[derive(Serialize)]
+struct Ir<'a> {
     programs: Vec<(FileId, &'a Program)>,
-    ir_facts: Vec<(IrId, MetaValue)>,
+    facts: Vec<(IrId, MetaValue)>,
 }
 
 #[derive(Serialize)]
@@ -37,13 +43,16 @@ struct FileRecord<'a> {
     facts: Vec<(NodeId, MetaValue)>,
 }
 
-/// The metadata of `package`, which `session` compiled from source with `root`
-/// as its root file.
+/// The library members of `package`, which `session` compiled from source with
+/// `root` as its root file: its metadata and its IR, in that order.
+///
+/// Both are written under **one** encoding, because the ids in them are the
+/// same ids and the header that says how to translate them is written once.
 ///
 /// Everything the session holds that did not come from a library is the
 /// package's, so this is only meaningful for a session whose entry was the
 /// package's root: a program's entry file belongs to no package, and is refused.
-pub fn metadata(session: &Session, package: &str, root: FileId) -> Result<Vec<u8>, String> {
+pub fn members(session: &Session, package: &str, root: FileId) -> Result<(Vec<u8>, Vec<u8>), String> {
     // The package's own files, in id order, numbered from zero.
     let mut own_files: HashMap<FileId, u32> = HashMap::new();
     let mut files = Vec::new();
@@ -112,7 +121,7 @@ pub fn metadata(session: &Session, package: &str, root: FileId) -> Result<Vec<u8
         builtins_used: Vec::new(),
     };
 
-    let (body, encoding) = codec::encode(encoding, || -> Result<Vec<u8>, String> {
+    let (bodies, encoding) = codec::encode(encoding, || -> Result<(Vec<u8>, Vec<u8>), String> {
         let mut records = Vec::with_capacity(files.len());
         for file in &files {
             let ast = session
@@ -132,7 +141,7 @@ pub fn metadata(session: &Session, package: &str, root: FileId) -> Result<Vec<u8
                     .map_err(|e| format!("`{}`: {e}", file.name))?,
             });
         }
-        let body = Body {
+        let meta = Meta {
             files: records,
             root,
             defs: defs.clone(),
@@ -142,17 +151,22 @@ pub fn metadata(session: &Session, package: &str, root: FileId) -> Result<Vec<u8
                 .filter(|(_, def, _)| !session.is_foreign_def(*def))
                 .map(|(tag, def, core)| (tag.clone(), def, core))
                 .collect(),
+        };
+        let ir = Ir {
             programs: files
                 .iter()
                 .filter_map(|f| session.ir.get(&f.id).map(|p| (f.id, p)))
                 .collect(),
-            ir_facts: metas::export(session.ir_meta.store(), |id| {
+            facts: metas::export(session.ir_meta.store(), |id| {
                 id.0 >= own_ir_base && id.0 < ir_end
             })?,
         };
-        postcard::to_stdvec(&body).map_err(|e| format!("cannot serialize the metadata: {e}"))
+        let meta = postcard::to_stdvec(&meta)
+            .map_err(|e| format!("cannot serialize the metadata: {e}"))?;
+        let ir = postcard::to_stdvec(&ir).map_err(|e| format!("cannot serialize the IR: {e}"))?;
+        Ok((meta, ir))
     });
-    let body = body?;
+    let (body, ir) = bodies?;
     if !encoding.unowned.is_empty() {
         return Err(format!(
             "the metadata names ids nothing owns: {}",
@@ -211,5 +225,5 @@ pub fn metadata(session: &Session, package: &str, root: FileId) -> Result<Vec<u8
     out.extend_from_slice(&(header.len() as u32).to_le_bytes());
     out.extend_from_slice(&header);
     out.extend_from_slice(&body);
-    Ok(out)
+    Ok((out, ir))
 }

@@ -1,27 +1,27 @@
 //! Libraries: what a package compiled on its own leaves behind for the packages
 //! compiled against it.
 //!
-//! ### `.nmeta`: the package, analyzed
+//! ### `.nlib`: the library, and the only artifact
 //!
-//! Everything a package compiled against this one asks about it, already
-//! answered: every definition with its namespace, every file's tree with the
-//! facts resolution and inference left on it, and every function lowered to IR
-//! **before** monomorphization — a generic function is instantiated by whoever
-//! calls it, so its body has to travel. Loading one ([`read::load`]) puts all of
-//! that into a session as though the package had been analyzed there, and the
-//! analysis passes skip its files.
+//! One file per package, an `ar` archive (`archive`) of three kinds of member:
+//!
+//! - `nest.nmeta`, the **analysis**: every definition with its namespace, the
+//!   facts resolution and inference left, the `#lang` tags — what a package
+//!   compiled against this one needs in order to typecheck against it.
+//! - `nest.nir`, the **IR**, before monomorphization: a generic function is
+//!   instantiated by whoever calls it, so its body has to travel. It is read
+//!   beside the metadata, and separate from it because typechecking alone does
+//!   not need it.
+//! - `u0.o`, `u1.o`, …, one **object** per codegen unit.
+//!
+//! Loading one ([`read::load`]) puts the first two into a session as though the
+//! package had been analyzed there, and the analysis passes skip its files.
 //!
 //! Two consequences shape the rest. A package is analyzed **once**, where it is
-//! compiled; and the files a reader has are the metadata's, so a package's
+//! compiled; and the files a reader has are the library's, so a package's
 //! source does not have to exist where it is used. The text of each file does
 //! travel, because a diagnostic pointing into a library still wants to show the
 //! line.
-//!
-//! ### `.nlib`: the package, compiled
-//!
-//! The metadata and the objects, in one `ar` archive (`archive`). Linking a
-//! program links every library's objects; compiling against one reads only its
-//! metadata member.
 
 pub mod archive;
 pub mod codec;
@@ -40,12 +40,12 @@ use crate::sema::def::{Def, DefId};
 
 use codec::{Bases, Counts};
 
-/// The first bytes of every `.nmeta`.
+/// The first bytes of a library's metadata member.
 pub const MAGIC: &[u8; 8] = b"NESTMETA";
 
 /// The layout of what follows the magic. Raised whenever anything written
 /// changes shape, so an old library is refused by name rather than misread.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// What a reader checks before it reads anything else.
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,9 +77,9 @@ pub struct Header {
     pub fingerprint: u64,
 }
 
-/// Everything else.
+/// The analysis, which is the rest of the `nest.nmeta` member.
 #[derive(Serialize, Deserialize)]
-pub struct Body {
+pub struct Meta {
     pub files: Vec<FileRecord>,
     /// The package's root file.
     pub root: FileId,
@@ -87,9 +87,19 @@ pub struct Body {
     /// The `#lang` tags this package's definitions claim, and whether each was
     /// `core`'s claim.
     pub lang_items: Vec<(Symbol, DefId, bool)>,
-    /// Each file's IR, before monomorphization.
+}
+
+/// The `nest.nir` member: each file's IR, before monomorphization, and the
+/// facts the passes left on it.
+///
+/// It is its own member because it is read for a different reason than the
+/// metadata is — a compilation that only typechecks against this package never
+/// looks at it — and because the ids inside it are translated by the same
+/// encoding, so the two are written and read together.
+#[derive(Serialize, Deserialize)]
+pub struct Ir {
     pub programs: Vec<(FileId, Program)>,
-    pub ir_facts: Vec<(IrId, metas::MetaValue)>,
+    pub facts: Vec<(IrId, metas::MetaValue)>,
 }
 
 /// One file of the package.

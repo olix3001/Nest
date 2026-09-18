@@ -1,4 +1,5 @@
-//! `.nlib`: a Unix `ar` archive holding a package's metadata and its objects.
+//! `.nlib`: a Unix `ar` archive holding a package's metadata, its IR and its
+//! objects.
 //!
 //! The format is the common one — a global header, then each member behind a
 //! 60-byte header of fixed-width text fields — written by hand because it is
@@ -11,6 +12,9 @@ const GLOBAL: &[u8] = b"!<arch>\n";
 
 /// The name the metadata member is stored under.
 pub const METADATA: &str = "nest.nmeta";
+
+/// The name the IR member is stored under.
+pub const IR: &str = "nest.nir";
 
 /// An archive of `members`, each a name and its bytes. A name is at most 15
 /// bytes and has no `/` in it.
@@ -58,19 +62,30 @@ pub fn read(bytes: &[u8]) -> Result<Vec<(String, &[u8])>, String> {
     Ok(members)
 }
 
-/// The metadata inside the library at `path` — or the file itself, when it is a
-/// bare `.nmeta`.
-pub fn metadata_of(path: &Path) -> Result<Vec<u8>, String> {
+/// The member `name` of the library at `path`.
+fn member_of(path: &Path, name: &str) -> Result<Vec<u8>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-    if bytes.starts_with(GLOBAL) {
-        let members = read(&bytes).map_err(|e| format!("`{}`: {e}", path.display()))?;
-        return members
-            .into_iter()
-            .find(|(name, _)| name == METADATA)
-            .map(|(_, data)| data.to_vec())
-            .ok_or_else(|| format!("`{}` holds no metadata", path.display()));
+    if !bytes.starts_with(GLOBAL) {
+        return Err(format!("`{}` is not a Nest library", path.display()));
     }
-    Ok(bytes)
+    read(&bytes)
+        .map_err(|e| format!("`{}`: {e}", path.display()))?
+        .into_iter()
+        .find(|(member, _)| member == name)
+        .map(|(_, data)| data.to_vec())
+        .ok_or_else(|| format!("`{}` holds no `{name}`", path.display()))
+}
+
+/// The metadata inside the library at `path`. A library that is only being
+/// asked about — is it this package, is it still fresh — is read this far and
+/// no further.
+pub fn metadata_of(path: &Path) -> Result<Vec<u8>, String> {
+    member_of(path, METADATA)
+}
+
+/// The IR inside the library at `path`.
+pub fn ir_of(path: &Path) -> Result<Vec<u8>, String> {
+    member_of(path, IR)
 }
 
 /// The objects inside the library at `path`, by member name.
@@ -82,7 +97,7 @@ pub fn objects_of(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(read(&bytes)
         .map_err(|e| format!("`{}`: {e}", path.display()))?
         .into_iter()
-        .filter(|(name, _)| name != METADATA)
+        .filter(|(name, _)| name != METADATA && name != IR)
         .map(|(name, data)| (name, data.to_vec()))
         .collect())
 }
