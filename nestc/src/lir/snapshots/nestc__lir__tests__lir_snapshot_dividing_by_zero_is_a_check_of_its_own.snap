@@ -12,9 +12,9 @@ unit mem:main {
     line: u32                    // +16
     column: u32                    // +20
   }
-  private const const.str.1: [16]u8 = b"division by zero"  // _NK1
-  private const const.str.2: [8]u8 = b"mem:main"  // _NK2
-  private const const.str.3: [16]u8 = b"integer overflow"  // _NK3
+  private const const.str.2: [16]u8 = b"division by zero"  // _NK2
+  private const const.str.3: [8]u8 = b"mem:main"  // _NK3
+  private const const.str.4: [16]u8 = b"integer overflow"  // _NK4
 
   func by_value(a_0: i32, b_1: i32) -> i32  // _NC8by_value
     let _2: bool
@@ -32,8 +32,8 @@ unit mem:main {
     _2 := ne.i32 b_1, 0
     switch.bool _2 { 1 => bb2, _ => bb1 }
   bb1:                    // division by zero
-    _3 := []u8(&const.str.1, 16)
-    _4 := []u8(&const.str.2, 8)
+    _3 := []u8(&const.str.2, 16)
+    _4 := []u8(&const.str.3, 8)
     _5 := core.loc.Location(_4, 1, 51)
     call core.fail.panic(_3, _5)
       @safepoint { live: [_3, _5]
@@ -47,8 +47,8 @@ unit mem:main {
     _8 := bit_and.bool _6, _7
     switch.bool _8 { 1 => bb3, _ => bb4 }
   bb3:                    // integer overflow
-    _9 := []u8(&const.str.3, 16)
-    _10 := []u8(&const.str.2, 8)
+    _9 := []u8(&const.str.4, 16)
+    _10 := []u8(&const.str.3, 8)
     _11 := core.loc.Location(_10, 1, 51)
     call core.fail.panic(_9, _11)
       @safepoint { live: [_9, _11]

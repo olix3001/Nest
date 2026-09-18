@@ -7,7 +7,7 @@
 // things. `str.nest` is left unexported for the same reason.
 
 { Location } :: import "loc.nest"
-{ len } :: import "slice.nest"
+{ put, put_usize } :: import "write.nest"
 
 // Abort the program with a message (§8). The `loc` default is what makes the
 // report name the line that called `panic`, rather than this declaration: a
@@ -60,74 +60,29 @@
   put("\n  at ")
   put(loc.file)
   put(":")
-  put_u32(loc.line)
+  put_usize(cast.<usize>(loc.line))
   put(":")
-  put_u32(loc.column)
+  put_usize(cast.<usize>(loc.column))
   put("\n")
+  // The report is finished, so the flag that stopped a panic *inside* it has
+  // nothing left to guard. It is cleared rather than left set because this is
+  // not always the end: a guarded call returns below, and the next panic is a
+  // first panic again.
+  reporting = false
+  nest_guard_fail()
   trap()
 }
 
-// Bytes to stderr. The only thing the runtime does for a failing program: it
-// knows how to reach stderr and nothing else — what a report *looks like* is
-// decided above, in Nest, so that changing its shape does not mean changing C.
+// Leave the guarded call, if a caller set one up — what lets a test binary
+// report a failing test and run the next one (`nestc/src/lir/entry.rs`).
+//
+// It **returns** when nothing is guarding, which is every ordinary program: the
+// `trap()` above is then reached exactly as it was before. A panic still does
+// not unwind, so nothing between here and the guard runs on the way out.
 //
 // The name is the runtime's own symbol: an `extern("c")` declaration links by
 // the name it is written with.
-nest_write_err :: extern("c") func (buf: *u8, len: usize) -> void
-
-// One `str` out. A slice is a pointer and a length (`design/lir.md` §7b), which
-// is exactly what the call wants, so this is a reinterpretation rather than a
-// conversion. An empty one writes nothing and never forms a pointer to read.
-put :: func (s: str) -> void {
-  let b: []u8 := cast.<[]u8>(s)
-  if b.len() > 0 { nest_write_err(b.ptr(), b.len()) }
-}
-
-// A `u32` as decimal, **without allocating**.
-//
-// That constraint is the reason this is written by hand rather than as
-// `f"{n}"`: interpolation builds a format buffer, and a panic is the one moment
-// that must not allocate, because a failed allocation is one of the things that
-// gets here. Ten digits is the widest a `u32` reaches, so the buffer is a fixed
-// ten bytes filled from the back.
-// A `u32` as decimal, **without allocating and without anything that can
-// fail**.
-//
-// Both halves of that matter, and the second is the harder one. A panic is the
-// one moment that must not allocate, because a failed allocation is one of the
-// things that arrives here — so `f"{n}"`, which builds a format buffer, is out.
-// But it also must not *panic*, and a panic inside the panic report is what an
-// array index or a sub-slice would risk: each is checked, and a failed check
-// calls `panic`, which is how the report becomes the thing that failed.
-//
-// So there is no buffer and no index. The digits are produced most-significant
-// first by dividing by a falling power of ten, and each is written on its own.
-// Ten small writes on the failure path is not a cost worth a buffer, and this
-// way the report cannot fail.
-put_u32 :: #unsafe func (n: u32) -> void {
-  if n == 0 {
-    put_byte(48)
-    return
-  }
-  let mut div: u32 := 1000000000
-  let mut seen: bool := false
-  while div > 0 {
-    let d: u32 := (n / div) % 10
-    if d != 0 || seen {
-      seen = true
-      put_byte(cast.<u8>(48 + d))
-    }
-    if div == 1 { break }
-    div = div / 10
-  }
-}
-
-// One byte out. The address of a local is a `*u8`, which is what the runtime
-// takes; there is no sequence here to index and so nothing to check.
-put_byte :: #unsafe func (b: u8) -> void {
-  let x: u8 := b
-  nest_write_err(&x, 1)
-}
+nest_guard_fail :: extern("c") func () -> void
 
 // Stop the process, immediately and without unwinding — the one part of failing
 // that no library can write, because it is a machine instruction (§6.4). Every

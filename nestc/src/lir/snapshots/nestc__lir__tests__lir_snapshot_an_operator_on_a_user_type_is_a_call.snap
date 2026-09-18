@@ -19,8 +19,8 @@ unit mem:main {
     0: i32                    // +0
     1: bool                    // +4
   }
-  private const const.str.1: [16]u8 = b"integer overflow"  // _NK1
-  private const const.str.2: [8]u8 = b"mem:main"  // _NK2
+  private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
+  private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
   func total(a_0: V, b_1: V) -> V  // _NC5total
     let _2: V
@@ -38,8 +38,8 @@ unit mem:main {
     _2 := add_checked.i32 self_0.x, rhs_1.x
     switch.bool _2.1 { 1 => bb1, _ => bb2 }
   bb1:                    // overflow
-    _3 := []u8(&const.str.1, 16)
-    _4 := []u8(&const.str.2, 8)
+    _3 := []u8(&const.str.2, 16)
+    _4 := []u8(&const.str.3, 8)
     _5 := core.loc.Location(_4, 5, 54)
     call core.fail.panic(_3, _5)
       @safepoint { live: [_3, _5]

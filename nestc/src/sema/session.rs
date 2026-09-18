@@ -323,6 +323,15 @@ pub struct Session {
     /// the canonical path of a file outside every package is measured from
     /// ([`Session::program_module_path`]).
     entry_dir: Option<(FileId, String)>,
+    /// The directory the **entry package's** own files live under, whether that
+    /// is a package's directory or a program's entry directory.
+    ///
+    /// It is what `--test` is measured against: a test binary runs the tests of
+    /// the package being compiled and not of everything it imports, and "the
+    /// package being compiled" is a question only this file can answer — a def
+    /// knows its file, and a file knows its path, and nothing in between records
+    /// which package a non-root file belongs to.
+    entry_base: Option<String>,
     /// Module paths already reported as claimed by both a file and a directory
     /// (see [`Session::module_twin`]), so the pair is reported once.
     pub(crate) twins_reported: HashSet<Vec<Symbol>>,
@@ -399,6 +408,7 @@ impl Session {
             pkg_of: HashMap::new(),
             pkg_dir: HashMap::new(),
             entry_dir: None,
+            entry_base: None,
             libraries: Vec::new(),
             own_ir_base: 0,
             ir_before_mono: 0,
@@ -621,6 +631,7 @@ impl Session {
                 self.pkg_of.insert(file, pkg.clone());
                 let dir = parent_of(&name).unwrap_or("");
                 self.pkg_dir.insert(pkg, normalize_str(dir));
+                self.entry_base = Some(normalize_str(dir));
             }
             None => {
                 // An in-memory name has no directory, only its loader's `mem:`
@@ -630,6 +641,7 @@ impl Session {
                     (None, Some(colon)) => name[..=colon].to_string(),
                     (None, None) => String::new(),
                 };
+                self.entry_base = Some(dir.clone());
                 self.entry_dir = Some((file, dir));
             }
         }
@@ -788,6 +800,41 @@ impl Session {
     /// Whether `def` came from a library.
     pub fn is_foreign_def(&self, def: DefId) -> bool {
         self.libraries.iter().any(|l| l.owns_def(def))
+    }
+
+    /// Whether `file` belongs to the package being compiled, rather than to one
+    /// it imports.
+    ///
+    /// A path prefix, because that is what a package *is* — a directory
+    /// ([`Session::load_package`]) — and because the alternative, a map filled
+    /// in as files are loaded, would have to agree with the prefix rule anyway
+    /// to name them.
+    pub fn in_entry_package(&self, file: FileId) -> bool {
+        let Some(base) = &self.entry_base else {
+            return false;
+        };
+        self.sources
+            .file(file)
+            .is_some_and(|f| f.name.starts_with(base.as_str()))
+    }
+
+    /// Every `@test` function of the package being compiled, in source order,
+    /// with the name it is reported under.
+    ///
+    /// The name is the canonical path — `math.adds` — which is what the compiler
+    /// knows the function by, and so what a filter would have to match.
+    pub fn entry_package_tests(&self) -> Vec<(String, DefId)> {
+        self.linked
+            .funcs()
+            .filter(|f| crate::ir::check::declarations::is_test(&self.defs, f.def))
+            .filter(|f| !self.is_foreign_def(f.def))
+            .filter(|f| {
+                self.linked
+                    .file_of(f.def)
+                    .is_some_and(|file| self.in_entry_package(file))
+            })
+            .map(|f| (self.defs.canonical_string(f.def), f.def))
+            .collect()
     }
 
     pub fn is_collected(&self, file: FileId) -> bool {

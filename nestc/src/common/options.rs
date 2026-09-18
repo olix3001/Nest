@@ -219,6 +219,18 @@ pub struct Options {
     pub codegen_units: usize,
     /// Whether a C `main` is synthesized; see [`EntryMode`].
     pub entry: EntryMode,
+    /// Build the entry package as a **test binary** (`--test`).
+    ///
+    /// One thing changes and nothing else does: the synthesized entry point runs
+    /// the entry package's `@test` functions instead of its `main`
+    /// (`crate::lir::entry`).
+    ///
+    /// It does **not** decide whether those functions are compiled. They are, in
+    /// every build, the way any other function is — keeping a declaration out of
+    /// a build is conditional compilation's job, and `@test` is not a second,
+    /// weaker spelling of it. A package that does not want its tests in a
+    /// release binary puts them in a namespace and excludes that.
+    pub test: bool,
     /// How hard the backend optimizes; see [`OptLevel`].
     pub opt_level: OptLevel,
     /// The processor the code may assume, by the backend's name for it:
@@ -236,6 +248,7 @@ impl Default for Options {
             profile: "debug",
             codegen_units: 1,
             entry: EntryMode::default(),
+            test: false,
             opt_level: OptLevel::default(),
             target_cpu: "generic",
         }

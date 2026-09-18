@@ -31,6 +31,16 @@ pub fn check(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagno
     recursive_layouts(defs, meta, linked, out);
     directive_legality(defs, meta, linked, out);
     entry_point(defs, meta, linked, out);
+    tests(defs, meta, linked, out);
+    tests_are_not_named(defs, meta, linked, out);
+}
+
+/// Whether `def` was written `@test`.
+///
+/// The attribute is carried as a directive (`crate::sema::collect`), so this is
+/// the one place that spelling is turned back into a question anyone asks.
+pub fn is_test(defs: &DefTable, def: DefId) -> bool {
+    defs.get(def).directives.iter().any(|d| d.is("test"))
 }
 
 // ===< Recursive layouts >===
@@ -377,6 +387,114 @@ fn entry_point(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diag
             );
         }
     }
+}
+
+// ===< `@test` >===
+
+/// A test's shape is the runner's to decide, the way `main`'s is the runtime's.
+///
+/// It takes no parameters — there is nothing to pass one — and it is not
+/// generic, because there would be no instantiation of it to run. What it
+/// *returns* is either nothing, or a `Result` whose success carries nothing:
+/// a test says it failed by failing (a trap, a failed `assert`) or by returning
+/// `.err`, and a value it returned successfully has nobody to read it.
+fn tests(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagnostic>) {
+    for f in linked.funcs() {
+        if !is_test(defs, f.def) {
+            continue;
+        }
+        if !f.params.is_empty() {
+            report_test(meta, f.id, "a `@test` function takes no parameters", out);
+            continue;
+        }
+        if meta
+            .get::<crate::sema::infer::Generics>(f.id)
+            .is_some_and(|g| !g.params.is_empty())
+        {
+            report_test(
+                meta,
+                f.id,
+                "a `@test` function is not generic: there would be no instantiation of it to run",
+                out,
+            );
+            continue;
+        }
+        let Some(Ty::Func { ret, .. }) = meta.ty(f.id) else {
+            continue;
+        };
+        if !test_return_ok(defs, &ret) {
+            report_test(
+                meta,
+                f.id,
+                &format!(
+                    "a `@test` function returns `void` or `Result.<void, E>`, not `{}`",
+                    ret.display(defs)
+                ),
+                out,
+            );
+        }
+    }
+}
+
+/// `void`, or a `Result` whose success type is `void`.
+fn test_return_ok(defs: &DefTable, ret: &Ty) -> bool {
+    match ret {
+        Ty::Void | Ty::Never | Ty::Error => true,
+        Ty::Nominal { def, args } => {
+            defs.get(*def).lang.as_ref().is_some_and(|l| l.as_str() == "result")
+                && matches!(args.first(), Some(Ty::Void))
+        }
+        _ => false,
+    }
+}
+
+/// **Nothing in a program may name a `@test` function.**
+///
+/// A test is run by `nestc --test` and by `twig test`, and by nothing else. The
+/// rule is not about what is in the binary — a `@test` function is compiled like
+/// any other — but about what a test *is*: something the runner calls, once,
+/// with a guard around it. A program that called one would be running a test
+/// outside the only place a failure means anything.
+///
+/// It is **naming** rather than calling, because the two are the same thing: a
+/// direct call's callee is the function's name (`Dispatch::Static`), and taking
+/// its address is the same expression with nothing after it.
+fn tests_are_not_named(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagnostic>) {
+    for f in linked.funcs() {
+        let Some(body) = &f.body else {
+            continue;
+        };
+        super::block_children(body, &mut |e| {
+            visit_named(defs, meta, e, out);
+        });
+    }
+}
+
+fn visit_named(defs: &DefTable, meta: &Meta, e: &crate::ir::Expr, out: &mut Vec<Diagnostic>) {
+    if let crate::ir::ExprKind::Global(def) = &e.kind
+        && is_test(defs, *def)
+    {
+        let mut d = Diagnostic::error(format!(
+            "`{}` is a `@test` function, and a program cannot name one",
+            defs.canonical_string(*def)
+        ));
+        if let Some(span) = meta.span(e.id) {
+            d = d.with_primary(span, "");
+        }
+        out.push(d.with_note(
+            "tests are run by `twig test`, which is the only place a failing one is reported"
+                .to_string(),
+        ));
+    }
+    super::children_of(e, &mut |c| visit_named(defs, meta, c, out));
+}
+
+fn report_test(meta: &Meta, at: IrId, message: &str, out: &mut Vec<Diagnostic>) {
+    let mut d = Diagnostic::error(message.to_string());
+    if let Some(span) = meta.span(at) {
+        d = d.with_primary(span, "");
+    }
+    out.push(d.with_note("a test is run by `twig test`, which has nothing to pass it and nowhere to put a result".to_string()));
 }
 
 fn report_main(meta: &Meta, at: IrId, message: &str, note: &str, out: &mut Vec<Diagnostic>) {

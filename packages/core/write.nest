@@ -1,0 +1,80 @@
+// Bytes to stderr, without allocating and without anything that can fail.
+// **Internal to `core`.**
+//
+// The package root does not re-export this file, so `core.write` is not a
+// namespace a program can import — the same arrangement `str.nest` has. It is
+// shared by the two things in `core` that must write before anything else is
+// known to work: the panic report (`fail.nest`) and the test runner
+// (`test.nest`).
+//
+// It is one file rather than one per caller because an `extern("c")`
+// declaration is a *definition* of the name for this package: two files each
+// declaring `nest_write_err` link against two symbols, one of which the runtime
+// does not have.
+//
+// **Nothing here may allocate and nothing here may panic.** A panic report is
+// written while the program is already failing — a failed allocation is one of
+// the things that gets there — and every check inside the report would call
+// `panic`, which is how a report becomes the thing that failed. So there is no
+// buffer, no index and no sub-slice below.
+
+{ len } :: import "slice.nest"
+
+// The runtime's whole output surface for a failing program: it knows how to
+// reach stderr and nothing else, so what a report *looks like* is decided in
+// Nest and changing its shape does not mean changing C.
+//
+// The name is the runtime's own symbol: an `extern("c")` declaration links by
+// the name it is written with.
+nest_write_err :: extern("c") func (buf: *u8, len: usize) -> void
+
+// Whether stderr is a terminal that has not asked for plain text. Both halves
+// of that are C's to answer — `isatty` is a syscall and `NO_COLOR` is the
+// process's environment — so both are answered in the runtime.
+nest_color_stderr :: extern("c") func () -> i32
+
+@public color :: func () -> bool {
+    return nest_color_stderr() != 0
+}
+
+// One `str` out. A slice is a pointer and a length (`design/lir.md` §7b), which
+// is exactly what the call wants, so this is a reinterpretation rather than a
+// conversion. An empty one writes nothing and never forms a pointer to read.
+@public put :: func (s: str) -> void {
+    let b: []u8 := cast.<[]u8>(s)
+    if b.len() > 0 { nest_write_err(b.ptr(), b.len()) }
+}
+
+// One byte out. The address of a local is a `*u8`, which is what the runtime
+// takes; there is no sequence here to index and so nothing to check.
+@public put_byte :: #unsafe func (b: u8) -> void {
+    let x: u8 := b
+    nest_write_err(&x, 1)
+}
+
+// A `usize` as decimal, most-significant digit first.
+//
+// No buffer and no index, for the reason at the top of this file: the digits
+// are produced by dividing by a falling power of ten and each is written on its
+// own. Ten small writes on a failure path is not a cost worth a buffer, and
+// this way the write cannot fail.
+@public put_usize :: #unsafe func (n: usize) -> void {
+    if n == 0 {
+        put_byte(48)
+        return
+    }
+    // The largest power of ten at or below `n`, found by counting `n` down
+    // rather than by starting at the type's widest — the width of a `usize` is
+    // the target's, and this does not need to know it.
+    let mut div: usize := 1
+    let mut left: usize := n
+    while left >= 10 {
+        left = left / 10
+        div = div * 10
+    }
+    while div > 0 {
+        put_byte(cast.<u8>(48 + (n / div) % 10))
+        if div == 1 { break }
+        div = div / 10
+    }
+}

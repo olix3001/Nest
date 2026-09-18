@@ -146,6 +146,7 @@ impl Collector<'_> {
                 // lookup for one attribute.
                 here.extend(self.link_name(&attrs));
                 here.extend(self.no_mangle(item, &attrs));
+                here.extend(self.test(&attrs));
                 let outer = std::mem::replace(&mut self.pending, here);
                 self.collect_binding(item, vis, scope);
                 self.pending = outer;
@@ -867,6 +868,31 @@ impl Collector<'_> {
         }
         Some(Directive {
             name: Symbol::new("no_mangle"),
+            args: Vec::new(),
+        })
+    }
+
+    /// `@test` on this declaration: the function is a test.
+    ///
+    /// Recorded as a directive for the same reason `@link_name` is — what reads
+    /// it is a later stage (monomorphization decides whether to keep it, and
+    /// `crate::lir::entry` builds the table of them), and a later stage has the
+    /// def and not the syntax tree.
+    ///
+    /// It takes no arguments: the whole of what it says is "this is a test", and
+    /// what a test is named is what it is *called*.
+    fn test(&mut self, attrs: &[NodeId]) -> Option<Directive> {
+        let found = attrs.iter().find(|&&a| {
+            matches!(&self.ast.node(a).kind, NodeKind::Attribute { name, .. }
+                if name.as_str() == "test")
+        })?;
+        if let NodeKind::Attribute { args, .. } = &self.ast.node(*found).kind
+            && !args.is_empty()
+        {
+            self.report(*found, "`@test` takes no arguments");
+        }
+        Some(Directive {
+            name: Symbol::new("test"),
             args: Vec::new(),
         })
     }

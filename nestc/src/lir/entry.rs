@@ -41,8 +41,9 @@
 //! `environ` instead, which is the live one.
 
 use super::{
-    Block, BlockId, CastKind, Callee, Constant, FuncId, Function, FunctionAttrs, Local, LocalId,
-    Operand, Place, Rvalue, Stmt, StmtKind, Terminator, TermKind, Ty, Unit,
+    Block, BlockId, CastKind, Callee, Constant, FuncId, Function, FunctionAttrs, Global, GlobalId,
+    Linkage, Local, LocalId, Operand, Place, Rvalue, Stmt, StmtKind, Terminator, TermKind, Ty,
+    Unit,
 };
 use crate::common::options::Target;
 use crate::common::source::FileSpan;
@@ -389,6 +390,296 @@ fn declare_init(unit: &mut Unit) -> FuncId {
             public: true,
             ..FunctionAttrs::default()
         },
+    });
+    id
+}
+
+// ===< A test binary's entry (`--test`) >===
+
+/// What the table of tests is called, in a dump and to the linker.
+const TABLE_NAME: &str = "test.cases";
+const TABLE_SYMBOL: &str = "_NEtests";
+
+/// The function the entry calls instead of the program's `main`, and its symbol.
+const TEST_NAME: &str = "test.main";
+const TEST_SYMBOL: &str = "_NEtestmain";
+
+/// Add the entry point of a **test binary**.
+///
+/// The shape is the ordinary one with a different middle: the C `main` is
+/// unchanged, `#lang("start")` still gets the arguments, and what it is handed a
+/// pointer to is a synthesized `func () -> i32` that calls the runner rather than
+/// the program's own `main`. A test binary is a program like any other, and
+/// everything that is true of starting one stays true.
+///
+/// `tests` is every `@test` function of the entry package, with the name it is
+/// reported under. `runner` is whatever claimed `#lang("test_runner")`, and
+/// `failed` whatever claimed `#lang("test_failed")` — the two halves of what a
+/// test run *is*, which is why neither is written here.
+pub fn synthesize_tests(
+    unit: &mut Unit,
+    tests: &[(String, FuncId)],
+    runner: FuncId,
+    failed: Option<FuncId>,
+    start: Option<FuncId>,
+    target: Target,
+) {
+    let main = test_main(unit, tests, runner, failed);
+    synthesize(unit, main, start, target);
+}
+
+/// `func () -> i32`: build the table, hand it to the runner, return its answer.
+fn test_main(
+    unit: &mut Unit,
+    tests: &[(String, FuncId)],
+    runner: FuncId,
+    failed: Option<FuncId>,
+) -> FuncId {
+    // The **first test's** span, not the runner's. The unit split puts a
+    // function where its span says it belongs (§11), and the runner lives in
+    // whichever package claimed the tag — so taking its span would file the
+    // table and the entry under `core` and leave the program's own unit without
+    // the code that starts it.
+    let span = tests
+        .first()
+        .and_then(|(_, f)| unit.funcs[f.0 as usize].span)
+        .or(unit.funcs[runner.0 as usize].span);
+    // The runner's own parameter says what a table of tests looks like: it takes
+    // `[]Case`, so the slice type and the case type are read off the signature
+    // rather than rebuilt from a shape this file would have to agree with.
+    let slice_ty = unit.funcs[runner.0 as usize]
+        .locals
+        .first()
+        .map(|l| l.ty.clone())
+        .unwrap_or(Ty::Void);
+    let case_ty = match &slice_ty {
+        Ty::Named(id) => match unit.types[id.0 as usize].members.first().map(|m| &m.ty) {
+            Some(Ty::Ptr(inner)) => (**inner).clone(),
+            _ => Ty::Void,
+        },
+        _ => Ty::Void,
+    };
+
+    // Each case, as data: its name, and the `func () -> void` to call. A test
+    // that returns a `Result` is not one of those, and gets a wrapper that turns
+    // the `.err` it may return into the failure it means (see [`result_thunk`]).
+    let mut elements = Vec::new();
+    for (name, func) in tests {
+        let call = if unit.funcs[func.0 as usize].ret == Ty::Void {
+            *func
+        } else {
+            result_thunk(unit, *func, failed, name)
+        };
+        let bytes = bytes_global(unit, name.as_bytes(), span);
+        elements.push(Constant::Aggregate(vec![
+            Constant::Aggregate(vec![
+                Constant::Global(bytes),
+                Constant::Int((name.len() as i128).into()),
+            ]),
+            Constant::Func(call),
+        ]));
+    }
+    let table = GlobalId(unit.globals.len() as u32);
+    unit.globals.push(Global {
+        name: TABLE_NAME.to_string(),
+        symbol: Symbol::new(TABLE_SYMBOL),
+        ty: Ty::Array {
+            len: elements.len() as u64,
+            elem: Box::new(case_ty),
+        },
+        init: Some(Constant::Aggregate(elements)),
+        mutable: false,
+        linkage: Linkage::Internal,
+        span,
+    });
+
+    let id = FuncId(unit.funcs.len() as u32);
+    let mut locals: Vec<Local> = Vec::new();
+    let cases = push_local(&mut locals, slice_ty.clone(), span);
+    let status = push_local(&mut locals, status_ty(), span);
+    let mut stmts = Vec::new();
+    // The slice, as a slice is: the table's address and how many are in it
+    // (§7b). It is assembled in a local rather than passed as a constant because
+    // an operand is a value and this is an aggregate.
+    if let Ty::Named(slice_id) = slice_ty {
+        stmts.push(Stmt::new(
+            StmtKind::Assign {
+                place: Place::local(cases),
+                value: Rvalue::Aggregate {
+                    kind: super::Aggregate::Struct(slice_id),
+                    fields: vec![
+                        Operand::Const(Constant::Global(table)),
+                        Operand::int(tests.len() as i128),
+                    ],
+                },
+            },
+            span,
+        ));
+    }
+    stmts.push(Stmt::new(
+        StmtKind::Call {
+            dest: Some(Place::local(status)),
+            callee: Callee::Static(runner),
+            args: vec![Operand::local(cases)],
+        },
+        span,
+    ));
+    unit.funcs.push(Function {
+        name: TEST_NAME.to_string(),
+        symbol: Symbol::new(TEST_SYMBOL),
+        locals,
+        params: 0,
+        ret: status_ty(),
+        blocks: vec![Block {
+            id: BlockId(0),
+            stmts,
+            term: Terminator::new(
+                TermKind::Return(Some(Operand::local(status))),
+                span,
+            ),
+            label: Some("run the tests".to_string()),
+        }],
+        extern_abi: None,
+        span,
+        attrs: FunctionAttrs::default(),
+    });
+    id
+}
+
+/// A `func () -> void` around a test that returns `Result.<void, E>`.
+///
+/// The runner calls one shape of function, and a test may be written in two
+/// (`ir::check::declarations` is what allows exactly those two). The difference
+/// is this wrapper: call the test, and if what came back is the `.err` variant,
+/// fail through whatever claimed `#lang("test_failed")` — an ordinary Nest
+/// function, so that what a returned error *says* stays out of the compiler.
+///
+/// An enum is `{ tag, payload }` after §7b, so which variant it holds is member
+/// zero, and which number `.ok` is comes from the type table rather than from an
+/// assumption about declaration order.
+fn result_thunk(unit: &mut Unit, test: FuncId, failed: Option<FuncId>, name: &str) -> FuncId {
+    let span = unit.funcs[test.0 as usize].span;
+    let ret = unit.funcs[test.0 as usize].ret.clone();
+    let (tag_ty, ok_tag) = match &ret {
+        Ty::Named(id) => {
+            let def = &unit.types[id.0 as usize];
+            let tag_ty = def
+                .members
+                .first()
+                .map(|m| m.ty.clone())
+                .unwrap_or(status_ty());
+            let ok = match &def.origin {
+                super::Origin::Enum { variants } => variants
+                    .iter()
+                    .find(|v| v.name.as_str() == "ok")
+                    .map(|v| v.tag),
+                _ => None,
+            };
+            (tag_ty, ok.unwrap_or(0))
+        }
+        _ => (status_ty(), 0),
+    };
+
+    let id = FuncId(unit.funcs.len() as u32);
+    let mut locals: Vec<Local> = Vec::new();
+    let result = push_local(&mut locals, ret, span);
+    let tag = push_local(&mut locals, tag_ty.clone(), span);
+    let call = vec![
+        Stmt::new(
+            StmtKind::Call {
+                dest: Some(Place::local(result)),
+                callee: Callee::Static(test),
+                args: Vec::new(),
+            },
+            span,
+        ),
+        Stmt::new(
+            StmtKind::Assign {
+                place: Place::local(tag),
+                value: Rvalue::Use(Operand::Copy(Place {
+                    base: super::Base::Local(result),
+                    projection: vec![super::Projection::Field {
+                        index: 0,
+                        name: Symbol::new("tag"),
+                    }],
+                })),
+            },
+            span,
+        ),
+    ];
+    // Three blocks: the call and the test of its tag, the way out, and the
+    // failure. The `.ok` arm is the *named* one because it is the one the type
+    // table can name — every other tag is an error, whatever the enum calls it.
+    let blocks = vec![
+        Block {
+            id: BlockId(0),
+            stmts: call,
+            term: Terminator::new(
+                TermKind::Switch {
+                    value: Operand::local(tag),
+                    ty: tag_ty,
+                    arms: vec![(ok_tag, BlockId(1))],
+                    otherwise: BlockId(2),
+                },
+                span,
+            ),
+            label: Some("the result".to_string()),
+        },
+        Block {
+            id: BlockId(1),
+            stmts: Vec::new(),
+            term: Terminator::new(TermKind::Return(None), span),
+            label: Some("ok".to_string()),
+        },
+        Block {
+            id: BlockId(2),
+            stmts: failed
+                .map(|f| {
+                    vec![Stmt::new(
+                        StmtKind::Call {
+                            dest: None,
+                            callee: Callee::Static(f),
+                            args: Vec::new(),
+                        },
+                        span,
+                    )]
+                })
+                .unwrap_or_default(),
+            term: Terminator::new(TermKind::Return(None), span),
+            label: Some("err".to_string()),
+        },
+    ];
+    unit.funcs.push(Function {
+        name: format!("test.wrap({name})"),
+        symbol: Symbol::new(&format!("_NEtestwrap{}", id.0)),
+        locals,
+        params: 0,
+        ret: Ty::Void,
+        blocks,
+        extern_abi: None,
+        span,
+        attrs: FunctionAttrs::default(),
+    });
+    id
+}
+
+/// The storage holding `bytes`, as its own read-only global.
+fn bytes_global(unit: &mut Unit, bytes: &[u8], span: Option<FileSpan>) -> GlobalId {
+    let id = GlobalId(unit.globals.len() as u32);
+    unit.globals.push(Global {
+        name: format!("test.name{}", id.0),
+        symbol: Symbol::new(&format!("_NEtestname{}", id.0)),
+        ty: Ty::Array {
+            len: bytes.len() as u64,
+            elem: Box::new(Ty::Int {
+                bits: 8,
+                signed: false,
+            }),
+        },
+        init: Some(Constant::Bytes(bytes.to_vec())),
+        mutable: false,
+        linkage: Linkage::Internal,
+        span,
     });
     id
 }

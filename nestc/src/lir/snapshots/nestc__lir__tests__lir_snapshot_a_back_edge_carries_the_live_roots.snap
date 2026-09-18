@@ -19,8 +19,8 @@ unit mem:main {
     0: i32                    // +0
     1: bool                    // +4
   }
-  private const const.str.1: [16]u8 = b"integer overflow"  // _NK1
-  private const const.str.2: [8]u8 = b"mem:main"  // _NK2
+  private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
+  private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
   func work(n_0: *Node) -> void  // _NC4work
   bb0:                    // entry
@@ -64,8 +64,8 @@ unit mem:main {
     _8 := add_checked.i32 i_5, 1
     switch.bool _8.1 { 1 => bb6, _ => bb7 }
   bb6:                    // overflow
-    _9 := []u8(&const.str.1, 16)
-    _10 := []u8(&const.str.2, 8)
+    _9 := []u8(&const.str.2, 16)
+    _10 := []u8(&const.str.3, 8)
     _11 := core.loc.Location(_10, 9, 9)
     call core.fail.panic(_9, _11)
       @safepoint { live: [_9, _11]

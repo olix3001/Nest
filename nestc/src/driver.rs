@@ -60,6 +60,8 @@ options:
   --obj-dir <dir>        keep the objects a link or a library is made from in
                          <dir>, rather than in a temporary directory removed
                          afterwards
+  --test                 build a test binary: keep the entry package's `@test`
+                         functions and run them instead of its `main`
   --up-to-date           compile nothing: exit 0 when the library at `-o` was
                          compiled from these files, settings and libraries as
                          they are now, and 1 when it would be compiled again
@@ -272,6 +274,8 @@ pub struct Invocation {
     print_options: bool,
     print_packages: bool,
     up_to_date: bool,
+    /// `--test`: build the entry package as a test binary.
+    test: bool,
     /// Where a link's or a library's objects are kept, when they are.
     obj_dir: Option<PathBuf>,
     format: ErrorFormat,
@@ -296,6 +300,7 @@ impl Invocation {
         let mut print_options = false;
         let mut print_packages = false;
         let mut up_to_date = false;
+        let mut test = false;
         let mut obj_dir: Option<PathBuf> = None;
         let mut format = ErrorFormat::default();
         let mut color = ColorChoice::default();
@@ -366,6 +371,7 @@ impl Invocation {
                     obj_dir = Some(PathBuf::from(value("--obj-dir", &mut args)?));
                 }
                 "--up-to-date" => up_to_date = true,
+                "--test" => test = true,
                 a if a == "--color" || a.starts_with("--color=") => {
                     color = ColorChoice::parse(&value("--color", &mut args)?)?;
                 }
@@ -418,6 +424,7 @@ impl Invocation {
             print_options,
             print_packages,
             up_to_date,
+            test,
             obj_dir,
             format,
             color,
@@ -452,6 +459,10 @@ impl Invocation {
         for (key, value) in &self.settings {
             options.set(key, value)?;
         }
+        // `--test` is a flag rather than a `-C` setting because it is not a
+        // property of the build the way `overflow=` is: it changes *what is
+        // built* from the same sources, which is the kind of thing `--emit` is.
+        options.test = self.test;
         backend.configure(&options);
         Ok((backend, options))
     }
@@ -582,6 +593,15 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
             &session.linked,
             session.options.target,
         );
+        // Which tests the entry point will run, when this is a test build. It is
+        // asked here rather than inside the lowering because the answer is the
+        // session's: which package a *file* belongs to is a thing only the thing
+        // that loaded it knows.
+        let tests = if session.options.test {
+            session.entry_package_tests()
+        } else {
+            Vec::new()
+        };
         let program = lir::lower::lower_against_libraries(
             &session.defs,
             &session.ir_meta,
@@ -590,6 +610,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
             &session.options,
             &session.lang_items,
             &session.sources,
+            &tests,
             &|def| session.is_foreign_def(def),
         );
         if emit.lir {

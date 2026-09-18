@@ -91,6 +91,45 @@ See [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md)
 §4.4 for the full visibility model, including `@public` on `import` bindings for
 re-export.
 
+### `@test`
+
+`@test` marks a function as a **test**. It takes no arguments.
+
+```
+add :: func (a: i32, b: i32) -> i32 { return a + b }
+
+tests :: namespace {
+    @test
+    adds :: func () {
+        assert(add(2, 3) == 5)
+    }
+
+    @test
+    reads :: func () -> Result.<void, str> {
+        return .ok(())
+    }
+}
+```
+
+A test takes **no parameters**, is **not generic**, and returns either `void` or
+`Result.<void, E>` for any `E`. It fails by failing — a trap, a failed `assert`,
+a panic — or, in the second shape, by returning `.err`. A value it returned
+successfully has nobody to read it, which is why `Result.<i32, E>` is refused.
+
+**A program may not name a `@test` function**: not call it, not take its address.
+A test is run by `nestc --test` and by `twig test`, each of which guards the call
+so that a failing test is reported and the next one still runs. A call from
+ordinary code would be a test run where nothing is watching.
+
+Tests are **compiled like any other function**; `@test` says what a function is
+for, not whether it is built. Keeping them out of a release binary is
+conditional compilation's job. The recommended arrangement is the one above — a
+`tests` namespace beside the code it tests, which sees the file's private names
+and is the unit a conditional-compilation attribute will later apply to.
+
+See [`design/toolchain.md`](../design/toolchain.md) for how a test binary is
+built and what it prints.
+
 ### User-defined attributes
 
 Any `@name` that is not a built-in visibility attribute is a **user attribute**:

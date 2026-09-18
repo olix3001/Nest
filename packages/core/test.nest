@@ -1,0 +1,129 @@
+// Running a package's tests. **Internal to `core`.**
+//
+// Nothing here is re-exported by the package root, and nothing here is
+// `@public`: a program cannot import this namespace, name `Case`, or call the
+// runner. Tests are run by `nestc --test` and by `twig test`, and by nothing a
+// program can write — which is the point. What reaches this file is the entry
+// point the compiler synthesizes for a test build (`nestc/src/lir/entry.rs`),
+// and it finds the two functions below by their `#lang` tags, never by name.
+//
+// **Why the runner is in `core` and not in `std`.** `core` is the one package
+// every program has, `std` included; a runner in `std` would mean `core`'s own
+// tests could not run. The cost is that this file may only use what `core` has
+// — so its output goes through `write.nest`, the same path to stderr the panic
+// report takes, rather than through `std/io`.
+//
+// **What a failing test prints is the panic's own report.** The runner writes
+// the test's name, the handler writes what went wrong, and the runner writes
+// the verdict, in that order.
+
+{ len } :: import "slice.nest"
+{ make } :: import "mem.nest"
+{ color, put, put_usize } :: import "write.nest"
+
+// One test: what it is called, and how to run it.
+//
+// The name is the function's canonical path (`path.tests.joining`), which is
+// what the compiler knows it by and what a filter would match against.
+Case :: struct {
+    name: str,
+    run: func () -> void,
+}
+
+// Call `run`, coming back with `1` if it panicked and `0` if it returned.
+//
+// The catching is the runtime's because it is `setjmp`'s: a panic does not
+// unwind, so there is no landing pad to arrive at, and `setjmp` only works in
+// the frame that called it — a wrapper written here would return before the
+// jump could be taken. See `runtime/nest_runtime.c`.
+nest_guard_run :: extern("c") func (run: func () -> void) -> i32
+
+// What a test that came back with `.err` fails with.
+//
+// It is a `panic`, which is how a test fails every other way too — so the
+// runner needs no second notion of failure, and a program that replaced the
+// panic handler has replaced this as well.
+//
+// The message says only *that* an error came back. Saying what it was would
+// mean formatting a value whose type is the test's own, and the wrapper that
+// calls this is built after monomorphization, where there is no longer a
+// `Display` to reach for. A test that wants its error reported writes the
+// message itself.
+fail_err :: #lang("test_failed") func () -> void {
+    panic("the test returned an error")
+}
+
+// Run every test, report as it goes, and answer with the process's status.
+run :: #lang("test_runner") func (cases: []Case) -> i32 {
+    colored = color()
+    let total: usize := cases.len()
+    // Which ones failed, so the summary can list them without running anything
+    // a second time. A test binary may allocate — it is the failing *report*
+    // that may not, and this is written before any test has run.
+    let failures: []mut bool := make.<[]bool>(total)
+    let mut failed: usize := 0
+
+    put("\nrunning ")
+    put_usize(total)
+    put(if total == 1 { " test\n\n" } else { " tests\n\n" })
+
+    for i in 0..<total {
+        put("test ")
+        put(cases[i].name)
+        put(" ... ")
+        if nest_guard_run(cases[i].run) == 0 {
+            green()
+            put("ok")
+            reset()
+            put("\n")
+        } else {
+            failures[i] = true
+            failed = failed + 1
+            red()
+            put("FAILED")
+            reset()
+            put("\n")
+        }
+    }
+
+    if failed > 0 {
+        put("\nfailures:\n")
+        for i in 0..<total {
+            if failures[i] {
+                put("    ")
+                put(cases[i].name)
+                put("\n")
+            }
+        }
+    }
+
+    put("\ntest result: ")
+    if failed == 0 {
+        green()
+        put("ok")
+    } else {
+        red()
+        put("FAILED")
+    }
+    reset()
+    put(". ")
+    put_usize(total - failed)
+    put(" passed; ")
+    put_usize(failed)
+    put(" failed\n\n")
+
+    if failed == 0 { return 0 }
+    return 1
+}
+
+// ===< Colour >===
+//
+// Set once, at the top of a run, rather than asked per write: whether stderr is
+// a terminal cannot change under a program, and a syscall per escape would be
+// three per test.
+#static colored: bool := false
+
+green :: func () -> void { if colored { put("\u{1b}[32m") } }
+red :: func () -> void { if colored { put("\u{1b}[31m") } }
+bold :: func () -> void { if colored { put("\u{1b}[1m") } }
+reset :: func () -> void { if colored { put("\u{1b}[0m") } }

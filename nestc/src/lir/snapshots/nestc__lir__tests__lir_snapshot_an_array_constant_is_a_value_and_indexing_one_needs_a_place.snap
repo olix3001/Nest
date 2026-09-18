@@ -3,13 +3,13 @@ source: src/lir/tests.rs
 expression: lir_text(src)
 ---
 unit mem:main {
-  private const const.data.1: [3]i32 = { 1, 2, 3 }  // _NK1
+  private const const.data.2: [3]i32 = { 1, 2, 3 }  // _NK2
 
   func from_constant() -> i32  // _NC13from_constant
     let _0: *[3]i32
     let _1: *i32
   bb0:                    // entry
-    _0 := &@const.data.1
+    _0 := &@const.data.2
     _1 := &_0.*[1]
     return _1.*
 

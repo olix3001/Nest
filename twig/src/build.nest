@@ -34,7 +34,7 @@ process :: import <std/process>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
 path :: import "path.nest"
-{ Manifest, ProfileSettings } :: import "manifest.nest"
+{ Bin, Manifest, ProfileSettings } :: import "manifest.nest"
 { Workspace, Member } :: import "workspace.nest"
 toolchain :: import "toolchain.nest"
 term :: import "term.nest"
@@ -88,6 +88,11 @@ string :: import <std/string>
   name: str,
   entry: str,
   lib: bool,
+  // A **test binary**: the same entry as the target it is made from, compiled
+  // with `nestc --test`, so that the package's `@test` functions are kept and
+  // the entry point runs them instead of its `main`. It links a program even
+  // when it is made from a library, because a test run is a program.
+  test: bool,
 }
 
 // Every library the build makes, each after the ones it depends on: the
@@ -107,13 +112,38 @@ string :: import <std/string>
   let root: *Member := &ws.root
   let mut out: Vec.<Target> := collections.new.<Target>()
   for b in root.manifest.bins() {
-    out.push(Target { name: b.name, entry: path.normalize(path.join(root.dir, b.path)), lib: false })
+    out.push(Target { name: b.name, entry: path.normalize(path.join(root.dir, b.path)), lib: false, test: false })
   }
   return out.as_slice()
 }
 
 library :: func (m: *Member) -> Target {
-  return Target { name: m.name, entry: m.lib_root().!, lib: true }
+  return Target { name: m.name, entry: m.lib_root().!, lib: true, test: false }
+}
+
+// The root package's test binary: its library if it has one, and its first
+// binary if it does not.
+//
+// One target rather than one per binary, because a package's tests are the
+// package's: they sit beside the code they test, and which of several `[[bin]]`
+// entries reaches a given file is not a question anyone writing a test is
+// asking. A package with neither a `[lib]` nor a `[[bin]]` is already refused by
+// the manifest check.
+@public tests :: func (ws: *Workspace) -> Result.<Target, str> {
+  let root: *Member := &ws.root
+  return root.lib_root().match {
+    .some(entry) => .ok(Target { name: root.name, entry: entry, lib: true, test: true }),
+    .none => {
+      let bins: []Bin := root.manifest.bins()
+      if bins.len() == 0 { return .err(f"`{root.name}` has no targets to test") }
+      return .ok(Target {
+        name: root.name,
+        entry: path.normalize(path.join(root.dir, bins[0].path)),
+        lib: false,
+        test: true,
+      })
+    },
+  }
 }
 
 // Where a build with `p` writes.
@@ -123,6 +153,7 @@ library :: func (m: *Member) -> Target {
 
 // The file `t` produces.
 @public output :: func (ws: *Workspace, p: Profile, t: Target) -> str {
+  if t.test { return path.join(out_dir(ws, p), f"{t.name}-test") }
   if t.lib { return library_file(ws, p, t.name) }
   return path.join(out_dir(ws, p), t.name)
 }
@@ -151,7 +182,7 @@ extension :: func (e: str) -> str {
 // Where the objects `t` is made from are kept: apart for a library and a binary,
 // which may share a name.
 @public objects :: func (ws: *Workspace, p: Profile, t: Target) -> str {
-  let kind: str := if t.lib { "lib" } else { "bin" }
+  let kind: str := if t.test { "test" } else if t.lib { "lib" } else { "bin" }
   return path.join(path.join(path.join(out_dir(ws, p), "obj"), kind), t.name)
 }
 
@@ -175,8 +206,11 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
     args.push("--package")
     args.push(f"{t.name}={t.entry}")
   }
+  if t.test { args.push("--test") }
   args.push("--emit")
-  let mut emit: str := if t.lib { "nlib" } else { "link" }
+  // A test target links a program whatever it was made from: what it produces is
+  // something to run, not something to depend on.
+  let mut emit: str := if t.lib && t.test == false { "nlib" } else { "link" }
   if t.lib == false || t.name == ws.root.name {
     for e in p.emit {
       let file: str := path.join(objects(ws, p, t), f"{t.name}.{extension(e)}")

@@ -1175,6 +1175,11 @@ fn run_on_host(src: &str) -> std::process::Output {
     run_on_host_with(src, &[])
 }
 
+/// [`run_on_host`], as a **test binary**: the `@test` functions are what runs.
+fn run_tests_on_host(src: &str) -> std::process::Output {
+    run_on_host_in_mode(src, &[], &[], true)
+}
+
 /// [`run_on_host`], with `-C` settings applied on top of the host's.
 fn run_on_host_with(src: &str, settings: &[(&str, &str)]) -> std::process::Output {
     run_on_host_in(src, settings, &[])
@@ -1186,10 +1191,21 @@ fn run_on_host_in(
     settings: &[(&str, &str)],
     env: &[(&str, &str)],
 ) -> std::process::Output {
+    run_on_host_in_mode(src, settings, env, false)
+}
+
+/// [`run_on_host_in`], saying whether this is a `--test` build.
+fn run_on_host_in_mode(
+    src: &str,
+    settings: &[(&str, &str)],
+    env: &[(&str, &str)],
+    test: bool,
+) -> std::process::Output {
     let mut probe = LlvmBackend::default();
     let info = probe.target_info(None).expect("the host resolves");
     let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
     session.options.target = info.target();
+    session.options.test = test;
     for (key, value) in settings {
         session.options.set(key, value).expect("a valid setting");
     }
@@ -1202,7 +1218,12 @@ fn run_on_host_in(
         &session.linked,
         session.options.target,
     );
-    let program = crate::lir::lower(
+    let tests = if session.options.test {
+        session.entry_package_tests()
+    } else {
+        Vec::new()
+    };
+    let program = crate::lir::lower::lower_against_libraries(
         &session.defs,
         &session.ir_meta,
         &session.linked,
@@ -1210,6 +1231,8 @@ fn run_on_host_in(
         &session.options,
         &session.lang_items,
         &session.sources,
+        &tests,
+        &|_| false,
     );
 
     let dir = std::env::temp_dir().join("nestc-host-runs");
@@ -1304,6 +1327,89 @@ fn recursion_past_the_end_of_the_stack_traps() {
          main :: func () -> i32 { return f(1000) - 990 }\n",
     );
     assert_eq!(shallow.status.code(), Some(10), "a recursion that fits ran wrong: {shallow:?}");
+}
+
+/// **A test binary runs every test, and one failing test does not end the run.**
+///
+/// This is the whole of `@test` end to end: the attribute collected, the
+/// functions kept, the table built, the runner called, a panic caught and the
+/// next test started anyway. It is written as one program because that is the
+/// only shape in which the last of those is a question — a suite whose second
+/// test traps proves nothing about the third unless the third is there.
+///
+/// Both shapes a test may have are here (§5.6's neighbour rule, in
+/// `ir::check::declarations`): one returning nothing and failing by trapping,
+/// one returning a `Result` and failing by returning `.err`.
+#[test]
+fn a_test_binary_runs_every_test_and_survives_a_failure() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_tests_on_host(
+        "add :: func (a: i32, b: i32) -> i32 { return a + b }\n\
+         @test\n\
+         adds :: func () { assert(add(2, 3) == 5) }\n\
+         @test\n\
+         divides :: func () { let z: i32 := 0; assert(add(1, 1) / z == 0) }\n\
+         @test\n\
+         ok_result :: func () -> Result.<void, str> { return .ok(()) }\n\
+         @test\n\
+         err_result :: func () -> Result.<void, str> { return .err(\"nope\") }\n\
+         main :: func () -> i32 { return 7 }\n",
+    );
+    let said = String::from_utf8_lossy(&ran.stderr);
+    // Every one of them reported, the two that failed included — which is the
+    // point: a trap in the second would otherwise have ended the process.
+    for name in ["adds", "divides", "ok_result", "err_result"] {
+        assert!(said.contains(&format!("test {name} ...")), "{said}");
+    }
+    assert!(said.contains("2 passed; 2 failed"), "{said}");
+    // The failures said what they were, through the ordinary panic report.
+    assert!(said.contains("division by zero"), "{said}");
+    assert!(said.contains("the test returned an error"), "{said}");
+    // A failing suite is a failing process.
+    assert_eq!(ran.status.code(), Some(1), "{ran:?}");
+}
+
+/// A suite that passes exits `0`, and `main` is not what ran.
+#[test]
+fn a_passing_suite_exits_zero_and_does_not_run_main() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_tests_on_host(
+        "@test\n\
+         passes :: func () { assert(1 == 1) }\n\
+         main :: func () -> i32 { return 42 }\n",
+    );
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert!(said.contains("1 passed; 0 failed"), "{said}");
+    assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+}
+
+/// **An ordinary build is unchanged**: `main` runs, and a panic still stops the
+/// program rather than returning into a guard nothing armed.
+#[test]
+fn a_test_function_changes_nothing_about_an_ordinary_build() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        "@test\n\
+         never_runs :: func () { assert(false) }\n\
+         main :: func () -> i32 { return 9 }\n",
+    );
+    assert_eq!(ran.status.code(), Some(9), "{ran:?}");
+    assert!(String::from_utf8_lossy(&ran.stderr).is_empty());
+
+    let failed = run_on_host(
+        "main :: func () -> i32 { assert(false); return 0 }\n",
+    );
+    assert_eq!(failed.status.code(), None, "it exited instead of trapping: {failed:?}");
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("assertion failed"),
+        "{failed:?}"
+    );
 }
 
 /// **Optimizing changes nothing a program does**: at every `opt-level`, and for

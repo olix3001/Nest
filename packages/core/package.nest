@@ -40,6 +40,12 @@ prelude :: import "prelude.nest"
 @public c       :: import "c.nest"
 @public reflect :: import "reflect.nest"
 
+// `test.nest` is imported and **not** re-exported: it is how `nestc --test`
+// runs a package's tests, and nothing a program writes should be able to reach
+// it. The import is still here because a `#lang` tag is registered when the file
+// that claims it is loaded, and nothing else would load this one.
+test :: import "test.nest"
+
 // `str.nest` gets no namespace re-export: its one public member is `str`, which
 // the prelude already exports, and a `str` namespace sitting beside the `str`
 // type would read as the same name meaning two things.

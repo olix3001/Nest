@@ -17,8 +17,8 @@ unit mem:main {
     1: bool                    // +4
   }
   global counter: u32 = 0  // _NG7counter
-  private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
-  private const const.str.3: [8]u8 = b"mem:main"  // _NK3
+  private const const.str.3: [16]u8 = b"integer overflow"  // _NK3
+  private const const.str.4: [8]u8 = b"mem:main"  // _NK4
 
   func bump() -> u32  // _NC4bump
     let _0: (u32, bool)
@@ -29,8 +29,8 @@ unit mem:main {
     _0 := add_checked.u32 @counter, 1
     switch.bool _0.1 { 1 => bb1, _ => bb2 }
   bb1:                    // overflow
-    _1 := []u8(&const.str.2, 16)
-    _2 := []u8(&const.str.3, 8)
+    _1 := []u8(&const.str.3, 16)
+    _2 := []u8(&const.str.4, 8)
     _3 := core.loc.Location(_2, 4, 13)
     call core.fail.panic(_1, _3)
       @safepoint { live: [_1, _3]

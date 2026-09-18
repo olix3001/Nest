@@ -77,3 +77,43 @@ SLASH: u8 :: 47
     .none => p,
   }
 }
+
+// The tests, in a namespace of their own.
+//
+// They sit beside what they test — an inner namespace sees the file's private
+// names, so `normalize` is reachable here and not from outside twig — and they
+// are gathered rather than scattered, so that what a reader skips is one block
+// and not every third declaration. When there is conditional compilation, this
+// is the namespace to compile only in a test build.
+tests :: namespace {
+    @test
+    joining :: func () {
+        assert(join("a", "b") == "a/b")
+        assert(join("a/", "b") == "a/b")
+        assert(join("a", "/b") == "/b", "an absolute right side is already where it is")
+        assert(join("", "b") == "b")
+        assert(join("a", "") == "a")
+    }
+
+    @test
+    normalizing :: func () {
+        assert(normalize("a/./b") == "a/b")
+        assert(normalize("a//b") == "a/b")
+        assert(normalize("a/b/../c") == "a/c")
+        assert(normalize("/..") == "/", "the root is its own parent")
+        assert(normalize("../a") == "../a", "a relative `..` has nothing to cancel")
+        assert(normalize("a/..") == ".")
+    }
+
+    @test
+    naming :: func () {
+        assert(parent("/a/b") == "/a")
+        assert(parent("/a") == "/")
+        assert(parent("a") == ".")
+        assert(file_name("/a/b") == "b")
+        assert(file_name("b") == "b")
+        assert(relative_to("/a/b", "/a") == "b")
+        assert(relative_to("/a", "/a") == ".")
+        assert(relative_to("/c", "/a") == "/c")
+    }
+}

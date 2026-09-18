@@ -6567,6 +6567,91 @@ fn a_trait_named_in_a_bound_is_in_scope_for_it() {
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
 }
 
+/// A `@test` function's shape is the runner's to decide.
+///
+/// It is run by something that has nothing to pass it and nowhere to put a
+/// result, so the two things it may be are "nothing" and "a `Result` that
+/// carries nothing" — and the refusal has to be at the declaration, because the
+/// mistake is in a signature and would otherwise surface as a compiler that
+/// built a table it could not call.
+#[test]
+fn a_test_function_takes_nothing_and_returns_nothing_that_matters() {
+    for (src, want) in [
+        (
+            "@test\nt :: func (n: i32) {}\n",
+            "takes no parameters",
+        ),
+        (
+            "@test\nt :: func <T> () {}\n",
+            "is not generic",
+        ),
+        (
+            "@test\nt :: func () -> i32 { return 1 }\n",
+            "returns `void` or `Result.<void, E>`",
+        ),
+        (
+            "@test\nt :: func () -> Result.<i32, str> { return .ok(1) }\n",
+            "returns `void` or `Result.<void, E>`",
+        ),
+    ] {
+        assert!(
+            messages(src).iter().any(|m| m.contains(want)),
+            "{src:?}: {:#?}",
+            messages(src)
+        );
+    }
+    // The two that are allowed, and a third shape that is really the first:
+    // a test whose body cannot come back has still returned nothing.
+    analyze_clean("@test\nt :: func () {}\n");
+    analyze_clean("@test\nt :: func () -> Result.<void, str> { return .ok(()) }\n");
+    // `@test` takes no arguments of its own.
+    assert!(
+        messages("@test(1)\nt :: func () {}\n")
+            .iter()
+            .any(|m| m.contains("`@test` takes no arguments")),
+        "{:#?}",
+        messages("@test(1)\nt :: func () {}\n")
+    );
+}
+
+/// **A program cannot name a `@test` function.**
+///
+/// Not because it is missing — it is compiled like any other function — but
+/// because calling one runs a test outside the runner, which is the only place
+/// a failing test is caught and reported.
+#[test]
+fn a_program_cannot_name_a_test_function() {
+    for src in [
+        "@test\nt :: func () {}\nmain :: func () { t() }\n",
+        "@test\nt :: func () {}\nmain :: func () { let f := t }\n",
+        "@test\nt :: func () {}\n@test\nu :: func () { t() }\n",
+    ] {
+        assert!(
+            messages(src)
+                .iter()
+                .any(|m| m.contains("is a `@test` function, and a program cannot name one")),
+            "{src:?}: {:#?}",
+            messages(src)
+        );
+    }
+}
+
+/// Tests gathered in a namespace of their own see the file's private names.
+///
+/// This is the shape the language recommends, and it only works because an
+/// inner namespace's scope is the enclosing one's (§4): the tests reach `add`
+/// without importing anything, and nothing outside the package reaches either.
+#[test]
+fn a_test_namespace_sees_the_file_around_it() {
+    analyze_clean(
+        "add :: func (a: i32, b: i32) -> i32 { return a + b }\n\
+         tests :: namespace {\n\
+        \x20 @test\n\
+        \x20 adds :: func () { assert(add(2, 3) == 5) }\n\
+         }\n",
+    );
+}
+
 /// The left side of an assignment has to **name** storage.
 ///
 /// `f() = 3` is not a read-only binding — it is not a binding at all — and the

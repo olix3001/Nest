@@ -98,7 +98,7 @@ pub fn lower(
     lang: &LangItems,
     sources: &SourceMap,
 ) -> Program {
-    lower_against_libraries(defs, meta, linked, layouts, options, lang, sources, &|_| false)
+    lower_against_libraries(defs, meta, linked, layouts, options, lang, sources, &[], &|_| false)
 }
 
 /// [`lower`], for a program some of whose definitions came from libraries.
@@ -118,6 +118,7 @@ pub fn lower_against_libraries(
     options: &Options,
     lang: &LangItems,
     sources: &SourceMap,
+    tests: &[(String, DefId)],
     foreign: &dyn Fn(DefId) -> bool,
 ) -> Program {
     let mut cx = Cx {
@@ -226,10 +227,43 @@ pub fn lower_against_libraries(
     // before the safepoints and before the split, because it is an ordinary
     // function from here on: its calls are safepoints like any others, and the
     // unit it lands in is decided by the same rule as every other function's.
-    if options.entry == crate::common::options::EntryMode::Auto
-        && let Some(id) = main
-    {
-        super::entry::synthesize(&mut unit, id, start, options.target);
+    // A test binary runs the package's tests instead of its `main` — the same
+    // entry point, handed a different function to call. With no `#lang`
+    // test runner there is nothing to run them with, and the build falls back to
+    // the ordinary entry: `ir::check` is where a missing one is reported, not
+    // here.
+    let runner = lang
+        .get("test_runner")
+        .map(|d| defs.resolve_alias(d))
+        .and_then(|d| cx.func_of.get(&d).copied());
+    let failed = lang
+        .get("test_failed")
+        .map(|d| defs.resolve_alias(d))
+        .and_then(|d| cx.func_of.get(&d).copied());
+    if options.entry == crate::common::options::EntryMode::Auto {
+        match (options.test, runner) {
+            (true, Some(runner)) => {
+                let cases: Vec<(String, super::FuncId)> = tests
+                    .iter()
+                    .filter_map(|(name, def)| {
+                        cx.func_of.get(def).map(|&f| (name.clone(), f))
+                    })
+                    .collect();
+                super::entry::synthesize_tests(
+                    &mut unit,
+                    &cases,
+                    runner,
+                    failed,
+                    start,
+                    options.target,
+                );
+            }
+            _ => {
+                if let Some(id) = main {
+                    super::entry::synthesize(&mut unit, id, start, options.target);
+                }
+            }
+        }
     }
     super::safepoint::annotate(&mut unit);
     // Which functions can reach themselves, and so need a stack check in their

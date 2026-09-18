@@ -239,6 +239,63 @@ whatever is missing from `std` will be discovered by needing it.
 4. Link, or hand `nestc` the objects to link, with `-C link-arg=` for whatever
    the manifest said about native libraries.
 
+### Tests (`@test`, `nestc --test`, `twig test`)
+
+**Done.** A `@test` function is an ordinary function the compiler notes
+(spec §9.2). Two things run them:
+
+- **`nestc --test`** builds the entry *package* as a test binary. The entry point
+  it synthesizes is the ordinary one — `nest_init`, then `#lang("start")` with
+  the arguments — except that what `start` is handed a pointer to is a
+  synthesized `func () -> i32` that builds a table of the package's tests and
+  passes it to whatever claimed `#lang("test_runner")`.
+- **`twig test`** builds that target (`build/<profile>/<name>-test`) and runs it.
+  It is not one of the package's targets: it is the package's own entry compiled
+  a second way, so the tests are compiled **as** the package rather than against
+  it, and they see its private names.
+
+**Which tests.** Those of the package being compiled, and not of anything it
+imports. A def knows its file and a file knows its path, so the question is
+answered by the session that loaded them (`Session::entry_package_tests`).
+
+**A failing test does not end the run**, and that needed something. A panic in
+Nest does not unwind, so there is no landing pad to arrive at and no stack to
+walk back — which leaves `setjmp`/`longjmp`, and leaves it in the runtime,
+because `setjmp` only works in the frame that called it. `nest_guard_run` calls
+one test with a guard armed; `core`'s panic handler calls `nest_guard_fail`
+after it has printed its report and before it traps, and that returns
+immediately when nothing is guarding. An ordinary program is unchanged.
+
+The cost is that a failing test's `defer`s do not run — there is no unwinding to
+run them. A test binary exits after its suite, which is why that is affordable
+here and would not be in general.
+
+**Threads are not involved.** Rust runs one thread per test and catches the
+unwind; with no unwinding, a thread would not help — an abort takes the process
+down whichever thread it is on. Threads would buy parallelism and nothing else,
+and `std` has none yet.
+
+**The runner is in `core`** (`core/test.nest`), private: the package root does
+not re-export it, nothing in it is `@public`, and the compiler finds the two
+functions it needs by `#lang` tag. It is in `core` rather than `std` because
+`core` is the one package every program has — a runner in `std` would mean
+`core`'s own tests could not run — and the cost is that its output goes through
+`core/write.nest`, the same path to stderr the panic report takes.
+
+**What is left.**
+
+- **Conditional compilation**, so a `tests` namespace is not in a release
+  binary. `@test` deliberately does not do this: it says what a function is for,
+  not whether it is built.
+- **A filter** (`twig test <pattern>`), and the `--test-threads`-shaped options
+  that only make sense once there are threads.
+- **`tests/` as integration tests** — a second target seeing only the package's
+  `@public` API, the way cargo's `tests/` does. Today every test is a unit test.
+- **Reporting what a returned `.err` said.** The wrapper that turns a
+  `Result`-returning test into the `func () -> void` the runner calls is built
+  after monomorphization, where there is no `Display` left to reach for, so it
+  reports only that an error came back.
+
 ### What `nestc` still owes it
 
 - **`-C opt-level`**, and LLVM's pass manager run behind it. The backend

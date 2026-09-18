@@ -28,6 +28,7 @@ usage :: func () -> str {
     "  init             create a package in the current directory",
     "  build            compile the package's targets",
     "  run [-- <args>]  build a binary, then run it with <args>",
+    "  test             build the package's `@test` functions and run them",
     "  metadata         how each package is compiled, as JSON, for tools",
     "",
     "options:",
@@ -72,6 +73,7 @@ main :: func () -> i32 {
     "init" => run_init(&opts),
     "build" => run_build(&opts),
     "run" => run_run(&opts),
+    "test" => run_test(&opts),
     "metadata" => run_metadata(&opts),
     _ => .err(f"no command `{opts.command}`; see `twig --help`"),
   }
@@ -216,6 +218,32 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
   }
   let one: Vec.<Target> := collections.from_slice.<Target>(.{ t })
   compile_all(&ws, p, one.as_slice()).?
+
+  let exe: str := build.output(&ws, p, t)
+  term.status("Running", f"`{shown(&ws, exe)}`")
+  let status: process.Status := process.run(exe, o.rest).match {
+    .ok(s) => s,
+    .err(e) => { return .err(f"could not run `{exe}`: {e.describe()}") },
+  }
+  return .ok(status.code())
+}
+
+// Build the package's tests and run them.
+//
+// The test binary is not one of the package's targets: it is the same entry
+// compiled a second way (`build.tests`), so what is built here is the
+// dependencies and then it — the root's own `.nlib` is not in the way, because
+// the tests are compiled *as* the package rather than against it.
+run_test :: func (o: *Options) -> Result.<i32, str> {
+  if o.positional.len() != 0 { return .err("arguments for the test binary go after `--`") }
+  let ws: Workspace := open().?
+  let mut p: Profile := build.profile(&ws.root.manifest, o.release)
+  p.emit = o.emit.as_slice()
+  p.verbose = o.verbose
+  let t: Target := build.tests(&ws).?
+  compile_deps(&ws, p).?
+  compiling(&ws.root)
+  build.compile(&ws, p, t).?
 
   let exe: str := build.output(&ws, p, t)
   term.status("Running", f"`{shown(&ws, exe)}`")

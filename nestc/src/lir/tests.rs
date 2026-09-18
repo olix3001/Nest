@@ -116,7 +116,12 @@ fn lir_program_rendered(
         &session.linked,
         session.options.target,
     );
-    let program = crate::lir::lower(
+    let tests = if session.options.test {
+        session.entry_package_tests()
+    } else {
+        Vec::new()
+    };
+    let program = crate::lir::lower::lower_against_libraries(
         &session.defs,
         &session.ir_meta,
         &session.linked,
@@ -124,6 +129,8 @@ fn lir_program_rendered(
         &session.options,
         &session.lang_items,
         &session.sources,
+        &tests,
+        &|_| false,
     );
     let _ = file;
     // The entry file's unit. `MemLoader` names it `mem:main`, and the split
@@ -2822,6 +2829,40 @@ f :: func () { let p := new.<Node>(); drop(p) }
 @public main :: func () {}
 ";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
+}
+
+/// **A test build's entry runs the tests**, and an ordinary one does not have
+/// them to run.
+///
+/// What the entry point calls is the only difference between the two programs:
+/// the C `main` is the same function, `#lang("start")` still gets the arguments,
+/// and what it is handed is a synthesized `func () -> i32` that hands a table to
+/// whatever claimed `#lang("test_runner")`.
+#[test]
+fn a_test_build_runs_the_tests_instead_of_main() {
+    let src = "\
+@test
+adds :: func () { assert(1 + 1 == 2) }
+@test
+reads :: func () -> Result.<void, str> { return .ok(()) }
+@public main :: func () -> i32 { return 0 }
+";
+    let mut options = crate::common::options::Options::default();
+    options.test = true;
+    let lir = lir_text_with(src, options);
+    // The table, the function that hands it over, and the wrapper the `Result`
+    // test needs — a runner calls one shape of function, and that test is the
+    // other one.
+    assert!(lir.contains("test.cases"), "{lir}");
+    assert!(lir.contains("test.main"), "{lir}");
+    assert!(lir.contains("test.wrap(reads)"), "{lir}");
+    // The one returning nothing is called directly: there is nothing to wrap.
+    assert!(!lir.contains("test.wrap(adds)"), "{lir}");
+
+    // The same program, built the ordinary way: none of it is there.
+    let plain = lir_text(src);
+    assert!(!plain.contains("test.cases"), "{plain}");
+    assert!(!plain.contains("test.main"), "{plain}");
 }
 
 // ===< Dividing by zero (§7d) >===

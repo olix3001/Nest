@@ -12,8 +12,8 @@ unit mem:main {
     line: u32                    // +16
     column: u32                    // +20
   }
-  private const const.str.1: [8]u8 = b"negative"  // _NK1
-  private const const.str.2: [8]u8 = b"mem:main"  // _NK2
+  private const const.str.2: [8]u8 = b"negative"  // _NK2
+  private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
   func checked(n_0: i32) -> i32  // _NC7checked
     let _1: bool
@@ -24,8 +24,8 @@ unit mem:main {
     _1 := lt.i32 n_0, 0
     switch.bool _1 { 1 => bb1, _ => bb2 }
   bb1:                    // then
-    _2 := []u8(&const.str.1, 8)
-    _3 := []u8(&const.str.2, 8)
+    _2 := []u8(&const.str.2, 8)
+    _3 := []u8(&const.str.3, 8)
     _4 := core.loc.Location(_3, 2, 14)
     call core.fail.panic(_2, _4)
       @safepoint { live: [_2, _4]

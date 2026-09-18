@@ -137,20 +137,18 @@ test-grammar:
         echo "npx not found — skipping the grammar corpus"; \
     fi
 
-# twig's own tests. It has none yet: they are waiting on `@test`, which is the
-# language's test attribute and does not exist. The recipe is here so that the
-# day it does, `just test` already runs them.
+# twig's own tests: `@test` functions in twig's sources, run by `twig test`.
 #
 # The probe reads the command list rather than trying `twig test --help`: twig
 # answers `--help` before it dispatches, so that exits 0 for a command it does
-# not have.
-[doc("twig's own tests. None yet — they wait on `@test`.")]
+# not have. It stays because this recipe runs before twig is necessarily built.
+[doc("twig's own tests, through `twig test`.")]
 test-twig:
     @just _step "Testing twig"
     @if [ -x "{{ twig }}" ] && {{ twig }} --help 2>/dev/null | grep -q '^  test\b'; then \
         cd {{ root }}/twig && {{ twig }} test; \
     else \
-        echo "twig has no tests yet (waiting on \`@test\`)"; \
+        echo "twig is not built — skipping its tests"; \
     fi
 
 # ===< Housekeeping >===

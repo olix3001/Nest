@@ -16,8 +16,8 @@ unit mem:main {
     0: i32                    // +0
     1: bool                    // +4
   }
-  private const const.str.1: [16]u8 = b"integer overflow"  // _NK1
-  private const const.str.2: [8]u8 = b"mem:main"  // _NK2
+  private const const.str.2: [16]u8 = b"integer overflow"  // _NK2
+  private const const.str.3: [8]u8 = b"mem:main"  // _NK3
 
   func count(n_0: i32) -> i32  // _NC5count
     let _1: i32
@@ -62,8 +62,8 @@ unit mem:main {
     _8 := add_checked.i32 acc_2, i_4
     switch.bool _8.1 { 1 => bb9, _ => bb10 }
   bb9:                    // overflow
-    _9 := []u8(&const.str.1, 16)
-    _10 := []u8(&const.str.2, 8)
+    _9 := []u8(&const.str.2, 16)
+    _10 := []u8(&const.str.3, 8)
     _11 := core.loc.Location(_10, 6, 11)
     call core.fail.panic(_9, _11)
       @safepoint { live: [_9, _11]
@@ -76,8 +76,8 @@ unit mem:main {
     _12 := add_checked.i32 i_4, 1
     switch.bool _12.1 { 1 => bb11, _ => bb12 }
   bb11:                    // overflow
-    _13 := []u8(&const.str.1, 16)
-    _14 := []u8(&const.str.2, 8)
+    _13 := []u8(&const.str.2, 16)
+    _14 := []u8(&const.str.3, 8)
     _15 := core.loc.Location(_14, 7, 9)
     call core.fail.panic(_13, _15)
       @safepoint { live: [_13, _15]

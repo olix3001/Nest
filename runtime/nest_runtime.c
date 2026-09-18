@@ -2,7 +2,7 @@
  * The Nest runtime, in one file.
  *
  * Every symbol a generated object file refers to that is not a Nest function is
- * here, and there are eleven of them. That is the point: the language's runtime
+ * here, and there are fourteen of them. That is the point: the language's runtime
  * surface is small enough to read, and swapping the collector is editing this
  * file and relinking rather than changing the compiler.
  *
@@ -51,6 +51,8 @@
  */
 
 #include <errno.h>
+#include <setjmp.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -328,6 +330,59 @@ void nest_trap(void) {
     abort();
 }
 
-/* `assert(cond)`. The argument is a byte holding 0 or 1 — a Nest `bool` is a
- * byte in every slot, member and argument, which is what keeps its size the same
- * in a register and in memory. */
+/* Whether what is written to stderr should carry colour.
+ *
+ * A terminal on the other end, and `NO_COLOR` unset: the two halves of the
+ * convention every tool follows. Both are C's to answer — `isatty` is a
+ * syscall and the environment is the process's — which is why the decision is
+ * here and only the *escapes* are in Nest. */
+int nest_color_stderr(void) {
+    const char *no = getenv("NO_COLOR");
+    if (no != NULL && no[0] != '\0') {
+        return 0;
+    }
+    return isatty(2) ? 1 : 0;
+}
+
+/* ===< Guarding one call against a panic >===
+ *
+ * What a test binary needs and nothing else does: a way to call a function and
+ * come back when it *failed*, so that one failing test does not end the run.
+ *
+ * A panic does not unwind (`design/lir.md`), so there is no stack to walk back
+ * and no landing pad to arrive at — which leaves `setjmp`/`longjmp`, and leaves
+ * it here, because `setjmp` only works in the frame that called it. A wrapper
+ * in Nest would return before the jump could be taken.
+ *
+ * `core`'s panic handler calls `nest_guard_fail` after it has printed its
+ * report and before it traps. With nothing guarding, that call returns and the
+ * trap happens as it always did: an ordinary program is unchanged.
+ *
+ * Nothing between the two runs: a `defer` the failing call was holding does not
+ * run, because there is no unwinding to run it. A test binary exits after its
+ * suite, which is why that is affordable here and would not be in general. */
+static jmp_buf nest_guard_buf;
+static int nest_guard_armed = 0;
+
+/* Call `fn`, returning 0 if it returned and 1 if it panicked.
+ *
+ * Not reentrant: one buffer, so a guarded call inside a guarded call would
+ * return to the outer one. The runner below it makes no such call. */
+int nest_guard_run(void (*fn)(void)) {
+    if (setjmp(nest_guard_buf) != 0) {
+        nest_guard_armed = 0;
+        return 1;
+    }
+    nest_guard_armed = 1;
+    fn();
+    nest_guard_armed = 0;
+    return 0;
+}
+
+/* Leave the guarded call, if there is one. Returns when there is not. */
+void nest_guard_fail(void) {
+    if (nest_guard_armed) {
+        nest_guard_armed = 0;
+        longjmp(nest_guard_buf, 1);
+    }
+}
