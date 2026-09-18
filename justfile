@@ -62,6 +62,7 @@ default:
 # has to be compiled by nestc directly, from `core` and `std` sources; that twig
 # then builds twig the way every other package is built. Once one exists,
 # `build` uses it and this is not needed again.
+[doc("A fresh machine: the compiler, the server, and twig from nothing.")]
 bootstrap: tools build-nestc build-lsp
     @just _step "Bootstrapping twig"
     mkdir -p {{ root }}/twig/build/bootstrap
@@ -83,12 +84,15 @@ build-nestc: tools
 # The language server. Built from the same source as nestc, which is not
 # optional: the two share the front end, and a server built from another commit
 # answers about a language the compiler is not compiling.
+[doc("The language server, from the same source as nestc.")]
 build-lsp: tools
     @just _step "Building nest-lsp ({{ profile }})"
     cd {{ root }}/nestc && cargo build {{ cargo_profile }} -p nest-lsp
 
-# The build tool, by itself. Bootstraps first if there is no twig yet.
-build-twig:
+# The build tool, by itself. Bootstraps first if there is no twig yet — which is
+# why it needs nestc: the bootstrap twig is compiled by it.
+[doc("The build tool. Bootstraps first if there is no twig yet.")]
+build-twig: build-nestc
     @just _step "Building twig ({{ profile }})"
     @if [ -x "{{ twig }}" ]; then \
         cd {{ root }}/twig && {{ twig }} build {{ twig_profile }}; \
@@ -108,6 +112,7 @@ build-twig:
 # One recipe rather than a list a reader has to assemble, because "did I break
 # anything" is one question. Each part is also its own recipe, for the times it
 # is not.
+[doc("Every suite: the compiler, the server, the grammar, and twig.")]
 test: test-nestc test-lsp test-grammar test-twig
     @just _step "All suites passed"
 
@@ -123,6 +128,7 @@ test-lsp:
 
 # The tree-sitter grammar, against its corpus. Skipped where it is not set up,
 # since it needs npx and the generated parser.
+[doc("The tree-sitter grammar, against its corpus.")]
 test-grammar:
     @just _step "Testing the grammar"
     @if command -v npx >/dev/null 2>&1; then \
@@ -134,9 +140,14 @@ test-grammar:
 # twig's own tests. It has none yet: they are waiting on `@test`, which is the
 # language's test attribute and does not exist. The recipe is here so that the
 # day it does, `just test` already runs them.
+#
+# The probe reads the command list rather than trying `twig test --help`: twig
+# answers `--help` before it dispatches, so that exits 0 for a command it does
+# not have.
+[doc("twig's own tests. None yet — they wait on `@test`.")]
 test-twig:
     @just _step "Testing twig"
-    @if [ -x "{{ twig }}" ] && {{ twig }} test --help >/dev/null 2>&1; then \
+    @if [ -x "{{ twig }}" ] && {{ twig }} --help 2>/dev/null | grep -q '^  test\b'; then \
         cd {{ root }}/twig && {{ twig }} test; \
     else \
         echo "twig has no tests yet (waiting on \`@test\`)"; \
@@ -146,6 +157,7 @@ test-twig:
 
 # Check the tools a build needs, and say which is missing rather than failing
 # somewhere inside cargo.
+[doc("Check the tools a build needs, and say which is missing.")]
 tools:
     @command -v cargo >/dev/null || (echo "error: cargo not found; install Rust with rustup (https://rustup.rs)" >&2; exit 1)
     @command -v cc >/dev/null || (echo "error: cc not found; install a C compiler (Xcode command line tools, or gcc/clang)" >&2; exit 1)
@@ -159,11 +171,13 @@ tools:
 fmt:
     cd {{ root }}/nestc && cargo fmt
 
+[doc("Check the Rust is formatted, without rewriting it.")]
 fmt-check:
     cd {{ root }}/nestc && cargo fmt --check
 
 # Everything built, in both profiles, plus the package build directories. A
 # serialized-format change needs this — see design/library.md.
+[doc("Everything built, in both profiles, plus the package build directories.")]
 clean:
     cd {{ root }}/nestc && cargo clean
     rm -rf {{ root }}/twig/build
