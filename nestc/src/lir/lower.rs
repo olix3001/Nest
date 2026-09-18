@@ -2692,7 +2692,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             index: 0,
             name: Symbol::new("tag"),
         });
-        self.into_temp(Rvalue::Use(Operand::Copy(tag)), Ty::int(width, signed), span)
+        self.into_temp(
+            Rvalue::Use(Operand::Copy(tag)),
+            Ty::int(width, signed),
+            span,
+        )
     }
 
     // ===< Calls >===

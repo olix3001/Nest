@@ -247,7 +247,11 @@ impl Stripper<'_> {
             );
             return None;
         };
-        let NodeKind::VariantLit { name: written, args } = &self.ast.node(value).kind else {
+        let NodeKind::VariantLit {
+            name: written,
+            args,
+        } = &self.ast.node(value).kind
+        else {
             self.report(
                 value,
                 format!(
@@ -259,7 +263,10 @@ impl Stripper<'_> {
             return None;
         };
         if !matches!(args, crate::parser::ast::VariantArgs::None) {
-            self.report(value, "a `#when` condition names a variant, and takes no payload");
+            self.report(
+                value,
+                "a `#when` condition names a variant, and takes no payload",
+            );
             return None;
         }
         let written = written.clone();
@@ -293,10 +300,7 @@ impl Stripper<'_> {
                 match name.as_str() {
                     "test" => Some(self.conds.test),
                     "all" | "any" | "not" => {
-                        self.report(
-                            value,
-                            format!("`{name}` takes conditions: `{name}(...)`"),
-                        );
+                        self.report(value, format!("`{name}` takes conditions: `{name}(...)`"));
                         None
                     }
                     _ => {
@@ -355,7 +359,9 @@ impl Stripper<'_> {
             _ => {
                 self.report(
                     call,
-                    format!("`{name}` is not a `#when` combinator; they are `all`, `any` and `not`"),
+                    format!(
+                        "`{name}` is not a `#when` combinator; they are `all`, `any` and `not`"
+                    ),
                 );
                 None
             }

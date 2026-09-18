@@ -149,7 +149,10 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         Field { name, .. } => format!("Field {name}:"),
         EnumType { .. } => "EnumType".into(),
         Variant {
-            name, payload, value, ..
+            name,
+            payload,
+            value,
+            ..
         } => {
             let tag = match payload {
                 VariantPayload::None => "",

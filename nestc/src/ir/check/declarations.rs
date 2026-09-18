@@ -242,7 +242,9 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
                     Some(DirectiveArg::Str(s) | DirectiveArg::Name(s)) => report_type(
                         meta,
                         t,
-                        format!("`#repr(\"{s}\")` is not a representation; the one there is is `\"C\"`"),
+                        format!(
+                            "`#repr(\"{s}\")` is not a representation; the one there is is `\"C\"`"
+                        ),
                         out,
                     ),
                     _ => report_type(

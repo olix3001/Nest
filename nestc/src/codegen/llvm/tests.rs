@@ -1913,8 +1913,7 @@ main :: func () -> i32 {
 /// and so turns up in units this compilation cannot enumerate.
 #[test]
 fn a_function_only_its_own_unit_calls_is_internal() {
-    let text = ir(
-        "helper :: func (a: i32) -> i32 { return a + 1 }\n\
+    let text = ir("helper :: func (a: i32) -> i32 { return a + 1 }\n\
          @public exported :: func (a: i32) -> i32 { return a + 2 }\n\
          Weigh :: trait { weight :: func (self: *Self) -> i32 }\n\
          Thing :: struct { hp: i32 }\n\
@@ -1922,8 +1921,7 @@ fn a_function_only_its_own_unit_calls_is_internal() {
          @public go :: func (t: *Thing) -> i32 {\n\
              const seen: *dyn Weigh := t\n\
              return helper(1) + exported(2) + seen.weight()\n\
-         }\n",
-    );
+         }\n");
     assert!(
         text.contains("define internal i32 @_NC6helper"),
         "a private function only its own unit calls is not internal:\n{text}"

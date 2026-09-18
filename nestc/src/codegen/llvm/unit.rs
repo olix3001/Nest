@@ -58,11 +58,11 @@ use inkwell::values::{
 };
 
 use crate::codegen::CodegenError;
-use crate::sema::ty::CallConv;
 use crate::lir::{
     Aggregate, Base, Callee, CastKind, Constant, Function, Global, Intrinsic, Linkage, Local, Op,
     Operand, Place, Projection, Rvalue, StmtKind, TermKind, Ty, TypeId, Unit,
 };
+use crate::sema::ty::CallConv;
 
 type Result<T> = std::result::Result<T, CodegenError>;
 

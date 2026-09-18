@@ -1752,10 +1752,7 @@ fn a_discriminant_must_be_an_integer_nobody_else_has() {
     // Two variants at one tag are two variants a `match` cannot tell apart, and
     // a discriminant that is not an integer is not a tag at all.
     let dup = messages("E :: enum { a = 1, b = 1 }\nf :: func () -> E { return .a }\n");
-    assert!(
-        dup.iter().any(|m| m.contains("already `a`'s")),
-        "{dup:#?}"
-    );
+    assert!(dup.iter().any(|m| m.contains("already `a`'s")), "{dup:#?}");
     // The variant after an explicit one continues from it, and 2 is nobody's.
     let implied = messages("E :: enum { a = 1, b }\nf :: func () -> E { return .b }\n");
     assert!(implied.is_empty(), "{implied:#?}");
@@ -1823,7 +1820,9 @@ f :: func () -> i32 { return linux.handle() }
         |_| {},
     );
     assert!(
-        named.iter().any(|m| m.contains("cannot resolve name `windows`")),
+        named
+            .iter()
+            .any(|m| m.contains("cannot resolve name `windows`")),
         "{named:#?}"
     );
 }
@@ -1871,7 +1870,8 @@ f :: func () -> i32 { return tests.n() }
 ";
     let off = when_messages(src, |_| {});
     assert!(
-        off.iter().any(|m| m.contains("cannot resolve name `tests`")),
+        off.iter()
+            .any(|m| m.contains("cannot resolve name `tests`")),
         "{off:#?}"
     );
     let on = when_messages(src, |o| o.test = true);
@@ -1911,7 +1911,8 @@ fn a_condition_the_compiler_does_not_know_is_refused_rather_than_answered_false(
         |_| {},
     );
     assert!(
-        key.iter().any(|m| m.contains("`platform` is not a condition")),
+        key.iter()
+            .any(|m| m.contains("`platform` is not a condition")),
         "{key:#?}"
     );
     let value = when_messages(
@@ -1919,7 +1920,9 @@ fn a_condition_the_compiler_does_not_know_is_refused_rather_than_answered_false(
         |_| {},
     );
     assert!(
-        value.iter().any(|m| m.contains("`.Plan9` is not a os this compiler knows")),
+        value
+            .iter()
+            .any(|m| m.contains("`.Plan9` is not a os this compiler knows")),
         "{value:#?}"
     );
     let flag = when_messages(
@@ -1927,7 +1930,8 @@ fn a_condition_the_compiler_does_not_know_is_refused_rather_than_answered_false(
         |_| {},
     );
     assert!(
-        flag.iter().any(|m| m.contains("`debug` is not a condition")),
+        flag.iter()
+            .any(|m| m.contains("`debug` is not a condition")),
         "{flag:#?}"
     );
     let empty = when_messages(
@@ -1935,7 +1939,9 @@ fn a_condition_the_compiler_does_not_know_is_refused_rather_than_answered_false(
         |_| {},
     );
     assert!(
-        empty.iter().any(|m| m.contains("`#when` takes a condition")),
+        empty
+            .iter()
+            .any(|m| m.contains("`#when` takes a condition")),
         "{empty:#?}"
     );
     let arity = when_messages(
@@ -1943,7 +1949,9 @@ fn a_condition_the_compiler_does_not_know_is_refused_rather_than_answered_false(
         |_| {},
     );
     assert!(
-        arity.iter().any(|m| m.contains("`not` takes one condition")),
+        arity
+            .iter()
+            .any(|m| m.contains("`not` takes one condition")),
         "{arity:#?}"
     );
 }
@@ -8600,7 +8608,9 @@ fn repr_is_refused_where_it_could_not_mean_anything() {
          @public main :: func () { const z := 1 }\n",
     );
     assert!(
-        unknown.iter().any(|m| m.contains("is not a representation")),
+        unknown
+            .iter()
+            .any(|m| m.contains("is not a representation")),
         "{unknown:#?}"
     );
 }

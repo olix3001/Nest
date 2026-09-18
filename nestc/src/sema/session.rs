@@ -941,4 +941,3 @@ fn c_char_signed(target: &crate::common::options::Target) -> bool {
         _ => true,
     }
 }
-
