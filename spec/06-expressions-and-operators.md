@@ -517,7 +517,14 @@ like is a library question, and a compiler that answered it would leave a user's
 own type with nowhere to.
 
 Width, alignment and precision (`{x:>8.2}`) are **not** in the syntax: `{ }`
-holds an expression and nothing else (§1.5).
+holds an expression and nothing else (§1.5). Nor is `{x:?}`, though what it
+would select exists: `core` has a second trait tagged `#lang("debug")`, one
+method `debug(self: *Self, out: *mut Buf)`, which writes what a value *is*
+rather than what it shows — text quoted and escaped, a struct's members named,
+the variant an enum holds. Every type has an impl of it, a concrete one where
+`core` wrote it and a reflective one otherwise, so `Debug` is not a bound a
+program has to satisfy. Nothing in the language reaches it yet: it is called by
+name, and the specifier that would select it arrives with the rest of them.
 
 ## 6.12 Ranges
 

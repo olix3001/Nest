@@ -713,6 +713,41 @@ fn a_program_links_and_runs() {
              }\n",
             57,
         ),
+        // `Debug`, which every type has: concrete impls for the scalars and
+        // text, and a blanket one that reads the description for everything
+        // else — a struct by its members, a tuple by its positions, an enum by
+        // the variant it holds, a `distinct` by what it is distinct from. The
+        // quoting is the half `Display` does not do.
+        (
+            "fmt :: import <core/fmt>\n\
+            { Debug } :: import <core/fmt>\n\
+            E :: enum { None, Code(i32), Named { name: str, n: u8 } }\n\
+            P :: struct { x: i32, s: str, inner: (u8, bool) }\n\
+            Meters :: distinct i32\n\
+            show :: func <T: Debug> (v: *T) -> str {\n\
+            \x20   let mut b: fmt.Buf := fmt.start()\n\
+            \x20   v.debug(&mut b)\n\
+            \x20   return fmt.end(&mut b)\n\
+            }\n\
+            main :: func () -> i32 {\n\
+            \x20   let a: E := .Code(7)\n\
+            \x20   if show.<E>(&a) != \"E.Code(7)\" { return 1 }\n\
+            \x20   let b: E := .None\n\
+            \x20   if show.<E>(&b) != \"E.None\" { return 2 }\n\
+            \x20   let c: E := .Named { name: \"hi\\n\", n: 3 }\n\
+            \x20   if show.<E>(&c) != \"E.Named { name: \\\"hi\\\\n\\\", n: 3 }\" { return 3 }\n\
+            \x20   let p: P := P { x: -2, s: \"a\\\"b\", inner: .{ 1, true } }\n\
+            \x20   if show.<P>(&p) != \"P { x: -2, s: \\\"a\\\\\\\"b\\\", inner: (1, true) }\" { return 4 }\n\
+            \x20   let m: Meters := cast.<Meters>(9)\n\
+            \x20   if show.<Meters>(&m) != \"9\" { return 5 }\n\
+            \x20   let ch: char := 'q'\n\
+            \x20   if show.<char>(&ch) != \"'q'\" { return 6 }\n\
+            \x20   let o: Option.<u8> := .some(4)\n\
+            \x20   if show.<Option.<u8>>(&o) != \"Option.some(4)\" { return 7 }\n\
+            \x20   return 42\n\
+            }\n",
+            42,
+        ),
         // The write half of the checked read, `member_of`, an `@attribute` on
         // the *type* rather than a member, and a `*dyn reflect.Any` whose trait
         // is named only through the namespace. 40 + 2.

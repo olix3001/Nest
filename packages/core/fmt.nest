@@ -51,6 +51,7 @@
 
 { make } :: import "mem.nest"
 { PTR_BITS } :: import "target.nest"
+{ Attr, Member, TypeInfo, Variant, type_id, type_info, variant_of } :: import "reflect.nest"
 
 // ===< The buffer >===
 
@@ -269,8 +270,246 @@ impl Display for char {
   }
 }
 
-// The two bytes the digit loops above need by name. `48` and `45` are ASCII `0`
-// and `-`; a character literal would be clearer still, but a `char` is a code
-// point and these are being appended as bytes.
+// ===< `Debug` >===
+
+// What a value **is**, written for whoever is reading the program.
+//
+// The other half of the pair Rust has, and the split is the same one: `Display`
+// is what a program means to show a person — no quotes, no member names, the
+// text a user reads — and `Debug` is the value itself, quoted where it is text
+// and spelled out where it is a structure. `f"{x}"` goes through `Display`;
+// `f"{x:?}"` goes through this.
+//
+// The receiver is a **pointer**, which `Display`'s is not, and it has to be:
+// the blanket impl below reaches a member through `member_dyn`, which hands one
+// back as a `*dyn Debug`, and erasing a type erases its size (§7b).
+@public Debug :: #lang("debug") trait {
+    debug :: func (self: *Self, out: *mut Buf) -> void
+}
+
+// A number is the same characters either way, so these forward rather than
+// repeat the digit loops above.
+impl <const N: u16> Debug for uint.<N> {
+    debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
+}
+
+impl <const N: u16> Debug for int.<N> {
+    debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
+}
+
+impl Debug for usize {
+    debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
+}
+
+impl Debug for isize {
+    debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
+}
+
+impl Debug for bool {
+    debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
+}
+
+// Text, **quoted and escaped** — the difference between the two traits at its
+// plainest. A `Display` of `a"b` is three characters and this is six, and only
+// one of them can be pasted back into a program.
+//
+// The escapes are the ones a `str` literal has (§1.5). Anything else goes out
+// as its own bytes: the buffer holds UTF-8 and so does the text.
+impl Debug for str {
+    debug :: func (self: *Self, out: *mut Buf) -> void {
+        let bytes: []u8 := self.*.as_bytes()
+        out.byte(QUOTE)
+        let mut i: usize := 0
+        while i < bytes.len() {
+            let b: u8 := bytes[i]
+            // The patterns are numbers rather than the named constants below:
+            // a bare name in a pattern **binds** (§7), so `QUOTE =>` would
+            // match every byte and call it `QUOTE`.
+            b.match {
+                34 => escaped(out, QUOTE),
+                92 => escaped(out, BACKSLASH),
+                10 => escaped(out, 110),
+                13 => escaped(out, 114),
+                9 => escaped(out, 116),
+                _ => out.byte(b),
+            }
+            i = i + 1
+        }
+        out.byte(QUOTE)
+    }
+}
+
+// A character, in its own quotes. The escapes are the same five, except that
+// the quote to escape is the single one.
+impl Debug for char {
+    debug :: func (self: *Self, out: *mut Buf) -> void {
+        out.byte(TICK)
+        cast.<u32>(self.*).match {
+            39 => escaped(out, TICK),
+            92 => escaped(out, BACKSLASH),
+            10 => escaped(out, 110),
+            13 => escaped(out, 114),
+            9 => escaped(out, 116),
+            _ => self.*.display(out),
+        }
+        out.byte(TICK)
+    }
+}
+
+// One escape: the backslash, then the character that names it.
+escaped :: func (out: *mut Buf, c: u8) -> void {
+    out.byte(BACKSLASH)
+    out.byte(c)
+}
+
+// ===< Every other type, by reflection >===
+
+// A member as its own `Debug`: the vtable is *that member's* impl, so a member
+// that is a `str` is quoted and a member that is a struct walks its own members
+// the same way this one does.
+member_debug :: #intrinsic("member_dyn") func <T> (v: *T, m: Member) -> *dyn Debug
+
+// The impl every type has, read off its description at run time.
+//
+// A concrete impl beats this one (§4.9), which is what the scalars above are:
+// nothing here knows that a `u8` is a number, and a type that wants a different
+// shape writes `impl Debug for MyType` and nothing else changes.
+//
+// What is left over — a float, a function, a pointer, a `dyn` — is written as
+// the name of its type. That is honest rather than useful, and the one that
+// most deserves better is the float: printing one correctly is Ryū, which
+// `Display` does not have either (see the top of this file).
+impl <T> Debug for T {
+    debug :: func (self: *Self, out: *mut Buf) -> void {
+        let t: TypeInfo := type_info.<T>()
+        t.kind.match {
+            .Struct => debug_struct.<T>(self, t, out),
+            .Tuple => debug_tuple.<T>(self, t, out),
+            .Enum => debug_enum.<T>(self, t, out),
+            .Distinct(_) => member_debug.<T>(self, representation()).debug(out),
+            _ => out.bytes(t.name.as_bytes()),
+        }
+    }
+}
+
+// `Name { a: 1, b: "two" }`, and just the name for a struct with no members.
+debug_struct :: func <T> (v: *T, t: TypeInfo, out: *mut Buf) -> void {
+    out.bytes(short_name(t.name).as_bytes())
+    if t.members.len() == 0 { return }
+    out.bytes(" { ".as_bytes())
+    let mut i: usize := 0
+    while i < t.members.len() {
+        if i > 0 { out.bytes(", ".as_bytes()) }
+        out.bytes(t.members[i].name.as_bytes())
+        out.bytes(": ".as_bytes())
+        member_debug.<T>(v, t.members[i]).debug(out)
+        i = i + 1
+    }
+    out.bytes(" }".as_bytes())
+}
+
+// `(1, "two")` — a tuple has positions rather than names, so the names its
+// description gives them (`0`, `1`, …) are left out.
+debug_tuple :: func <T> (v: *T, t: TypeInfo, out: *mut Buf) -> void {
+    out.byte(OPEN)
+    let mut i: usize := 0
+    while i < t.members.len() {
+        if i > 0 { out.bytes(", ".as_bytes()) }
+        member_debug.<T>(v, t.members[i]).debug(out)
+        i = i + 1
+    }
+    out.byte(CLOSE)
+}
+
+// `Error.NotFound(2)`, `Shape.Rect { w: 1, h: 2 }`, `Color.Red`.
+//
+// The type's name is written as well as the variant's, so that what comes out
+// is what a program would have to write to build the value again.
+debug_enum :: func <T> (v: *T, t: TypeInfo, out: *mut Buf) -> void {
+    let which: Variant := variant_of.<T>(v).match {
+        .some(x) => x,
+        // A tag no variant claims. The value is not one this enum can hold, so
+        // there is nothing to name but the type.
+        .none => {
+            out.bytes(short_name(t.name).as_bytes())
+            return
+        },
+    }
+    out.bytes(short_name(t.name).as_bytes())
+    out.byte(DOT)
+    out.bytes(which.name.as_bytes())
+    if which.payload.len() == 0 { return }
+    if which.tuple { out.byte(OPEN) } else { out.bytes(" { ".as_bytes()) }
+    let mut i: usize := 0
+    while i < which.payload.len() {
+        if i > 0 { out.bytes(", ".as_bytes()) }
+        if which.tuple == false {
+            out.bytes(which.payload[i].name.as_bytes())
+            out.bytes(": ".as_bytes())
+        }
+        member_debug.<T>(v, which.payload[i]).debug(out)
+        i = i + 1
+    }
+    if which.tuple { out.byte(CLOSE) } else { out.bytes(" }".as_bytes()) }
+}
+
+// The name a programmer calls the type: the last segment of its path, without
+// the generic arguments.
+//
+// The description carries the whole of it — `core.result.Result.<i32, str>` —
+// which says both where the type lives and what it was instantiated with.
+// Neither belongs in front of every value: what someone reading the output is
+// looking for is `Result.err("boom")`.
+//
+// Cutting at a `.` is safe on text: the byte is ASCII, so it is never part of a
+// character that spans more than one byte.
+short_name :: func (name: str) -> str {
+    let bytes: []u8 := name.as_bytes()
+    // Up to the generic arguments, where there are any. `.<` opens them and
+    // cannot appear inside a path segment.
+    let mut end: usize := bytes.len()
+    let mut i: usize := 0
+    while i + 1 < bytes.len() {
+        if bytes[i] == DOT && bytes[i + 1] == ANGLE {
+            end = i
+            break
+        }
+        i = i + 1
+    }
+    // The last `.` before that is where the name itself starts.
+    let mut start: usize := 0
+    i = 0
+    while i < end {
+        if bytes[i] == DOT { start = i + 1 }
+        i = i + 1
+    }
+    return cast.<str>(bytes[start..<end])
+}
+
+// The one member a `distinct` type has: its representation, at the start of the
+// value. Its description lists no members, so this is built rather than looked
+// up — `member_dyn` reads an offset and an index and nothing else.
+representation :: func () -> Member {
+    return Member {
+        name: "",
+        offset: 0,
+        size: 0,
+        kind: .Void,
+        id: type_id.<void>(),
+        attrs: cast.<[]Attr>(make.<[]Attr>(0)),
+        index: 0,
+    }
+}
+
+// The bytes the loops above and the `Debug` impls below need by name. A
+// character literal would be clearer still, but a `char` is a code point and
+// these are being appended as bytes.
 ZERO: u8 :: 48
 MINUS: u8 :: 45
+QUOTE: u8 :: 34
+TICK: u8 :: 39
+BACKSLASH: u8 :: 92
+DOT: u8 :: 46
+OPEN: u8 :: 40
+CLOSE: u8 :: 41
+ANGLE: u8 :: 60
