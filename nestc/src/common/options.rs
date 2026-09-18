@@ -231,6 +231,18 @@ pub struct Options {
     /// weaker spelling of it. A package that does not want its tests in a
     /// release binary puts them in a namespace and excludes that.
     pub test: bool,
+    /// Build the entry package as a **library** others link against
+    /// (`--emit nlib`).
+    ///
+    /// What it changes is linkage, and only linkage. A whole-program build
+    /// knows every caller there will ever be, so a definition no other codegen
+    /// unit names is emitted `internal` and the backend is free to inline it
+    /// and delete it (`crate::lir::unit`). A library knows nothing of the kind:
+    /// the packages compiled against it are not here, and a definition they
+    /// will name — a trait impl's method, most of all, which carries no
+    /// `@public` of its own — would be deleted before they ever ask for it. So
+    /// a library internalizes nothing.
+    pub library: bool,
     /// How hard the backend optimizes; see [`OptLevel`].
     pub opt_level: OptLevel,
     /// The processor the code may assume, by the backend's name for it:
@@ -249,6 +261,7 @@ impl Default for Options {
             codegen_units: 1,
             entry: EntryMode::default(),
             test: false,
+            library: false,
             opt_level: OptLevel::default(),
             target_cpu: "generic",
         }

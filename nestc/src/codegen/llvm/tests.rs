@@ -28,7 +28,18 @@ fn ir(src: &str) -> String {
 /// What a test wants this for is the *optimizer's* answer to something the
 /// lowering deliberately leaves to it (§11).
 fn ir_at(src: &str, level: OptLevel) -> String {
+    ir_with(src, level, false)
+}
+
+/// [`ir`], for a compilation that is producing a **library** rather than a whole
+/// program. The one thing it changes is linkage (`Options::library`).
+fn library_ir(src: &str) -> String {
+    ir_with(src, OptLevel::O0, true)
+}
+
+fn ir_with(src: &str, level: OptLevel, library: bool) -> String {
     let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
+    session.options.library = library;
     let file = session.load_entry("main").expect("entry loads");
     analyze(&mut session, file);
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
@@ -1924,6 +1935,34 @@ fn a_function_only_its_own_unit_calls_is_internal() {
     assert!(
         text.contains("define i32 @_NC5ThingXN5WeighIE6weight"),
         "a method a vtable carries is not external:\n{text}"
+    );
+}
+
+/// …and **not** when the compilation is a library (§11).
+///
+/// A library does not know its callers: the packages compiled against it are
+/// not in this build, and `@public` does not name everything they can reach —
+/// a trait impl's method carries no visibility of its own. An internal function
+/// nothing in *this* compilation calls is deleted by the backend, so
+/// internalizing one here is a link error in somebody else's build, which is
+/// how this was found: `core`'s `impl Eq for TypeId` went missing from
+/// `core.nlib` and `std` could not link against it.
+#[test]
+fn a_library_internalizes_nothing() {
+    let src = "helper :: func (a: i32) -> i32 { return a + 1 }\n\
+               @public go :: func (a: i32) -> i32 { return helper(a) }\n";
+    assert!(
+        ir(src).contains("define internal i32 @_NC6helper"),
+        "the whole-program build stopped internalizing"
+    );
+    let text = library_ir(src);
+    assert!(
+        !text.contains("internal i32 @_NC6helper"),
+        "a library internalized a definition its callers are not here to name:\n{text}"
+    );
+    assert!(
+        text.contains("define i32 @_NC6helper"),
+        "the definition is not external in a library build:\n{text}"
     );
 }
 

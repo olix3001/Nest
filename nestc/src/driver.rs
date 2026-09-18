@@ -496,6 +496,8 @@ impl Invocation {
         // property of the build the way `overflow=` is: it changes *what is
         // built* from the same sources, which is the kind of thing `--emit` is.
         options.test = self.test;
+        // A library's linkage is not a whole program's: see `Options::library`.
+        options.library = self.emit.as_ref().is_some_and(|e| e.nlib);
         backend.configure(&options);
         Ok((backend, options))
     }

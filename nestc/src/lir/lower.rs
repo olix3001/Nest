@@ -284,7 +284,7 @@ pub fn lower_against_libraries(
     // prologue. After the entry point is in, because it is a function like any
     // other and its calls are edges like any others.
     super::recursion::mark(&mut unit);
-    super::unit::split(unit, options.codegen_units, sources)
+    super::unit::split(unit, options.codegen_units, sources, !options.library)
 }
 
 /// State shared by every function's lowering: the tables that answer questions

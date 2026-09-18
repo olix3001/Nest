@@ -1650,6 +1650,16 @@ worth naming: a vtable is private data, so every unit that builds a trait object
 carries its own copy, and a copy in another unit is a reference this cut cannot
 enumerate.
 
+**And only a whole-program build does it.** Those five reasons all read *this*
+compilation, and a library's callers are not in it: a package compiled against
+an `.nlib` later is not here to be counted, and `@public` does not name
+everything it can reach — a trait impl's method carries no visibility of its own
+and is reachable wherever the trait and the type are. Since the backend deletes
+an internal function nothing in this compilation calls, internalizing one in a
+library is not a missed optimization but a link error in somebody else's build.
+So `--emit nlib` (`Options::library`) internalizes nothing, and the cut is
+otherwise the same.
+
 The point of it is not the linker's time. An internal function is one a backend
 can see every caller of, which is what lets it rewrite the function itself —
 promote its calling convention, drop an argument nothing reads, pass a parameter

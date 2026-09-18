@@ -52,9 +52,15 @@ use super::{
 };
 
 /// Cut the whole-program unit into at most `n` codegen units.
-pub fn split(mut whole: Unit, n: usize, sources: &SourceMap) -> Program {
+///
+/// `whole_program` says whether this compilation is every caller there will
+/// ever be. It is false for a library, and then nothing is internalized: see
+/// [`internalize`].
+pub fn split(mut whole: Unit, n: usize, sources: &SourceMap, whole_program: bool) -> Program {
     let groups = partition(&whole, n.max(1), sources);
-    internalize(&mut whole, &groups);
+    if whole_program {
+        internalize(&mut whole, &groups);
+    }
     let only = groups.len() == 1;
     let units = groups
         .into_iter()
@@ -168,6 +174,14 @@ fn partition(whole: &Unit, n: usize, sources: &SourceMap) -> Vec<Group> {
 ///   private data every unit that needs it gets a copy of, so the reference can
 ///   turn up in a unit this cannot name;
 /// - or any function outside its own unit refers to it.
+///
+/// None of those five reasons can see a **downstream package**, which is why
+/// this runs only for a whole-program build. The packages compiled against a
+/// library are not here, and `@public` does not name everything they can reach:
+/// a trait impl's method carries no visibility of its own and is reachable
+/// wherever the trait and the type are. Internalizing one is not a missed
+/// optimization but a link error — the backend deletes an `internal` function
+/// nothing in *this* compilation calls, and the caller arrives later.
 fn internalize(whole: &mut Unit, groups: &[Group]) {
     // Which unit each defined function landed in.
     let mut home: HashMap<u32, usize> = HashMap::new();
