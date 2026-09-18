@@ -1100,8 +1100,9 @@ impl VisitorMut for Rewriter<'_, '_> {
     }
 }
 
-/// The members of a struct or a tuple, as the concrete types an instantiation
-/// gives them, in declaration order — the order `Member.index` counts in.
+/// The members of a struct, a tuple or an enum, as the concrete types an
+/// instantiation gives them, in declaration order — the order `Member.index`
+/// counts in.
 fn member_types(linked: &Linked, meta: &Meta, ty: &Ty) -> Vec<(String, Ty)> {
     match ty {
         Ty::Tuple(elems) => elems
@@ -1116,9 +1117,27 @@ fn member_types(linked: &Linked, meta: &Meta, ty: &Ty) -> Vec<(String, Ty)> {
             // A `distinct` has one member at index 0, its representation — the
             // one a `member_dyn` over it reaches, since the description lists
             // no members to select it by.
-            let members = match &t.kind {
-                super::TypeDefKind::Struct { members } => members.as_slice(),
-                super::TypeDefKind::Distinct { repr } => std::slice::from_ref(repr),
+            //
+            // An enum's are **every variant's payload, flattened in variant
+            // order**. Which variant a value holds is a run-time question, so a
+            // `member_dyn` over one must be able to reach any of them, and the
+            // flattening is the order `Variant.payload`'s `index` counts in
+            // (`core/reflect`).
+            let members: Vec<(String, IrId)> = match &t.kind {
+                super::TypeDefKind::Struct { members } => {
+                    members.iter().map(|m| (m.name.to_string(), m.id)).collect()
+                }
+                super::TypeDefKind::Distinct { repr } => {
+                    vec![(repr.name.to_string(), repr.id)]
+                }
+                super::TypeDefKind::Enum { variants } => variants
+                    .iter()
+                    .flat_map(|v| {
+                        v.members
+                            .iter()
+                            .map(move |m| (format!("{}.{}", v.name, m.name), m.id))
+                    })
+                    .collect(),
                 _ => return Vec::new(),
             };
             let mut subst = Subst::default();
@@ -1132,8 +1151,8 @@ fn member_types(linked: &Linked, meta: &Meta, ty: &Ty) -> Vec<(String, Ty)> {
                 }
             }
             members
-                .iter()
-                .map(|m| (m.name.to_string(), subst_ty(&subst, &meta.ty_or_error(m.id))))
+                .into_iter()
+                .map(|(name, id)| (name, subst_ty(&subst, &meta.ty_or_error(id))))
                 .collect()
         }
         _ => Vec::new(),

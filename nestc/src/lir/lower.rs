@@ -1342,18 +1342,9 @@ impl Cx<'_> {
         };
         let mut parts: Vec<Constant> = Vec::new();
         for (i, (name, mty)) in members.iter().enumerate() {
-            let size = self.layouts.of(mty).map(|l| l.size).unwrap_or(0);
-            let name_const = self.text_data(name.as_str().as_bytes(), &text);
-            let attrs = self.attrs_const(defs_of.get(i).copied().flatten(), &key, i);
-            parts.push(Constant::Aggregate(vec![
-                name_const,
-                Constant::Int((*offsets.get(i).unwrap_or(&0) as i128).into()),
-                Constant::Int((size as i128).into()),
-                self.kind_const(mty),
-                self.type_id_const(mty),
-                attrs,
-                Constant::Int((i as i128).into()),
-            ]));
+            let offset = *offsets.get(i).unwrap_or(&0);
+            let def = defs_of.get(i).copied().flatten();
+            parts.push(self.member_const(name, mty, offset, def, &key, i));
         }
         let count = parts.len() as u64;
         let member_lty = self.lir(&member_ty);
@@ -1375,6 +1366,7 @@ impl Cx<'_> {
             _ => None,
         };
         let own_attrs = self.attrs_const(own, &key, usize::MAX);
+        let variants = self.variants_const(ty, &key);
         let info = Constant::Aggregate(vec![
             name_const,
             Constant::Int((layout.size as i128).into()),
@@ -1386,10 +1378,147 @@ impl Cx<'_> {
                 Constant::Global(table),
                 Constant::Int((count as i128).into()),
             ]),
+            variants,
             own_attrs,
         ]);
         self.globals[slot.0 as usize].init = Some(info);
         Some(slot)
+    }
+
+    /// One `Member` descriptor, as a constant.
+    ///
+    /// `index` is both the member's position and what keys the globals its
+    /// attributes go to, which is why a variant's payload members count across
+    /// the whole enum: two descriptors with the same index would share one
+    /// attribute table.
+    fn member_const(
+        &mut self,
+        name: &Symbol,
+        ty: &Ty,
+        offset: u64,
+        def: Option<DefId>,
+        key: &str,
+        index: usize,
+    ) -> Constant {
+        let text = Ty::Slice {
+            mutable: false,
+            inner: Box::new(Ty::u8()),
+        };
+        let size = self.layouts.of(ty).map(|l| l.size).unwrap_or(0);
+        let name_const = self.text_data(name.as_str().as_bytes(), &text);
+        let attrs = self.attrs_const(def, key, index);
+        Constant::Aggregate(vec![
+            name_const,
+            Constant::Int((offset as i128).into()),
+            Constant::Int((size as i128).into()),
+            self.kind_const(ty),
+            self.type_id_const(ty),
+            attrs,
+            Constant::Int((index as i128).into()),
+        ])
+    }
+
+    /// The `[]Variant` slice of `ty`'s description — empty for everything that
+    /// is not an enum.
+    ///
+    /// A variant's payload members are described the way a struct's members
+    /// are, with the two differences that let the same two intrinsics take one
+    /// without knowing where it came from: the `offset` is from the start of
+    /// the **value** — where the payload begins, plus where the member sits
+    /// inside it — and the `index` counts across every variant of the enum,
+    /// which is the order [`crate::ir::mono::member_types`] builds the
+    /// `member_dyn` table in.
+    fn variants_const(&mut self, ty: &Ty, key: &str) -> Constant {
+        let (Some(variant_ty), Some(member_ty)) = (
+            self.lang_nominal("reflect_variant"),
+            self.lang_nominal("reflect_member"),
+        ) else {
+            return Constant::Aggregate(vec![Constant::Undef, Constant::Int(0.into())]);
+        };
+        // The names and shapes first, owned: building a descriptor needs `self`
+        // and the type table is what they were read from.
+        let shape: Vec<(Symbol, bool, Vec<Option<DefId>>)> = match ty {
+            Ty::Nominal { def, .. } => match self.linked.ty(*def).map(|t| &t.kind) {
+                Some(TypeDefKind::Enum { variants }) => variants
+                    .iter()
+                    .map(|v| {
+                        (
+                            v.name.clone(),
+                            v.tuple,
+                            v.members.iter().map(|m| m.def).collect(),
+                        )
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let enum_layout = match self.layouts.enum_layout(ty) {
+            Some(Ok(l)) => Some(l),
+            _ => None,
+        };
+        let text = Ty::Slice {
+            mutable: false,
+            inner: Box::new(Ty::u8()),
+        };
+        let member_lty = self.lir(&member_ty);
+        let mut parts: Vec<Constant> = Vec::new();
+        let mut flat = 0usize;
+        for (i, (name, tuple, defs_of)) in shape.iter().enumerate() {
+            let members = self.layouts.variant_member_types(ty, i).unwrap_or_default();
+            let offsets = enum_layout
+                .as_ref()
+                .and_then(|l| l.variants.get(i))
+                .map(|f| f.offsets.clone())
+                .unwrap_or_default();
+            let payload_at = enum_layout.as_ref().map(|l| l.payload_at).unwrap_or(0);
+            let mut payload: Vec<Constant> = Vec::new();
+            for (j, (mname, mty)) in members.iter().enumerate() {
+                let offset = payload_at + *offsets.get(j).unwrap_or(&0);
+                let def = defs_of.get(j).copied().flatten();
+                payload.push(self.member_const(mname, mty, offset, def, key, flat));
+                flat += 1;
+            }
+            let n = payload.len() as u64;
+            let table = self.data_global(
+                "payload",
+                LirTy::Array {
+                    len: n,
+                    elem: Box::new(member_lty.clone()),
+                },
+                Constant::Aggregate(payload),
+                format!("reflect.payload:{key}:{i}"),
+            );
+            let name_const = self.text_data(name.as_str().as_bytes(), &text);
+            // The tag is the declaration index, which is what [`Self::variant_info`]
+            // says when it builds a value of one. `core`'s `Variant` carries both
+            // anyway: explicit discriminants are what would separate them.
+            parts.push(Constant::Aggregate(vec![
+                name_const,
+                Constant::Int((i as i128).into()),
+                Constant::Aggregate(vec![
+                    Constant::Global(table),
+                    Constant::Int((n as i128).into()),
+                ]),
+                Constant::Bool(*tuple),
+                Constant::Int((i as i128).into()),
+            ]));
+        }
+        let n = parts.len() as u64;
+        let variant_lty = self.lir(&variant_ty);
+        let table = self.data_global(
+            "variants",
+            LirTy::Array {
+                len: n,
+                elem: Box::new(variant_lty),
+            },
+            Constant::Aggregate(parts),
+            format!("reflect.variants:{key}"),
+        );
+        Constant::Aggregate(vec![
+            Constant::Global(table),
+            Constant::Int((n as i128).into()),
+        ])
     }
 
     /// The `[]Attr` slice for the attributes written on `def`, as a constant.
@@ -3253,6 +3382,46 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     ptr: base,
                     index: offset,
                     stride: 1,
+                })
+            }
+            // Which variant an enum value holds, as the tag it stores.
+            //
+            // An enum is `{ tag, payload }` (§7b), so this is a member read
+            // through the pointer and a widening: the tag is as narrow as the
+            // variant count allows, and `core` asks for a `u64` so that one
+            // signature covers every enum. A `T` that is not an enum has no
+            // variants for a tag to be looked up in and answers zero.
+            "variant_tag" if args.len() == 1 => {
+                let owner = self.type_argument(e.id)?;
+                let width = match self.cx.layouts.enum_layout(&owner) {
+                    Some(Ok(l)) => (l.tag.size * 8) as u16,
+                    _ => return Some(Rvalue::Use(Operand::Const(Constant::Int(0.into())))),
+                };
+                let at = self.temp(
+                    Ty::Ptr {
+                        mutable: false,
+                        inner: Box::new(owner),
+                    },
+                    span,
+                );
+                let value = self.eval(&args[0]);
+                self.assign(Place::local(at), Rvalue::Use(value), span);
+                let tag = Place::local(at)
+                    .then(Projection::Deref)
+                    .then(Projection::Field {
+                        index: 0,
+                        name: Symbol::new("tag"),
+                    });
+                let from = self.cx.lir(&Ty::int(width, false));
+                let to = self.cx.lir(&Ty::int(64, false));
+                if from == to {
+                    return Some(Rvalue::Use(Operand::Copy(tag)));
+                }
+                Some(Rvalue::Cast {
+                    value: Operand::Copy(tag),
+                    kind: CastKind::of(&from, &to),
+                    from,
+                    to,
                 })
             }
             // A member as a trait object: the data half is `member_ptr`, and the

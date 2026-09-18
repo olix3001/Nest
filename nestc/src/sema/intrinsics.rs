@@ -131,13 +131,17 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     plain("wrapping_add"),
     plain("wrapping_sub"),
     plain("wrapping_mul"),
-    // Reflection (§9's addition). All three are constants or one instruction:
+    // Reflection (§9's addition). All four are constants or one instruction:
     // `type_info` and `type_id` are read-only data the compiler already has by
     // the time it mangles a symbol, and `member_ptr` is the byte offset every
     // static field access already computes.
     plain("type_info"),
     plain("type_id"),
     plain("member_ptr"),
+    // Which variant an enum value holds, as the tag it stores. One load of
+    // member zero (`design/lir.md` §7b); turning a tag into a position in the
+    // description is `core/reflect`'s own loop, not this.
+    plain("variant_tag"),
     // A member as a `*dyn Trait`, the trait named by the declared result type.
     // It is declared by whatever library owns the trait, which is why the row
     // is not tied to one: `core` cannot name a trait `std` has not written.

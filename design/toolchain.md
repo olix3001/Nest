@@ -147,6 +147,14 @@ The shape:
   yields a differently-typed value for each member can only be typed if the loop
   around it is unrolled. That is a property of the loop's body, not of the data —
   and reading a field by a **run-time** selector is a separate question, below.
+- **An enum's variants are on the description too.** `TypeInfo.variants` lists
+  them in declaration order — each with its name, its tag, whether the payload
+  was written positionally, and the payload itself — and
+  `variant_tag.<T>(v)` answers which one a value holds *now*, which is the one
+  question the description cannot: it is a property of the value. A variant's
+  payload members are `Member`s like any others, described with offsets from
+  the start of the **value**, so `member_ptr`, the checked read and `member_dyn`
+  take one without knowing where it came from.
 - **User attributes are data on the same descriptors.** An `@attribute`
   declaration defines a struct; writing `@json(rename: "user_id")` on a member
   puts that struct in the member's `attrs`. No expansion pass, no generated

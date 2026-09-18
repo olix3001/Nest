@@ -657,6 +657,62 @@ fn a_program_links_and_runs() {
              }\n",
             141,
         ),
+        // An enum's variants, described: their names, their tags, whether the
+        // payload was written positionally, and payload members that go into
+        // the checked read exactly as a struct's do because their offsets are
+        // from the start of the *value*. The indexes count across the whole
+        // enum, which is what `member_dyn` over one needs. 7 + 35.
+        (
+            "r :: import <core/reflect>\n\
+             E :: enum { None, Code(i32), Named { name: str, n: u8 } }\n\
+             main :: func () -> i32 {\n\
+            \x20 let info: r.TypeInfo := r.type_info.<E>()\n\
+            \x20 if info.variants.len() != 3 { return 1 }\n\
+            \x20 if info.variants[0].name != \"None\" { return 2 }\n\
+            \x20 if info.variants[0].payload.len() != 0 { return 3 }\n\
+            \x20 if info.variants[1].name != \"Code\" { return 4 }\n\
+            \x20 if info.variants[1].tuple == false { return 5 }\n\
+            \x20 if info.variants[2].tuple { return 6 }\n\
+            \x20 if info.variants[2].payload.len() != 2 { return 7 }\n\
+            \x20 if info.variants[2].payload[1].name != \"n\" { return 8 }\n\
+            \x20 if info.variants[1].payload[0].index != 0 { return 9 }\n\
+            \x20 if info.variants[2].payload[0].index != 1 { return 10 }\n\
+            \x20 if info.variants[2].payload[1].index != 2 { return 11 }\n\
+            \x20 if r.type_info.<i32>().variants.len() != 0 { return 12 }\n\
+            \x20 let v: E := .Code(7)\n\
+            \x20 if r.variant_tag.<E>(&v) != 1 { return 13 }\n\
+            \x20 let got: r.Variant := r.variant_of.<E>(&v).!\n\
+            \x20 if got.name != \"Code\" || got.index != 1 { return 14 }\n\
+            \x20 return r.member_read.<E, i32>(&v, got.payload[0]) + 35\n\
+             }\n",
+            42,
+        ),
+        // `member_dyn` over an **enum**: the table it indexes holds one vtable
+        // per payload member of every variant, flattened in variant order, so
+        // the descriptor a `variant_of` handed back reaches its own impl. 3 + 4
+        // through `u8`, then 5 through `i32`, which counts ten times.
+        (
+            "r :: import <core/reflect>\n\
+             Sum :: trait { sum :: func (self: *Self) -> i64 }\n\
+             member_sum :: #intrinsic(\"member_dyn\") func <T> (v: *T, m: r.Member) -> *dyn Sum\n\
+             impl Sum for i32 { sum :: func (self: *Self) -> i64 { return cast.<i64>(self.*) * 10 } }\n\
+             impl Sum for u8 { sum :: func (self: *Self) -> i64 { return cast.<i64>(self.*) } }\n\
+             E :: enum { None, Code(i32), Pair(u8, u8) }\n\
+             main :: func () -> i32 {\n\
+            \x20 let v: E := .Pair(3, 4)\n\
+            \x20 let va: r.Variant := r.variant_of.<E>(&v).!\n\
+            \x20 let mut total: i64 := 0\n\
+            \x20 let mut i: usize := 0\n\
+            \x20 while i < va.payload.len() {\n\
+            \x20   total = total + member_sum.<E>(&v, va.payload[i]).sum()\n\
+            \x20   i = i + 1\n\
+            \x20 }\n\
+            \x20 let w: E := .Code(5)\n\
+            \x20 let wa: r.Variant := r.variant_of.<E>(&w).!\n\
+            \x20 return cast.<i32>(total + member_sum.<E>(&w, wa.payload[0]).sum())\n\
+             }\n",
+            57,
+        ),
         // The write half of the checked read, `member_of`, an `@attribute` on
         // the *type* rather than a member, and a `*dyn reflect.Any` whose trait
         // is named only through the namespace. 40 + 2.

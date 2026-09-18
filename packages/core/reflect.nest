@@ -113,6 +113,31 @@ impl Eq for TypeId {
   index: usize,
 }
 
+// One variant of an enum: what it is called, which tag stands for it, and what
+// it carries.
+//
+// `payload` describes the variant's members exactly as a struct's are
+// described, and its offsets are from the start of the **value** rather than
+// from the start of the payload — so a `Member` taken from here goes into
+// `member_ptr` or `member_dyn` without either of them knowing it came from a
+// variant. Their `index` counts across the whole enum, in variant order, for
+// the same reason: that is the table `member_dyn` indexes.
+//
+// `tag` is what the value stores and `index` is the position in
+// `TypeInfo.variants`. The two agree today; they are kept apart because
+// explicit discriminants (§3) are what would make them differ, and code that
+// assumed a tag was a position would be wrong the day they land.
+@public Variant :: #lang("reflect_variant") struct {
+    name: str,
+    tag: u64,
+    payload: []Member,
+    // Whether the payload was written positionally — `.b(T)` rather than
+    // `.c { x: U }`. It changes nothing about the layout and everything about
+    // how the variant is printed.
+    tuple: bool,
+    index: usize,
+}
+
 // A type, described.
 //
 // Constant-folded: `T` is concrete after monomorphization, so this is a value
@@ -126,6 +151,9 @@ impl Eq for TypeId {
   // Empty for everything that is not a struct. A tuple's positional members are
   // real members named `0`, `1`, … (§3.3), so they are here too.
   members: []Member,
+  // Empty for everything that is not an enum, and every variant of one in
+  // declaration order where it is.
+  variants: []Variant,
   // The attributes written on the type itself.
   attrs: []Attr,
 }
@@ -138,6 +166,14 @@ impl Eq for TypeId {
 // The identity of `T`, alone — the whole of `type_info.<T>().id` without the
 // rest of the description, for the common case of comparing two types.
 @public type_id :: #intrinsic("type_id") func <T> () -> TypeId
+
+// The discriminant `v` holds right now.
+//
+// One load: the tag is member zero of an enum value (`design/lir.md` §7b).
+// What comes back is the **tag**, not the position in `TypeInfo.variants`,
+// because the tag is what the value stores — `variant_of` below turns one into
+// the other. On anything that is not an enum the answer is `0`.
+@public variant_tag :: #intrinsic("variant_tag") func <T> (v: *T) -> u64
 
 // The address of `v`'s member `m`.
 //
@@ -234,4 +270,20 @@ Dyn :: struct { data: *mut void, vtable: *mut void }
     i = i + 1
   }
   return .none
+}
+
+// Which variant `v` holds.
+//
+// A search rather than an index, because a tag is not a position (see
+// [`Variant`]). The list is short — an enum with a hundred variants is a rare
+// thing and this is a walk over read-only data.
+@public variant_of :: func <T> (v: *T) -> Option.<Variant> {
+    let info: TypeInfo := type_info.<T>()
+    let tag: u64 := variant_tag.<T>(v)
+    let mut i: usize := 0
+    while i < info.variants.len() {
+        if info.variants[i].tag == tag { return .some(info.variants[i]) }
+        i = i + 1
+    }
+    return .none
 }
