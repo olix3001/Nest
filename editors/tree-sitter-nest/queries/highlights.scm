@@ -75,6 +75,18 @@
   name: (attribute_name) @attribute)
 
 (directive_name) @preproc
+(when_directive_name) @preproc
+
+; `#when`'s conditions: the key and the combinators read as the compiler's own
+; words, the variant as the `core/os.nest` variant it is spelled after.
+(when_condition
+  key: (identifier) @property)
+(when_condition
+  name: (identifier) @function.builtin)
+(when_condition
+  flag: (identifier) @constant.builtin)
+(when_condition
+  "not" @keyword.operator)
 
 (package_path) @string.special
 

@@ -942,6 +942,10 @@
           {
             "type": "directive_name",
             "named": true
+          },
+          {
+            "type": "when_directive_name",
+            "named": true
           }
         ]
       }
@@ -952,6 +956,10 @@
       "types": [
         {
           "type": "arguments",
+          "named": true
+        },
+        {
+          "type": "when_arguments",
           "named": true
         }
       ]
@@ -2559,6 +2567,81 @@
     }
   },
   {
+    "type": "when_arguments",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "when_condition",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "when_condition",
+    "named": true,
+    "fields": {
+      "flag": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "key": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "not",
+            "named": false
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "enum_literal",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "when_condition",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "while_statement",
     "named": true,
     "fields": {
@@ -2940,6 +3023,10 @@
   },
   {
     "type": "type_identifier",
+    "named": true
+  },
+  {
+    "type": "when_directive_name",
     "named": true
   },
   {

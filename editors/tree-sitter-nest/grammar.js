@@ -118,12 +118,29 @@ module.exports = grammar({
       optional($.arguments),
     )),
 
-    directive: $ => prec.right(seq(
-      field('name', $.directive_name),
-      optional($.arguments),
+    directive: $ => prec.right(choice(
+      seq(field('name', $.directive_name), optional($.arguments)),
+      // `#when` has an argument grammar of its own: `=` is not an expression
+      // and `not` is a keyword, so its conditions cannot be `arguments`.
+      seq(field('name', $.when_directive_name), optional($.when_arguments)),
     )),
 
     directive_name: _ => token(seq('#', /[A-Za-z_][A-Za-z0-9_]*/)),
+
+    when_directive_name: _ => token(prec(1, '#when')),
+
+    when_arguments: $ => seq('(', commaSep1($.when_condition), ')'),
+
+    when_condition: $ => choice(
+      seq(field('key', $.identifier), '=', field('value', $.enum_literal)),
+      seq(
+        field('name', choice($.identifier, 'not')),
+        '(',
+        commaSep1($.when_condition),
+        ')',
+      ),
+      field('flag', $.identifier),
+    ),
 
     const_binding: $ => seq(
       field('pattern', $._pattern),

@@ -198,3 +198,31 @@ extern("c") {
                   (type_identifier))))
             (type_path
               (type_identifier))))))))
+
+==============================
+Conditional compilation
+==============================
+
+#when(any(os = .Macos, not(test)))
+posix :: namespace { }
+
+---
+
+(source_file
+  (declaration
+    (directive
+      (when_directive_name)
+      (when_arguments
+        (when_condition
+          (identifier)
+          (when_condition
+            (identifier)
+            (enum_literal
+              (identifier)))
+          (when_condition
+            (when_condition
+              (identifier))))))
+    (const_binding
+      (identifier)
+      (namespace_expression
+        (item_body)))))
