@@ -414,10 +414,11 @@ fn an_interpolation_holds_an_ordinary_expression() {
     ));
 }
 
-/// Several statements may share a line, and the classifier that decides what a
-/// statement *is* looks ahead to the end of that line.
+/// Several statements may share a line when a `;` separates them, and the
+/// classifier that decides what a statement *is* looks ahead to the end of that
+/// statement.
 ///
-/// So `f(x) n = 1` is two statements whose scan finds an assignment operator
+/// So `f(x); n = 1` is two statements whose scan finds an assignment operator
 /// belonging to the second one. Taking that as evidence about the first parsed
 /// `f(x)` as an assignment's place and then reported "expected an assignment
 /// operator" at `n` — for a program that is written correctly.
@@ -425,6 +426,51 @@ fn an_interpolation_holds_an_ordinary_expression() {
 fn a_call_may_be_followed_by_an_assignment_on_one_line() {
     assert_snapshot!(tree(
         "f :: func (n: i32) {}\n\
-         go :: func () -> i32 { let mut n: i32 := 0  f(n) n = n + 1  return n }\n"
+         go :: func () -> i32 { let mut n: i32 := 0; f(n); n = n + 1; return n }\n"
     ))
+}
+
+/// Two statements on **one line** need a `;` between them (spec §1.1).
+///
+/// A newline is a separator and stays one, so the rule only bites where a
+/// statement ran straight into the next one on the same line — which used to
+/// parse, and read as one thing while meaning two: `if n == 0 { put(48) return }`
+/// is a call and a `return`, not a call whose result is returned.
+#[test]
+fn two_statements_on_one_line_need_a_semicolon() {
+    for src in [
+        "go :: func () { f() g() }\n",
+        "go :: func () -> i32 { let n: i32 := 1 return n }\n",
+        "go :: func () { let mut n: i32 := 0 n = 1 }\n",
+        "go :: func (n: i32) { if n == 0 { f() return } }\n",
+    ] {
+        let (_, errors) = Parser::parse_file(src, FileId(0));
+        assert_eq!(errors.len(), 1, "one diagnostic for {src:?}: {errors:#?}");
+        assert!(
+            errors[0].message.contains("expected `;` or a newline"),
+            "{:#?}",
+            errors[0]
+        );
+    }
+}
+
+/// What the rule leaves alone: a `;`, a newline, a statement the closing `}`
+/// follows, and a line the **next** one continues.
+///
+/// The continuation is the case worth pinning down, because it is the one place
+/// a newline is *not* a separator: §1.1 joins a line that begins with `.`, `+`
+/// or `::` to the one before it, so the joined text is a single statement and
+/// the rule must not see two.
+#[test]
+fn a_separator_is_a_semicolon_a_newline_or_a_continuation() {
+    for src in [
+        "go :: func () -> i32 { let n: i32 := 1; return n }\n",
+        "go :: func () -> i32 { let n: i32 := 1\n  return n }\n",
+        "go :: func () -> i32 { let n: i32 := 1\n  n }\n",
+        "go :: func (s: P) -> i32 { let n := s\n  .x\n  return n }\n",
+        "go :: func (s: P) -> i32 { return s\n  .x }\n",
+    ] {
+        let (_, errors) = Parser::parse_file(src, FileId(0));
+        assert!(errors.is_empty(), "for {src:?}: {errors:#?}");
+    }
 }

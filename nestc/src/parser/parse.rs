@@ -139,6 +139,12 @@ impl Parser {
         });
     }
 
+    /// How many diagnostics have been recorded — a mark, so a caller can tell
+    /// whether the parse it just ran reported anything of its own.
+    pub(crate) fn error_count(&self) -> usize {
+        self.errors.len()
+    }
+
     /// Emit an [`NodeKind::Error`] placeholder at `span` after recording `msg`.
     pub(crate) fn error_node(&mut self, span: Span, msg: impl Into<String>) -> NodeId {
         self.error(span, msg);

@@ -3983,7 +3983,7 @@ fn operator_mixed_widths() {
     // Distinct fixed widths each select their own primitive; a literal adapts to
     // the operand width.
     let s =
-        analyze1("f :: func (a: i16, b: i64) -> i64 { let x := a + a  let y := b + 1  return y }");
+        analyze1("f :: func (a: i16, b: i64) -> i64 { let x := a + a; let y := b + 1; return y }");
     assert!(!s.has_errors(), "{:#?}", s.diagnostics);
     let file = entry_file(&s);
     // The literal `1` was pinned to `i64` by its operand.
@@ -4002,7 +4002,7 @@ fn operator_mixed_widths() {
 fn operator_result_pinned_late_by_return() {
     // The width of `x + 2` is only known from the function's return type — the
     // obligation is solved after backward flow (builtin matches the numeric var).
-    let s = analyze1("f :: func () -> i16 { let x := 1  let y := x + 2  return y }");
+    let s = analyze1("f :: func () -> i16 { let x := 1; let y := x + 2; return y }");
     assert!(!s.has_errors(), "{:#?}", s.diagnostics);
     let file = entry_file(&s);
     assert_eq!(
@@ -6504,14 +6504,14 @@ fn a_defer_captures_its_arguments_where_it_is_registered() {
         &[(
             "main",
             "sink :: func (n: i32) {}\n\
-             f :: func () { let mut x: i32 := 1  defer sink(x)  x = 2 }\n",
+             f :: func () { let mut x: i32 := 1; defer sink(x); x = 2 }\n",
         )],
         "main",
     );
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
     // The capture is a binding in front of the `defer`, in the same scope: one
     // of its own would end immediately and run the body there.
-    let ir = ir_text("sink :: func (n: i32) {}\nf :: func () { let mut x: i32 := 1  defer sink(x)  x = 2 }\n");
+    let ir = ir_text("sink :: func (n: i32) {}\nf :: func () { let mut x: i32 := 1; defer sink(x); x = 2 }\n");
     assert!(ir.contains("__defer"), "{ir}");
 }
 
@@ -6527,7 +6527,7 @@ fn a_defer_captures_its_arguments_where_it_is_registered() {
 fn a_qualified_name_heads_a_composite_literal() {
     analyze_clean(
         "ns :: namespace { @public P :: struct { x: i32 } }\n\
-         f :: func () -> i32 { let q: ns.P := ns.P { x: 7 }  return q.x }\n",
+         f :: func () -> i32 { let q: ns.P := ns.P { x: 7 }; return q.x }\n",
     );
     // Across files, which is the shape a package dependency has.
     let session = analyze_mem(
@@ -6588,13 +6588,13 @@ fn assigning_to_something_that_is_not_a_place_is_refused() {
     }
     // A real place is still accepted, and a read-only one still fails the
     // *permission* check rather than this one.
-    analyze_clean("main :: func () { let x: i32 := 1  x = 2 }\n");
+    analyze_clean("main :: func () { let x: i32 := 1; x = 2 }\n");
     assert!(
-        messages("main :: func () { const x: i32 := 1  x = 2 }\n")
+        messages("main :: func () { const x: i32 := 1; x = 2 }\n")
             .iter()
             .any(|m| m.contains("not a mutable binding")),
         "{:#?}",
-        messages("main :: func () { const x: i32 := 1  x = 2 }\n")
+        messages("main :: func () { const x: i32 := 1; x = 2 }\n")
     );
 }
 

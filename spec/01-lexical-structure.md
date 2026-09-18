@@ -20,6 +20,15 @@ const y := a
          + b        // also one statement
 ```
 
+Two statements that **share a line** must be separated by a `;`. A newline is a
+separator and nothing else is: without one, the two run together and read as one
+thing while meaning two.
+
+```
+if n == 0 { put_byte(48); return }   // two statements, one line
+if n == 0 { put_byte(48) return }    // error: expected `;` or a newline
+```
+
 ## 1.2 Comments
 
 ```

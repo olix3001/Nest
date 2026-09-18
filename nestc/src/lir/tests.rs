@@ -1455,7 +1455,7 @@ words :: func (s: str) -> i32 { return s.match { \"hi\" => 1, \"\" => 2, _ => 0 
 sum :: func (xs: []i32) -> i32 {
   let acc := 0
   let i: usize := 0
-  while i < xs.len() { acc = acc + xs[i] i = i + 1 }
+  while i < xs.len() { acc = acc + xs[i]; i = i + 1 }
   return acc
 }
 ratio :: func (a: i32, b: i32) -> i32 { return a / b }
@@ -1470,7 +1470,7 @@ manual :: func () -> i32 {
   drop(q)
   return v
 }
-dyn_call :: func (d: *Dog) -> i32 { let s: *dyn Speak := d return s.say() }
+dyn_call :: func (d: *Dog) -> i32 { let s: *dyn Speak := d; return s.say() }
 widen :: func (n: u8) -> i64 { return n }
 @public main :: func () {
   let a := area(.circle(4))
@@ -2284,8 +2284,8 @@ take :: func (v: void, n: i32) -> i32 { return n }
 #[test]
 fn two_function_local_statics_do_not_share_a_symbol() {
     let src = "\
-a :: func () -> u32 { #static n: u32 := 0 n = n + 1 return n }
-b :: func () -> u32 { #static n: u32 := 5 n = n + 2 return n }
+a :: func () -> u32 { #static n: u32 := 0; n = n + 1; return n }
+b :: func () -> u32 { #static n: u32 := 5; n = n + 2; return n }
 @public main :: func () { let x := a() + b() }
 ";
     let unit = lir_unit(src);
@@ -2379,7 +2379,7 @@ fn a_split_defines_every_symbol_exactly_once() {
 fn a_split_defines_every_global_exactly_once() {
     let src = "\
 #static counter: i32 := 7
-bump :: func () -> i32 { counter = counter + 1 return counter }
+bump :: func () -> i32 { counter = counter + 1; return counter }
 @public main :: func () { let n := bump() }
 ";
     let mut options = crate::common::options::Options::default();
@@ -2762,7 +2762,7 @@ fn dropping_an_outer_value_inside_a_loop_is_refused() {
 Node :: struct { x: i32 }
 f :: func () {
   let p := new.<Node>()
-  loop { drop(p) break }
+  loop { drop(p); break }
 }
 ";
     assert!(
@@ -2818,7 +2818,7 @@ fn the_drops_own_argument_is_not_a_use_after_drop() {
     let src = "\
 { new, drop } :: import <core/mem>
 Node :: struct { x: i32 }
-f :: func () { let p := new.<Node>() drop(p) }
+f :: func () { let p := new.<Node>(); drop(p) }
 @public main :: func () {}
 ";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
@@ -3089,7 +3089,7 @@ f :: func (n: i32) -> i32 {
   let i := 0
   while i < n {
     let j := 0
-    while j < n { t = t + 1 j = j + 1 }
+    while j < n { t = t + 1; j = j + 1 }
     i = i + 1
   }
   return t
@@ -3115,7 +3115,7 @@ fn a_drop_in_a_branch_that_returns_does_not_reach_the_code_after_it() {
 Node :: struct { x: i32 }
 f :: func (c: bool) -> i32 {
   let p := new.<Node>()
-  if c { drop(p) return 0 }
+  if c { drop(p); return 0 }
   return p.*.x
 }
 @public main :: func () {}

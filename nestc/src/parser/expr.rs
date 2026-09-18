@@ -925,7 +925,22 @@ impl Parser {
             if self.at(&TokenKind::RBrace) || self.at_eof() {
                 break;
             }
+            let before = self.error_count();
             let (node, is_expr) = self.allowing_struct_lit(Parser::parse_stmt);
+            // Two statements on one line need a `;` between them (spec §1.1). A
+            // newline is still a separator, so only a statement that ran into
+            // the next one on the same line is refused — and only when the
+            // statement itself parsed, so a recovery does not report twice.
+            if !self.at_stmt_end() && self.error_count() == before {
+                let span = self.cur_span();
+                self.error(
+                    span,
+                    format!(
+                        "expected `;` or a newline after a statement, found {}",
+                        self.describe_next()
+                    ),
+                );
+            }
             let had_semi = self.eat(&TokenKind::Semicolon);
             self.skip_newlines();
             if is_expr && !had_semi && self.at(&TokenKind::RBrace) {

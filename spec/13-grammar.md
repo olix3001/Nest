@@ -169,7 +169,8 @@ param_types = type { ',' type }
 ## 13.6 Statements
 
 ```
-block     = '{' { statement } [ expr ] '}'
+block     = '{' { statement stmt_end } [ expr ] '}'
+stmt_end  = ';' | newline | &'}'                 // two statements on one line need the ';' (1.1)
 statement = local_decl
           | const_bind
           | assign_stmt
@@ -279,7 +280,7 @@ Trailing-block call sugar (a final `func`-typed argument written as a block afte
 
 ```
 trailing_call  = callee [ '(' [ args ] ')' ] closure_block
-closure_block  = '{' [ closure_header ] { statement } [ expr ] '}'
+closure_block  = '{' [ closure_header ] { statement stmt_end } [ expr ] '}'
 closure_header = param { ',' param } '=>'      // params; types optional (inferred)
 ```
 

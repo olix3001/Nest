@@ -613,11 +613,11 @@ fn a_program_links_and_runs() {
         (
             "Sink :: trait {\n\
             \x20 put :: func (self: *mut Self, n: i64) -> i64\n\
-            \x20 twice :: func (self: *mut Self, n: i64) -> i64 { self.put(n)  return self.put(n) }\n\
+            \x20 twice :: func (self: *mut Self, n: i64) -> i64 { self.put(n); return self.put(n) }\n\
              }\n\
              Acc :: struct { total: i64 }\n\
              impl Sink for Acc {\n\
-            \x20 put :: func (self: *mut Self, n: i64) -> i64 { self.total = self.total + n  return self.total }\n\
+            \x20 put :: func (self: *mut Self, n: i64) -> i64 { self.total = self.total + n; return self.total }\n\
              }\n\
              main :: func () -> i32 {\n\
             \x20 let mut acc: Acc := Acc { total: 0 }\n\
@@ -702,7 +702,7 @@ fn a_program_links_and_runs() {
         // different `Result` types, with a struct payload, which is the shape
         // `std` uses everywhere.
         (
-            "E :: struct { op: str, code: i32 }\n             inner :: func () -> Result.<i32, E> { return .err(E { op: \"open\", code: 7 }) }\n             outer :: func () -> Result.<[]u8, E> {\n            \x20 let v: i32 := inner().?\n            \x20 return .ok(\"x\".as_bytes())\n             }\n             main :: func () -> i32 {\n            \x20 return outer().match {\n            \x20   .ok(_) => 0,\n            \x20   .err(e) => { if e.op != \"open\" { return 1 }  return e.code },\n            \x20 }\n             }\n",
+            "E :: struct { op: str, code: i32 }\n             inner :: func () -> Result.<i32, E> { return .err(E { op: \"open\", code: 7 }) }\n             outer :: func () -> Result.<[]u8, E> {\n            \x20 let v: i32 := inner().?\n            \x20 return .ok(\"x\".as_bytes())\n             }\n             main :: func () -> i32 {\n            \x20 return outer().match {\n            \x20   .ok(_) => 0,\n            \x20   .err(e) => { if e.op != \"open\" { return 1 }; return e.code },\n            \x20 }\n             }\n",
             7,
         ),
         // `#comptime for`, unrolled: four copies of the body, each typed on its
@@ -1292,7 +1292,7 @@ fn recursion_past_the_end_of_the_stack_traps() {
         return;
     };
     let deep = run_on_host(
-        "f :: func (n: i32) -> i32 { if n == 0 { return 0 } return f(n - 1) }\n\
+        "f :: func (n: i32) -> i32 { if n == 0 { return 0 }; return f(n - 1) }\n\
          main :: func () -> i32 { return f(100000) }\n",
     );
     assert_eq!(deep.status.code(), None, "it exited instead of trapping: {deep:?}");
@@ -1300,7 +1300,7 @@ fn recursion_past_the_end_of_the_stack_traps() {
     assert!(said.contains("stack overflow"), "it did not say what happened: {said}");
 
     let shallow = run_on_host(
-        "f :: func (n: i32) -> i32 { if n == 0 { return 0 } return f(n - 1) + 1 }\n\
+        "f :: func (n: i32) -> i32 { if n == 0 { return 0 }; return f(n - 1) + 1 }\n\
          main :: func () -> i32 { return f(1000) - 990 }\n",
     );
     assert_eq!(shallow.status.code(), Some(10), "a recursion that fits ran wrong: {shallow:?}");
