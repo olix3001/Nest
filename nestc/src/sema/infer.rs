@@ -46,6 +46,7 @@ use num_traits::ToPrimitive;
 
 use crate::ir::ConstValue;
 
+use super::decl::Decls;
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::impls::{ImplInfo, ImplTable};
 use super::ty::{Const, FloatWidth, InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
@@ -964,6 +965,11 @@ struct Inferer<'a> {
 }
 
 impl Inferer<'_> {
+    /// The declaration queries, over the tables this pass already holds.
+    fn decls(&self) -> Decls<'_> {
+        Decls::new(self.defs, self.asts)
+    }
+
     fn infer_func(&mut self, func: NodeId) {
         let NodeKind::FuncExpr {
             params, ret, body, ..
@@ -2509,29 +2515,7 @@ impl Inferer<'_> {
 
     /// The declared field names of a record struct, in declaration order.
     fn record_field_names(&self, def: DefId) -> Vec<Symbol> {
-        let d = self.defs.get(def);
-        let (Some(file), Some(node)) = (d.file, d.node) else {
-            return Vec::new();
-        };
-        let ast = &self.asts[&file];
-        let rhs = match ast.node(node).kind.clone() {
-            NodeKind::ConstBind { rhs, .. } => rhs,
-            _ => node,
-        };
-        let NodeKind::StructType {
-            kind: crate::parser::ast::StructKind::Record(fields),
-            ..
-        } = ast.node(rhs).kind.clone()
-        else {
-            return Vec::new();
-        };
-        fields
-            .iter()
-            .filter_map(|&f| match &ast.node(f).kind {
-                NodeKind::Field { name, .. } => Some(name.clone()),
-                _ => None,
-            })
-            .collect()
+        self.decls().record_field_names(def)
     }
 
     /// The type already inferred for `node` (composite bodies are walked once,
@@ -3168,29 +3152,8 @@ impl Inferer<'_> {
     }
 
     /// The **value** parameter names of a function def, in declaration order.
-    ///
-    /// A leading `self` is excluded: a method call's receiver is not one of its
-    /// written arguments, so the names line up with `args` either way.
     fn func_param_names(&self, def: DefId) -> Option<Vec<Symbol>> {
-        let d = self.defs.get(def);
-        let (file, node) = (d.file?, d.node?);
-        let ast = &self.asts[&file];
-        let rhs = match &ast.node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
-        };
-        let NodeKind::FuncExpr { params, .. } = &ast.node(rhs).kind else {
-            return None;
-        };
-        Some(
-            params
-                .iter()
-                .filter_map(|&p| match &ast.node(p).kind {
-                    NodeKind::Param { name, .. } if name.as_str() != "self" => Some(name.clone()),
-                    _ => None,
-                })
-                .collect(),
-        )
+        self.decls().param_names(def)
     }
 
     /// Report any reference from a default argument to one of the function's own
@@ -3226,33 +3189,8 @@ impl Inferer<'_> {
     /// Which of `def`'s **value** parameters carry a default, in declaration
     /// order — the same order and filtering as [`Self::func_param_names`], so
     /// the two zip.
-    ///
-    /// Only presence is reported, not the default expression: a call site never
-    /// looks at the default itself. It was type-checked once at the declaration
-    /// and is filled in by lowering, so all inference needs to know is that the
-    /// slot may legally be left empty.
     fn func_param_defaults(&self, def: DefId) -> Option<Vec<bool>> {
-        let d = self.defs.get(def);
-        let (file, node) = (d.file?, d.node?);
-        let ast = &self.asts[&file];
-        let rhs = match &ast.node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
-        };
-        let NodeKind::FuncExpr { params, .. } = &ast.node(rhs).kind else {
-            return None;
-        };
-        Some(
-            params
-                .iter()
-                .filter_map(|&p| match &ast.node(p).kind {
-                    NodeKind::Param { name, default, .. } if name.as_str() != "self" => {
-                        Some(default.is_some())
-                    }
-                    _ => None,
-                })
-                .collect(),
-        )
+        self.decls().param_defaults(def)
     }
 
     /// How many arguments a call to `def` must supply — its parameter count
@@ -3852,10 +3790,7 @@ impl Inferer<'_> {
     /// The individual trait nodes of a generic parameter's constraint, which is
     /// either a `+`-separated [`NodeKind::Bounds`] list or a single trait.
     fn bound_nodes(&self, file: FileId, constraint: NodeId) -> Vec<NodeId> {
-        match self.asts[&file].node(constraint).kind.clone() {
-            NodeKind::Bounds { bounds } => bounds,
-            _ => vec![constraint],
-        }
+        self.decls().bound_nodes(file, constraint)
     }
 
     /// Unify a method's `self` parameter with the receiver, inserting the one
@@ -4020,18 +3955,7 @@ impl Inferer<'_> {
     /// **default body** — a bodyless signature is a requirement the impl must
     /// satisfy, not something callable through the impl.
     fn trait_default_method(&self, trait_def: DefId, name: &Symbol) -> Option<DefId> {
-        let m = *self.defs.get(trait_def).ns.members.get(name)?;
-        let d = self.defs.get(m);
-        if d.kind != DefKind::Func {
-            return None;
-        }
-        let (file, node) = (d.file?, d.node?);
-        let ast = &self.asts[&file];
-        let rhs = match &ast.node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
-        };
-        matches!(ast.node(rhs).kind, NodeKind::FuncExpr { body: Some(_), .. }).then_some(m)
+        self.decls().trait_default_method(trait_def, name)
     }
 
     /// Resolve `name` on a trait-object receiver (`dyn Trait` or `*dyn Trait`) to
@@ -4512,28 +4436,7 @@ impl Inferer<'_> {
     /// A function's declared generic parameters — types **and** `const` values —
     /// in source order, which is the order `.<...>` arguments bind to.
     fn func_generic_param_defs(&self, def: DefId) -> Vec<DefId> {
-        let d = self.defs.get(def);
-        let (Some(file), Some(node)) = (d.file, d.node) else {
-            return Vec::new();
-        };
-        let ast = &self.asts[&file];
-        let rhs = match &ast.node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
-        };
-        let NodeKind::FuncExpr { generics, .. } = &ast.node(rhs).kind else {
-            return Vec::new();
-        };
-        generics
-            .iter()
-            .filter(|&&g| {
-                matches!(
-                    ast.node(g).kind,
-                    NodeKind::GenericTypeParam { .. } | NodeKind::GenericConstParam { .. }
-                )
-            })
-            .filter_map(|&g| self.def_meta_in(file, g))
-            .collect()
+        self.decls().func_generic_param_defs(def)
     }
 
     fn collect_type_params(&self, ty: &Ty, out: &mut Vec<super::def::DefId>) {
@@ -4757,23 +4660,7 @@ impl Inferer<'_> {
     /// *width* there. A string literal is open too, but every type it may
     /// become holds it, so there is nothing to check.
     fn const_lit_value(&self, node: NodeId) -> Option<Lit> {
-        let mut def = self.resolved_def(node)?;
-        for _ in 0..16 {
-            let d = self.defs.get(def);
-            if d.kind != DefKind::Const {
-                return None;
-            }
-            let (file, n) = (d.file?, d.node?);
-            let NodeKind::ConstBind { rhs, .. } = self.asts[&file].node(n).kind.clone() else {
-                return None;
-            };
-            match self.asts[&file].node(rhs).kind.clone() {
-                NodeKind::Lit(l @ (Lit::Int(_) | Lit::Float(_))) => return Some(l),
-                NodeKind::Path { .. } => def = self.resolved_def_in(file, rhs)?,
-                _ => return None,
-            }
-        }
-        None
+        self.decls().const_lit_value(self.file, node)
     }
 
     /// Give a comptime literal back its `comptime_int` / `comptime_float` type
@@ -5108,21 +4995,7 @@ impl Inferer<'_> {
 
     /// Number of generic parameters a type def declares.
     fn generic_arity(&self, def: super::def::DefId) -> usize {
-        let d = self.defs.get(def);
-        let (Some(file), Some(node)) = (d.file, d.node) else {
-            return 0;
-        };
-        let ast = &self.asts[&file];
-        let rhs = match &ast.node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
-        };
-        match &ast.node(rhs).kind {
-            NodeKind::StructType { generics, .. }
-            | NodeKind::EnumType { generics, .. }
-            | NodeKind::TraitType { generics, .. } => generics.len(),
-            _ => 0,
-        }
+        self.decls().generic_arity(def)
     }
 
     /// Infer each variant-literal payload argument, tagging record entries with
@@ -5148,25 +5021,7 @@ impl Inferer<'_> {
 
     /// The generic type-parameter [`DefId`]s a type def declares, in order.
     fn type_param_defs(&self, def: DefId) -> Vec<DefId> {
-        let d = self.defs.get(def);
-        let (Some(file), Some(node)) = (d.file, d.node) else {
-            return Vec::new();
-        };
-        let ast = &self.asts[&file];
-        let rhs = match &ast.node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
-        };
-        let generics = match &ast.node(rhs).kind {
-            NodeKind::StructType { generics, .. }
-            | NodeKind::EnumType { generics, .. }
-            | NodeKind::TraitType { generics, .. } => generics.clone(),
-            _ => return Vec::new(),
-        };
-        generics
-            .iter()
-            .filter_map(|&g| self.def_meta_in(file, g))
-            .collect()
+        self.decls().type_param_defs(def)
     }
 
     /// The substitution `{ generic-param → type-arg }` for a nominal use
@@ -5184,10 +5039,6 @@ impl Inferer<'_> {
                 .zip(args.iter().cloned())
                 .collect(),
         )
-    }
-
-    fn def_meta_in(&self, file: FileId, node: NodeId) -> Option<DefId> {
-        self.asts[&file].meta::<DefMeta>(node).map(|m| m.0)
     }
 
     // ===< field access >===
@@ -5396,23 +5247,7 @@ impl Inferer<'_> {
 
     /// A trait's declared generic parameters, in source order.
     fn trait_generic_param_defs(&self, trait_def: DefId) -> Vec<DefId> {
-        let d = self.defs.get(trait_def);
-        let (Some(file), Some(node)) = (d.file, d.node) else {
-            return Vec::new();
-        };
-        let ast = &self.asts[&file];
-        let rhs = match &ast.node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
-        };
-        let NodeKind::TraitType { generics, .. } = &ast.node(rhs).kind else {
-            return Vec::new();
-        };
-        generics
-            .iter()
-            .filter(|&&g| matches!(ast.node(g).kind, NodeKind::GenericTypeParam { .. }))
-            .filter_map(|&g| self.def_meta_in(file, g))
-            .collect()
+        self.decls().trait_generic_param_defs(trait_def)
     }
 
     /// Apply the one rule an intrinsic needs beyond its declared signature
@@ -7243,10 +7078,7 @@ impl Inferer<'_> {
     }
 
     fn resolved_def_in(&self, file: FileId, node: NodeId) -> Option<super::def::DefId> {
-        match self.asts[&file].meta::<Resolution>(node)? {
-            Resolution::Def(d) => Some(self.defs.resolve_alias(d)),
-            _ => None,
-        }
+        self.decls().resolved_def(file, node)
     }
 
     fn type_head_def_in(&self, file: FileId, node: NodeId) -> Option<super::def::DefId> {

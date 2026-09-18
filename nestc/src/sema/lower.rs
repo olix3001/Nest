@@ -44,6 +44,7 @@ use crate::parser::ast::{
     VariantPayload,
 };
 
+use super::decl::Decls;
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::OpResolution;
 use super::infer::{
@@ -144,6 +145,11 @@ struct Lowerer<'a> {
 }
 
 impl Lowerer<'_> {
+    /// The declaration queries, over the tables this pass already holds.
+    fn decls(&self) -> Decls<'_> {
+        Decls::new(self.defs, self.asts)
+    }
+
     // ===< node construction >===
     //
     // Every IR node is built through one of these four, which is what makes the
@@ -1291,29 +1297,13 @@ impl Lowerer<'_> {
     /// Whether `def`'s `i`-th value parameter defaults to `#caller_location`.
     fn default_is_caller_location(&self, def: Option<DefId>, i: usize) -> bool {
         let Some(def) = def else { return false };
-        let d = self.defs.get(def);
-        let (Some(file), Some(node)) = (d.file, d.node) else {
+        let Some((file, _)) = self.decls().func(def) else {
             return false;
         };
-        let Some(ast) = self.asts.get(&file) else {
-            return false;
-        };
-        let rhs = match &ast.node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
-        };
-        let NodeKind::FuncExpr { params, .. } = &ast.node(rhs).kind else {
-            return false;
-        };
-        params
-            .iter()
-            .filter_map(|&p| match &ast.node(p).kind {
-                NodeKind::Param { name, default, .. } if name.as_str() != "self" => Some(*default),
-                _ => None,
-            })
-            .nth(i)
-            .flatten()
-            .is_some_and(|d| matches!(ast.node(d).kind, NodeKind::CallerLocation))
+        self.decls()
+            .param_default_nodes(def)
+            .and_then(|d| d.get(i).copied().flatten())
+            .is_some_and(|d| matches!(self.asts[&file].node(d).kind, NodeKind::CallerLocation))
     }
 
     /// Build the `Location` value for the call site `at` (§5.2).
@@ -1388,28 +1378,11 @@ impl Lowerer<'_> {
         if let Some(cached) = self.defaults.get(&def) {
             return cached.get(i).cloned().flatten();
         }
-        let d = self.defs.get(def);
-        let (Some(file), Some(node)) = (d.file, d.node) else {
-            return None;
-        };
-        let ast = self.asts.get(&file)?;
-        let rhs = match &ast.node(node).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => node,
-        };
-        let NodeKind::FuncExpr { params, .. } = ast.node(rhs).kind.clone() else {
-            return None;
-        };
-        let slots: Vec<Option<NodeId>> = params
-            .iter()
-            .filter_map(|&p| match &ast.node(p).kind {
-                NodeKind::Param { name, default, .. } if name.as_str() != "self" => Some(*default),
-                _ => None,
-            })
-            .collect();
+        let (file, _) = self.decls().func(def)?;
+        let slots = self.decls().param_default_nodes(def)?;
         // Lower in the *declaring* file's context: the default's nodes, and the
         // types inference stamped on them, live in that arena.
-        let saved = std::mem::replace(&mut self.ast, ast);
+        let saved = std::mem::replace(&mut self.ast, &self.asts[&file]);
         let lowered: Vec<Option<Expr>> = slots
             .into_iter()
             .map(|s| s.map(|n| self.lower_expr(n)))
@@ -1450,29 +1423,7 @@ impl Lowerer<'_> {
 
     /// The fields `def` declares, in declaration order.
     fn record_field_names(&self, def: DefId) -> Vec<Symbol> {
-        let d = self.defs.get(def);
-        let (Some(file), Some(node)) = (d.file, d.node) else {
-            return Vec::new();
-        };
-        let ast = &self.asts[&file];
-        let rhs = match ast.node(node).kind.clone() {
-            NodeKind::ConstBind { rhs, .. } => rhs,
-            _ => node,
-        };
-        let NodeKind::StructType {
-            kind: crate::parser::ast::StructKind::Record(fields),
-            ..
-        } = ast.node(rhs).kind.clone()
-        else {
-            return Vec::new();
-        };
-        fields
-            .iter()
-            .filter_map(|&f| match &ast.node(f).kind {
-                NodeKind::Field { name, .. } => Some(name.clone()),
-                _ => None,
-            })
-            .collect()
+        self.decls().record_field_names(def)
     }
 
     /// The `DefKind::Field` def named `name` on struct `def`.

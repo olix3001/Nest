@@ -42,6 +42,7 @@
 
 pub mod builtins;
 pub mod collect;
+pub mod decl;
 pub mod def;
 pub mod desugar;
 pub mod fields;

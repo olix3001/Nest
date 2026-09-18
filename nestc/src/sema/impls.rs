@@ -22,6 +22,7 @@ use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
+use super::decl::Decls;
 use super::def::{DefId, DefKind, DefTable};
 use super::{DefMeta, Resolution};
 
@@ -147,28 +148,10 @@ fn check_completeness(
         if imp.members.contains_key(name) || imp.assoc.contains_key(name) {
             continue;
         }
-        let d = defs.get(member);
-        let (Some(file), Some(mnode)) = (d.file, d.node) else {
+        let Some(kind) = Decls::new(defs, asts).requirement(member) else {
             continue;
         };
-        let Some(ast) = asts.get(&file) else { continue };
-        // The member's node is the `ConstBind`; what it binds says which kind of
-        // requirement this is, and whether the trait already answered it.
-        let rhs = match &ast.node(mnode).kind {
-            NodeKind::ConstBind { rhs, .. } => *rhs,
-            _ => mnode,
-        };
-        let kind = match &ast.node(rhs).kind {
-            // A method with a body is a default: the impl may stay silent.
-            NodeKind::FuncExpr { body: Some(_), .. } => continue,
-            NodeKind::FuncExpr { .. } => "method",
-            NodeKind::AssocType { .. } => "associated type",
-            NodeKind::AssocConst {
-                default: Some(_), ..
-            } => continue,
-            NodeKind::AssocConst { .. } => "associated constant",
-            _ => continue,
-        };
+        let kind = kind.label();
         missing.push(format!("{kind} `{name}`"));
     }
     if missing.is_empty() {
