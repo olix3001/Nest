@@ -34,7 +34,8 @@ process :: import <std/process>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
 path :: import <std/path>
-{ Bin, Manifest, ProfileSettings } :: import "manifest.nest"
+{ Bin, Build, Manifest, ProfileSettings } :: import "manifest.nest"
+manifest :: import "manifest.nest"
 { Workspace, Member } :: import "workspace.nest"
 toolchain :: import "toolchain.nest"
 term :: import "term.nest"
@@ -55,6 +56,10 @@ string :: import <std/string>
   // because it is the same kind of thing: what this *invocation* asked for,
   // rather than what the profile says a build is.
   verbose: bool,
+  // What `--nestc-arg` passed: arguments for `nestc` verbatim, last on the
+  // command line, on the root package's targets only. Beside `emit` for the
+  // same reason — this invocation asked for it.
+  nestc_args: []str,
 }
 
 // `debug` or `release`, with whatever the root manifest changed about it.
@@ -62,9 +67,9 @@ string :: import <std/string>
 // program's decision.
 @public profile :: func (m: *Manifest, release: bool) -> Profile {
   let mut p: Profile := if release {
-    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3", emit: .{}, verbose: false }
+    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3", emit: .{}, verbose: false, nestc_args: .{} }
   } else {
-    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0", emit: .{}, verbose: false }
+    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0", emit: .{}, verbose: false, nestc_args: .{} }
   }
   let settings: Option.<ProfileSettings> := m.profile.match {
     .some(ps) => if release { ps.release } else { ps.debug },
@@ -211,7 +216,7 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
   // A test target links a program whatever it was made from: what it produces is
   // something to run, not something to depend on.
   let mut emit: str := if t.lib && t.test == false { "nlib" } else { "link" }
-  if t.lib == false || t.name == ws.root.name {
+  if own(ws, t) {
     for e in p.emit {
       let file: str := path.join(objects(ws, p, t), f"{t.name}.{extension(e)}")
       emit = f"{emit},{emit_kind(e)}={file}"
@@ -241,7 +246,42 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
   setting(&mut args, f"overflow={p.overflow}")
   setting(&mut args, f"codegen-units={p.codegen_units}")
   setting(&mut args, f"opt-level={p.opt_level}")
+
+  // What the root package asked to add to its own command, last, so that it
+  // beats what twig decided: the manifest's `[build]` and then this run's
+  // `--nestc-arg`, which is the more specific of the two.
+  if own(ws, t) {
+    extra(&mut args, ws, p)
+  }
   return Command { program: toolchain.nestc(), args: args.as_slice() }
+}
+
+// Whether `t` is a target of the **root** package: one of its binaries, or its
+// own library. A dependency is compiled the way its own package says, and
+// nothing a build of this package passes reaches it.
+own :: func (ws: *Workspace, t: Target) -> bool {
+  return t.lib == false || t.name == ws.root.name
+}
+
+// The root package's own additions to a command: its `[build]` section, and
+// then whatever `--nestc-arg` passed.
+extra :: func (args: *mut Vec.<str>, ws: *Workspace, p: Profile) -> void {
+  let b: Build := ws.root.manifest.build_section()
+  b.linker.match {
+    .some(l) => setting(args, f"linker={l}"),
+    .none => (),
+  }
+  for a in manifest.strings(b.link_args) { setting(args, f"link-arg={a}") }
+  for l in manifest.strings(b.link_libs) {
+    args.push("-l")
+    args.push(l)
+  }
+  for d in manifest.strings(b.link_search) {
+    args.push("--link-search")
+    args.push(path.normalize(path.join(ws.root.dir, d)))
+  }
+  for a in manifest.strings(b.nestc_args) { args.push(a) }
+  for a in p.nestc_args { args.push(a) }
 }
 
 library_flag :: func (args: *mut Vec.<str>, ws: *Workspace, p: Profile, flag: str, name: str) -> void {

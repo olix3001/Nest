@@ -39,6 +39,10 @@ usage :: func () -> str {
     "  --emit <list>    build, run: also write the compiler's dumps for the",
     "                   package's own targets beside their objects, in",
     "                   build/<profile>/obj: ast, ir, mono, lir, llvm-ir, asm",
+    "  --nestc-arg <arg>  build, run, test: one more argument for `nestc`, last",
+    "                   on the command line and on the package's own targets",
+    "                   only. Repeatable. `[build]` in nest.toml is the same",
+    "                   thing written down",
     "  --lib            new, init: a library rather than a binary",
     "  -h, --help       this",
     "",
@@ -53,6 +57,8 @@ Options :: struct {
   lib: bool,
   deps: bool,
   emit: Vec.<str>,
+  // `--nestc-arg`: passed to the compiler verbatim, in order.
+  nestc_args: Vec.<str>,
   positional: Vec.<str>,
   // Everything after `--`, for `run` to pass on.
   rest: []str,
@@ -100,6 +106,7 @@ parse :: func (args: []str) -> Result.<Options, str> {
     lib: false,
     deps: false,
     emit: collections.new.<str>(),
+    nestc_args: collections.new.<str>(),
     positional: collections.new.<str>(),
     rest: args[args.len()..<args.len()],
   }
@@ -129,6 +136,10 @@ parse :: func (args: []str) -> Result.<Options, str> {
         }
         o.emit.push(e)
       }
+      i = i + 1
+    } else if a == "--nestc-arg" {
+      if i + 1 == args.len() { return .err("`--nestc-arg` needs an argument") }
+      o.nestc_args.push(args[i + 1])
       i = i + 1
     } else if a == "--bin" {
       if i + 1 == args.len() { return .err("`--bin` needs a name") }
@@ -187,6 +198,7 @@ run_build :: func (o: *Options) -> Result.<i32, str> {
   let ws: Workspace := open().?
   let mut p: Profile := build.profile(&ws.root.manifest, o.release)
   p.emit = o.emit.as_slice()
+  p.nestc_args = o.nestc_args.as_slice()
   p.verbose = o.verbose
   if o.deps {
     compile_deps(&ws, p).?
@@ -206,6 +218,7 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
   let ws: Workspace := open().?
   let mut p: Profile := build.profile(&ws.root.manifest, o.release)
   p.emit = o.emit.as_slice()
+  p.nestc_args = o.nestc_args.as_slice()
   p.verbose = o.verbose
   let bins: []Target := build.binaries(&ws)
   let t: Target := o.bin.match {
@@ -239,6 +252,7 @@ run_test :: func (o: *Options) -> Result.<i32, str> {
   let ws: Workspace := open().?
   let mut p: Profile := build.profile(&ws.root.manifest, o.release)
   p.emit = o.emit.as_slice()
+  p.nestc_args = o.nestc_args.as_slice()
   p.verbose = o.verbose
   let t: Target := build.test_target(&ws).?
   compile_deps(&ws, p).?
@@ -291,6 +305,7 @@ run_metadata :: func (o: *Options) -> Result.<i32, str> {
   let ws: Workspace := open().?
   let mut p: Profile := build.profile(&ws.root.manifest, o.release)
   p.emit = o.emit.as_slice()
+  p.nestc_args = o.nestc_args.as_slice()
   p.verbose = o.verbose
   let text: String := metadata.describe(&ws, p).?
   io.print(text.as_str())

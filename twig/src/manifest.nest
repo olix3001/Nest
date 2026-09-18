@@ -19,6 +19,10 @@
 //     codegen-units = 4
 //     opt-level = "s"
 //
+//     [build]
+//     link-libs = ["sfml-graphics"]
+//     link-search = ["/opt/homebrew/lib"]
+//
 // **Targets are explicit.** Nothing is inferred from which files exist: a
 // package with no `[lib]` cannot be depended on, and one with no `[[bin]]` has
 // nothing to run. Every path is relative to the directory the manifest is in.
@@ -41,6 +45,7 @@ path :: import <std/path>
   bin: Option.<[]Bin>,
   dependencies: Option.<HashMap.<str, Dependency>>,
   profile: Option.<Profiles>,
+  build: Option.<Build>,
 }
 
 @public Package :: struct {
@@ -59,6 +64,28 @@ path :: import <std/path>
 
 @public Dependency :: struct {
   path: Option.<str>,
+}
+
+// `[build]`: what the **root** package adds to the compiler command that makes
+// its own targets — its binaries and its own library, not its dependencies'.
+//
+// A link requirement of a dependency cannot travel this way: it has to reach
+// every binary that depends on the package, and that is a job for a build
+// script and the library's own metadata (`design/toolchain.md`). Until there is
+// one, this is where an `-lsfml-graphics` goes.
+@public Build :: struct {
+  // The linker driver to run, `nestc -C linker=`.
+  linker: Option.<str>,
+  // Extra arguments for it, `nestc -C link-arg=` each.
+  @rename(name: "link-args") link_args: Option.<[]str>,
+  // C libraries to link against, `nestc -l` each: `"m"`, `"sfml-graphics"`.
+  @rename(name: "link-libs") link_libs: Option.<[]str>,
+  // Directories to look for them in, `nestc --link-search` each. A relative one
+  // is relative to the package's directory.
+  @rename(name: "link-search") link_search: Option.<[]str>,
+  // Anything else, passed to `nestc` verbatim and last, so it beats what twig
+  // decided. The same thing `twig --nestc-arg` passes.
+  @rename(name: "nestc-args") nestc_args: Option.<[]str>,
 }
 
 @public Profiles :: struct {
@@ -91,6 +118,26 @@ impl Manifest {
   @public dependency :: func (self: *Self, name: str) -> Dependency {
     return self.dependencies.!.get(name).!
   }
+
+  // The `[build]` section, or an empty one, so a caller reads the same shape
+  // whether the manifest wrote it or not.
+  @public build_section :: func (self: *Self) -> Build {
+    return self.build.match {
+      .some(b) => b,
+      .none => Build {
+        linker: .none,
+        link_args: .none,
+        link_libs: .none,
+        link_search: .none,
+        nestc_args: .none,
+      },
+    }
+  }
+}
+
+// A list of strings a manifest may have left out, or an empty one.
+@public strings :: func (xs: Option.<[]str>) -> []str {
+  return xs.match { .some(v) => v, .none => cast.<[]str>(make.<[]str>(0)) }
 }
 
 // The manifest in directory `dir`, read and checked.
