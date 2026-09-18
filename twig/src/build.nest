@@ -37,6 +37,9 @@ path :: import "path.nest"
 { Manifest, ProfileSettings } :: import "manifest.nest"
 { Workspace, Member } :: import "workspace.nest"
 toolchain :: import "toolchain.nest"
+term :: import "term.nest"
+string :: import <std/string>
+{ String } :: import <std/string>
 
 // The settings one build is made with.
 @public Profile :: struct {
@@ -48,6 +51,10 @@ toolchain :: import "toolchain.nest"
   // The compiler's dumps to write for the root package's targets, beside their
   // objects: any of `ast`, `ir`, `mono`, `lir`, `llvm-ir` and `asm`.
   emit: []str,
+  // Print each compiler command before running it (`-v`). Here beside `emit`
+  // because it is the same kind of thing: what this *invocation* asked for,
+  // rather than what the profile says a build is.
+  verbose: bool,
 }
 
 // `debug` or `release`, with whatever the root manifest changed about it.
@@ -55,9 +62,9 @@ toolchain :: import "toolchain.nest"
 // program's decision.
 @public profile :: func (m: *Manifest, release: bool) -> Profile {
   let mut p: Profile := if release {
-    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3", emit: .{} }
+    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3", emit: .{}, verbose: false }
   } else {
-    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0", emit: .{} }
+    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0", emit: .{}, verbose: false }
   }
   let settings: Option.<ProfileSettings> := m.profile.match {
     .some(ps) => if release { ps.release } else { ps.debug },
@@ -219,6 +226,7 @@ setting :: func (args: *mut Vec.<str>, value: str) -> void {
   let c: Command := command(ws, p, t)
   let mut args: Vec.<str> := collections.from_slice.<str>(c.args)
   args.push("--up-to-date")
+  if p.verbose { trace(c.program, args.as_slice()) }
   let status: process.Status := run(c.program, args.as_slice()).?
   return status.match {
     .exited(0) => .ok(true),
@@ -237,12 +245,39 @@ setting :: func (args: *mut Vec.<str>, value: str) -> void {
     .err(e) => { return .err(e.describe()) },
   }
   let c: Command := command(ws, p, t)
+  if p.verbose { trace(c.program, c.args) }
   let status: process.Status := run(c.program, c.args).?
   return status.match {
     .exited(0) => .ok(()),
     .exited(127) => .err(toolchain.not_found(c.program)),
     _ => .err(f"could not compile `{t.name}`"),
   }
+}
+
+// One compiler command, as it is about to be run.
+//
+// Every argument is quoted whether or not it needs to be, so that the line can
+// be pasted back into a shell without the reader checking which ones contained
+// a space. That is the whole point of printing it: a build that went wrong is
+// then one paste away from being run by hand.
+trace :: func (program: str, args: []str) -> void {
+  let mut line: String := string.from(quoted(program))
+  for a in args {
+    line.push_str(" ")
+    line.push_str(quoted(a))
+  }
+  term.status("Running", line.as_str())
+}
+
+// A shell-safe spelling of one argument: single quotes, with any single quote
+// inside ended, escaped, and reopened — `it's` becomes `'it'\''s'`.
+quoted :: func (a: str) -> str {
+  let mut out: String := string.from("'")
+  for b in a.as_bytes() {
+    if b == 39 { out.push_str("'\\''") } else { out.push_byte(b) }
+  }
+  out.push_str("'")
+  return out.as_str()
 }
 
 run :: func (program: str, args: []str) -> Result.<process.Status, str> {

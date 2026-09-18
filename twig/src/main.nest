@@ -34,6 +34,7 @@ usage :: func () -> str {
     "  --release        build with the release profile (default: debug)",
     "  --bin <name>     build or run only this binary",
     "  --deps           build: only the libraries the package depends on",
+    "  -v, --verbose    print each compiler command before running it",
     "  --emit <list>    build, run: also write the compiler's dumps for the",
     "                   package's own targets beside their objects, in",
     "                   build/<profile>/obj: ast, ir, mono, lir, llvm-ir, asm",
@@ -46,6 +47,7 @@ usage :: func () -> str {
 Options :: struct {
   command: str,
   release: bool,
+  verbose: bool,
   bin: Option.<str>,
   lib: bool,
   deps: bool,
@@ -97,6 +99,7 @@ parse :: func (args: []str) -> Result.<Options, str> {
   let mut o: Options := Options {
     command: "",
     release: false,
+    verbose: false,
     bin: .none,
     lib: false,
     deps: false,
@@ -115,6 +118,8 @@ parse :: func (args: []str) -> Result.<Options, str> {
       return .ok(o)
     } else if a == "--release" {
       o.release = true
+    } else if a == "-v" || a == "--verbose" {
+      o.verbose = true
     } else if a == "--lib" {
       o.lib = true
     } else if a == "--deps" {
@@ -186,6 +191,7 @@ run_build :: func (o: *Options) -> Result.<i32, str> {
   let ws: Workspace := open().?
   let mut p: Profile := build.profile(&ws.root.manifest, o.release)
   p.emit = o.emit.as_slice()
+  p.verbose = o.verbose
   if o.deps {
     compile_deps(&ws, p).?
     return .ok(0)
@@ -204,6 +210,7 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
   let ws: Workspace := open().?
   let mut p: Profile := build.profile(&ws.root.manifest, o.release)
   p.emit = o.emit.as_slice()
+  p.verbose = o.verbose
   let bins: []Target := build.binaries(&ws)
   let t: Target := o.bin.match {
     .some(name) => select(bins, name).?[0],
@@ -262,6 +269,7 @@ run_metadata :: func (o: *Options) -> Result.<i32, str> {
   let ws: Workspace := open().?
   let mut p: Profile := build.profile(&ws.root.manifest, o.release)
   p.emit = o.emit.as_slice()
+  p.verbose = o.verbose
   let text: String := metadata.describe(&ws, p).?
   io.print(text.as_str())
   io.print("\n")
