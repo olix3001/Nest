@@ -553,7 +553,9 @@ carried both since before this existed.
 The **tag's type** follows from the discriminants: the narrowest integer that
 holds every one of them, signed exactly when some variant's is negative. An enum
 of fewer than 256 positional variants therefore still has a one-byte tag, and
-`invalid = -1` above costs a sign rather than a wider tag.
+`invalid = -1` above costs a sign rather than a wider tag. To fix the tag at the
+type a C enumeration has instead, write `#repr("C")`
+([09-directives-and-attributes.md](09-directives-and-attributes.md)).
 
 ### Tuples
 

@@ -8290,6 +8290,82 @@ fn an_enum_is_a_tag_and_an_overlapping_payload() {
     assert_eq!(e.payload.size, 8);
 }
 
+/// `#repr("C")` is a promise about the representation (§9). On a struct the
+/// language was already keeping it — declaration order, natural alignment — so
+/// the layout is the same with and without. On an enum it is not: a C
+/// enumeration's values are `int`s, and the tag is one whatever the
+/// discriminants would have fitted in.
+#[test]
+fn repr_c_gives_an_enum_the_tag_a_c_enumeration_has() {
+    let session = analyze_clean(
+        "Errno :: #repr(\"C\") enum { ok = 0, perm = 1, io = 5 }\n\
+         Small :: enum { ok = 0, perm = 1, io = 5 }\n\
+         Wide :: #repr(\"C\") enum { big = 0x1_0000_0000 }\n\
+         Rect :: #repr(\"C\") struct { x: i32, y: i32 }\n\
+         Plain :: struct { x: i32, y: i32 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    // Four bytes, signed, where the same enum without the directive has one.
+    let tag = |name: &str| {
+        let ty = session
+            .linked
+            .types()
+            .find(|t| t.name.as_str() == name)
+            .map(|t| session.ir_meta.ty_or_error(t.id))
+            .unwrap();
+        let e = layouts_of(&session).enum_layout(&ty).unwrap().unwrap();
+        (e.tag.size, e.tag_signed)
+    };
+    assert_eq!(tag("Errno"), (4, true));
+    assert_eq!(tag("Small"), (1, false));
+    // A discriminant an `int` cannot hold widens the tag: the alternative is a
+    // tag that cannot store the value the program wrote.
+    assert_eq!(tag("Wide"), (8, true));
+    // A struct's layout is what it always was.
+    assert_eq!(
+        layout_of_named(&session, "Rect"),
+        layout_of_named(&session, "Plain")
+    );
+}
+
+/// The promise is only worth having if the members keep it: a slice, a tuple, a
+/// trait object and `str` are shapes no C declaration can state.
+#[test]
+fn repr_c_refuses_a_member_c_cannot_name() {
+    let out = messages(
+        "S :: #repr(\"C\") struct { name: str, xs: []u8, pair: (i32, i32), p: *[]u8 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    // `str` is refused as the slice it is distinct from, and so are the slice
+    // and the tuple written out.
+    assert_eq!(out.iter().filter(|m| m.contains("is a slice")).count(), 2);
+    assert!(out.iter().any(|m| m.contains("is a tuple")), "{out:#?}");
+    // A *pointer* to one is fine: C can name a pointer to anything.
+    assert_eq!(out.iter().filter(|m| m.contains("#repr")).count(), 3);
+}
+
+/// `#repr` applies to the two kinds of type C has, and `"C"` is the only
+/// representation there is to ask for.
+#[test]
+fn repr_is_refused_where_it_could_not_mean_anything() {
+    let on_func = messages(
+        "f :: #repr(\"C\") func () -> i32 { return 1 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    assert!(
+        on_func.iter().any(|m| m.contains("does not apply")),
+        "{on_func:#?}"
+    );
+    let unknown = messages(
+        "S :: #repr(\"packed\") struct { x: i32 }\n\
+         @public main :: func () { const z := 1 }\n",
+    );
+    assert!(
+        unknown.iter().any(|m| m.contains("is not a representation")),
+        "{unknown:#?}"
+    );
+}
+
 /// A `distinct T` **is** `T`'s representation reinterpreted (§2.4) — not "the
 /// same size as", the same bytes. That is what makes a `usize` and its
 /// `uint.<64>` interchangeable in memory and different in the type system.

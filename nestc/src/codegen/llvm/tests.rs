@@ -1878,3 +1878,25 @@ main :: func () -> i32 {
          a TOML document is a table, and this is an array\n"
     );
 }
+
+/// A `#repr("C")` enum reaches the backend with C's own discriminant type: the
+/// tag member is an `i32`, where the same enum without the directive would have
+/// the one byte its two discriminants fit in (§9, §11).
+#[test]
+fn a_repr_c_enums_tag_is_a_c_int() {
+    let src = "E :: #repr(\"C\") enum { ok = 0, io = 5 }\n\
+               @public pick :: func (e: E) -> i32 { return e.match { .ok => 1, .io => 2 } }\n";
+    let text = ir(src);
+    assert!(
+        text.contains("%E = type <{ i32, [0 x i8] }>"),
+        "the tag is not an i32:\n{text}"
+    );
+    // And the switch that reads it compares against the discriminants the
+    // program wrote, not against positions.
+    assert!(text.contains("i32 5, label"), "no arm for `io`:\n{text}");
+    let plain = ir(&src.replace("#repr(\"C\") ", ""));
+    assert!(
+        plain.contains("%E = type <{ i8, [0 x i8] }>"),
+        "without the directive the tag should be one byte:\n{plain}"
+    );
+}

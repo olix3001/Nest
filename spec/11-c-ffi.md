@@ -186,10 +186,31 @@ add :: extern("c") func (a: c.int, b: c.int) -> c.int {
 }
 ```
 
-Aggregates handed across the boundary should have a C-compatible layout —
-typically `#packed` or `#align(...)` as the C side expects, and built from `c.*`
-field types (or language types of matching ABI width). `#raw` structs are useful
-here to hand C uninitialized buffers without the zeroing cost.
+Aggregates handed across the boundary should be written `#repr("C")` (§9), which
+is the promise that the type's representation is the one a C declaration of it
+has — and, on an `enum`, the thing that makes the tag a C `int`. `#packed` and
+`#align(...)` say the rest where the C side expects them, and `#raw` structs are
+useful here to hand C uninitialized buffers without the zeroing cost.
+
+### A C enumeration
+
+A C enumeration is an `int` whose values the header states, so binding one needs
+both halves: `#repr("C")` for the type, and explicit discriminants (§3.3) for the
+values.
+
+```
+// enum SDL_EventType { SDL_QUIT = 0x100, SDL_KEYDOWN = 0x300, SDL_KEYUP };
+EventType :: #repr("C") enum {
+    quit     = 0x100,
+    keydown  = 0x300,
+    keyup,                  // 0x301, as in C
+}
+```
+
+Without `#repr("C")` the tag would be the narrowest integer that holds those
+values — two bytes here — which is not what the C declaration passes or returns.
+Without the discriminants the values would be 0, 1, 2. Neither half is optional
+for a binding that has to agree with a header.
 
 ## 11.6 Safety at the boundary
 

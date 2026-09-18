@@ -168,11 +168,26 @@ is what the language model relies on):
   the element type becomes its own contiguous column. Element access presents the
   same `s[i].field` interface; the layout differs. Only valid for record element
   types.
+- **`#repr("C")`** — on a `struct` or an `enum`, guarantee that the type's
+  representation is the one a C declaration of it has. It is a **promise**, not a
+  rearrangement: the language already lays a struct's fields out in declaration
+  order at their natural alignment, so on a struct this changes nothing today and
+  fixes it against ever changing. On an `enum` it does change something — the tag
+  is C's `int`, whatever the discriminants would have fitted in — because that is
+  the type a C enumeration's values have. Every member must be something a C
+  declaration can name: a slice, a tuple, a trait object and `str` are refused,
+  since C cannot state their layout; a pointer to one is fine, as is a nested
+  struct or enum. Pairs with explicit discriminants (§3.3), which is what gives
+  the enum C's *numbering*.
 
 ```
 Vec3 :: #align(16) struct { x: f32, y: f32, z: f32, _pad: f32 }
 
 Header :: #packed struct { magic: uint32, len: uint32 }
+
+Errno :: #repr("C") enum { ok = 0, perm = 1, noent = 2 }   // tag is a C `int`
+
+Rect :: #repr("C") struct { x: i32, y: i32, w: i32, h: i32 }
 
 particles: #soa []Particle          // stored column-wise
 ```

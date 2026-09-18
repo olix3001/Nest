@@ -590,8 +590,18 @@ impl<'a> Layouts<'a> {
         // Signed exactly when some discriminant is negative. An enum with none
         // is laid out the way it always was, which is what keeps `-1` from
         // costing every other enum a byte.
-        let signed = variants.iter().any(|v| v.tag < 0);
-        let bound = variants.iter().map(|v| tag_bits(v.tag, signed)).max();
+        //
+        // `#repr("C")` is the exception: a C enumeration is an `int`, so the tag
+        // is one whether or not the discriminants would fit in less (§11). It is
+        // still widened where they do not fit, because the alternative is a tag
+        // that cannot hold the value the program wrote.
+        let c_repr = self.repr_c(def);
+        let signed = c_repr || variants.iter().any(|v| v.tag < 0);
+        let bound = variants
+            .iter()
+            .map(|v| tag_bits(v.tag, signed))
+            .chain(c_repr.then_some(C_INT_BITS))
+            .max();
         let tag = Layout::scalar(match bound.unwrap_or(1) {
             0..=8 => 1,
             9..=16 => 2,
@@ -671,6 +681,22 @@ impl<'a> Layouts<'a> {
         self.defs.get(def).directives.iter().any(|d| d.is(name))
     }
 
+    /// Whether `#repr("C")` is written on a definition (§9).
+    ///
+    /// Both spellings are accepted — the string `#repr("C")` and the bare name
+    /// `#repr(c)` — and neither is case-sensitive, because `extern("c")` names
+    /// the same ABI in lower case and one of them being wrong would be a silent
+    /// no-op rather than a mistake anything reports.
+    fn repr_c(&self, def: DefId) -> bool {
+        let Some(d) = self.defs.get(def).directives.iter().find(|d| d.is("repr")) else {
+            return false;
+        };
+        matches!(
+            d.args.first(),
+            Some(DirectiveArg::Str(s) | DirectiveArg::Name(s)) if s.as_str().eq_ignore_ascii_case("c")
+        )
+    }
+
     /// The `#align(N)` written on a definition, if any.
     fn align_of_def(&self, def: DefId) -> Option<u64> {
         let d = self
@@ -722,6 +748,11 @@ pub struct EnumLayout {
     /// Each variant's own members, at offsets **relative to the payload**.
     pub variants: Vec<Fields>,
 }
+
+/// The width of C's `int` on every target this compiler has: 32 bits, which is
+/// what `core/c`'s `int` is an alias for (§11.1). It is the tag's width for a
+/// `#repr("C")` enum, because that is the type a C enumeration's values have.
+const C_INT_BITS: u32 = 32;
 
 /// How many bits a discriminant needs, at the signedness the enum settled on.
 ///

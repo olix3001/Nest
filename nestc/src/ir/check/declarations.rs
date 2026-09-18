@@ -30,6 +30,7 @@ pub struct RecursiveLayout;
 pub fn check(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Vec<Diagnostic>) {
     recursive_layouts(defs, meta, linked, out);
     directive_legality(defs, meta, linked, out);
+    c_representable(meta, linked, defs, out);
     entry_point(defs, meta, linked, out);
     tests(defs, meta, linked, out);
     tests_are_not_named(defs, meta, linked, out);
@@ -191,7 +192,10 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
             let ok = match name {
                 // Layout directives apply to a type with fields to lay out.
                 "packed" | "soa" => matches!(t.kind, TypeDefKind::Struct { .. }),
-                "align" => matches!(
+                // `#repr` promises a representation a C declaration can name, so
+                // it applies to the two kinds of type C has: a struct and an
+                // enumeration.
+                "align" | "repr" => matches!(
                     t.kind,
                     TypeDefKind::Struct { .. } | TypeDefKind::Enum { .. }
                 ),
@@ -219,6 +223,28 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
                         meta,
                         t,
                         "`#align` needs an integer argument".to_string(),
+                        out,
+                    ),
+                }
+            }
+            // `#repr("abi")`: `"C"` is the only representation there is to ask
+            // for. Refusing the rest by name is what keeps `#repr("packed")`, a
+            // reasonable guess for a reader who knows another language, from
+            // being a directive that promises something and does nothing.
+            if name == "repr" {
+                match d.args.first() {
+                    Some(DirectiveArg::Str(s) | DirectiveArg::Name(s))
+                        if s.as_str().eq_ignore_ascii_case("c") => {}
+                    Some(DirectiveArg::Str(s) | DirectiveArg::Name(s)) => report_type(
+                        meta,
+                        t,
+                        format!("`#repr(\"{s}\")` is not a representation; the one there is is `\"C\"`"),
+                        out,
+                    ),
+                    _ => report_type(
+                        meta,
+                        t,
+                        "`#repr` needs the representation it asks for: `#repr(\"C\")`".to_string(),
                         out,
                     ),
                 }
@@ -271,7 +297,7 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
     for f in linked.funcs() {
         for d in meta.directives(f.id) {
             let name = d.name.as_str();
-            if matches!(name, "packed" | "soa") {
+            if matches!(name, "packed" | "soa" | "repr") {
                 let mut diag = Diagnostic::error(format!("`#{name}` does not apply to a function"));
                 if let Some(span) = meta.span(f.id) {
                     diag = diag.with_primary(span, "");
@@ -297,6 +323,75 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
         }
     }
     let _ = defs;
+}
+
+/// Every member of a `#repr("C")` type must be something a C declaration can
+/// name (§11).
+///
+/// That is what the directive *promises*: the layout of a struct and the tag of
+/// an enum are already C's, so the guarantee is only worth having if the types
+/// inside are too. A nested struct or enum passes — it is laid out in declaration
+/// order like every other one — and the refusals are the shapes the language
+/// invented, whose size and field order no C header can state: a slice, a tuple,
+/// a trait object, and `str`, which is a slice under its name.
+fn c_representable(meta: &Meta, linked: &Linked, defs: &DefTable, out: &mut Vec<Diagnostic>) {
+    for t in linked.types() {
+        if !meta.directives(t.id).iter().any(|d| {
+            d.is("repr")
+                && matches!(
+                    d.args.first(),
+                    Some(DirectiveArg::Str(s) | DirectiveArg::Name(s))
+                        if s.as_str().eq_ignore_ascii_case("c")
+                )
+        }) {
+            continue;
+        }
+        for m in members_of(t) {
+            let ty = meta.ty_or_error(m.id);
+            let Some(what) = not_c(&ty, meta, linked, 0) else {
+                continue;
+            };
+            let mut diag = Diagnostic::error(format!(
+                "`{}` is `#repr(\"C\")`, and `{}` is {what}",
+                t.name,
+                ty.display(defs)
+            ));
+            if let Some(span) = meta.span(m.id) {
+                diag = diag.with_primary(span, "");
+            }
+            out.push(diag.with_note(
+                "a C declaration cannot name its layout; use a pointer, an array or a                  `#repr(\"C\")` type instead (§11)",
+            ));
+        }
+    }
+}
+
+/// What makes `ty` un-nameable in C, or `None` when a C declaration can state it.
+///
+/// A pointer stops the walk: C can name a pointer to anything, including to a
+/// type it could not hold by value. An array does not — `[4]T` is four `T`s laid
+/// end to end, so it is C's array exactly when `T` is C's.
+fn not_c(ty: &Ty, meta: &Meta, linked: &Linked, depth: u32) -> Option<&'static str> {
+    if depth > 16 {
+        return None;
+    }
+    match ty {
+        Ty::Slice { .. } => Some("a slice, which is a pointer and a length"),
+        Ty::Tuple(_) => Some("a tuple"),
+        Ty::Struct(_) => Some("an anonymous struct"),
+        Ty::Dyn(_) => Some("a trait object"),
+        Ty::Array { inner, .. } => not_c(inner, meta, linked, depth + 1),
+        // A `distinct` is its representation, down to the bytes (§2.4), so it is
+        // C's type exactly when what it is distinct from is — which is how `str`
+        // is refused as the slice it is.
+        Ty::Nominal { def, .. } => match linked.ty(*def).map(|t| &t.kind) {
+            Some(TypeDefKind::Distinct { repr }) => {
+                not_c(&meta.ty(repr.id)?, meta, linked, depth + 1)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn what(t: &TypeDef) -> &'static str {
