@@ -415,6 +415,52 @@ pub struct ImplTarget {
 /// Runs after inference for the ordinary reason a stage runs after another: it
 /// borrows the finished [`ImplTable`] and produces a value beside it, rather
 /// than mutating the table every use site is already reading.
+/// The signature of `def`, worked out from the tree the way a call site used to
+/// ask for it — for the test that the recorded one is the same
+/// (`super::decl::tests`).
+#[cfg(test)]
+pub(crate) fn signature_from_tree(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    lang: &LangItems,
+    impls: &ImplTable,
+    def: DefId,
+) -> Ty {
+    let empty: HashSet<DefId> = HashSet::new();
+    let table = super::decl::DeclTable::new();
+    let mut diags = Vec::new();
+    let Some(file) = defs.get(def).file else {
+        return Ty::Error;
+    };
+    let Some(ast) = asts.get(&file) else {
+        return Ty::Error;
+    };
+    let mut cx = Inferer {
+        defs,
+        asts,
+        decls: &table,
+        ast,
+        diags: &mut diags,
+        lang,
+        impls,
+        in_scope_traits: &empty,
+        lang_traits: &empty,
+        in_default: false,
+        file,
+        cx: InferCtxt::new(),
+        env: HashMap::new(),
+        types: HashMap::new(),
+        ret: Ty::Void,
+        breaks: Vec::new(),
+        alias_stack: Vec::new(),
+        const_stack: Vec::new(),
+        int_values: HashMap::new(),
+        float_values: HashMap::new(),
+    };
+    let ty = cx.func_def_ty(def);
+    cx.cx.resolve(&ty)
+}
+
 pub fn resolve_impl_targets(
     defs: &DefTable,
     asts: &HashMap<FileId, Ast>,
@@ -4924,6 +4970,9 @@ impl Inferer<'_> {
 
     /// Build the [`Ty::Func`] of a function def from its signature.
     fn func_def_ty(&mut self, def: super::def::DefId) -> Ty {
+        if let Some(sig) = self.decls().signature(def) {
+            return sig;
+        }
         let d = self.defs.get(def);
         let (Some(file), Some(node)) = (d.file, d.node) else {
             return self.cx.fresh();

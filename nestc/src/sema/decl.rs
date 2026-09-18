@@ -26,8 +26,8 @@ use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, Lit, NodeId, NodeKind, StructKind};
 
-use super::DefMeta;
 use super::Resolution;
+use super::{DefMeta, Signature};
 use super::def::{DefId, DefKind, DefTable};
 use super::ty::Ty;
 
@@ -73,6 +73,13 @@ pub struct FuncDecl {
     /// Whether it has a body. A trait method without one is a requirement an
     /// impl must satisfy; with one it is a default the impl may inherit.
     pub has_body: bool,
+    /// Its signature, generics left standing: the `Ty::Func` a call site
+    /// instantiates and unifies its arguments against.
+    ///
+    /// `None` when inference could not settle one, which is a function already
+    /// reported against — the tree answers for it, as it did before there was a
+    /// table.
+    pub sig: Option<Ty>,
 }
 
 /// What a use of a `struct` / `enum` / `trait` needs to know about it.
@@ -242,6 +249,11 @@ impl<'a> Decls<'a> {
             Decl::Alias(a) => a.repr.clone(),
             _ => None,
         }
+    }
+
+    /// The signature of a function: the `Ty::Func` a call instantiates.
+    pub fn signature(&self, def: DefId) -> Option<Ty> {
+        self.func_decl(def)?.sig.clone()
     }
 
     /// The declared type of an associated constant.
@@ -660,6 +672,7 @@ pub fn record(
                     .collect(),
                 generics: q.generic_params(d.id),
                 has_body: q.has_body(d.id),
+                sig: None,
             }),
             DefKind::Struct | DefKind::Enum | DefKind::Trait => Decl::Type(TypeDecl {
                 generics: q.generic_params(d.id),
@@ -793,6 +806,44 @@ mod tests {
         );
     }
 
+    /// Every recorded signature is the one the tree gives.
+    ///
+    /// This is the query a **call** asks, so it is the one whose answer shows
+    /// up in every inferred type in the program: the recorded signature is read
+    /// back off what inference settled, and the tree's is resolved from the
+    /// syntax a second time, and the two have to be the same type.
+    fn signatures_agree_with_the_tree(session: &Session) {
+        let mut checked = 0;
+        for d in session.defs.iter() {
+            let Some(Decl::Func(f)) = session.decls.get(&d.id) else {
+                continue;
+            };
+            let Some(recorded) = f.sig.clone() else { continue };
+            let tree = crate::sema::infer::signature_from_tree(
+                &session.defs,
+                &session.asts,
+                &session.lang_items,
+                &session.impls,
+                d.id,
+            );
+            // A signature the tree cannot resolve on its own is one that needed
+            // the context a call site has; there is nothing to compare it with.
+            if tree.mentions_error() || tree.mentions_var() {
+                continue;
+            }
+            assert_eq!(
+                recorded,
+                tree,
+                "{}: recorded {}, the tree says {}",
+                session.defs.canonical_string(d.id),
+                recorded.display(&session.defs),
+                tree.display(&session.defs),
+            );
+            checked += 1;
+        }
+        assert!(checked > 200, "only {checked} signatures were compared");
+    }
+
     #[test]
     fn the_table_answers_what_the_tree_would() {
         // twig over `std` over `core`: the largest program there is, and the one
@@ -804,6 +855,7 @@ mod tests {
         assert!(!session.has_errors(), "{:#?}", session.diagnostics);
         agrees_with_the_tree(&session);
         every_declared_type_is_recorded(&session);
+        signatures_agree_with_the_tree(&session);
     }
 }
 
@@ -847,6 +899,24 @@ pub fn record_types(
                 if let Some(payload) = variant_payload(ast, node, &settled) {
                     table.insert(d.id, Decl::Variant(payload));
                 }
+            }
+            DefKind::Func => {
+                let (Some(Decl::Func(f)), Some(sig)) =
+                    (table.get(&d.id), settled(signature(ast, node)))
+                else {
+                    continue;
+                };
+                // An errored signature is one already reported against, and
+                // recording it would hand every later caller the error instead
+                // of the diagnostic that explains it.
+                if sig.mentions_error() {
+                    continue;
+                }
+                let f = FuncDecl {
+                    sig: Some(sig),
+                    ..f.clone()
+                };
+                table.insert(d.id, Decl::Func(f));
             }
             DefKind::TypeAlias | DefKind::Const => {
                 let rhs = match &ast.node(node).kind {
@@ -902,6 +972,33 @@ pub fn record_types(
             _ => {}
         }
     }
+}
+
+/// The signature of the function whose def points at `node`, read back off
+/// what inference stamped.
+///
+/// A function with a body was typed by the per-function pass, which left each
+/// parameter's type on its own node and the **return** type on the `FuncExpr`.
+/// A trait method has no body and so was never typed that way; its signature
+/// was worked out once for the vtable and stamped whole, as a [`Signature`].
+fn signature(ast: &Ast, node: NodeId) -> Option<Ty> {
+    let func = match &ast.node(node).kind {
+        NodeKind::ConstBind { rhs, .. } => *rhs,
+        _ => node,
+    };
+    let NodeKind::FuncExpr { params, .. } = ast.node(func).kind.clone() else {
+        return None;
+    };
+    if let Some(Signature(t)) = ast.meta::<Signature>(func) {
+        return Some(t);
+    }
+    Some(Ty::Func {
+        params: params
+            .iter()
+            .map(|&p| ast.meta::<Ty>(p))
+            .collect::<Option<Vec<Ty>>>()?,
+        ret: Box::new(ast.meta::<Ty>(func)?),
+    })
 }
 
 /// The stamped payload types of the variant at `node`, or `None` if any of them
