@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::diagnostic::Diagnostic;
-use crate::common::options::Options;
+use crate::common::options::{Options, variant_name as variant};
 use crate::common::source::{FileId, FileSpan, SourceMap};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
@@ -942,21 +942,3 @@ fn c_char_signed(target: &crate::common::options::Target) -> bool {
     }
 }
 
-/// A setting's spelling as the enum variant `core/os.nest` declares for it:
-/// `x86_64` is `X86_64`, `macos` is `MacOs`, `freebsd` is `FreeBsd`.
-///
-/// Underscore-separated words keep their underscores and each word is
-/// capitalized, which is the one rule that produces every variant in that file.
-fn variant(setting: &str) -> String {
-    setting
-        .split('_')
-        .map(|w| {
-            let mut c = w.chars();
-            match c.next() {
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("_")
-}

@@ -5,7 +5,7 @@
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 
-use super::ast::{AssignOp, ImportPath, NodeId, NodeKind};
+use super::ast::{AssignOp, ImportPath, NodeId, NodeKind, VariantArgs};
 use super::lexer::TokenKind;
 use super::parse::Parser;
 
@@ -170,14 +170,117 @@ impl Parser {
             } else {
                 self.expect_ident()
             };
-            let (args, end) = if self.at(&TokenKind::LParen) {
-                self.parse_call_args()
-            } else {
+            let (args, end) = if !self.at(&TokenKind::LParen) {
                 (Vec::new(), start)
+            } else if name.as_str() == "when" {
+                self.parse_when_args()
+            } else {
+                self.parse_call_args()
             };
             directives.push(self.alloc(start.to(end), NodeKind::Directive { name, args }));
         }
         directives
+    }
+
+    /// `'(' cond { ',' cond } ')'` — the argument list of `#when`, which has a
+    /// grammar of its own.
+    ///
+    /// Two things keep it out of the expression parser that every other
+    /// directive's arguments go through. `not` is a **keyword** (`not x`), so
+    /// `not(os = .Linux)` reads there as the operator applied to a parenthesis,
+    /// and `=` is a statement in this language, not an expression. And a
+    /// condition is not an expression in the first place: it is read before
+    /// name resolution and names nothing the program declares
+    /// (`crate::sema::when`).
+    ///
+    /// The nodes are the ordinary ones — an [`NodeKind::Arg`] per condition,
+    /// a [`NodeKind::Call`] for a combinator — so that everything downstream of
+    /// the parser sees one shape.
+    fn parse_when_args(&mut self) -> (Vec<NodeId>, Span) {
+        self.expect(&TokenKind::LParen);
+        let args = self.parse_when_list();
+        let end = self.cur_span();
+        self.expect(&TokenKind::RParen);
+        (args, end)
+    }
+
+    /// `cond { ',' cond }`, up to but not consuming the closing paren.
+    fn parse_when_list(&mut self) -> Vec<NodeId> {
+        let mut args = Vec::new();
+        self.skip_newlines();
+        while !self.at(&TokenKind::RParen) && !self.at_eof() {
+            args.push(self.parse_when_cond());
+            self.skip_newlines();
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        args
+    }
+
+    /// One condition: `key = .Variant`, `name(...)`, or a bare flag.
+    fn parse_when_cond(&mut self) -> NodeId {
+        let start = self.cur_span();
+        // `not` is a keyword; as the head of a condition it is a name.
+        let name = if self.eat(&TokenKind::NotKw) {
+            Symbol::new("not")
+        } else {
+            self.expect_ident()
+        };
+        let head = self.alloc(
+            start,
+            NodeKind::Path {
+                segments: vec![name.clone()],
+            },
+        );
+        if self.eat(&TokenKind::Eq) {
+            // The value is a **variant literal** of the enum `core/os.nest`
+            // declares for the key — `.Windows` for `os` — so that a reader,
+            // and a language server, are looking at the same `Os` the program
+            // reads at run time through `core/target.nest`.
+            let at = self.cur_span();
+            let value = if self.eat(&TokenKind::Dot) {
+                let end = self.cur_span();
+                let variant = self.expect_ident();
+                self.alloc(
+                    at.to(end),
+                    NodeKind::VariantLit {
+                        name: variant,
+                        args: VariantArgs::None,
+                    },
+                )
+            } else {
+                self.error_node(
+                    at,
+                    format!("expected a variant, found {}", self.describe_next()),
+                )
+            };
+            return self.alloc(
+                start.to(self.node_span(value)),
+                NodeKind::Arg {
+                    name: Some(name),
+                    value,
+                },
+            );
+        }
+        let value = if self.at(&TokenKind::LParen) {
+            self.bump();
+            let inner = self.parse_when_list();
+            let end = self.cur_span();
+            self.expect(&TokenKind::RParen);
+            self.alloc(
+                start.to(end),
+                NodeKind::Call {
+                    callee: head,
+                    args: inner,
+                },
+            )
+        } else {
+            head
+        };
+        let span = start.to(self.node_span(value));
+        self.alloc(span, NodeKind::Arg { name: None, value })
     }
 
     // ===< Statements >===

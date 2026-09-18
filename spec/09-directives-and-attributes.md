@@ -129,9 +129,17 @@ ordinary code would be a test run where nothing is watching.
 
 Tests are **compiled like any other function**; `@test` says what a function is
 for, not whether it is built. Keeping them out of a release binary is
-conditional compilation's job. The recommended arrangement is the one above — a
-`tests` namespace beside the code it tests, which sees the file's private names
-and is the unit a conditional-compilation attribute will later apply to.
+conditional compilation's job — `#when(test)` on the namespace they live in
+(§9.3). The recommended arrangement is the one above — a `tests` namespace
+beside the code it tests, which sees the file's private names and is the unit
+`#when` applies to:
+
+```
+tests :: #when(test) namespace {
+    @test
+    adds :: func () { assert(add(2, 3) == 5) }
+}
+```
 
 See [`design/toolchain.md`](../design/toolchain.md) for how a test binary is
 built and what it prints.
@@ -156,6 +164,63 @@ Because attributes do not alter compilation, an unknown attribute is not an erro
 
 Directives modify the construct they precede. The core set (extensible, but this
 is what the language model relies on):
+
+### Conditional compilation
+
+- **`#when(condition)`** — on any declaration, compile it only when `condition`
+  holds. A declaration that is excluded is **removed before names are
+  resolved**: it declares nothing, so naming it is an ordinary unresolved name,
+  and its body may mention things this build does not have.
+
+A condition is not a Nest expression, and cannot be one: it is read before name
+resolution, so there is nothing yet for a name in it to mean. It is a small
+closed language over what the **build** is:
+
+- **`test`** — a flag. True in a test build (`nestc --test`) **of the package
+  the declaration belongs to**; a dependency compiled in the same build is not
+  under test.
+- **`os = .Variant`** — the target's operating system: a variant of `core`'s
+  `Os` (`.Linux`, `.Macos`, `.Windows`, `.Freebsd`, `.Bare`).
+- **`arch = .Variant`** — the target's architecture: a variant of `Arch`
+  (`.X86_64`, `.Aarch64`, `.Riscv64`, `.Wasm32`).
+- **`profile = .Variant`** — the build profile: a variant of `Profile`
+  (`.Debug`, `.Release`).
+- **`all(...)`**, **`any(...)`**, **`not(...)`** — over the above. Several
+  conditions listed directly in one `#when`, and several `#when` on one
+  declaration, are each a conjunction.
+
+The three enums are the ones [`core/os.nest`](../packages/core/os.nest)
+declares, and they are the same three a *running* program reads through
+`core/target.nest` — so `.Windows` in a condition and `.Windows` in an `if` are
+one word about one type, and an editor has something to complete from. The
+compiler still only compares the spelling: name resolution has not run when a
+condition is read, so nothing in it is resolved to that enum, only written as
+it.
+
+A key the compiler does not know, and a variant outside its enum, are
+**errors** — not a condition that is quietly false. A typo that excluded a
+declaration on every target would otherwise produce a build that compiles and
+is missing something.
+
+```
+tests :: #when(test) namespace {
+    @test
+    adds :: func () { assert(add(2, 3) == 5) }
+}
+
+@public
+#when(os = .Windows)
+Handle :: distinct usize
+
+#when(all(arch = .X86_64, not(os = .Windows)))
+sysv_only :: func () { ... }
+
+#when(any(os = .Macos, os = .Linux))
+posix :: namespace { ... }
+```
+
+This is what keeps `@test` functions out of a release binary (§9.2): `@test`
+says what a function is *for*, and `#when` says whether it is built.
 
 ### Layout
 

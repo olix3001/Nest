@@ -57,6 +57,28 @@ pub const ARCHES: &[&str] = &["x86_64", "aarch64", "riscv64", "wasm32"];
 /// where a program may branch on it, decides nothing here.
 pub const PROFILES: &[&str] = &["debug", "release"];
 
+/// A setting's spelling as the enum variant `core/os.nest` declares for it:
+/// `x86_64` is `X86_64`, `macos` is `Macos`, `freebsd` is `Freebsd`.
+///
+/// Underscore-separated words keep their underscores and each word is
+/// capitalized, which is the one rule that produces every variant in that file.
+/// It lives here, beside the lists, because two things read it and they must
+/// agree: the generated `core/target.nest`, which writes one of these, and
+/// `#when(os = .Windows)`, which is written by hand against the same enum.
+pub fn variant_name(setting: &str) -> String {
+    setting
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 impl Target {
     /// A 64-bit target, used when nothing resolved a real one.
     ///

@@ -1778,6 +1778,203 @@ fn only_a_payloadless_variant_may_state_a_discriminant() {
     );
 }
 
+/// Analyze `src` with the build's options chosen, and return the errors.
+///
+/// `#when` is the one thing that reads an option before a name is resolved, so
+/// it is the one thing whose tests have to set one.
+fn when_messages(src: &str, set: impl FnOnce(&mut crate::common::options::Options)) -> Vec<String> {
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
+    set(&mut session.options);
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
+    session
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::common::diagnostic::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+#[test]
+fn a_when_that_does_not_hold_takes_the_declaration_out_of_the_tree() {
+    // The excluded namespace's body calls a function nobody declares. That it
+    // is not an error is the point: a declaration `#when` excludes is gone
+    // before resolution, so it does not merely go unemitted — it never resolves.
+    // The default target is linux, so it is the windows half that goes.
+    let src = "\
+#when(os = .Windows)
+windows :: namespace {
+    @public handle :: func () -> i32 { return no_such_function() }
+}
+
+#when(os = .Linux)
+linux :: namespace {
+    @public handle :: func () -> i32 { return 1 }
+}
+
+f :: func () -> i32 { return linux.handle() }
+";
+    let out = when_messages(src, |_| {});
+    assert!(out.is_empty(), "{out:#?}");
+    // And naming the excluded half is an ordinary unresolved name.
+    let named = when_messages(
+        "#when(os = .Windows)\nwindows :: namespace { @public n :: func () -> i32 { return 1 } }\n\
+         f :: func () -> i32 { return windows.n() }\n",
+        |_| {},
+    );
+    assert!(
+        named.iter().any(|m| m.contains("cannot resolve name `windows`")),
+        "{named:#?}"
+    );
+}
+
+#[test]
+fn an_excluded_body_is_not_type_checked_either() {
+    // Unlinking the declaration from its namespace is not the whole of it:
+    // `infer` gathers the functions to check by walking the file's nodes, so a
+    // body left in the arena would still be checked — and checked with none of
+    // the resolution collection would have given it. Both halves are here: a
+    // name nothing declares, and an inference failure that needs no name at all.
+    let src = "\
+#when(os = .Windows)
+gone :: namespace {
+    @public gap :: func () -> i32 { return no_such_function() }
+    @public ambiguous :: func () { let x := .none }
+}
+
+f :: func () -> i32 { return 1 }
+";
+    let out = when_messages(src, |_| {});
+    assert!(out.is_empty(), "{out:#?}");
+}
+
+#[test]
+fn when_reads_the_directive_on_the_construct_as_well_as_before_the_binding() {
+    // §9.1: a directive written before the declaration and one written on the
+    // construct it binds mean the same thing, and `#when` is no exception.
+    let out = when_messages(
+        "tests :: #when(os = .Windows) namespace { @public n :: func () -> i32 { return gone() } }\n\
+         f :: func () -> i32 { return 1 }\n",
+        |_| {},
+    );
+    assert!(out.is_empty(), "{out:#?}");
+}
+
+#[test]
+fn when_test_holds_only_in_a_test_build() {
+    let src = "\
+tests :: #when(test) namespace {
+    @public n :: func () -> i32 { return 1 }
+}
+
+f :: func () -> i32 { return tests.n() }
+";
+    let off = when_messages(src, |_| {});
+    assert!(
+        off.iter().any(|m| m.contains("cannot resolve name `tests`")),
+        "{off:#?}"
+    );
+    let on = when_messages(src, |o| o.test = true);
+    assert!(on.is_empty(), "{on:#?}");
+}
+
+#[test]
+fn a_when_condition_combines_with_all_any_and_not() {
+    // One source, one build, every combinator: what survives is what `f` can
+    // name, and what does not survive holds a call to nothing.
+    let src = "\
+#when(all(arch = .X86_64, not(os = .Windows)))
+kept_all :: namespace { @public n :: func () -> i32 { return 1 } }
+
+#when(any(os = .Macos, os = .Linux))
+kept_any :: namespace { @public n :: func () -> i32 { return 2 } }
+
+#when(not(os = .Linux))
+dropped :: namespace { @public n :: func () -> i32 { return gone() } }
+
+#when(profile = .Debug, arch = .X86_64)
+kept_both :: namespace { @public n :: func () -> i32 { return 3 } }
+
+f :: func () -> i32 { return kept_all.n() + kept_any.n() + kept_both.n() }
+";
+    let out = when_messages(src, |_| {});
+    assert!(out.is_empty(), "{out:#?}");
+}
+
+#[test]
+fn a_condition_the_compiler_does_not_know_is_refused_rather_than_answered_false() {
+    // A typo that quietly excluded a declaration on every target would compile
+    // and be missing something, which is worse than an error. So each of these
+    // is reported, and the declaration is kept.
+    let key = when_messages(
+        "#when(platform = .Linux)\nn :: namespace { @public x :: func () {} }\n",
+        |_| {},
+    );
+    assert!(
+        key.iter().any(|m| m.contains("`platform` is not a condition")),
+        "{key:#?}"
+    );
+    let value = when_messages(
+        "#when(os = .Plan9)\nn :: namespace { @public x :: func () {} }\n",
+        |_| {},
+    );
+    assert!(
+        value.iter().any(|m| m.contains("`.Plan9` is not a os this compiler knows")),
+        "{value:#?}"
+    );
+    let flag = when_messages(
+        "#when(debug)\nn :: namespace { @public x :: func () {} }\n",
+        |_| {},
+    );
+    assert!(
+        flag.iter().any(|m| m.contains("`debug` is not a condition")),
+        "{flag:#?}"
+    );
+    let empty = when_messages(
+        "#when\nn :: namespace { @public x :: func () {} }\n",
+        |_| {},
+    );
+    assert!(
+        empty.iter().any(|m| m.contains("`#when` takes a condition")),
+        "{empty:#?}"
+    );
+    let arity = when_messages(
+        "#when(not(os = .Linux, os = .Macos))\nn :: namespace { @public x :: func () {} }\n",
+        |_| {},
+    );
+    assert!(
+        arity.iter().any(|m| m.contains("`not` takes one condition")),
+        "{arity:#?}"
+    );
+}
+
+#[test]
+fn when_excludes_a_nested_namespace_and_any_other_declaration() {
+    // The rule is per declaration, not per namespace: a function, a type and a
+    // namespace inside a namespace are each excluded the same way.
+    let src = "\
+outer :: namespace {
+    @public
+    #when(os = .Windows)
+    inner :: namespace { @public n :: func () -> i32 { return gone() } }
+
+    @public
+    #when(os = .Windows)
+    Handle :: distinct usize
+
+    @public
+    #when(os = .Windows)
+    only_windows :: func () -> i32 { return also_gone() }
+
+    @public here :: func () -> i32 { return 1 }
+}
+
+f :: func () -> i32 { return outer.here() }
+";
+    let out = when_messages(src, |_| {});
+    assert!(out.is_empty(), "{out:#?}");
+}
+
 #[test]
 fn the_ir_carries_enum_variants_and_their_payloads() {
     // Exhaustiveness needs every variant and the arity of each payload; the

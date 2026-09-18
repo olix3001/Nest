@@ -54,6 +54,7 @@ pub mod pretty;
 pub mod resolve;
 pub mod session;
 pub mod ty;
+pub mod when;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -529,6 +530,17 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
                 name: name.clone(),
             },
         );
+
+        // Conditional compilation, before anything reads a name: a declaration
+        // `#when` excludes is gone from the tree by the time collection walks
+        // it, so it defines nothing and resolves nothing (`when`).
+        let conds = when::Conditions::new(&session.options, session.in_entry_package(file));
+        {
+            let Session {
+                asts, diagnostics, ..
+            } = &mut *session;
+            when::strip(&asts[&file], file, &conds, diagnostics);
+        }
 
         // Collect definitions (disjoint field borrows while reading the ast).
         let in_core = session.pkg_of.get(&file).map(String::as_str) == Some("core");
