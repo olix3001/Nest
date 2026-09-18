@@ -2910,8 +2910,14 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     ///
     /// A float has no overflow to trap on — it has infinities — and a bitwise
     /// operation cannot leave its width at all.
+    ///
+    /// `#unsafe` turns these off with everything else (§9). The directive makes
+    /// one claim — *this scope has already been reasoned about* — and there is
+    /// no reading of it under which an index is covered and an addition is not.
+    /// A scope that says so gets the plain opcode and no flag to branch on.
     fn traps(&self, op: BuiltinOp, ty: &Ty) -> bool {
-        self.cx.options.overflow == OverflowMode::Trap
+        !self.unguarded
+            && self.cx.options.overflow == OverflowMode::Trap
             && ty.is_int()
             && matches!(op, BuiltinOp::Add | BuiltinOp::Sub | BuiltinOp::Mul)
     }
@@ -2943,13 +2949,16 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     ///   check is on the *amount*, not on the bits that fall off the end. Bits
     ///   leaving the top of a `<<` are what a shift is for.
     ///
-    /// Neither is removed by `#unsafe`, for the reason the checked opcodes are
-    /// not: `overflow=` is a build-wide decision about what leaving the width
-    /// *means*, not a check on a program that might be wrong. `overflow=wrap` is
-    /// what removes these. Both are skipped when the operand the check is about
-    /// is a constant that already answers it.
+    /// Both are removed by `#unsafe`, like every other run-time check: the
+    /// directive's meaning is that the checks in that scope are off, and a
+    /// program that says so about its own arithmetic is saying the same thing it
+    /// says about an index. `overflow=wrap` removes them too, and differently —
+    /// it changes what leaving the width *means* everywhere, where `#unsafe`
+    /// says only that this scope has already been reasoned about. Both are also
+    /// skipped when the operand the check is about is a constant that already
+    /// answers it.
     fn range_check(&mut self, op: BuiltinOp, args: &[Operand], ty: &Ty, span: Option<FileSpan>) {
-        if self.cx.options.overflow != OverflowMode::Trap {
+        if self.unguarded || self.cx.options.overflow != OverflowMode::Trap {
             return;
         }
         let Some((signed, bits)) = self.cx.strip(ty).int_parts() else {

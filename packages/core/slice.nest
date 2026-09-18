@@ -17,6 +17,7 @@
 // the slice header's length.
 
 { Index, IndexMut } :: import "ops.nest"
+{ transmute } :: import "mem.nest"
 
 // The element count of an array or slice. This is the second intrinsic whose
 // signature cannot state its own rule: `T` is unbounded here and the compiler
@@ -34,7 +35,29 @@
 // one (§6.4), and a forwarding call was only ever a way of naming which one.
 impl <T> []T {
   len :: #intrinsic("len") func (self: *Self) -> usize
+
+  // The address the elements start at.
+  //
+  // A slice **is** a pointer and a length (`design/lir.md` §7b), so this is the
+  // first of those two words rather than anything computed. It exists because
+  // the alternative was every caller declaring its own two-word struct and
+  // `transmute`-ing to it — which is the same reinterpretation, written out
+  // once per caller and wrong in a way nothing would catch if the two words
+  // ever swapped places.
+  //
+  // What comes back is a `*T`, so it is traced and non-null like any other, and
+  // it is only as valid as the slice it came from. A slice of length zero still
+  // has an address; there is simply nothing at it to read.
+  @public ptr :: #inline func (self: Self) -> *T {
+    return transmute.<Raw.<T>>(self).ptr
+  }
 }
+
+// The two words a slice is, so that `ptr` above can name the first of them.
+// Private: a program that wants the pointer calls `ptr`, and a program that
+// wants to take a slice apart some other way is doing something `core` should
+// not be handing out.
+Raw :: struct <T> { ptr: *T, len: usize }
 
 impl <T, const N: usize> [N]T {
   len :: #intrinsic("len") func (self: *Self) -> usize

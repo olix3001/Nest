@@ -19,7 +19,8 @@ Rule of thumb: `@` annotates, `#` modifies the construct it precedes, and a
 **value comes from a function** — never from a directive. This is what resolves
 the "directive as expression" tension: value-producing compile magic
 (`embed_file`, `size_of`, `cast`) is a function core declares and the compiler
-fills in, and a static check inside a struct is the statement `assert(...)`, not
+fills in, and a static check inside a struct is the statement
+`comptime_assert(...)`, not
 a directive.
 
 ## 9.1 Placement
@@ -295,16 +296,24 @@ directives trade safety for speed:
   zeroed) by `new` / `make`, and reads are not init-checked. For FFI structs and
   performance-critical buffers.
 - **`#unsafe`** — on a **func or block**, disables run-time safety checks in that
-  scope: bounds checks, the division-by-zero check, the read-before-write
-  (uninitialized) trap, and null checks at C boundaries. Nothing else changes —
-  in particular the overflow behaviour is `overflow=`'s to decide (§6.13), not
-  this directive's, so a checked add stays checked inside an `#unsafe` body.
+  scope: bounds checks, the division-by-zero check, the **integer overflow and
+  shift-amount traps**, the read-before-write (uninitialized) trap, and null
+  checks at C boundaries. The claim it makes is one claim — *this scope has
+  already been reasoned about* — and it applies to arithmetic for the same
+  reason it applies to an index.
+
+  This is not the same lever as `overflow=` (§6.13). `overflow=wrap` changes what
+  leaving the width *means*, everywhere, for every program in the build;
+  `#unsafe` changes nothing about meaning and only says that here, the check is
+  not worth paying for. An operation written to have a stated behaviour —
+  `wrapping_add`, `checked_add`, `saturating_add` — still means exactly what it
+  says inside an `#unsafe` body, because that is its own name and not a check.
 
 ```
 Scratch :: #raw struct { buf: [4096]uint8 }     // not zeroed on allocation
 
-fast_copy :: #unsafe func (dst: *mut uint8, src: *uint8, n: usize) {
-  // no bounds/init checks inside this body
+fast_copy :: #unsafe func (dst: *mut u8, src: *u8, n: usize) {
+  // no bounds, init, division or overflow checks inside this body
 }
 
 hot :: func () {
