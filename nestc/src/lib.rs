@@ -1,7 +1,7 @@
 //! The Nest compiler, as a library: what the `nestc` binary drives, and what a
 //! tool that needs the compiler's answers — the language server — calls.
 
-#![feature(box_patterns)]
+#![feature(deref_patterns)]
 
 pub mod codegen;
 pub mod common;
