@@ -213,9 +213,7 @@ pub fn declaration(s: &Session, def: DefId, use_ty: Option<Ty>) -> String {
         let file = d.file?;
         let ast = s.asts.get(&file);
         let src = source(s, file)?;
-        let span = d
-            .span
-            .or_else(|| Some(ast?.node(d.node?).span))?;
+        let span = d.span.or_else(|| Some(ast?.node(d.node?).span))?;
         let end = match (ast, d.node) {
             (Some(ast), Some(node)) => body_start(ast, node).unwrap_or(span.end),
             _ => text_body_start(&src, span.start).unwrap_or(span.end),

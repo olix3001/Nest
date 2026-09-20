@@ -719,9 +719,7 @@ main :: func () {
         let scale = session
             .defs
             .iter()
-            .find(|d| {
-                d.kind == crate::sema::def::DefKind::Trait && d.name.as_str() == "Scale"
-            })
+            .find(|d| d.kind == crate::sema::def::DefKind::Trait && d.name.as_str() == "Scale")
             .expect("`Scale` came out of the library");
         let decls = crate::sema::decl::Decls::new(&session.defs, &session.asts, &session.decls);
         let args = decls

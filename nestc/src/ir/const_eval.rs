@@ -788,9 +788,7 @@ impl<'a> ConstEval<'a> {
                     // `N` of `uint.<N>` is what says how wide the type is. So
                     // it goes in both, and a question about a type inside the
                     // body finds a width rather than a name.
-                    ty_frame
-                        .consts
-                        .insert(*p, self.substituted_const(k));
+                    ty_frame.consts.insert(*p, self.substituted_const(k));
                 }
                 // A **type** argument, which is not a value and lives in its own
                 // frame. It is substituted through when the body asks a question

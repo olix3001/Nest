@@ -1747,10 +1747,7 @@ impl Inferer<'_> {
                     // value and report a missing *field*, which for `u8.NOPE`
                     // is a question about the compiler rather than the program.
                     let what = self.cx.resolve(&t).display(self.defs);
-                    self.report(
-                        node,
-                        format!("`{what}` has no associated item `{name}`"),
-                    );
+                    self.report(node, format!("`{what}` has no associated item `{name}`"));
                     self.ast.set_meta(node, Resolution::Error);
                     return Ty::Error;
                 }
@@ -4387,17 +4384,15 @@ impl Inferer<'_> {
             None => {
                 let d = self.defs.get(def);
                 match (d.file, d.node) {
-                    (Some(file), Some(node)) => match self
-                        .asts
-                        .get(&file)
-                        .map(|a| a.node(node).kind.clone())
-                    {
-                        Some(NodeKind::GenericTypeParam {
-                            constraint: Some(c),
-                            ..
-                        }) => Some((file, self.bound_nodes(file, c))),
-                        _ => None,
-                    },
+                    (Some(file), Some(node)) => {
+                        match self.asts.get(&file).map(|a| a.node(node).kind.clone()) {
+                            Some(NodeKind::GenericTypeParam {
+                                constraint: Some(c),
+                                ..
+                            }) => Some((file, self.bound_nodes(file, c))),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 }
             }

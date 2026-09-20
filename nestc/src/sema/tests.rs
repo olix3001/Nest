@@ -9638,9 +9638,8 @@ fn a_signed_family_constant_spans_the_whole_width() {
 /// width's ceiling is as much a fact about it as `wrapping_add` is.
 #[test]
 fn a_distinct_type_inherits_an_associated_constant() {
-    let session = analyze_clean(
-        "S: usize :: usize.MAX\n@public main :: func () { const z := S }\n",
-    );
+    let session =
+        analyze_clean("S: usize :: usize.MAX\n@public main :: func () { const z := S }\n");
     assert_eq!(const_value(&session, "S"), u64::MAX);
 }
 
@@ -9674,10 +9673,12 @@ fn an_associated_constant_is_read_through_self_in_a_blanket_impl() {
         .linked
         .globals()
         .filter(|g| g.name.as_str() == "BITS")
-        .filter_map(|g| match session.ir_meta.get::<crate::ir::ConstValue>(g.id) {
-            Some(crate::ir::ConstValue::Int(n)) => i64::try_from(&n).ok(),
-            _ => None,
-        })
+        .filter_map(
+            |g| match session.ir_meta.get::<crate::ir::ConstValue>(g.id) {
+                Some(crate::ir::ConstValue::Int(n)) => i64::try_from(&n).ok(),
+                _ => None,
+            },
+        )
         .collect();
     assert!(bits.contains(&8) && bits.contains(&16), "{bits:?}");
 }

@@ -821,8 +821,10 @@ fn dependency_order(session: &Session, files: &[FileId]) -> Vec<FileId> {
 /// at the import that closes it.
 fn report_package_cycles(session: &mut Session) {
     // package -> (package it depends on, the file and import span that says so)
-    let mut edges: std::collections::BTreeMap<String, Vec<(String, FileId, crate::common::span::Span)>> =
-        std::collections::BTreeMap::new();
+    let mut edges: std::collections::BTreeMap<
+        String,
+        Vec<(String, FileId, crate::common::span::Span)>,
+    > = std::collections::BTreeMap::new();
     for (&file, meta) in &session.files {
         let Some(from) = session.pkg_of.get(&file) else {
             continue;
@@ -855,7 +857,10 @@ fn report_package_cycles(session: &mut Session) {
     }
     fn visit(
         pkg: &str,
-        edges: &std::collections::BTreeMap<String, Vec<(String, FileId, crate::common::span::Span)>>,
+        edges: &std::collections::BTreeMap<
+            String,
+            Vec<(String, FileId, crate::common::span::Span)>,
+        >,
         colour: &mut std::collections::HashMap<String, Colour>,
         path: &mut Vec<String>,
         found: &mut Vec<(Vec<String>, FileId, crate::common::span::Span)>,
