@@ -216,9 +216,8 @@ mod tests {
     /// The library `name` is, compiled from `src` against `against` — which is
     /// `core` and whatever other libraries the source imports.
     fn library(name: &str, src: &str, against: &[&Members]) -> Members {
-        let mut session = Session::with_loader(Box::new(
-            MemLoader::new().with(name, src).with("main", ""),
-        ));
+        let mut session =
+            Session::with_loader(Box::new(MemLoader::new().with(name, src).with("main", "")));
         for (meta, ir) in against {
             super::read::load(&mut session, meta, ir, std::path::Path::new(NOWHERE), true)
                 .expect("a library loads");
@@ -360,7 +359,12 @@ impl Shape for Square {
             // Its text did arrive: a diagnostic pointing into a dependency
             // shows the line, and nothing in the metadata could rebuild it.
             assert!(
-                !session.sources.file(id).expect("the file is there").src.is_empty(),
+                !session
+                    .sources
+                    .file(id)
+                    .expect("the file is there")
+                    .src
+                    .is_empty(),
                 "`{name}` arrived without its text"
             );
         }
