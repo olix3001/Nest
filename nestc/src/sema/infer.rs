@@ -46,7 +46,7 @@ use num_traits::ToPrimitive;
 
 use crate::ir::ConstValue;
 
-use super::decl::{DeclTable, Decls};
+use super::decl::{ConstTy, DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::impls::{ImplInfo, ImplTable, TypedImpl};
 use super::ty::{Const, FloatWidth, InferCtxt, Obligation, Ty, TyVarKind, primitive_ty};
@@ -4821,7 +4821,7 @@ impl Inferer<'_> {
                 self.func_def_ty(def)
             }
             DefKind::Struct | DefKind::Enum => self.nominal_of(def),
-            DefKind::Const => self.const_def_ty(def),
+            DefKind::Const => self.const_def_ty(node, def),
             // `<const N: usize>` names a value in the body, of the type it was
             // declared with (§5).
             DefKind::ConstParam => self.const_param_ty(def),
@@ -5073,11 +5073,20 @@ impl Inferer<'_> {
         Some(ty)
     }
 
-    fn const_def_ty(&mut self, def: DefId) -> Ty {
+    fn const_def_ty(&mut self, node: NodeId, def: DefId) -> Ty {
         // A constant defined in terms of itself has no type; break the cycle
         // rather than recursing forever.
         if self.const_stack.contains(&def) {
             return Ty::Error;
+        }
+        // The recorded shape first, always: a constant in another package has
+        // one and no syntax, and while syntax still travels a tree-first read
+        // would mean the recorded answer was never exercised here.
+        if let Some(shape) = self.decls().const_ty(def) {
+            self.const_stack.push(def);
+            let ty = self.const_shape_ty(node, shape);
+            self.const_stack.pop();
+            return ty;
         }
         let d = self.defs.get(def);
         let (Some(file), Some(node)) = (d.file, d.node) else {
@@ -5090,6 +5099,23 @@ impl Inferer<'_> {
         let ty = self.const_rhs_ty(file, rhs);
         self.const_stack.pop();
         ty
+    }
+
+    /// The type a use of a constant has, built from the shape recorded for it.
+    ///
+    /// The shape rather than a type because a comptime literal has no single
+    /// one: each use gets its own variable and settles it, which is what this
+    /// allocates. `node` is the use, and is where a diagnostic about the
+    /// constant `Same` names would be anchored.
+    fn const_shape_ty(&mut self, node: NodeId, shape: ConstTy) -> Ty {
+        match shape {
+            // No `#lang("str")` item leaves a string literal nothing to become
+            // and nothing to unify with — a broken `core`, reported as such.
+            ConstTy::Comptime(TyVarKind::Str) if self.lang.get("str").is_none() => Ty::Error,
+            ConstTy::Comptime(kind) => self.cx.fresh_of(kind),
+            ConstTy::Same(other) => self.def_ty(node, other),
+            ConstTy::Settled(ty) => ty,
+        }
     }
 
     /// The type a constant's right-hand side gives it, read in the file the

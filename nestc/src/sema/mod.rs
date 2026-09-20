@@ -773,7 +773,7 @@ fn resolve_fields_one(session: &mut Session, file: FileId) {
 }
 
 fn lower_one(session: &mut Session, file: FileId) {
-    let program = lower::lower_file(
+    let lowered = lower::lower_file(
         &session.defs,
         &session.lang_items,
         &session.asts,
@@ -782,7 +782,8 @@ fn lower_one(session: &mut Session, file: FileId) {
         &session.sources,
         file,
     );
-    session.ir.insert(file, program);
+    decl::record_defaults(&mut session.decls, lowered.defaults);
+    session.ir.insert(file, lowered.program);
 }
 
 fn desugar_one(session: &mut Session, file: FileId) {

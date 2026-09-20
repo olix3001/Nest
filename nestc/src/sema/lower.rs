@@ -59,6 +59,17 @@ use crate::ir::{
     TraitMethod, TypeDef, TypeDefKind, Variant,
 };
 
+/// What lowering a file produced.
+pub struct Lowered {
+    /// The file's IR.
+    pub program: Program,
+    /// Each function's **value**-parameter defaults, in declaration order, as
+    /// lowering settled them — [`decl::record_defaults`] files them under the
+    /// definition so a caller in another package can fill an omitted argument
+    /// without the declaring file's tree.
+    pub defaults: Vec<(DefId, Vec<Option<super::decl::ParamDefault>>)>,
+}
+
 /// Lower every function body in `file` to IR.
 pub fn lower_file(
     defs: &DefTable,
@@ -68,7 +79,7 @@ pub fn lower_file(
     meta: &Meta,
     sources: &crate::common::source::SourceMap,
     file: FileId,
-) -> Program {
+) -> Lowered {
     let ast = &asts[&file];
     let mut lo = Lowerer {
         defs,
@@ -79,6 +90,7 @@ pub fn lower_file(
         asts,
         meta,
         defaults: HashMap::new(),
+        recorded: Vec::new(),
     };
     // Iterate the `Func` defs of this file: each carries the name/DefId and its
     // node is the `ConstBind` whose RHS is the `FuncExpr`. A **bodyless** one is
@@ -109,10 +121,13 @@ pub fn lower_file(
     }
     let types = lo.lower_types(file);
     let globals = lo.lower_globals(file);
-    Program {
-        types,
-        globals,
-        funcs,
+    Lowered {
+        program: Program {
+            types,
+            globals,
+            funcs,
+        },
+        defaults: lo.recorded,
     }
 }
 
@@ -146,6 +161,9 @@ struct Lowerer<'a> {
     /// written in one place, and anything later that walks it — the `#const`
     /// check above all — should see it once.
     defaults: HashMap<DefId, Vec<Option<Expr>>>,
+    /// Where each of those lowered defaults went, per function — what
+    /// [`Lowered::defaults`] carries out of here.
+    recorded: Vec<(DefId, Vec<Option<super::decl::ParamDefault>>)>,
 }
 
 impl Lowerer<'_> {
@@ -603,11 +621,20 @@ impl Lowerer<'_> {
             .enumerate()
             .map(|(i, p)| (i, p.id))
             .collect();
+        let mut recorded = Vec::with_capacity(value_params.len());
         for (i, param_id) in value_params {
-            if let Some(d) = self.param_default(def, i) {
-                self.meta.set(param_id, crate::ir::DefaultValue(d));
-            }
+            recorded.push(match self.param_default(def, i) {
+                Some(d) => {
+                    self.meta.set(param_id, crate::ir::DefaultValue(d));
+                    Some(match self.default_is_caller_location(Some(def), i) {
+                        true => super::decl::ParamDefault::CallerLocation,
+                        false => super::decl::ParamDefault::Value(param_id),
+                    })
+                }
+                None => None,
+            });
         }
+        self.recorded.push((def, recorded));
         let body = body.map(|b| self.lower_block(b));
         // A function's own type is its whole signature. Keeping only the return
         // type here would have made `meta.ty` mean something different for a
@@ -1301,6 +1328,11 @@ impl Lowerer<'_> {
     /// Whether `def`'s `i`-th value parameter defaults to `#caller_location`.
     fn default_is_caller_location(&self, def: Option<DefId>, i: usize) -> bool {
         let Some(def) = def else { return false };
+        // What lowering recorded, first: a callee in another package has this
+        // written down and has no syntax to read it off.
+        if let Some(d) = self.decls().param_default(def, i) {
+            return matches!(d, super::decl::ParamDefault::CallerLocation);
+        }
         let Some((file, _)) = self.decls().func(def) else {
             return false;
         };
@@ -1381,6 +1413,16 @@ impl Lowerer<'_> {
     fn param_default(&mut self, def: DefId, i: usize) -> Option<Expr> {
         if let Some(cached) = self.defaults.get(&def) {
             return cached.get(i).cloned().flatten();
+        }
+        // The recorded default, first: it is the only one a callee in another
+        // package has, and it is the same expression this would lower — the one
+        // that was lowered where it was written, kept on the parameter it
+        // belongs to and carried by the library along with its type and span.
+        if let Some(super::decl::ParamDefault::Value(id)) = self.decls().param_default(def, i) {
+            return self
+                .meta
+                .get::<crate::ir::DefaultValue>(id)
+                .map(|crate::ir::DefaultValue(e)| e);
         }
         let (file, _) = self.decls().func(def)?;
         let slots = self.decls().param_default_nodes(def)?;

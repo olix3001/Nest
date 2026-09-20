@@ -24,11 +24,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
+use crate::ir::IrId;
 use crate::parser::ast::{Ast, Lit, NodeId, NodeKind, StructKind};
 
 use super::Resolution;
 use super::def::{DefId, DefKind, DefTable};
-use super::ty::Ty;
+use super::ty::{Ty, TyVarKind};
 use super::{DefMeta, Expansion, Signature};
 
 /// What a definition declares, as the pass that read its syntax concluded it.
@@ -57,6 +58,8 @@ pub enum Decl {
     Variant(Vec<(Option<Symbol>, Ty)>),
     /// A `distinct T` or a plain type alias.
     Alias(AliasDecl),
+    /// A namespace-level `::` constant that names a **value**.
+    Const(ConstDecl),
 }
 
 /// What a call site needs to know about a function it is calling.
@@ -118,6 +121,31 @@ pub struct AliasDecl {
     pub expands_to: Option<Ty>,
 }
 
+/// A `::` constant that names a value — `A :: 42`, `NAME :: "nest"`, `K :: A`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstDecl {
+    /// The type a **use** of it has.
+    pub ty: ConstTy,
+}
+
+/// What type a use of a constant has, which is not always *a* type.
+///
+/// A constant bound to a bare literal has none: §2.5 gives it a fresh variable
+/// at every use, so `A :: 1` is an `i8` where one caller wants one and an `i64`
+/// where the next does. Recording a single [`Ty`] for it would pick one of those
+/// and be wrong everywhere else, so what is recorded is the *shape* the use site
+/// builds its own type from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConstTy {
+    /// A comptime literal: a fresh variable of this kind, per use.
+    Comptime(TyVarKind),
+    /// Another constant's type, whatever that turns out to be — `B :: A`
+    /// inherits `A`'s comptime-ness rather than settling it here.
+    Same(DefId),
+    /// One concrete type, the same at every use.
+    Settled(Ty),
+}
+
 /// A trait's associated type or constant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssocDecl {
@@ -147,11 +175,33 @@ pub struct Param {
     pub name: Symbol,
     /// Whether it carries a default.
     ///
-    /// Only presence, not the expression: a call site never looks at the
-    /// default itself. It was type-checked once at the declaration and is
-    /// filled in by lowering, so all a caller needs to know is that the slot
-    /// may legally be left empty.
+    /// Presence is all *inference* needs: it decides whether the slot may
+    /// legally be left empty, and it is known from the syntax, before anything
+    /// has been lowered.
     pub default: bool,
+    /// **What** it defaults to, which is what *lowering* needs — see
+    /// [`ParamDefault`]. `None` until the declaration has been lowered, which
+    /// is the pass that works it out.
+    pub lowered: Option<ParamDefault>,
+}
+
+/// What an omitted argument is filled in with.
+///
+/// The default itself is IR, not a type, and it is the one thing in this table
+/// that is: it was an expression where it was written, it was lowered and
+/// checked once at its declaration (§5.2), and a call that omits the argument
+/// gets that same expression cloned into it. So what travels is where the
+/// lowered expression is — a key into the metadata a library carries — rather
+/// than the expression again.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ParamDefault {
+    /// `#caller_location`: the one default whose value is *which call site
+    /// asked*, so it is built at each call and the declaration's own lowering
+    /// of it is never the answer.
+    CallerLocation,
+    /// An ordinary default, kept on this parameter as
+    /// [`ir::DefaultValue`](crate::ir::DefaultValue).
+    Value(IrId),
 }
 
 /// Every definition's [`Decl`], by [`DefId`] — the ones this compilation
@@ -275,6 +325,19 @@ impl<'a> Decls<'a> {
         }
     }
 
+    /// The type a use of the constant `def` has — see [`ConstTy`].
+    ///
+    /// Both shapes of constant answer here. A `::` binding of a value carries
+    /// its shape; `#static c: u32 :: 0` and an associated constant **declare** a
+    /// type instead, and a declared type is the same at every use.
+    pub fn const_ty(&self, def: DefId) -> Option<ConstTy> {
+        match self.table.get(&def)? {
+            Decl::Const(c) => Some(c.ty.clone()),
+            Decl::Assoc(a) => a.ty.clone().map(ConstTy::Settled),
+            _ => None,
+        }
+    }
+
     /// The declared type of an associated constant.
     pub fn assoc_const_ty(&self, def: DefId) -> Option<Ty> {
         match self.table.get(&def)? {
@@ -363,6 +426,12 @@ impl<'a> Decls<'a> {
                 })
                 .collect(),
         )
+    }
+
+    /// What `def`'s `i`-th **value** parameter defaults to, once lowering has
+    /// recorded it — the answer a call that omits the argument fills in.
+    pub fn param_default(&self, def: DefId, i: usize) -> Option<ParamDefault> {
+        self.func_decl(def)?.params.get(i)?.lowered
     }
 
     /// Which of `def`'s **value** parameters carry a default.
@@ -682,7 +751,11 @@ pub fn record(defs: &DefTable, asts: &HashMap<FileId, Ast>, table: &mut DeclTabl
                     .unwrap_or_default()
                     .into_iter()
                     .zip(q.param_defaults(d.id).unwrap_or_default())
-                    .map(|(name, default)| Param { name, default })
+                    .map(|(name, default)| Param {
+                        name,
+                        default,
+                        lowered: None,
+                    })
                     .collect(),
                 generics: q.generic_params(d.id),
                 has_body: q.has_body(d.id),
@@ -900,6 +973,10 @@ pub fn record_types(
 ) {
     let Some(ast) = asts.get(&file) else { return };
     let settled = |t: Option<Ty>| t.filter(|t| !t.mentions_var());
+    // Reads resolutions only — a constant naming another constant needs the def
+    // its path resolved to — so the table it is given does not matter.
+    let empty = DeclTable::new();
+    let q = Decls::new(defs, asts, &empty);
     for d in defs.iter() {
         if d.file != Some(file) {
             continue;
@@ -987,6 +1064,12 @@ pub fn record_types(
                                     expands_to: Some(t),
                                 }),
                             );
+                        } else if let Some(ty) = const_ty(&q, ast, file, node, rhs, &settled) {
+                            // It names a value, not a type. A use of it asks
+                            // what type it has, and that is the one question
+                            // about a constant a caller cannot answer from its
+                            // own file.
+                            table.insert(d.id, Decl::Const(ConstDecl { ty }));
                         } else {
                             table.insert(
                                 d.id,
@@ -1031,6 +1114,31 @@ pub fn record_types(
     }
 }
 
+/// Record **what** each parameter defaults to, as lowering worked it out.
+///
+/// The third and last thing a declaration has written down about it, and the
+/// only one that is IR rather than a type: a default is an expression, lowered
+/// once against its own declaration (§5.2, [`ir::DefaultValue`]), and a call
+/// that omits the argument is given that expression. Before this, a caller
+/// lowered it again out of the declaring file's tree — which a caller in
+/// another package does not have.
+///
+/// Called with what [`super::lower::lower_file`] collected while it lowered
+/// them, since the [`IrId`]s it hands out are the only record of where each
+/// finished expression went.
+pub fn record_defaults(table: &mut DeclTable, defaults: Vec<(DefId, Vec<Option<ParamDefault>>)>) {
+    for (def, lowered) in defaults {
+        let Some(Decl::Func(f)) = table.get(&def) else {
+            continue;
+        };
+        let mut f = f.clone();
+        for (p, l) in f.params.iter_mut().zip(lowered) {
+            p.lowered = l;
+        }
+        table.insert(def, Decl::Func(f));
+    }
+}
+
 /// The signature of the function whose def points at `node`, read back off
 /// what inference stamped.
 ///
@@ -1056,6 +1164,42 @@ fn signature(ast: &Ast, node: NodeId) -> Option<Ty> {
             .collect::<Option<Vec<Ty>>>()?,
         ret: Box::new(ast.meta::<Ty>(func)?),
     })
+}
+
+/// The shape of the constant bound by `node`, whose right-hand side is `rhs`.
+///
+/// Mirrors what `Inferer::const_rhs_ty` reads off the same syntax at a use site,
+/// which is the answer this has to reproduce for a caller that has no syntax.
+/// `None` for a binding that declares no value type — an `AssocConst` shape
+/// declares one and is recorded as an associated constant instead, and an
+/// expression whose type never settled is left for the tree to answer.
+fn const_ty(
+    q: &Decls,
+    ast: &Ast,
+    file: FileId,
+    node: NodeId,
+    rhs: NodeId,
+    settled: &impl Fn(Option<Ty>) -> Option<Ty>,
+) -> Option<ConstTy> {
+    match &ast.node(rhs).kind {
+        NodeKind::Lit(Lit::Int(_)) => Some(ConstTy::Comptime(TyVarKind::Int)),
+        NodeKind::Lit(Lit::Float(_)) => Some(ConstTy::Comptime(TyVarKind::Float)),
+        NodeKind::Lit(Lit::Str(_)) => Some(ConstTy::Comptime(TyVarKind::Str)),
+        // `-1` / `+1` are still literals for this purpose.
+        NodeKind::Unary { operand, .. } => const_ty(q, ast, file, node, *operand, settled),
+        // A constant naming another inherits its comptime-ness, so the *other*
+        // constant's shape is the answer — worked out at the use site, where the
+        // variable it may need belongs.
+        NodeKind::Path { .. } => q.resolved_def(file, rhs).map(ConstTy::Same),
+        // `#static count: u32 :: 0` (§2.6) declares its type, and the pass above
+        // recorded it as an associated constant.
+        NodeKind::AssocConst { .. } => None,
+        // Anything else has one concrete type, which inference stamped on the
+        // binding when it typed the declaration.
+        _ => settled(ast.meta::<Ty>(node))
+            .filter(|t| !t.mentions_error())
+            .map(ConstTy::Settled),
+    }
 }
 
 /// The stamped payload types of the variant at `node`, or `None` if any of them
