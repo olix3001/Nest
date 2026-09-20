@@ -29,7 +29,7 @@
 // emits. Declaring is the whole of it, which is what a C library needs. `std`
 // still formats things itself (`core/fmt`) rather than going out to `printf`.
 
-{ C_LONG, C_ULONG, C_CHAR } :: import "target.nest"
+{ C_LONG, C_ULONG, C_CHAR, C_VOID } :: import "target.nest"
 { transmute, size_of, make } :: import "mem.nest"
 
 // ===< The scalar types >===
@@ -68,22 +68,33 @@
 @public float     :: f32
 @public double    :: f64
 
-// ===< `void` >===
+// ===< `void` and the opaque pointee >===
 
-// C's `void` as a pointee: `void *` is `*c.void`, and `FILE`, `sqlite3` or any
-// other handle a C library hands back is a `*c.void` too when the library does
-// not publish the struct.
+// C's `void` as a *return*: a function that returns nothing returns this. It
+// is the language's own unit type, which is a real type with exactly one
+// value — `f()` where `f` returns `c.void` is an ordinary expression — so an
+// `extern("c")` declaration reads the way the C header does.
+//
+// It is imported rather than written, for the reason `char` above is: this file
+// declares `void`, so `void :: void` here would name itself. See `C_VOID` in
+// the generated `target.nest`.
+@public void :: C_VOID
+
+// C's `void` as a *pointee*: `void *` is `*c.anyopaque`, and `FILE`, `sqlite3`
+// or any other handle a C library hands back is a `*c.anyopaque` too when the
+// library does not publish the struct.
 //
 // It is an alias for the `opaque` primitive, which is the language's name for a
-// type with no size and no values. The alias exists because `void` is the name
-// a C programmer looks for; the rule is `opaque`'s, unchanged: `*T` and
-// `*c.void` convert only through an explicit `cast`, in both directions, and
-// nothing reads through one.
+// type with no size and no values. Spelled apart from `void` above because C
+// spells one thing two ways and the language does not: a return of nothing has
+// a value and a pointee of nothing does not. The rule is `opaque`'s, unchanged:
+// `*T` and `*c.anyopaque` convert only through an explicit `cast`, in both
+// directions, and nothing reads through one.
 //
 // A binding that wants its own handle type — so that its `*Sqlite` does not
 // interchange with every other C pointer — writes `Sqlite :: distinct opaque`
 // rather than using this.
-@public void :: opaque
+@public anyopaque :: opaque
 
 // ===< The raw pointer >===
 

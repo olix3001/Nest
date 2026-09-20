@@ -759,13 +759,16 @@ impl Session {
              @public ARCH: Arch :: .{arch}\n\
              @public PROFILE: Profile :: .{profile}\n\
              \n\
-             // The two C types whose width or signedness the target decides.\n\
-             // `core/c` names them; they are here because this is the file that\n\
-             // knows what the build is, and because `c.nest` cannot spell them\n\
-             // itself — it declares `int`, which shadows the family there.\n\
+             // The C types whose width or signedness the target decides, and\n\
+             // `void`, which does not vary at all. `core/c` names them; they are\n\
+             // here because this is the file that knows what the build is, and\n\
+             // because `c.nest` cannot spell them itself — it declares `int`,\n\
+             // which shadows the family there, and `void`, which would name\n\
+             // itself.\n\
              @public C_LONG  :: {clong}\n\
              @public C_ULONG :: {culong}\n\
-             @public C_CHAR  :: {cchar}\n",
+             @public C_CHAR  :: {cchar}\n\
+             @public C_VOID  :: void\n",
             bits = o.target.pointer_bits,
             os = variant(o.target.os),
             arch = variant(o.target.arch),

@@ -4028,7 +4028,7 @@ fn an_opaque_by_value_is_refused_through_an_alias_too() {
     // at.
     for src in [
         "A :: opaque\nS :: struct { f: A }\n",
-        "c :: import <core/c>\nS :: struct { f: c.void }\n",
+        "c :: import <core/c>\nS :: struct { f: c.anyopaque }\n",
         "Handle :: distinct opaque\nS :: struct { h: Handle }\n",
     ] {
         assert!(first_error(src).contains("has no size"), "{src}");
@@ -4044,10 +4044,27 @@ fn a_distinct_over_an_opaque_is_a_nominal_handle() {
     analyze_clean(
         "Handle :: distinct opaque\nopen :: func () -> *Handle { return cast.<*Handle>(cast.<*opaque>(&0)) }\n",
     );
-    // `c.void` is the alias a C programmer looks for, and it is the same type.
+    // `c.anyopaque` is the alias a C programmer looks for, and it is the same
+    // type. `c.void` is **not** it — see the test below.
     analyze_clean(
-        "c :: import <core/c>\nf :: func (p: *c.void) -> *opaque { return cast.<*opaque>(p) }\n",
+        "c :: import <core/c>\nf :: func (p: *c.anyopaque) -> *opaque { return cast.<*opaque>(p) }\n",
     );
+}
+
+#[test]
+fn c_void_is_the_unit_type_and_c_anyopaque_is_the_pointee() {
+    // C spells two things `void` and the language spells them apart (§11.1): a
+    // function returning `void` returns the unit type, which *has* a value, and
+    // a `void *` points at `opaque`, which has none. `c.void` was the second of
+    // those and could not be written as a return at all, which is the bug.
+    analyze_clean(
+        "c :: import <core/c>\n\
+         nothing :: func () -> c.void { return () }\n\
+         f :: func () -> void { let u: c.void := nothing()\n return u }\n",
+    );
+    // And they are different types: a `c.void` in a struct is a sized member,
+    // where a `c.anyopaque` there is the "has no size" refusal above.
+    analyze_clean("c :: import <core/c>\nS :: struct { f: c.void }\n");
 }
 
 #[test]

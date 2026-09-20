@@ -22,7 +22,8 @@ c.short  c.ushort c.int    c.uint   c.long  c.ulong  c.longlong c.ulonglong
 c.float  c.double
 c.bool
 c.size_t c.ssize_t c.ptrdiff_t c.intptr_t c.uintptr_t
-c.void                          // an alias for `opaque` — the pointee of a `void *`
+c.void                          // the unit type — what a C function returning `void` returns
+c.anyopaque                     // an alias for `opaque` — the pointee of a `void *`
 c.ptr.<T>                       // a raw, nullable, non-GC C pointer to T
 c.func                          // a C function-pointer type constructor
 ```
@@ -41,25 +42,37 @@ match a C type on mainstream targets is a property of those targets, not a
 promise — so a type crossing the C boundary is spelled with a `core/c` name, and
 the coercions of §11.4 are what carry a language value into one.
 
-### `c.void` and opaque pointees
+### `c.void` and `c.anyopaque`
 
-A C `void *`, and every handle a C library hands back without publishing the
-struct behind it — `FILE`, `sqlite3`, an `SDL_Window` — is a pointer to
-something this program does not describe. `c.void` is the name for that
-pointee: an alias for the `opaque` primitive (§3.1), which has no size and no
-values.
+C spells two different things `void`, and the language spells them apart.
+
+A C function that *returns* `void` returns nothing, which is the language's unit
+type (§3.1). `c.void` is that type — the same one `void` names, under the name a
+C programmer looks for — so a declaration reads the way the header does and the
+call is an ordinary expression.
 
 ```
 c :: import <core/c>
 
-fopen  :: extern("c") func (path: c.cstr, mode: c.cstr) -> *c.void
-fclose :: extern("c") func (f: *c.void) -> c.int
+free :: extern("c") func (p: c.ptr.<c.anyopaque>) -> c.void
+```
+
+A C `void *`, and every handle a C library hands back without publishing the
+struct behind it — `FILE`, `sqlite3`, an `SDL_Window` — is a pointer to
+something this program does not describe. `c.anyopaque` is the name for that
+pointee: an alias for the `opaque` primitive (§3.1), which has no size and no
+values.
+
+```
+fopen  :: extern("c") func (path: c.cstr, mode: c.cstr) -> *c.anyopaque
+fclose :: extern("c") func (f: *c.anyopaque) -> c.int
 ```
 
 `opaque`'s rules hold unchanged here, and they are what make the declaration
 honest: it is a type only behind a pointer, nothing reads through it, and
-`*T` <-> `*c.void` is an explicit `cast` in both directions. A program cannot
-accidentally acquire a `c.void` by value, because there is no such value.
+`*T` <-> `*c.anyopaque` is an explicit `cast` in both directions. A program
+cannot accidentally acquire a `c.anyopaque` by value, because there is no such
+value — which is exactly the difference from `c.void`, which has one.
 
 A binding that wants each handle kept apart — so that a `*Sqlite` cannot be
 passed where a `*SDL_Window` is expected — declares its own nominal handle
@@ -72,11 +85,6 @@ sqlite3_close :: extern("c") func (db: *Sqlite) -> c.int
 
 Both spellings compile to the same pointer; the difference is entirely in what
 the type checker will let the program confuse with what.
-
-Note that a C function *returning* `void` returns nothing, which is the
-language's `void` (the unit type, §3.1) and not this. The two are different
-types with the same C spelling: `void` is what a function with no result
-returns, `c.void` is what a `void *` points at.
 
 ## 11.2 C pointers (`c.ptr.<T>`)
 
@@ -111,9 +119,9 @@ string — and no body:
 c :: import <core/c>
 
 strlen :: extern("c") func (s: c.ptr.<c.char>) -> c.size_t
-malloc :: extern("c") func (n: c.size_t) -> c.ptr.<c.void>
-qsort  :: extern("c") func (base: c.ptr.<c.void>, n: c.size_t, size: c.size_t,
-                            cmp: c.func.<(c.ptr.<c.void>, c.ptr.<c.void>) -> c.int>)
+malloc :: extern("c") func (n: c.size_t) -> c.ptr.<c.anyopaque>
+qsort  :: extern("c") func (base: c.ptr.<c.anyopaque>, n: c.size_t, size: c.size_t,
+                            cmp: c.func.<(c.ptr.<c.anyopaque>, c.ptr.<c.anyopaque>) -> c.int>)
 ```
 
 - `extern("c")` selects the **C ABI / calling convention** *and* marks the binding
@@ -147,7 +155,7 @@ qsort  :: extern("c") func (base: c.ptr.<c.void>, n: c.size_t, size: c.size_t,
   ```
   @link_name("MessageBoxW")
   message_box :: #callconv("stdcall") extern("c") func (
-    owner: c.ptr.<c.void>, text: c.ptr.<u16>, caption: c.ptr.<u16>, flags: c.uint
+    owner: c.ptr.<c.anyopaque>, text: c.ptr.<u16>, caption: c.ptr.<u16>, flags: c.uint
   ) -> c.int
   ```
 
@@ -160,7 +168,7 @@ AST or name resolution. Members are function declarations only.
 ```
 extern("c") {
   strlen :: func (s: c.ptr.<c.char>) -> c.size_t
-  malloc :: func (n: c.size_t) -> c.ptr.<c.void>
+  malloc :: func (n: c.size_t) -> c.ptr.<c.anyopaque>
 }
 // identical to writing `strlen :: extern("c") func ...` on each line
 ```
