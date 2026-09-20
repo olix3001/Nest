@@ -253,6 +253,17 @@ pub struct Def {
     /// says the projected type is itself a `Holder`, so it gets associated-type
     /// parameters of its own (see [`Def::projection`]).
     pub assoc_bounds: Option<Vec<DefId>>,
+    /// For a **generic type parameter** (`<T: Float>`): the traits its written
+    /// constraint named.
+    ///
+    /// Recorded rather than read back off the constraint's syntax, because a
+    /// parameter that arrives with a library has no syntax here — and the
+    /// answer is one impl selection cannot do without: a blanket
+    /// `impl <T: Float> Display for T` unifies its self type with *anything*,
+    /// so the bound is the whole of what keeps it from applying to every type
+    /// in the program. `None` means nothing recorded it; an empty list means it
+    /// was written with no bounds.
+    pub param_bounds: Option<Vec<DefId>>,
     /// For a type parameter **synthesized from a bound's associated type** —
     /// the `Item` of `T.Item` where `<T: Holder>` (§5.4) — what it projects.
     ///
@@ -395,6 +406,7 @@ impl DefTable {
             directives: Vec::new(),
             ns: Namespace::default(),
             assoc_bounds: None,
+            param_bounds: None,
             projection: None,
             alias: None,
             using: false,

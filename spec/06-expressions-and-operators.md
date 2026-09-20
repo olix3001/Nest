@@ -582,15 +582,23 @@ precision on an integer is ignored. A precision cannot be combined with a type
 character: a radix has no fraction, and what `Debug` writes is the value's own
 shape.
 
-**A float's text is C's.** `core` writes every other value itself and does not
-write this one: the shortest decimal that reads back as the same bits is Ryū or
-Grisu, and the runtime asks `snprintf` instead, at rising precision until
-`strtod` agrees (`runtime/nest_runtime.c`). What comes out is the shortest text
-that round-trips — `1` for `1.0`, `0.1` for the double nearest a tenth — written
-positionally between `1e-5` and `1e17` and in exponent form outside them, where
-the positional form would be almost all zeroes. The three values that are not
-numbers are `NaN`, `inf` and `-inf`. `f16`, `f80` and `f128` have no `Display`:
-C has no portable spelling of them to ask through.
+**A float's digits are C's; the decisions about them are not.** Producing the
+decimal digits of a binary float exactly is Ryū or Grisu, and `snprintf` already
+does it, so `core` asks C that one question and answers every other one itself:
+how many digits to ask for, whether the answer reads back as the value handed
+over (`strtod`, at rising precision), where the point belongs, and how an
+exponent is spelled. What comes out is the shortest text that round-trips — `1`
+for `1.0`, `0.1` for the double nearest a tenth — written positionally between
+`1e-5` and `1e17` and in exponent form outside them, where the positional form
+would be almost all zeroes. The three values that are not numbers are `NaN`,
+`inf` and `-inf`.
+
+`Display` is written **once, over a trait**: `core`'s `Float` names each float
+type's width through an associated type (`Bits :: type`, the unsigned integer of
+the same width), and `impl <T: Float> Display for T` covers `f16`, `f32` and
+`f64` together. `f80` and `f128` are not among them, and neither absence is a
+formatting gap — the backend has no 80-bit float type at all, and an `f128`
+cannot be arithmetic on the targets built today.
 
 ## 6.12 Ranges
 

@@ -8,7 +8,8 @@
 // It is a second copy of that search rather than a call into `core/fmt`, for
 // two reasons: a format's float must always *look* like one (`1.0`, never `1`),
 // which is the opposite of what an interpolated `{x}` wants, and the reading
-// half below has no counterpart there at all.
+// half below has no counterpart there at all. `core/fmt` declares the same two
+// C functions; one global is emitted for both.
 //
 // Both functions assume the C locale, which is the one a program starts in:
 // nothing in `std` calls `setlocale`.

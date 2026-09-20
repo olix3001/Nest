@@ -2281,6 +2281,22 @@ fn every_call_agrees_with_its_callees_signature() {
                             continue;
                         };
                         let callee = &u.funcs[id.0 as usize];
+                        // A `#c_vararg` callee's declared parameters are C's
+                        // *fixed* ones, and a call is expected to pass a tail
+                        // beyond them — `snprintf(buf, n, fmt, ...)` is three
+                        // and any number more. The fixed ones still have to be
+                        // there, which is what is worth checking.
+                        if callee.attrs.c_variadic {
+                            assert!(
+                                args.len() >= callee.params,
+                                "{}: calls variadic {} with {} arguments; its fixed ones are {}",
+                                f.name,
+                                callee.name,
+                                args.len(),
+                                callee.params
+                            );
+                            continue;
+                        }
                         assert_eq!(
                             args.len(),
                             callee.params,

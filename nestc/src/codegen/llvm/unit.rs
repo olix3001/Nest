@@ -400,9 +400,25 @@ impl<'ctx> Cx<'ctx, '_> {
             } else {
                 LlvmLinkage::External
             };
-            let value = self
+            // One symbol, one global. Two packages may each declare the same C
+            // function — `core` and `std` both want `snprintf` — and they are
+            // declarations of *the same* function: adding a second global of
+            // that name makes LLVM rename it (`snprintf.1`), which links
+            // against a symbol no library has.
+            //
+            // Only a **declaration** may be shared this way. Two definitions of
+            // one symbol are a genuine collision, and letting LLVM rename one
+            // keeps them apart until the linker or the mangler says otherwise.
+            let existing = self
                 .module
-                .add_function(f.symbol.as_str(), sig, Some(linkage));
+                .get_function(f.symbol.as_str())
+                .filter(|_| f.blocks.is_empty());
+            let value = match existing {
+                Some(v) => v,
+                None => self
+                    .module
+                    .add_function(f.symbol.as_str(), sig, Some(linkage)),
+            };
             // The calling convention, on the declaration *and* on every call —
             // LLVM keeps them per site, and a site that disagrees with the
             // function it calls is a miscompile rather than a diagnostic. The

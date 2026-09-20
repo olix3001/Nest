@@ -111,9 +111,9 @@ extern("c") {
 
 extern("c") {
   // `std/serialize` finds a float's text the way `core/fmt` does — `snprintf`
-  // at rising precision until `strtod` reads the same bits back — and asks C
-  // itself rather than through the runtime, because it needs the reading half
-  // too and because a format's float must always look like one.
+  // at rising precision until `strtod` reads the same bits back. Both declare
+  // these two, which is fine: two `extern("c")` declarations of one symbol are
+  // declarations of the same function, and codegen emits one global for them.
   @public snprintf :: #c_vararg func (buf: c.ptr.<c.uchar>, n: c.size_t, fmt: c.cstr) -> c.int
   @public strtod   :: func (s: c.cstr, end: c.ptr.<c.cstr>) -> c.double
 }

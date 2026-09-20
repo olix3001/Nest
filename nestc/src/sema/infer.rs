@@ -2416,6 +2416,11 @@ impl Inferer<'_> {
                     Outcome::Solved
                 }
                 Select::Ok(Choice::Builtin(_)) | Select::Error => Outcome::Solved,
+                // The bound itself is the answer; monomorphization picks the
+                // impl. There is no member to stamp, because there is no impl
+                // yet to take one from — a call through a bound is dispatched
+                // the way every other call through a bound is.
+                Select::ByBound => Outcome::Solved,
                 Select::Defer => Outcome::Deferred,
                 Select::NoImpl => {
                     self.report_no_impl(*origin, self_ty, *trait_def, args);
@@ -2461,7 +2466,10 @@ impl Inferer<'_> {
                     Outcome::Solved
                 }
                 Select::Defer => Outcome::Deferred,
-                Select::NoImpl => {
+                // A projection through a bound (`T.Item`) is answered from the
+                // parameter's declaration long before it reaches selection, so
+                // one arriving here is the ordinary missing impl it looks like.
+                Select::ByBound | Select::NoImpl => {
                     self.report_no_impl(*origin, self_ty, *trait_def, args);
                     let _ = self.cx.unify(out, &Ty::Error);
                     Outcome::Failed
@@ -2869,6 +2877,20 @@ impl Inferer<'_> {
             }
         }
 
+        // Still nothing, and the self type is a **type parameter**: its own
+        // bound is the proof. There is no impl to find for `T` — it is not a
+        // type yet — and `<T: Float>` is precisely the promise that whatever
+        // instantiates it has one, which is what lets a generic function hand
+        // its parameter to another generic function with the same bound.
+        //
+        // Monomorphization substitutes the real type here and selects the impl
+        // then, so nothing is left unanswered: the question is postponed to the
+        // one place that can answer it. The `*dyn` coercion proves a bound the
+        // same way ([`Inferer::param_has_bound`]).
+        if best.is_none() && self.param_has_bound(&s, trait_def) {
+            return Select::ByBound;
+        }
+
         match best {
             // Several impls fit only because the self type is still unknown:
             // that is a question inference has not answered yet, not a genuine
@@ -2895,6 +2917,38 @@ impl Inferer<'_> {
                 let t = self.subst_type_params(t, &map);
                 if self.cx.unify(&t, a).is_err() {
                     ok = false;
+                    break;
+                }
+            }
+        }
+        // **The impl's own bounds are part of whether it applies.** `impl <T:
+        // Float> Display for T` unifies its self type with anything, so without
+        // this every type in the program would implement `Display` and the
+        // mistake would surface as `internal: no impl of Float for Foo at
+        // monomorphization` — a message about the compiler, from inside `core`,
+        // for a program that simply never wrote an impl.
+        //
+        // Each parameter is checked against what the trial bound it to, and a
+        // parameter still unsolved is *not* a failure: the self type it came
+        // from is not known yet either, and `select` defers on that.
+        if ok {
+            for &p in &imp.generics {
+                let Some(bound_on) = map.tys.get(&p).cloned() else {
+                    continue;
+                };
+                if is_var(&self.cx.shallow(&bound_on)) {
+                    continue;
+                }
+                for t in self.param_bound_traits(p) {
+                    if !matches!(
+                        self.select(&bound_on, t, &[]),
+                        Select::Ok(_) | Select::ByBound | Select::Defer | Select::Error
+                    ) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
                     break;
                 }
             }
@@ -4021,14 +4075,27 @@ impl Inferer<'_> {
             let adef = self.defs.resolve_alias(adef);
             return self.defs.get(adef).assoc_bounds.clone().unwrap_or_default();
         }
+        // The recorded answer first, always: a parameter that arrived with a
+        // library has no tree here, and a tree-first branch would read as "no
+        // bounds" for exactly the impls that most need them.
+        if let Some(bounds) = self.defs.get(def).param_bounds.clone() {
+            return bounds;
+        }
         let d = self.defs.get(def);
         let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Vec::new();
+        };
+        // A parameter whose def came from a library names a file this
+        // compilation never parsed. Nothing recorded its bounds — a library
+        // written before they were recorded — so the honest answer is that
+        // there are none to read, not a panic on a tree that is not here.
+        let Some(ast) = self.asts.get(&file) else {
             return Vec::new();
         };
         let NodeKind::GenericTypeParam {
             constraint: Some(constraint),
             ..
-        } = self.asts[&file].node(node).kind.clone()
+        } = ast.node(node).kind.clone()
         else {
             return Vec::new();
         };
@@ -7653,6 +7720,9 @@ enum Select {
     Defer,
     /// No candidate impl applies to a known self type.
     NoImpl,
+    /// The self type is a type parameter the trait bounds, so the obligation is
+    /// discharged by that bound and the impl is chosen at monomorphization.
+    ByBound,
     /// Two or more equally specific impls apply.
     Ambiguous,
     /// The self type is already `Error`; absorb without further diagnostics.

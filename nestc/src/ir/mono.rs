@@ -603,11 +603,16 @@ impl Mono<'_> {
                 }
             }
         }
-        // A default body's `Self` is the argument past its declared ones.
+        // A default body's `Self` is the argument past its declared ones, and
+        // the trait's associated items are placeholders for whatever the impl
+        // at that `Self` chose. Both are resolved here, together, because here
+        // is where the body and a concrete `Self` first meet.
+        let mut assoc: HashMap<DefId, DefId> = HashMap::new();
         if let (Some(trait_def), Some(GenericArg::Ty(t))) =
             (self.default_body_of(original.def), args.get(params.len()))
         {
             subst.tys.insert(trait_def, t.clone());
+            self.bind_assoc_items(trait_def, t, &mut subst, &mut assoc);
         }
 
         let mut func = original.clone();
@@ -620,6 +625,7 @@ impl Mono<'_> {
         let mut cloner = Cloner {
             meta: self.meta,
             subst: &subst,
+            assoc,
         };
         cloner.visit_function(&mut func);
         let qual = self.trait_qualifier(linked, original.def, args);
@@ -952,6 +958,54 @@ impl Mono<'_> {
     /// implementing type: its `Self` is the trait's own nominal type until an
     /// instantiation binds it. So it is instantiated per `Self`, with that type
     /// as one argument past the ones it declares.
+    /// Point a default body's associated items at the ones the impl supplies.
+    ///
+    /// A trait's `Bits :: type` and `BITS: u16` are declarations, not answers:
+    /// the answer is in whichever impl applies to this `Self`. An associated
+    /// **type** is substituted as a type, using what the impl's binding was
+    /// resolved to rather than the binding's own def — a layout query on the
+    /// binding reads nothing, because a binding is a name and not a type. An
+    /// associated **constant** is an [`ExprKind::Global`] naming the
+    /// declaration, so it is remapped by id.
+    ///
+    /// An impl supplying neither leaves both alone, which is right: what the
+    /// body already refers to is then the trait's own default.
+    fn bind_assoc_items(
+        &mut self,
+        trait_def: DefId,
+        self_ty: &Ty,
+        subst: &mut Subst,
+        assoc: &mut HashMap<DefId, DefId>,
+    ) {
+        let Some((i, bindings)) = self.match_impl(trait_def, self_ty, &[]) else {
+            return;
+        };
+        let imp = self.impls.impls[i].clone();
+        let chosen = imp.typed.map(|t| t.assoc).unwrap_or_default();
+        for (name, &decl) in &self.defs.get(trait_def).ns.members.clone() {
+            let decl = self.defs.resolve_alias(decl);
+            match self.defs.get(decl).kind {
+                DefKind::TypeAlias => {
+                    // The impl's own generics may appear in what it chose —
+                    // `impl <T> Holder for Box.<T> { Item :: T }` — and the
+                    // match above is what bound them.
+                    if let Some(t) = chosen.get(name) {
+                        subst.tys.insert(decl, subst_ty(&bindings, t));
+                    }
+                }
+                DefKind::Const => {
+                    if let Some(&supplied) = imp.members.get(name) {
+                        let supplied = self.defs.resolve_alias(supplied);
+                        if supplied != decl {
+                            assoc.insert(decl, supplied);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn default_body_of(&self, def: DefId) -> Option<DefId> {
         let parent = self.defs.get(def).parent?;
         (self.defs.get(parent).kind == DefKind::Trait).then_some(parent)
@@ -1439,6 +1493,15 @@ fn match_const(holes: &[DefId], pattern: &Const, k: &Const, out: &mut Subst) -> 
 struct Cloner<'a> {
     meta: &'a Meta,
     subst: &'a Subst,
+    /// A trait's associated **constant** → the one the selected impl supplies.
+    ///
+    /// A default body is written in the trait's terms: `Self.BITS` reads the
+    /// trait's own declaration, which holds no value. This is where it becomes
+    /// the impl's — the one point at which the body and a concrete `Self` are
+    /// both in hand. Associated *types* need no map: they are types, and the
+    /// ordinary type substitution carries them. Empty for every instantiation
+    /// that is not a default body.
+    assoc: HashMap<DefId, DefId>,
 }
 
 impl Cloner<'_> {
@@ -1531,6 +1594,16 @@ impl VisitorMut for Cloner<'_> {
             ExprKind::ConstParam(def) => {
                 if let Some(lit) = self.subst.consts.get(def).and_then(const_lit) {
                     expr.kind = ExprKind::Lit(lit);
+                }
+            }
+            // An associated constant a default body read off the trait, now
+            // read off the impl that was selected. Without this the body keeps
+            // pointing at the trait's bodyless declaration, which holds no
+            // value at all, and what reaches the machine is whatever happens to
+            // be at that symbol.
+            ExprKind::Global(def) => {
+                if let Some(&target) = self.assoc.get(def) {
+                    *def = target;
                 }
             }
             // The two expression forms that carry a type of their own. Both are

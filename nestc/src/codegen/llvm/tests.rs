@@ -2230,13 +2230,18 @@ main :: func () -> i32 {
     io.println(f"{0.0} {-2.25} {100.0}")
     let e: f32 := 0.1
     io.println(f"{e} {e:?}")
+    // One `impl <T: Float> Display for T` covers all three widths, and each
+    // rounds to its own: `0.1` is a different number in every one of them.
+    let h: f16 := 0.1
+    let big: f16 := 2048.0
+    io.println(f"{h} {big}")
     return 0
 }
 "#,
     );
     assert_eq!(
         String::from_utf8_lossy(&ran.stdout),
-        "1.5 1 0.1 0.3333333333333333\n0 -2.25 100\n0.1 0.1\n",
+        "1.5 1 0.1 0.3333333333333333\n0 -2.25 100\n0.1 0.1\n0.1 2048\n",
         "{ran:?}"
     );
 }
@@ -2301,6 +2306,53 @@ main :: func () -> i32 {
     assert_eq!(
         String::from_utf8_lossy(&ran.stdout),
         "3.14 1.000 3\n0.3333\n[hel] [hi] [äö]\n[    3.14] [00003.14] [+3.1]\n",
+        "{ran:?}"
+    );
+}
+
+/// A trait's **default body** reads the associated items of whichever impl was
+/// selected, not the trait's own declarations.
+///
+/// The declarations are placeholders: an associated constant the trait declares
+/// holds no value, and an associated type it declares names nothing. A body
+/// written in those terms has to arrive at the impl's answers, and until it did
+/// this compiled and then read whatever was at that symbol — a wrong number
+/// rather than an error, which is the worst way to be wrong.
+#[test]
+fn a_default_body_reads_the_impl_s_associated_items() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+{ size_of } :: import <core/mem>
+
+Width :: trait {
+    // One of each kind, because they travel by different routes: a type is
+    // substituted as a type, a constant is a global that has to be remapped.
+    Bits :: type
+    BITS: u16
+
+    // Neither name is known here; both are answered by the impl below.
+    bytes :: func (self: Self) -> usize { return size_of.<Self.Bits>() }
+    bits :: func (self: Self) -> u16 { return Self.BITS }
+}
+
+impl Width for f32 { Bits :: u32  BITS :: 32 }
+impl Width for f64 { Bits :: u64  BITS :: 64 }
+
+main :: func () -> i32 {
+    let a: f64 := 1.0
+    let b: f32 := 1.0
+    io.println(f"{a.bytes()} {a.bits()} {b.bytes()} {b.bits()}")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "8 64 4 32\n",
         "{ran:?}"
     );
 }

@@ -34,10 +34,12 @@
 //
 // ### What is not here
 //
-// **`f16`, `f80` and `f128`.** A float's text comes from C (see below), and C
-// has no portable spelling of those three to ask through: `_Float16` and
-// `__float128` are extensions, and `long double` is a different width on every
-// platform. `f32` and `f64` are `float` and `double` everywhere.
+// **`f80` and `f128`.** Neither is a formatting gap. The backend has no 80-bit
+// float type at all — `no float type of 80 bits`, x87 being an x86 thing — so
+// an `f80` value cannot be held, let alone written; and an `f128` cannot be
+// arithmetic on this target, because the soft-float builtins it lowers to are
+// not in the C runtime. `f16`, `f32` and `f64` are all here, through one impl
+// written over the `Float` trait.
 //
 // **An owned string type.** `Buf` is the formatter's scratch space, not a
 // `String`: it grows, it is written into once, and `end` hands back a `str` view
@@ -45,6 +47,7 @@
 // carry its own `#lang` tag, exactly as `str.nest` says.
 
 { make } :: import "mem.nest"
+c :: import "c.nest"
 { PTR_BITS } :: import "target.nest"
 { Attr, Member, TypeInfo, Variant, type_id, type_info, variant_of } :: import "reflect.nest"
 
@@ -267,49 +270,147 @@ impl Display for char {
 
 // ===< Floats >===
 
-// A float's text is **C's**, and this is the only value in this file whose is.
+// What every floating-point type has in common, and all this file needs of
+// one: **its width**, and a way in and out of the `f64` the digits come from.
 //
-// The shortest decimal that reads back as the same bits is Ryū or Grisu — a
-// table and a few hundred lines — and libc has already answered the question,
-// so the runtime asks it (`runtime/nest_runtime.c`) and the loops above stay
-// the only arithmetic here. What comes back is the text `strtod` reads as the
-// value that went in: `1` for `1.0`, `0.1` for the double nearest a tenth, and
-// `NaN`, `inf` and `-inf` for the three values that are not numbers.
+// `BITS` is that width, and it is what makes one impl cover every width instead
+// of one impl per width.
 //
-// The call is in C rather than here because `snprintf` is **variadic**, and on
-// arm64 a variadic argument does not arrive where a fixed one does — a Nest
-// declaration of it as an ordinary function reads whatever the stack held.
+// `write_float` is a **default body**: it is the whole of what a float does
+// when it is written out, and a width wanting none of it supplies its own.
+// Everything it calls is either a method on `Self` or an ordinary function —
+// nothing here is generic over `T: Float` except the impls themselves, because
+// handing a bounded parameter to another generic asks a question the compiler
+// only answers at monomorphization.
 //
-// `precision` is the `.3` of a format specifier, and `-1` is none: see
-// `with_precision` below.
-nest_fmt_f64 :: extern("c") func (buf: *mut u8, cap: usize, value: f64, precision: i32) -> usize
-nest_fmt_f32 :: extern("c") func (buf: *mut u8, cap: usize, value: f32, precision: i32) -> usize
+// `f80` and `f128` are **not** here, and neither absence is a formatting gap:
+// the backend has no 80-bit float type at all (`no float type of 80 bits`, x87
+// being an x86 thing), and an `f128` cannot be arithmetic on this target
+// because the soft-float builtins it lowers to are not in the C runtime.
+@public Float :: trait {
+    // How many bits wide this type is.
+    BITS: u16
 
-// How much room to offer C before it has said how much it wants.
-//
-// Enough for every float there is when no precision was asked for, so the
-// second call below happens only for `{x:.300}` and its like. It is not a
-// limit: what does not fit is reserved and asked for again.
-FLOAT_ROOM: usize :: 64
+    // The value as an `f64`, and a round trip back through this type.
+    //
+    // Widening is exact for every width here, so `to_f64` loses nothing;
+    // `narrowed` is what asks whether a text that read back as an `f64` is
+    // *this* value, which is the question the search below is made of.
+    to_f64 :: func (self: Self) -> f64
+    narrowed :: func (self: Self, v: f64) -> f64
 
-// None, spelled as the runtime spells it. A `usize` precision cannot say
-// "unwritten", and the specifier that has one is a different call anyway.
-NO_PRECISION: i32 :: 0 - 1
+    // How many significant digits always suffice to tell this width's values
+    // apart: seventeen for an `f64`, nine for an `f32`, five for an `f16`.
+    //
+    // A function of `BITS` and nothing else, so it is written once here rather
+    // than three times below — which is the whole reason `BITS` is on the
+    // trait. A width that wants a different count still supplies its own.
+    round_trip_digits :: func (self: Self) -> usize {
+        return Self.BITS.match {
+            16 => 5,
+            32 => 9,
+            _ => 17,
+        }
+    }
 
-impl Display for f64 {
-    display :: func (self: Self, out: *mut Buf) -> void {
-        write_f64(self, out, NO_PRECISION)
+    // The shortest text that reads back as this value, or this value to a
+    // written number of digits after the point.
+    //
+    // **The digits are C's and the decisions are not.** Producing the decimal
+    // digits of a binary float exactly is Ryū or Grisu — a table and a few
+    // hundred lines — and `snprintf` already does it, so that one question is
+    // asked of C and every other one is answered here: how many digits to ask
+    // for, whether the answer reads back as the value handed over, where the
+    // point belongs, and how an exponent is spelled.
+    write_float :: func (self: Self, out: *mut Buf, precision: i32) -> void {
+        let v: f64 := self.to_f64()
+        // The three values that are not numbers, spelled as Nest spells them:
+        // C's own `nan` and `inf` have varied in case between platforms, and
+        // whoever reads the output should not have to know which one wrote it.
+        if v != v {
+            out.bytes("NaN".as_bytes())
+            return
+        }
+        if v > F64_MAX {
+            out.bytes("inf".as_bytes())
+            return
+        }
+        if v < 0.0 - F64_MAX {
+            out.bytes("-inf".as_bytes())
+            return
+        }
+        if precision >= 0 {
+            write_fixed(out, v, precision)
+            return
+        }
+
+        // The shortest text that reads back as the value it was given, found by
+        // asking for one significant digit more until it does. `%e` is asked
+        // for rather than `%f` or `%g` because it is the form that says how
+        // many *significant* digits it wrote and where the point would be,
+        // which is what both decisions below are made of.
+        let room: []mut u8 := make.<[]u8>(SCRATCH)
+        let most: usize := self.round_trip_digits()
+        let mut digits: usize := 1
+        let mut n: usize := sci(room, digits, v)
+        while digits < most {
+            if self.narrowed(read_back(room, n)) == v { break }
+            digits = digits + 1
+            n = sci(room, digits, v)
+        }
+
+        let text: []u8 := room[0..<n]
+        let exponent: i32 := exponent_of(text)
+        if exponent >= MIN_EXP && exponent < MAX_EXP {
+            // The same digits with the point written where it falls. Asking
+            // for exactly the ones that land after it writes the number the
+            // search found and no more: `1e+02` becomes `100`, `1e-01` becomes
+            // `0.1`, and a value needing none of them keeps none.
+            let mut frac: i32 := cast.<i32>(digits) - 1 - exponent
+            if frac < 0 { frac = 0 }
+            write_fixed(out, v, frac)
+            return
+        }
+        tidy_exponent(out, text)
     }
 }
 
-impl Display for f32 {
+impl Float for f16 {
+    BITS :: 16
+    to_f64 :: func (self: Self) -> f64 { return cast.<f64>(self) }
+    narrowed :: func (self: Self, v: f64) -> f64 { return cast.<f64>(cast.<f16>(v)) }
+}
+
+impl Float for f32 {
+    BITS :: 32
+    to_f64 :: func (self: Self) -> f64 { return cast.<f64>(self) }
+    narrowed :: func (self: Self, v: f64) -> f64 { return cast.<f64>(cast.<f32>(v)) }
+}
+
+impl Float for f64 {
+    BITS :: 64
+    to_f64 :: func (self: Self) -> f64 { return self }
+    narrowed :: func (self: Self, v: f64) -> f64 { return v }
+}
+
+// One `Display` for every float there is, and one `Debug` — written over the
+// trait rather than once per width, which is the whole point of `Float`.
+//
+// A concrete impl beats a generic one (§4.9), so a program wanting its own
+// spelling of a float still writes `impl Display for f32` and wins.
+impl <T: Float> Display for T {
     display :: func (self: Self, out: *mut Buf) -> void {
-        write_f32(self, out, NO_PRECISION)
+        self.write_float(out, NO_PRECISION)
     }
 }
 
 // A number is the same characters either way, as it is for the integers above.
-impl Debug for f64 {
+//
+// These are **concrete** where `Display` above is generic, and they have to be:
+// the reflective `impl <T> Debug for T` at the bottom of this file matches every
+// type, a bound does not make a blanket impl more specific than another blanket
+// impl, and the tie would be an ambiguity. A concrete impl beats both (§4.9).
+impl Debug for f16 {
     debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
 }
 
@@ -317,61 +418,172 @@ impl Debug for f32 {
     debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
 }
 
-// The runtime writes into the buffer's own room rather than into scratch space
-// of its own, so a float costs one `reserve` and no copy.
+impl Debug for f64 {
+    debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
+}
+
+// ===< What C is asked >===
 //
-// It answers with the length of the **whole** text whether or not it fitted,
-// which is what makes the second call the only one ever needed: the first is
-// told `FLOAT_ROOM` and comes back with the truth. The `+ 1` is the NUL C
-// writes past the text and Nest does not count.
-write_f64 :: func (value: f64, out: *mut Buf, precision: i32) -> void {
-    out.reserve(FLOAT_ROOM)
+// `snprintf` is **variadic**, which is why the declaration says so: on arm64 a
+// variadic argument does not arrive where a fixed one does, and declaring it as
+// an ordinary function reads whatever the stack held (§11.2).
+//
+// The locale is the C one, which is what a process starts in: nothing in `core`
+// calls `setlocale`, so the decimal point is a `.`.
+
+extern("c") {
+    snprintf :: #c_vararg func (buf: c.ptr.<c.uchar>, n: c.size_t, fmt: c.cstr) -> c.int
+    strtod :: func (s: c.cstr, end: c.ptr.<c.cstr>) -> c.double
+}
+
+// Room for the text of one float, and for the NUL C writes after it.
+//
+// Every form this file produces fits: seventeen significant digits is the most
+// any of these widths needs, and the positional form is reached only between
+// the two exponents below, which bounds the zeroes in front of the digits. A
+// written precision is the one thing that can want more, and it asks for what
+// it needs rather than being cut down to this.
+SCRATCH: usize :: 64
+
+// The decimal exponents between which a value is written positionally rather
+// than in scientific notation: `0.00001` and `100` are written out, `1e-7` and
+// `1e17` are not. Outside them the positional form is almost all zeroes —
+// `1e300` is three hundred of them — and the exponent is what a reader wants.
+MIN_EXP: i32 :: 0 - 5
+MAX_EXP: i32 :: 17
+
+// A precision that was not written. A `usize` cannot say "none", and C's own
+// `%.*f` reads a negative precision as no precision at all.
+NO_PRECISION: i32 :: 0 - 1
+
+// `%.*e` of `v` with `digits` significant digits, into `room`, and how many
+// bytes of it that took. `room` is `SCRATCH` wide and this form never fills it.
+sci :: func (room: []mut u8, digits: usize, v: f64) -> usize {
+    return cast.<usize>(snprintf(
+        c.from_ptr(&mut room[0]), room.len(), c"%.*e", cast.<c.int>(digits) - 1, v))
+}
+
+// What C would read back out of the first `n` bytes of `room`: the other half
+// of the round trip, and the whole of what makes the search below terminate.
+read_back :: func (room: []u8, n: usize) -> f64 {
+    return strtod(c.to_cstr(cast.<str>(room[0..<n])), c.null.<c.cstr>())
+}
+
+// `%.*f` of `v`, straight into the buffer.
+//
+// The length is asked for first because there is no bound on it — `{1e300:.2}`
+// is three hundred and four characters — so no fixed scratch would always do.
+// C answers a length whether or not it fitted, which is what makes one more
+// `reserve` enough rather than a loop.
+write_fixed :: func (out: *mut Buf, v: f64, frac: i32) -> void {
+    out.reserve(SCRATCH)
     let mut room: usize := out.data.len() - out.len
-    let mut n: usize := nest_fmt_f64(&mut out.data[out.len], room, value, precision)
+    let mut n: usize := cast.<usize>(snprintf(
+        c.from_ptr(&mut out.data[out.len]), room, c"%.*f", cast.<c.int>(frac), v))
     if n >= room {
+        // The `+ 1` is the NUL C writes past the text and Nest does not count.
         out.reserve(n + 1)
         room = out.data.len() - out.len
-        n = nest_fmt_f64(&mut out.data[out.len], room, value, precision)
+        n = cast.<usize>(snprintf(
+            c.from_ptr(&mut out.data[out.len]), room, c"%.*f", cast.<c.int>(frac), v))
     }
     out.len = out.len + n
 }
 
-write_f32 :: func (value: f32, out: *mut Buf, precision: i32) -> void {
-    out.reserve(FLOAT_ROOM)
-    let mut room: usize := out.data.len() - out.len
-    let mut n: usize := nest_fmt_f32(&mut out.data[out.len], room, value, precision)
-    if n >= room {
-        out.reserve(n + 1)
-        room = out.data.len() - out.len
-        n = nest_fmt_f32(&mut out.data[out.len], room, value, precision)
+// The exponent `%e` wrote, as a number. It always writes one, after an `e`,
+// with a sign and at least two digits.
+exponent_of :: func (text: []u8) -> i32 {
+    let mut i: usize := 0
+    while i < text.len() && text[i] != LOWER_E {
+        i = i + 1
     }
-    out.len = out.len + n
+    if i == text.len() { return 0 }
+    i = i + 1
+    let mut negative: bool := false
+    if i < text.len() && (text[i] == MINUS || text[i] == PLUS) {
+        negative = text[i] == MINUS
+        i = i + 1
+    }
+    let mut n: i32 := 0
+    while i < text.len() {
+        n = n * 10 + cast.<i32>(text[i] - ZERO)
+        i = i + 1
+    }
+    if negative { return 0 - n }
+    return n
 }
+
+// `1.5e+07` as `1.5e7`, `1e-07` as `1e-7`.
+//
+// C pads an exponent to two digits and writes a `+` on a positive one, and
+// neither is what a program would type — and the text here is text a program
+// reads.
+tidy_exponent :: func (out: *mut Buf, text: []u8) -> void {
+    let mut i: usize := 0
+    while i < text.len() && text[i] != LOWER_E {
+        out.byte(text[i])
+        i = i + 1
+    }
+    out.byte(LOWER_E)
+    i = i + 1
+    if i < text.len() && text[i] == MINUS {
+        out.byte(MINUS)
+        i = i + 1
+    } else if i < text.len() && text[i] == PLUS {
+        i = i + 1
+    }
+    // The leading zeroes of the exponent, but never its last digit: `1e+00` is
+    // an exponent of nothing, and `1e` is not a number.
+    while i + 1 < text.len() && text[i] == ZERO {
+        i = i + 1
+    }
+    while i < text.len() {
+        out.byte(text[i])
+        i = i + 1
+    }
+}
+
+// The largest finite `f64`, for telling an infinity from a number without a
+// classify intrinsic: nothing finite is above it, and both infinities are.
+F64_MAX: f64 :: 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0
 
 // ===< Precision >===
 
 // `{x:.3}` — how many digits of a number, or how much of a text.
 //
-// **No trait**, for the reason the radices below have none: a precision is a
-// fact about a number's fraction and about a string's length, and a type that
-// is neither has no answer to give. These are private methods, called by name
-// from the desugaring exactly as `display` is, and `{n:.3}` on an integer is an
-// error where it is written — which is a deliberate difference from Rust, where
-// a precision on an integer is silently ignored.
+// It is **not** a formatting trait in the sense `Display` and `Debug` are, and
+// it is not an extension point: it is private, and the two types that answer it
+// are the ones a precision means something to. A precision is a fact about a
+// number's fraction and about a string's length, and `{n:.3}` on an integer is
+// an error where it is written — which is a deliberate difference from Rust,
+// where a precision on an integer is silently ignored.
+//
+// These are **inherent** methods rather than a trait's, exactly as the radices
+// below are, and for a reason beyond taste: a trait method is reached only
+// where the trait's name is in scope, and the program that writes `{x:.2}` has
+// imported nothing from this file. An inherent method is a fact about the type
+// and needs no import, which is what a desugaring calling by name requires.
 //
 // It is also the one specifier that cannot be done to the bytes afterwards: a
 // width pads whatever was written, and this changes what gets written, so the
-// value's own call is where it has to go.
-
-impl f64 {
+// value's own call is where it has to go. The floats forward to the same
+// `write_float` their `Display` uses, with the digit count C was going to be
+// given anyway.
+impl f16 {
     with_precision :: func (self: Self, out: *mut Buf, digits: usize) -> void {
-        write_f64(self, out, cast.<i32>(digits))
+        self.write_float(out, cast.<i32>(digits))
     }
 }
 
 impl f32 {
     with_precision :: func (self: Self, out: *mut Buf, digits: usize) -> void {
-        write_f32(self, out, cast.<i32>(digits))
+        self.write_float(out, cast.<i32>(digits))
+    }
+}
+
+impl f64 {
+    with_precision :: func (self: Self, out: *mut Buf, digits: usize) -> void {
+        self.write_float(out, cast.<i32>(digits))
     }
 }
 
@@ -842,6 +1054,7 @@ reverse :: func (out: *mut Buf, from: usize, to: usize) -> void {
 // these are being appended as bytes.
 ZERO: u8 :: 48
 LOWER_A: u8 :: 97
+LOWER_E: u8 :: 101
 UPPER_A: u8 :: 65
 MINUS: u8 :: 45
 PLUS: u8 :: 43

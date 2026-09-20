@@ -9540,3 +9540,45 @@ fn a_precision_and_a_type_character_are_refused_together() {
         "{messages:#?}"
     );
 }
+
+/// A blanket impl's **bounds** decide whether it applies.
+///
+/// `impl <T: Float> Display for T` unifies its self type with anything, so
+/// without checking the bound every type in the program implements `Display` —
+/// and a struct that never wrote one was told `internal: no impl of Float for
+/// Foo at monomorphization`, a message about the compiler, pointing into
+/// `core`, for an ordinary mistake in the program.
+#[test]
+fn a_blanket_impl_applies_only_where_its_bounds_hold() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "Small :: trait { size :: func (self: Self) -> i32 }\n\
+             Shown :: trait { shown :: func (self: Self) -> i32 }\n\
+             impl <T: Small> Shown for T {\n\
+                 shown :: func (self: Self) -> i32 { return self.size() }\n\
+             }\n\
+             Foo :: struct { x: i32 }\n\
+             Bar :: struct { y: i32 }\n\
+             impl Small for Bar { size :: func (self: Self) -> i32 { return self.y } }\n\
+             main :: func () -> i32 {\n\
+                 let b: Bar := Bar { y: 2 }\n\
+                 let f: Foo := Foo { x: 1 }\n\
+                 return b.shown() + f.shown()\n\
+             }\n",
+        )],
+        "main",
+    );
+    let messages: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    // `Bar` satisfies the bound and `Foo` does not, so exactly one of the two
+    // is refused — and it is refused *here*, not at monomorphization.
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert!(
+        messages[0].contains("Foo") && !messages[0].contains("internal"),
+        "{messages:#?}"
+    );
+}

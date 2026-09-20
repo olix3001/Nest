@@ -845,6 +845,15 @@ impl Resolver<'_> {
                 .iter()
                 .filter_map(|&b| self.bound_trait_def(b).map(|t| (t, Some(b))))
                 .collect();
+            // The bounds go **on the def**, for the same reason an abstract
+            // associated type's do (see [`Def::assoc_bounds`] above): a later
+            // compilation reading this parameter out of a library has no syntax
+            // tree to read the constraint from, and impl selection has to know
+            // it — `impl <T: Float> Display for T` applies to a float and to
+            // nothing else, and a bound nobody recorded reads as no bound at
+            // all, which is every type in the program.
+            self.defs.get_mut(param).param_bounds =
+                Some(traits.iter().map(|&(t, _)| t).collect());
             self.project_bounds(param, name.as_str(), &traits, g, 0);
         }
     }
