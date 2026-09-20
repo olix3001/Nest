@@ -169,23 +169,53 @@ fn a_wrapping_add_is_a_plain_add_with_no_overflow_flag() {
     );
 }
 
-/// **An aggregate is a packed struct whose padding is written out.**
+/// **An aggregate's padding is written out, and it is packed only when it has
+/// to be.**
 ///
 /// LIR decided the layout; the type here has to *be* that layout rather than one
-/// LLVM derived. Packed with explicit padding is what makes those the same
-/// thing, and a `<{` in the text is how the IR says packed.
+/// LLVM derived, and explicit padding is what makes those the same thing. An
+/// ordinary struct then lays out the way LLVM would have laid it out anyway, so
+/// it is declared **unpacked** and keeps the alignment its ABI gives it — which
+/// is what a C caller passing one by value depends on. A `#packed` or
+/// `#align(N)` struct is the case LLVM's own rules would move, and only that one
+/// is packed; `<{` in the text is how the IR says so.
 #[test]
-fn an_aggregate_is_packed_with_its_padding_explicit() {
+fn an_aggregate_is_packed_only_when_its_layout_needs_it() {
     let text = ir("\
 P :: struct { a: u8, b: i32 }
 @public get :: func (p: P) -> i32 { return p.b }
 ");
-    assert!(text.contains("<{"), "an aggregate is not packed:\n{text}");
     // `a` at +0, three bytes of padding, `b` at +4 — the layout engine's answer,
     // reproduced exactly.
     assert!(
         text.contains("i8, [3 x i8], i32"),
         "the padding does not match the layout:\n{text}"
+    );
+    assert!(
+        !text.contains("<{ i8, [3 x i8], i32 }>"),
+        "an ordinary aggregate is packed, which loses its ABI alignment:\n{text}"
+    );
+
+    // The same members, laid out with no padding at all: LLVM would put `b` at
+    // +4, so this one is packed.
+    let text = ir("\
+P :: #packed struct { a: u8, b: i32 }
+@public get :: func (p: P) -> i32 { return p.b }
+");
+    assert!(
+        text.contains("<{ i8, i32 }>"),
+        "a `#packed` aggregate is not packed:\n{text}"
+    );
+
+    // And an over-aligned one, where LLVM's alignment for the fields is 4 and
+    // the layout says 16: packed, so that nothing moves.
+    let text = ir("\
+P :: #align(16) struct { a: u8, b: i32 }
+@public get :: func (p: P) -> i32 { return p.b }
+");
+    assert!(
+        text.contains("<{ i8, [3 x i8], i32, [8 x i8] }>"),
+        "an `#align` aggregate is not packed:\n{text}"
     );
 }
 
@@ -2074,7 +2104,7 @@ fn a_repr_c_enums_tag_is_a_c_int() {
                @public pick :: func (e: E) -> i32 { return e.match { .ok => 1, .io => 2 } }\n";
     let text = ir(src);
     assert!(
-        text.contains("%E = type <{ i32, [0 x i8] }>"),
+        text.contains("%E = type { i32, [0 x i8] }"),
         "the tag is not an i32:\n{text}"
     );
     // And the switch that reads it compares against the discriminants the
@@ -2082,7 +2112,7 @@ fn a_repr_c_enums_tag_is_a_c_int() {
     assert!(text.contains("i32 5, label"), "no arm for `io`:\n{text}");
     let plain = ir(&src.replace("#repr(\"C\") ", ""));
     assert!(
-        plain.contains("%E = type <{ i8, [0 x i8] }>"),
+        plain.contains("%E = type { i8, [0 x i8] }"),
         "without the directive the tag should be one byte:\n{plain}"
     );
 }

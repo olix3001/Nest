@@ -22,10 +22,15 @@
 //! struct types and indexing them by member number — would mean two layout
 //! engines that have to agree, and LLVM's would be the one that wins silently.
 //!
-//! Aggregates are still *declared* as packed structs with their padding written
+//! Aggregates are still *declared* as LLVM structs with their padding written
 //! out explicitly, so the IR is readable and a global's initializer is an
-//! ordinary constant. Packed, because the padding is already there: letting LLVM
-//! insert its own on top would move every member.
+//! ordinary constant. An ordinary struct is declared **unpacked**: the padding
+//! being explicit is what makes LLVM's own rules reproduce the layout exactly,
+//! and an unpacked type keeps the alignment the ABI gives it, which is what a C
+//! caller taking one by value depends on. A `#packed` or `#align(N)` struct is
+//! the case where LLVM's rules would move a member, and only that one is
+//! declared packed — `must_pack` asks LLVM whether it agrees and packs when it
+//! does not.
 //!
 //! ## An aggregate is never a value
 //!
@@ -51,6 +56,7 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage as LlvmLinkage, Module};
+use inkwell::targets::TargetData;
 use inkwell::types::{BasicType, BasicTypeEnum, StructType};
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue,
@@ -109,6 +115,7 @@ pub fn build<'ctx>(
     context: &'ctx Context,
     unit: &Unit,
     pointer_bytes: u64,
+    data: &TargetData,
 ) -> Result<Module<'ctx>> {
     let module = context.create_module(&unit.name);
     let mut cx = Cx {
@@ -117,6 +124,7 @@ pub fn build<'ctx>(
         module,
         unit,
         pointer_bytes,
+        data,
         types: Vec::new(),
         globals: Vec::new(),
         funcs: Vec::new(),
@@ -143,6 +151,9 @@ struct Cx<'ctx, 'u> {
     module: Module<'ctx>,
     unit: &'u Unit,
     pointer_bytes: u64,
+    /// LLVM's own statement about the target, used to check that a struct type
+    /// built here lays out the way LIR said it does.
+    data: &'u TargetData,
     types: Vec<StructType<'ctx>>,
     globals: Vec<GlobalValue<'ctx>>,
     funcs: Vec<FunctionValue<'ctx>>,
@@ -236,6 +247,9 @@ impl<'ctx> Cx<'ctx, '_> {
         }
         for (i, def) in self.unit.types.iter().enumerate() {
             let mut fields: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+            // Where each member ended up in `fields`, so that LLVM's layout of
+            // the result can be checked against the offsets LIR decided.
+            let mut placed: Vec<(u32, u64)> = Vec::new();
             let mut at = 0u64;
             // Members in offset order, with the gaps written out. A `TypeDef`
             // lists them in declaration order and the two usually agree, but a
@@ -252,7 +266,10 @@ impl<'ctx> Cx<'ctx, '_> {
                 // members around it depend on. Anything that reads the member
                 // fails on its own, with a message about that member.
                 match self.llty(&m.ty) {
-                    Ok(t) => fields.push(t),
+                    Ok(t) => {
+                        placed.push((fields.len() as u32, m.offset));
+                        fields.push(t);
+                    }
                     Err(_) => fields.push(self.pad(self.size_of(&m.ty))),
                 }
                 at = m.offset + self.size_of(&m.ty);
@@ -260,10 +277,35 @@ impl<'ctx> Cx<'ctx, '_> {
             if def.layout.size > at {
                 fields.push(self.pad(def.layout.size - at));
             }
-            // Packed: the padding above is already explicit, and letting LLVM
-            // add its own on top would move every member off its offset.
-            self.types[i].set_body(&fields, true);
+            self.types[i].set_body(&fields, self.must_pack(def, &fields, &placed));
         }
+    }
+
+    /// Whether the struct built out of `fields` has to be declared packed for
+    /// its members to sit where LIR put them.
+    ///
+    /// The padding above is explicit, so an *ordinary* layout — a plain struct,
+    /// a `#repr("C")` one — comes out of LLVM's own rules unchanged, and
+    /// declaring it unpacked is what gives it the alignment its ABI says it has.
+    /// That matters at the C boundary, where a packed type is passed and
+    /// returned differently, and it is why this is not simply `true` (which it
+    /// used to be).
+    ///
+    /// A `#packed` or `#align(N)` struct is the case that does not survive:
+    /// LLVM would align a member this layout deliberately did not. So the
+    /// question is put to LLVM, on a literal struct of the same fields, and the
+    /// answer is believed rather than re-derived — there is still one layout
+    /// engine here, and it is LIR's, with LLVM's asked only whether it agrees.
+    fn must_pack(&self, def: &crate::lir::TypeDef, fields: &[BasicTypeEnum<'ctx>], placed: &[(u32, u64)]) -> bool {
+        let loose = self.context.struct_type(fields, false);
+        if self.data.get_store_size(&loose) != def.layout.size
+            || self.data.get_abi_alignment(&loose) as u64 != def.layout.align
+        {
+            return true;
+        }
+        placed
+            .iter()
+            .any(|&(field, offset)| self.data.offset_of_element(&loose, field) != Some(offset))
     }
 
     /// `n` bytes of nothing.

@@ -173,10 +173,11 @@ impl Codegen for LlvmBackend {
             OptLevel::O3 => OptimizationLevel::Aggressive,
         };
         let machine = machine(&triple.as_str().to_string_lossy(), &cpu, &features, level)?;
-        let pointer_bytes = machine.get_target_data().get_pointer_byte_size(None) as u64;
-        let module = unit::build(&context, unit, pointer_bytes)?;
+        let data = machine.get_target_data();
+        let pointer_bytes = data.get_pointer_byte_size(None) as u64;
+        let module = unit::build(&context, unit, pointer_bytes, &data)?;
         module.set_triple(&triple);
-        module.set_data_layout(&machine.get_target_data().get_data_layout());
+        module.set_data_layout(&data.get_data_layout());
 
         // Verification is not optional. A module LLVM rejects is a bug in the
         // lowering or in this file, and the message it gives naming the
