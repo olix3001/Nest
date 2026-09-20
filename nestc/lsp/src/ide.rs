@@ -136,6 +136,55 @@ pub fn find(s: &Session, file: FileId, offset: usize) -> Option<Found> {
     None
 }
 
+/// What `offset` is on when it is not a name: a tuple's member, which is a
+/// position rather than a definition (`t.0`), so there is no `Found` for it.
+///
+/// The rendering and the span the editor should highlight, or `None` when the
+/// offset is on something else.
+pub fn tuple_member(s: &Session, file: FileId, offset: usize) -> Option<(String, Span)> {
+    let ast = s.asts.get(&file)?;
+    let src = source(s, file)?;
+    let mut nodes: Vec<NodeId> = ast
+        .ids()
+        .filter(|&id| {
+            let n = ast.node(id);
+            n.file == file && n.span.start <= offset && offset <= n.span.end
+        })
+        .collect();
+    nodes.sort_by_key(|&id| {
+        let span = ast.node(id).span;
+        span.end - span.start
+    });
+    for id in nodes {
+        let n = ast.node(id);
+        let NodeKind::TupleIndex { base, index } = &n.kind else {
+            continue;
+        };
+        // The index is what is hovered, not the whole expression: `t.0` with
+        // the cursor on `t` is the local, which `find` answers.
+        let digits = index.to_string();
+        let at = Span::new(n.span.end.saturating_sub(digits.len()), n.span.end);
+        if !contains(at, offset) || src.get(at.start..at.end) != Some(digits.as_str()) {
+            continue;
+        }
+        let of = match ast.meta::<Ty>(*base) {
+            Some(Ty::Tuple(elems)) => elems,
+            _ => continue,
+        };
+        let ty = of.get(*index as usize)?;
+        let whole = Ty::Tuple(of.clone());
+        return Some((
+            format!(
+                "```nest\n{}\n```\n\n```nest\n{digits}: {}\n```",
+                whole.display(&s.defs),
+                ty.display(&s.defs)
+            ),
+            at,
+        ));
+    }
+    None
+}
+
 /// Where `def`'s name is written, in its own file.
 pub fn name_span(s: &Session, def: DefId) -> Option<Span> {
     let d = s.defs.get(def);

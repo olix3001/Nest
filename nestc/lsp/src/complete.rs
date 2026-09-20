@@ -422,8 +422,23 @@ impl Cx<'_> {
     fn methods(&self, ty: &Ty) -> Vec<CompletionItem> {
         let s = self.s;
         let mut found: Vec<(DefId, Option<DefId>)> = Vec::new();
+        let mut items: Vec<CompletionItem> = Vec::new();
         let mut ty = self.concrete(ty.clone());
         loop {
+            // A tuple's members are positions, not definitions: `t.0` is a
+            // `TupleIndex` and there is no `Def` anywhere to offer, so the items
+            // are built here from the type itself.
+            if let Ty::Tuple(elems) = &ty {
+                items.extend(elems.iter().enumerate().map(|(i, e)| CompletionItem {
+                    label: i.to_string(),
+                    kind: Some(CompletionItemKind::FIELD),
+                    detail: Some(format!("{i}: {}", e.display(&s.defs))),
+                    // Digits sort after letters by label, and a tuple's own
+                    // members are what a `.` on one is most likely reaching for.
+                    sort_text: Some(format!("0{i:03}")),
+                    ..Default::default()
+                }));
+            }
             if let Ty::Nominal { def, .. } = &ty {
                 let fields = s.defs.get(*def).ns.members.values().copied();
                 found.extend(
@@ -469,7 +484,7 @@ impl Cx<'_> {
 
         let importable = importable(s, self.file);
         let mut seen = HashSet::new();
-        let mut out = Vec::new();
+        let mut out = items;
         for (m, trait_def) in found {
             if !seen.insert(s.defs.get(m).name.to_string()) {
                 continue;

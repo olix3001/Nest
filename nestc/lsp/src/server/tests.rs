@@ -481,6 +481,34 @@ fn completion_offers_members_and_names_in_scope() {
     );
 }
 
+/// A tuple's members are positions rather than definitions, and both a `.` on
+/// one and a hover over an index have to say so anyway.
+#[test]
+fn completion_and_hover_know_a_tuple_s_members() {
+    let (_dir, file, mut client) = program();
+    let text = PROGRAM.replace(
+        "  return p.sum() + n",
+        "  let t: (i32, bool) := (n, true)\n  let u: i32 := t.\n  return p.sum() + n",
+    );
+    client.change(&file, &text);
+
+    let members = labels(&client.at(Completion::METHOD, &file, position(&text, "t.\n", 0, 2)));
+    for want in ["0", "1"] {
+        assert!(members.contains(&want.to_string()), "{want} in {members:?}");
+    }
+
+    // And the index hovers as the member it is, with the tuple it came out of.
+    let done = text.replace("let u: i32 := t.\n", "let u: i32 := t.0\n");
+    client.change(&file, &done);
+    let at = hover_text(&client.at(
+        HoverRequest::METHOD,
+        &file,
+        position(&done, "t.0", 0, 2),
+    ));
+    assert!(at.contains("0: i32"), "{at}");
+    assert!(at.contains("(i32, bool)"), "{at}");
+}
+
 /// A file a unit read, changed on disk while not open, is analyzed again when
 /// the client says so.
 #[test]

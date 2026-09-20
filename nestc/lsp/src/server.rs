@@ -482,13 +482,22 @@ impl Server {
         let path = uri_to_path(uri)?;
         let (_, o, file) = self.unit_for(&path)?;
         let src = ide::source(&o.session, file)?;
-        let found = ide::find(&o.session, file, analysis::offset(&src, position))?;
+        let offset = analysis::offset(&src, position);
+        // A tuple's member is a position and not a definition, so it is asked
+        // for separately — `find` has nothing to return for one.
+        let (value, span) = match ide::find(&o.session, file, offset) {
+            Some(found) => (
+                ide::hover(&o.session, file, found),
+                found.span,
+            ),
+            None => ide::tuple_member(&o.session, file, offset)?,
+        };
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: ide::hover(&o.session, file, found),
+                value,
             }),
-            range: Some(analysis::range(&src, found.span.start, found.span.end)),
+            range: Some(analysis::range(&src, span.start, span.end)),
         })
     }
 
