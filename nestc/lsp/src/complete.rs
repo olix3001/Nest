@@ -33,7 +33,7 @@ use lsp_types::{
 };
 use nestc::common::source::FileId;
 use nestc::common::span::Span;
-use nestc::parser::ast::{Ast, NodeId, NodeKind};
+use nestc::parser::ast::{Ast, CompositeBody, NodeId, NodeKind};
 use nestc::sema::def::{Def, DefId, DefKind, Visibility};
 use nestc::sema::session::Session;
 use nestc::sema::ty::Ty;
@@ -140,7 +140,7 @@ pub fn from_analysis(
         visible: visible(s, file),
     };
     let Some(end) = base else {
-        return Some(cx.scope());
+        return Some(cx.literal_fields().unwrap_or_else(|| cx.scope()));
     };
     // The expression reads the same, and so does the byte before it, so that
     // `p` is not taken for the end of `sop`.
@@ -318,6 +318,11 @@ impl Cx<'_> {
             }
         }
 
+        // Inside a `Point { ... }`, where another field's name goes.
+        if let Some(items) = self.literal_fields() {
+            return items;
+        }
+
         let end = self.offset + self.placeholder.len();
         let mut nodes: Vec<NodeId> = ast
             .ids()
@@ -354,6 +359,85 @@ impl Cx<'_> {
             }
         }
         self.scope()
+    }
+
+    /// The fields a composite literal has not written yet, when the cursor is
+    /// where another field's *name* goes.
+    ///
+    /// Where that is comes from the text — after the `{` or after a `,`, past
+    /// whatever word is typed so far — because it is the same question in both
+    /// entries to this file and one of them has no placeholder to look at. What
+    /// the literal *is* comes from the tree: a `{` is also a block, and only a
+    /// composite literal has fields.
+    fn literal_fields(&self) -> Option<Vec<CompletionItem>> {
+        let before = self.text.get(..self.cursor)?;
+        let word = before.trim_end_matches(|c: char| c == '_' || c.is_alphanumeric());
+        if !matches!(word.trim_end().chars().next_back(), Some('{' | ',')) {
+            return None;
+        }
+
+        let ast = self.ast;
+        // The innermost literal the cursor is in, in the analyzed text's own
+        // offsets.
+        let mut lits: Vec<NodeId> = ast
+            .ids()
+            .filter(|&id| {
+                let n = ast.node(id);
+                n.file == self.file
+                    && matches!(n.kind, NodeKind::CompositeLit { .. })
+                    && n.span.start <= self.offset
+                    && self.offset <= n.span.end
+            })
+            .collect();
+        lits.sort_by_key(|&id| {
+            let span = ast.node(id).span;
+            span.end - span.start
+        });
+        let lit = *lits.first()?;
+        let NodeKind::CompositeLit { ty, body } = ast.node(lit).kind.clone() else {
+            return None;
+        };
+
+        // The literal's own type is asked for first and its written type
+        // second: a literal with a half-typed field in it may not have inferred
+        // at all, and `Point { ... }` still says `Point`.
+        let def = match ast.meta::<Ty>(lit) {
+            Some(Ty::Nominal { def, .. }) => def,
+            _ => match ty.and_then(|ty| ast.meta::<Resolution>(ty)) {
+                Some(Resolution::Def(d)) => target(self.s, d),
+                _ => return None,
+            },
+        };
+        // A `[_]u8 { 1, 2 }` is a composite literal too, and its entries are
+        // values rather than names.
+        let fields: Vec<DefId> = members(self.s, def)
+            .into_iter()
+            .filter(|&m| self.s.defs.get(m).kind == DefKind::Field)
+            .collect();
+        if fields.is_empty() {
+            return None;
+        }
+        // What the literal already names is not offered again.
+        let written: HashSet<String> = entries(&body)
+            .iter()
+            .filter_map(|&e| match &ast.node(e).kind {
+                NodeKind::FieldInit { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect();
+        Some(
+            fields
+                .into_iter()
+                .filter(|&f| !written.contains(self.s.defs.get(f).name.as_str()))
+                .map(|f| {
+                    let mut it = item(self.s, f);
+                    // A field in a literal is written `name: value`, so the `:`
+                    // comes with the name and the cursor lands after it.
+                    it.insert_text = Some(format!("{}: ", self.s.defs.get(f).name));
+                    it
+                })
+                .collect(),
+        )
     }
 
     /// What a `.` after `base` reaches: a namespace's or a type's members when it
@@ -781,6 +865,17 @@ impl Cx<'_> {
 
 /// Whether a namespace's member `def` is reachable from another file: what it
 /// names is public.
+/// The nodes a composite literal's body holds.
+fn entries(body: &CompositeBody) -> Vec<NodeId> {
+    match body {
+        CompositeBody::Named { fields, spread } => {
+            fields.iter().copied().chain(*spread).collect()
+        }
+        CompositeBody::Positional(entries) => entries.clone(),
+        CompositeBody::Repeat { value, count } => vec![*value, *count],
+    }
+}
+
 fn public(s: &Session, def: DefId) -> bool {
     s.defs.get(target(s, def)).vis == Visibility::Public
 }

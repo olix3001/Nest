@@ -481,6 +481,39 @@ fn completion_offers_members_and_names_in_scope() {
     );
 }
 
+/// Inside a struct literal, the struct's own fields — the ones it has not
+/// written yet — rather than the names in scope.
+#[test]
+fn completion_offers_a_struct_literal_s_fields() {
+    let (_dir, file, mut client) = program();
+    let text = PROGRAM.replace(
+        "  return p.sum() + n",
+        "  let a: Point := Point { }\n  let b: Point := Point { x: 1,  }\n  return p.sum() + n",
+    );
+    client.change(&file, &text);
+
+    let empty = labels(&client.at(
+        Completion::METHOD,
+        &file,
+        position(&text, "Point { }", 0, 8),
+    ));
+    for want in ["x", "y"] {
+        assert!(empty.contains(&want.to_string()), "{want} in {empty:?}");
+    }
+    assert!(
+        !empty.contains(&"add".to_string()),
+        "a name in scope is not a field: {empty:?}"
+    );
+
+    // The one already written is not offered a second time.
+    let rest = labels(&client.at(
+        Completion::METHOD,
+        &file,
+        position(&text, "Point { x: 1,  }", 0, 14),
+    ));
+    assert_eq!(rest, vec!["y".to_string()], "{rest:?}");
+}
+
 /// A tuple's members are positions rather than definitions, and both a `.` on
 /// one and a hover over an index have to say so anyway.
 #[test]
