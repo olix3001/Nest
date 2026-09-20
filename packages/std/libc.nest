@@ -110,9 +110,10 @@ extern("c") {
 // ===< Numbers as text >===
 
 extern("c") {
-  // Shortest round-trip float text is Ryū's job and `core/fmt` does not do it
-  // yet (see the note there), so `std/serialize` asks C: `snprintf` at rising
-  // precision until `strtod` reads the same bits back.
+  // `std/serialize` finds a float's text the way `core/fmt` does — `snprintf`
+  // at rising precision until `strtod` reads the same bits back — and asks C
+  // itself rather than through the runtime, because it needs the reading half
+  // too and because a format's float must always look like one.
   @public snprintf :: #c_vararg func (buf: c.ptr.<c.uchar>, n: c.size_t, fmt: c.cstr) -> c.int
   @public strtod   :: func (s: c.cstr, end: c.ptr.<c.cstr>) -> c.double
 }

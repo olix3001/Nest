@@ -2207,3 +2207,100 @@ main :: func () -> i32 {
         "{ran:?}"
     );
 }
+
+/// A float writes the **shortest** text that reads back as the same bits, which
+/// is what makes `0.1` come out as it was written rather than as the seventeen
+/// digits the double actually holds.
+#[test]
+fn a_float_writes_the_shortest_text_that_round_trips() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+
+main :: func () -> i32 {
+    let a: f64 := 1.5
+    let b: f64 := 1.0
+    let c: f64 := 0.1
+    let d: f64 := 1.0 / 3.0
+    io.println(f"{a} {b} {c} {d}")
+    // A literal with nothing constraining it is an `f64` (§3.1).
+    io.println(f"{0.0} {-2.25} {100.0}")
+    let e: f32 := 0.1
+    io.println(f"{e} {e:?}")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "1.5 1 0.1 0.3333333333333333\n0 -2.25 100\n0.1 0.1\n",
+        "{ran:?}"
+    );
+}
+
+/// The magnitudes at either end: written out where the digits are worth reading
+/// and in exponent form where the positional text would be almost all zeroes,
+/// and the three values that are not numbers.
+#[test]
+fn a_float_far_from_one_is_written_with_an_exponent() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+
+main :: func () -> i32 {
+    let small: f64 := 0.00001
+    let smaller: f64 := 0.0000001
+    let big: f64 := 100000000000000000.0
+    io.println(f"{small} {smaller} {big}")
+    let zero: f64 := 0.0
+    let nan: f64 := zero / zero
+    let inf: f64 := 1.0 / zero
+    io.println(f"{nan} {inf} {0.0 - inf}")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "0.00001 1e-7 1e17\nNaN inf -inf\n",
+        "{ran:?}"
+    );
+}
+
+/// A precision is digits after the point on a number and a maximum length on a
+/// text — and it counts characters there, as a width does.
+#[test]
+fn a_precision_writes_digits_or_shortens_a_text() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+
+main :: func () -> i32 {
+    let pi: f64 := 3.14159
+    let one: f64 := 1.0
+    io.println(f"{pi:.2} {one:.3} {pi:.0}")
+    let third: f32 := 1.0 / 3.0
+    io.println(f"{third:.4}")
+    io.println(f"[{"hello":.3}] [{"hi":.5}] [{"äöü":.2}]")
+    // A precision and a width are answered by different halves of the
+    // desugaring, so both at once is both.
+    io.println(f"[{pi:>8.2}] [{pi:08.2}] [{pi:+.1}]")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "3.14 1.000 3\n0.3333\n[hel] [hi] [äö]\n[    3.14] [00003.14] [+3.1]\n",
+        "{ran:?}"
+    );
+}

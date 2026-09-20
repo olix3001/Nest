@@ -559,7 +559,8 @@ about an integer's bits, nothing that is not an integer has one, and a trait for
 it would have been an extension point for something that does not extend. The
 four are ordinary methods on the integer families, which `core` writes once for
 every width, and the hole calls the one its type character names — so `{s:x}` on
-text is "no member `lower_hex`", reported where it is written. `usize` and
+text is an error where it is written, naming the **specifier** rather than the
+method the desugaring happened to produce. `usize` and
 `isize` inherit them, as a `distinct` type inherits every inherent method.
 
 A radix writes the **bits**: `{n:x}` of `-1` is every bit set, not a minus sign
@@ -570,8 +571,26 @@ pads after it. `#` on a hole with no radix is an error: Rust's `{x:#?}` is a
 second `Debug` rather than a flag on this one, and there is no second `Debug`
 here.
 
-`.precision` is part of the grammar and is **not implemented yet**; a hole that
-writes one is an error saying so.
+**A precision is not a trait either**, and for the same reason: `{x:.3}` asks a
+number for three digits after the point and a text for its first three
+characters, and a type that is neither has nothing to answer. It is a method on
+the float types and on `str`, chosen in place of `display` rather than wrapped
+around it — a width pads what was written, and a precision changes what gets
+written, so it cannot be done afterwards. `{n:.3}` on an **integer** is an error
+where it is written, which is a deliberate difference from Rust, where a
+precision on an integer is ignored. A precision cannot be combined with a type
+character: a radix has no fraction, and what `Debug` writes is the value's own
+shape.
+
+**A float's text is C's.** `core` writes every other value itself and does not
+write this one: the shortest decimal that reads back as the same bits is Ryū or
+Grisu, and the runtime asks `snprintf` instead, at rising precision until
+`strtod` agrees (`runtime/nest_runtime.c`). What comes out is the shortest text
+that round-trips — `1` for `1.0`, `0.1` for the double nearest a tenth — written
+positionally between `1e-5` and `1e17` and in exponent form outside them, where
+the positional form would be almost all zeroes. The three values that are not
+numbers are `NaN`, `inf` and `-inf`. `f16`, `f80` and `f128` have no `Display`:
+C has no portable spelling of them to ask through.
 
 ## 6.12 Ranges
 

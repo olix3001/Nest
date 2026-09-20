@@ -35,7 +35,7 @@ use crate::parser::ast::{
     AssignOp, Ast, BinOp, CompositeBody, Lit, NodeId, NodeKind, TryKind, UnOp, VariantArgs,
     VariantPatArgs,
 };
-use crate::parser::fmt::{FormatSpec, SpecKind};
+use crate::parser::fmt::{FormatCall, FormatSpec, SpecKind};
 
 use super::def::{DefId, DefKind, DefTable, LangItems, Visibility};
 use super::{DefMeta, Resolution, SpreadBase};
@@ -399,6 +399,7 @@ impl Desugar<'_> {
     /// ```text
     /// {x}      →  x.display(&mut __fmt1)
     /// {x:?}    →  x.debug(&mut __fmt1)
+    /// {x:.2}   →  x.with_precision(&mut __fmt1, 2)
     /// {x:>8}   →  __mark2 :: format.mark(&mut __fmt1)
     ///             x.display(&mut __fmt1)
     ///             format.pad(&mut __fmt1, __mark2, 8, ' ', 2, 0, false)
@@ -433,10 +434,36 @@ impl Desugar<'_> {
             self.report(piece, "`{...:?}` requires the `#lang(\"debug\")` item");
             return;
         }
-        if spec.precision.is_some() {
-            self.report(piece, "a precision format specifier is not implemented yet");
-            return;
-        }
+        // A precision changes what the value writes rather than what is done to
+        // it afterwards, so it is a **different call** and not another wrapper:
+        // `{x:.3}` asks the value for three digits. It is the one specifier
+        // that cannot be combined with a type character — a radix has no
+        // fraction, and what `Debug` writes is the value's own shape.
+        let method = match spec.precision {
+            None => method,
+            // `core` hands the number to C as an `i32`, where `-1` is the "none
+            // was written" the desugaring uses for a hole with no precision. A
+            // number that does not fit would wrap into one that does, so it is
+            // refused here rather than silently becoming no precision at all.
+            Some(digits) if digits > i32::MAX as u32 => {
+                self.report(
+                    piece,
+                    format!("a precision of {digits} digits is more than one value can be written to"),
+                );
+                return;
+            }
+            Some(_) if spec.kind == SpecKind::Display => "with_precision",
+            Some(_) => {
+                self.report(
+                    piece,
+                    format!(
+                        "a precision writes digits after the point, and `{{...:{}}}` has none",
+                        spec.kind.letter()
+                    ),
+                );
+                return;
+            }
+        };
         // `#` is the radix prefix and nothing else: Rust's `{x:#?}`, which
         // pretty-prints, is a second `Debug` and not a flag on this one.
         let prefix = match (spec.alternate, spec.kind.alternate_prefix()) {
@@ -486,7 +513,23 @@ impl Desugar<'_> {
         }
 
         let out = self.buf_ref(at, buf, buf_local);
-        stmts.push(self.method_call(at, piece, method, vec![out]));
+        let mut args = vec![out];
+        if let Some(digits) = spec.precision {
+            args.push(self.int_lit(at, digits));
+        }
+        let call = self.method_call(at, piece, method, args);
+        // What the call came from, so that a receiver without the method is told
+        // about the specifier rather than about the name it produced.
+        if let NodeKind::Call { callee, .. } = self.ast.node(call).kind {
+            self.ast.set_meta(
+                callee,
+                FormatCall {
+                    kind: spec.kind,
+                    precision: spec.precision.is_some(),
+                },
+            );
+        }
+        stmts.push(call);
 
         let Some((mark, mark_local)) = mark else {
             return;

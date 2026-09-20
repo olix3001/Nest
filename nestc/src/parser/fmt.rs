@@ -69,6 +69,20 @@ pub enum SpecKind {
 }
 
 impl SpecKind {
+    /// The character that names it, for a message that quotes the specifier
+    /// back at whoever wrote it. Empty for the one that is written by saying
+    /// nothing.
+    pub fn letter(self) -> &'static str {
+        match self {
+            SpecKind::Display => "",
+            SpecKind::Debug => "?",
+            SpecKind::LowerHex => "x",
+            SpecKind::UpperHex => "X",
+            SpecKind::Binary => "b",
+            SpecKind::Octal => "o",
+        }
+    }
+
     /// The prefix `#` writes in front of the digits, where the kind has one.
     pub fn alternate_prefix(self) -> Option<&'static str> {
         match self {
@@ -145,6 +159,42 @@ impl FormatSpec {
             '0'
         } else {
             self.fill
+        }
+    }
+}
+
+/// A call a format specifier wrote, left on the callee node as metadata.
+///
+/// A specifier chooses a method by name — `display`, `lower_hex`,
+/// `with_precision` — and a receiver that has none of it would otherwise be
+/// told about the method, which is an implementation detail of the desugaring
+/// rather than anything the program wrote. This is what lets the message name
+/// the **specifier** instead: `{s:x}` is "a `x` specifier writes an integer",
+/// not "no member `lower_hex`".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatCall {
+    pub kind: SpecKind,
+    /// Whether a `.precision` is what chose the method.
+    pub precision: bool,
+}
+
+impl FormatCall {
+    /// What to say when the receiver has no such method, `ty` being the
+    /// receiver's type as it is spelled.
+    pub fn message(self, ty: &str) -> String {
+        if self.precision {
+            return format!(
+                "a precision format specifier writes a float or shortens a `str`, and `{ty}` is \
+                 neither"
+            );
+        }
+        match self.kind {
+            SpecKind::Display => format!("`{ty}` has no `Display` impl, so `{{...}}` cannot write it"),
+            SpecKind::Debug => format!("`{ty}` has no `Debug` impl, so `{{...:?}}` cannot write it"),
+            k => format!(
+                "`{{...:{}}}` writes an integer in another base, and `{ty}` is not one",
+                k.letter()
+            ),
         }
     }
 }
@@ -340,5 +390,34 @@ mod tests {
     #[test]
     fn unwritten_alignment_is_left() {
         assert_eq!(parse("8").expect("width").alignment(), Align::Left);
+    }
+
+    /// A receiver with no such method is told about the **specifier**, because
+    /// the method name is the desugaring's and not the program's.
+    #[test]
+    fn a_missing_method_is_reported_as_the_specifier() {
+        let radix = FormatCall {
+            kind: SpecKind::LowerHex,
+            precision: false,
+        };
+        let msg = radix.message("str");
+        assert!(msg.contains("{...:x}"), "{msg}");
+        assert!(!msg.contains("lower_hex"), "{msg}");
+
+        let precise = FormatCall {
+            kind: SpecKind::Display,
+            precision: true,
+        };
+        let msg = precise.message("i32");
+        assert!(msg.contains("precision"), "{msg}");
+        assert!(!msg.contains("with_precision"), "{msg}");
+
+        // The two traits are named as traits, which is what a program would
+        // write to fix either.
+        let plain = FormatCall {
+            kind: SpecKind::Display,
+            precision: false,
+        };
+        assert!(plain.message("Foo").contains("`Display`"));
     }
 }

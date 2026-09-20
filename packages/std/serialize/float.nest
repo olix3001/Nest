@@ -1,9 +1,14 @@
 // Floating-point numbers as text, for the formats.
 //
-// **Written by C.** `core/fmt` has no float formatting yet, and correct
-// shortest output is Ryū or Grisu — a few hundred lines and a table. Until that
-// exists here, `snprintf` at rising precision finds the shortest text `strtod`
-// reads back to the same bits, which is the same answer by a slower road.
+// **Written by C**, as `core/fmt`'s floats are: correct shortest output is Ryū
+// or Grisu — a few hundred lines and a table — and `snprintf` at rising
+// precision finds the same text by a slower road, the one `strtod` reads back
+// to the same bits.
+//
+// It is a second copy of that search rather than a call into `core/fmt`, for
+// two reasons: a format's float must always *look* like one (`1.0`, never `1`),
+// which is the opposite of what an interpolated `{x}` wants, and the reading
+// half below has no counterpart there at all.
 //
 // Both functions assume the C locale, which is the one a program starts in:
 // nothing in `std` calls `setlocale`.

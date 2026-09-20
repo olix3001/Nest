@@ -516,7 +516,9 @@ into two formats over one pair of traits, the way serde has them:
   every base, floats, arrays, inline tables and `[[arrays of tables]]`; no
   multi-line strings or dates. TOML has no null, so a `.none` is left out.
 - **Floats go through C** — `snprintf` at rising precision until `strtod` reads
-  the same bits back — until `core/fmt` has shortest float formatting.
+  the same bits back. `core/fmt` reaches the same answer through the runtime
+  now; this stays its own copy because a format's float must always *look* like
+  one (`1.0`, never `1`), and because the reading half is here too.
 
 What it needed from the compiler: every file its own namespace (two `Error`s in
 one package were one type), and two monomorphization fixes — a call through a

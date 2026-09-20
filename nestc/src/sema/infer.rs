@@ -3313,7 +3313,13 @@ impl Inferer<'_> {
                         for a in args {
                             self.infer_expr(*a);
                         }
-                        let msg = format!("no method `{name}` on `{}`", r.display(self.defs));
+                        // A call a format specifier wrote names a method the
+                        // program never typed, so the message names the
+                        // specifier instead (`parser::fmt::FormatCall`).
+                        let msg = match self.ast.meta::<crate::parser::fmt::FormatCall>(callee) {
+                            Some(f) => f.message(&r.display(self.defs)),
+                            None => format!("no method `{name}` on `{}`", r.display(self.defs)),
+                        };
                         // A literal that reached this point had nothing else to
                         // constrain it, so the type in the message is the
                         // default rather than anything the source wrote. Saying

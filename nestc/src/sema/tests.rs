@@ -9460,3 +9460,83 @@ fn a_private_import_is_not_a_member_to_other_files() {
         "a re-exporting binding is public"
     );
 }
+
+/// A specifier the receiver cannot answer is reported as the **specifier**, not
+/// as the method the desugaring wrote: `lower_hex` and `with_precision` are
+/// names no program typed, and naming them describes the compiler rather than
+/// the mistake.
+#[test]
+fn a_specifier_a_value_cannot_answer_names_the_specifier() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "Foo :: struct { x: i32 }\n\
+             main :: func () -> i32 {\n\
+                 let s: str := \"hi\"\n\
+                 let n: i32 := 3\n\
+                 let f: Foo := Foo { x: 1 }\n\
+                 let a: str := f\"{s:x}\"\n\
+                 let b: str := f\"{n:.3}\"\n\
+                 let c: str := f\"{f}\"\n\
+                 return 0\n\
+             }\n",
+        )],
+        "main",
+    );
+    let messages: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("{...:x}")
+            && m.contains("another base")
+            && !m.contains("lower_hex")),
+        "{messages:#?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("precision") && !m.contains("with_precision")),
+        "{messages:#?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`Display`") && m.contains("Foo")),
+        "{messages:#?}"
+    );
+}
+
+/// A precision and a type character ask for two different things of one value,
+/// and the one that cannot be both is refused where it is written — a radix has
+/// no fraction, and what `Debug` writes is the value's own shape.
+#[test]
+fn a_precision_and_a_type_character_are_refused_together() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "main :: func () -> i32 {\n\
+                 let n: i32 := 3\n\
+                 let a: str := f\"{n:.3x}\"\n\
+                 let b: str := f\"{n:.3?}\"\n\
+                 return 0\n\
+             }\n",
+        )],
+        "main",
+    );
+    let messages: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 2, "{messages:#?}");
+    assert!(
+        messages.iter().any(|m| m.contains("`{...:x}` has none")),
+        "{messages:#?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("`{...:?}` has none")),
+        "{messages:#?}"
+    );
+}

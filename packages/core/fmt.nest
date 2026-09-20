@@ -34,16 +34,10 @@
 //
 // ### What is not here
 //
-// **Floats.** Printing one correctly is Ryū or Grisu, which is a few hundred
-// lines and a table, and it belongs beside the rest of the float work rather
-// than in the file that defines what interpolation *is*. Until it exists,
-// `f"{x}"` on an `f64` is "no impl of `Display`" at the call, which is a
-// readable thing to be told.
-//
-// **Precision** — `{x:.2}`. The syntax has a place for it (§1.5) and nothing
-// answers it yet; width and alignment do work, and are at the bottom of this
-// file rather than in any impl, because padding is done to the bytes a value
-// wrote rather than by the value itself.
+// **`f16`, `f80` and `f128`.** A float's text comes from C (see below), and C
+// has no portable spelling of those three to ask through: `_Float16` and
+// `__float128` are extensions, and `long double` is a different width on every
+// platform. `f32` and `f64` are `float` and `double` everywhere.
 //
 // **An owned string type.** `Buf` is the formatter's scratch space, not a
 // `String`: it grows, it is written into once, and `end` hands back a `str` view
@@ -271,6 +265,139 @@ impl Display for char {
   }
 }
 
+// ===< Floats >===
+
+// A float's text is **C's**, and this is the only value in this file whose is.
+//
+// The shortest decimal that reads back as the same bits is Ryū or Grisu — a
+// table and a few hundred lines — and libc has already answered the question,
+// so the runtime asks it (`runtime/nest_runtime.c`) and the loops above stay
+// the only arithmetic here. What comes back is the text `strtod` reads as the
+// value that went in: `1` for `1.0`, `0.1` for the double nearest a tenth, and
+// `NaN`, `inf` and `-inf` for the three values that are not numbers.
+//
+// The call is in C rather than here because `snprintf` is **variadic**, and on
+// arm64 a variadic argument does not arrive where a fixed one does — a Nest
+// declaration of it as an ordinary function reads whatever the stack held.
+//
+// `precision` is the `.3` of a format specifier, and `-1` is none: see
+// `with_precision` below.
+nest_fmt_f64 :: extern("c") func (buf: *mut u8, cap: usize, value: f64, precision: i32) -> usize
+nest_fmt_f32 :: extern("c") func (buf: *mut u8, cap: usize, value: f32, precision: i32) -> usize
+
+// How much room to offer C before it has said how much it wants.
+//
+// Enough for every float there is when no precision was asked for, so the
+// second call below happens only for `{x:.300}` and its like. It is not a
+// limit: what does not fit is reserved and asked for again.
+FLOAT_ROOM: usize :: 64
+
+// None, spelled as the runtime spells it. A `usize` precision cannot say
+// "unwritten", and the specifier that has one is a different call anyway.
+NO_PRECISION: i32 :: 0 - 1
+
+impl Display for f64 {
+    display :: func (self: Self, out: *mut Buf) -> void {
+        write_f64(self, out, NO_PRECISION)
+    }
+}
+
+impl Display for f32 {
+    display :: func (self: Self, out: *mut Buf) -> void {
+        write_f32(self, out, NO_PRECISION)
+    }
+}
+
+// A number is the same characters either way, as it is for the integers above.
+impl Debug for f64 {
+    debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
+}
+
+impl Debug for f32 {
+    debug :: func (self: *Self, out: *mut Buf) -> void { self.*.display(out) }
+}
+
+// The runtime writes into the buffer's own room rather than into scratch space
+// of its own, so a float costs one `reserve` and no copy.
+//
+// It answers with the length of the **whole** text whether or not it fitted,
+// which is what makes the second call the only one ever needed: the first is
+// told `FLOAT_ROOM` and comes back with the truth. The `+ 1` is the NUL C
+// writes past the text and Nest does not count.
+write_f64 :: func (value: f64, out: *mut Buf, precision: i32) -> void {
+    out.reserve(FLOAT_ROOM)
+    let mut room: usize := out.data.len() - out.len
+    let mut n: usize := nest_fmt_f64(&mut out.data[out.len], room, value, precision)
+    if n >= room {
+        out.reserve(n + 1)
+        room = out.data.len() - out.len
+        n = nest_fmt_f64(&mut out.data[out.len], room, value, precision)
+    }
+    out.len = out.len + n
+}
+
+write_f32 :: func (value: f32, out: *mut Buf, precision: i32) -> void {
+    out.reserve(FLOAT_ROOM)
+    let mut room: usize := out.data.len() - out.len
+    let mut n: usize := nest_fmt_f32(&mut out.data[out.len], room, value, precision)
+    if n >= room {
+        out.reserve(n + 1)
+        room = out.data.len() - out.len
+        n = nest_fmt_f32(&mut out.data[out.len], room, value, precision)
+    }
+    out.len = out.len + n
+}
+
+// ===< Precision >===
+
+// `{x:.3}` — how many digits of a number, or how much of a text.
+//
+// **No trait**, for the reason the radices below have none: a precision is a
+// fact about a number's fraction and about a string's length, and a type that
+// is neither has no answer to give. These are private methods, called by name
+// from the desugaring exactly as `display` is, and `{n:.3}` on an integer is an
+// error where it is written — which is a deliberate difference from Rust, where
+// a precision on an integer is silently ignored.
+//
+// It is also the one specifier that cannot be done to the bytes afterwards: a
+// width pads whatever was written, and this changes what gets written, so the
+// value's own call is where it has to go.
+
+impl f64 {
+    with_precision :: func (self: Self, out: *mut Buf, digits: usize) -> void {
+        write_f64(self, out, cast.<i32>(digits))
+    }
+}
+
+impl f32 {
+    with_precision :: func (self: Self, out: *mut Buf, digits: usize) -> void {
+        write_f32(self, out, cast.<i32>(digits))
+    }
+}
+
+// On text a precision is a **maximum length**, as Rust's is: `{s:.3}` of
+// `"hello"` is `"hel"`, and of `"hi"` is `"hi"`.
+//
+// It counts characters rather than bytes, which is what a width does at the
+// bottom of this file and for the same reason — and it is why this walks the
+// bytes rather than taking a sub-slice: cutting UTF-8 at a byte would leave
+// half a character behind.
+impl str {
+    with_precision :: func (self: Self, out: *mut Buf, digits: usize) -> void {
+        let bytes: []u8 := self.as_bytes()
+        let mut i: usize := 0
+        let mut seen: usize := 0
+        while i < bytes.len() {
+            if (bytes[i] & 192) != 128 {
+                if seen == digits { break }
+                seen = seen + 1
+            }
+            i = i + 1
+        }
+        out.bytes(bytes[0..<i])
+    }
+}
+
 // ===< Radices >===
 
 // `{n:x}`, `{n:X}`, `{n:b}`, `{n:o}` — the same value, written in another base.
@@ -457,10 +584,10 @@ member_debug :: #intrinsic("member_dyn") func <T> (v: *T, m: Member) -> *dyn Deb
 // nothing here knows that a `u8` is a number, and a type that wants a different
 // shape writes `impl Debug for MyType` and nothing else changes.
 //
-// What is left over — a float, a function, a pointer, a `dyn` — is written as
-// the name of its type. That is honest rather than useful, and the one that
-// most deserves better is the float: printing one correctly is Ryū, which
-// `Display` does not have either (see the top of this file).
+// What is left over — a function, a pointer, a `dyn`, a float of a width C has
+// no name for — is written as the name of its type. That is honest rather than
+// useful, and it is all there is to say about a value whose description carries
+// no members.
 impl <T> Debug for T {
     debug :: func (self: *Self, out: *mut Buf) -> void {
         let t: TypeInfo := type_info.<T>()
