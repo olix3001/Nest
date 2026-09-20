@@ -24,14 +24,14 @@ mem :: import <core/mem>
   table(*mut Table),
 }
 
-@public Array :: struct {
+@public(fields: package) Array :: struct {
   items: Vec.<Value>,
   // Built by `[[name]]` headers, which may add to it; an array written as
   // `[ ... ]` is complete where it is written.
   of_tables: bool,
 }
 
-@public Table :: struct {
+@public(fields: package) Table :: struct {
   keys: Vec.<String>,
   values: Vec.<Value>,
   // Opened by a `[name]` header, which may only happen once.

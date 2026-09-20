@@ -26,7 +26,7 @@ toolchain :: import "toolchain.nest"
 { Shipped } :: import "toolchain.nest"
 
 // A package, where it is, and what its manifest says.
-@public Member :: struct {
+@public(fields: package) Member :: struct {
   name: str,
   // Absolute and normalized, which is what makes two of them comparable.
   dir: str,
@@ -43,7 +43,7 @@ impl Member {
   }
 }
 
-@public Workspace :: struct {
+@public(fields: package) Workspace :: struct {
   root: Member,
   // Every other package in the graph, the ones that ship with the compiler
   // included, each after every package it depends on.

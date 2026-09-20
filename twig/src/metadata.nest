@@ -14,7 +14,7 @@ build :: import "build.nest"
 { Profile, Target, Command } :: import "build.nest"
 { Workspace, Member } :: import "workspace.nest"
 
-@public Metadata :: struct {
+@public(fields: package) Metadata :: struct {
   // The root package's directory.
   root: str,
   profile: str,
@@ -22,14 +22,14 @@ build :: import "build.nest"
   packages: []Package,
 }
 
-@public Package :: struct {
+@public(fields: package) Package :: struct {
   name: str,
   dir: str,
   // A dependency's library; the root's library, then its binaries.
   targets: []TargetInfo,
 }
 
-@public TargetInfo :: struct {
+@public(fields: package) TargetInfo :: struct {
   name: str,
   entry: str,
   lib: bool,

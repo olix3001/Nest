@@ -101,7 +101,7 @@ impl Eq for TypeId {
 // `offset` is what makes a run-time field read possible at all — `member_ptr`
 // is `base + offset` — and `id` is what makes it *safe*, by giving the read
 // something to compare against.
-@public Member :: #lang("reflect_member") struct {
+@public(all) Member :: #lang("reflect_member") struct {
   name: str,
   offset: usize,
   size: usize,
@@ -128,7 +128,7 @@ impl Eq for TypeId {
 // and explicit discriminants (§3) are what separates them: `io = 5` is the
 // third variant of its enum and stores 5. A negative discriminant arrives here
 // as its two's-complement pattern, which is what `variant_tag` reads back.
-@public Variant :: #lang("reflect_variant") struct {
+@public(all) Variant :: #lang("reflect_variant") struct {
     name: str,
     tag: u64,
     payload: []Member,
@@ -143,7 +143,7 @@ impl Eq for TypeId {
 //
 // Constant-folded: `T` is concrete after monomorphization, so this is a value
 // in read-only data and the call is a copy of it.
-@public TypeInfo :: #lang("reflect_info") struct {
+@public(all) TypeInfo :: #lang("reflect_info") struct {
   name: str,
   size: usize,
   align: usize,

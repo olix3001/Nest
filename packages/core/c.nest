@@ -108,7 +108,7 @@
 //
 // One `usize` is also its whole representation, so it goes over the C ABI as a
 // pointer does on every target here.
-@public ptr :: struct <T> { addr: usize }
+@public(all) ptr :: struct <T> { addr: usize }
 
 // The null pointer. A function rather than a constant because `T` has to come
 // from somewhere: `c.null.<u8>()`, or from the context it is passed into.

@@ -43,7 +43,7 @@ string :: import <std/string>
 { String } :: import <std/string>
 
 // The settings one build is made with.
-@public Profile :: struct {
+@public(fields: package) Profile :: struct {
   name: str,
   overflow: str,
   codegen_units: usize,
@@ -92,7 +92,7 @@ string :: import <std/string>
 }
 
 // What one target compiles from, and to.
-@public Target :: struct {
+@public(fields: package) Target :: struct {
   // What the output is called: the binary's name, or the package's for a
   // library.
   name: str,
@@ -214,7 +214,7 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
   return path.join(path.join(dir, "deps"), f"{name}.nlib")
 }
 
-@public Command :: struct {
+@public(fields: package) Command :: struct {
   program: str,
   args: []str,
 }

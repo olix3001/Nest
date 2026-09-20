@@ -36,7 +36,7 @@ libc :: import "libc.nest"
 // `n` is the operation's own answer — bytes transferred, a descriptor, a
 // process id — and is meaningless when `err` is set. `err` is zero on success,
 // which is the one value `errno` never takes.
-@public Res :: struct {
+@public(fields: package) Res :: struct {
   n: isize,
   err: c.int,
 }

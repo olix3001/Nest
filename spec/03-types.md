@@ -329,9 +329,13 @@ Pair   :: struct(int, int)           // tuple struct; fields are .0 and .1
 Marker :: struct                     // unit struct; a single value `Marker`
 ```
 
-Fields are private to the struct's namespace unless the struct is `@public(all)`
-or the field is individually `@public`. Inside a `@public(all)` struct, an
-individual field may be re-hidden with `@private` (see
+Fields are private unless the struct says otherwise — `@public(all)` for all of
+them, `@public(fields: package)` for the package that declares it — or the field
+is individually `@public` / `@public(package)`. A private field is still
+reachable from the namespace the struct is declared in and from namespaces
+nested inside it, which is where its impls and the functions written beside it
+are (§4.4). Inside a struct that opened its fields, an individual one may be
+re-hidden with `@private` (see
 [09-directives-and-attributes.md](09-directives-and-attributes.md)). A record
 body may also contain compile-time items such as `comptime_assert(...)` (see
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.10).

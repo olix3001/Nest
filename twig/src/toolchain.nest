@@ -28,7 +28,7 @@ path :: import <std/path>
 }
 
 // A package that ships with the compiler: its name and its root file.
-@public Shipped :: struct {
+@public(fields: package) Shipped :: struct {
   name: str,
   root: str,
 }

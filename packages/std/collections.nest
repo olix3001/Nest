@@ -31,7 +31,7 @@
 // `data` is **room**, and `len` is how much of it holds anything — the same
 // split `core/fmt`'s `Buf` makes, for the same reason: the elements past `len`
 // are allocated and meaningless.
-@public Vec :: struct <T> {
+@public(fields: package) Vec :: struct <T> {
   data: []mut T,
   // How many of `data`'s slots hold an element.
   //

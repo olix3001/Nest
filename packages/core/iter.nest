@@ -16,7 +16,7 @@
 }
 
 // Iterating a slice hands out a cursor `SliceIter` over its elements.
-@public SliceIter :: struct <T> {
+@public(all) SliceIter :: struct <T> {
   data: []T,
   pos: usize,
 }

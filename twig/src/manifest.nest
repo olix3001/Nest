@@ -40,7 +40,7 @@ path :: import <std/path>
 
 @public FILE_NAME: str :: "nest.toml"
 
-@public Manifest :: struct {
+@public(fields: package) Manifest :: struct {
   package: Package,
   lib: Option.<Lib>,
   bin: Option.<[]Bin>,
@@ -49,21 +49,21 @@ path :: import <std/path>
   build: Option.<Build>,
 }
 
-@public Package :: struct {
+@public(fields: package) Package :: struct {
   name: str,
   version: str,
 }
 
-@public Lib :: struct {
+@public(fields: package) Lib :: struct {
   path: str,
 }
 
-@public Bin :: struct {
+@public(fields: package) Bin :: struct {
   name: str,
   path: str,
 }
 
-@public Dependency :: struct {
+@public(fields: package) Dependency :: struct {
   path: Option.<str>,
 }
 
@@ -74,7 +74,7 @@ path :: import <std/path>
 // every binary that depends on the package, and that is a job for a build
 // script and the library's own metadata (`design/toolchain.md`). Until there is
 // one, this is where an `-lsfml-graphics` goes.
-@public Build :: struct {
+@public(fields: package) Build :: struct {
   // The linker driver to run, `nestc -C linker=`.
   linker: Option.<str>,
   // Extra arguments for it, `nestc -C link-arg=` each.
@@ -89,14 +89,14 @@ path :: import <std/path>
   @rename(name: "nestc-args") nestc_args: Option.<[]str>,
 }
 
-@public Profiles :: struct {
+@public(fields: package) Profiles :: struct {
   debug: Option.<ProfileSettings>,
   release: Option.<ProfileSettings>,
 }
 
 // What a manifest may change about a built-in profile. Anything left out keeps
 // the profile's own value.
-@public ProfileSettings :: struct {
+@public(fields: package) ProfileSettings :: struct {
   overflow: Option.<str>,
   @rename(name: "codegen-units") codegen_units: Option.<usize>,
   @rename(name: "opt-level") opt_level: Option.<str>,

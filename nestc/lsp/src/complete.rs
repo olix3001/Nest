@@ -1153,6 +1153,8 @@ fn item(s: &Session, def: DefId) -> CompletionItem {
         DefKind::TypeParam => CompletionItemKind::TYPE_PARAMETER,
         DefKind::Const | DefKind::ConstParam => CompletionItemKind::CONSTANT,
         DefKind::Func => CompletionItemKind::FUNCTION,
+        // An overload set is called like a function and offered like one.
+        DefKind::Overload => CompletionItemKind::FUNCTION,
         DefKind::Field => CompletionItemKind::FIELD,
         DefKind::Variant => CompletionItemKind::ENUM_MEMBER,
         DefKind::Param | DefKind::Local => CompletionItemKind::VARIABLE,

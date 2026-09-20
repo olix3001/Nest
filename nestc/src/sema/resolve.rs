@@ -35,12 +35,14 @@ pub fn resolve_file(
     file_ns: DefId,
     prelude_globs: &[DefId],
     builtins: DefId,
+    pkg_of: &HashMap<FileId, String>,
 ) {
     let mut r = Resolver {
         defs,
         diags,
         ast,
         file,
+        pkg_of,
         prelude_globs,
         builtins,
         scopes: Vec::new(),
@@ -60,6 +62,10 @@ struct Resolver<'a> {
     diags: &'a mut Vec<Diagnostic>,
     ast: &'a Ast,
     file: FileId,
+    /// Which package each file belongs to, for `@public(package)` (§4.4). A
+    /// file with no entry belongs to no package — the program's own files,
+    /// which are one such unit between them.
+    pkg_of: &'a HashMap<FileId, String>,
     prelude_globs: &'a [DefId],
     /// The builtins namespace: fixed primitives plus the width-parameterized
     /// primitives (`i32`, `u7`, `f64`, …) synthesized lazily on first use.
@@ -800,11 +806,23 @@ impl Resolver<'_> {
             *ns.members.get(name)?
         };
         let d = self.defs.resolve_alias(d);
-        if same_file || self.defs.get(d).vis.is_public() {
+        if same_file || self.reaches(d) {
             Some(d)
         } else {
             None
         }
+    }
+
+    /// Whether `d` is exported far enough to be named from the file being
+    /// resolved: always for `@public`, and within its own package for
+    /// `@public(package)`.
+    fn reaches(&self, d: DefId) -> bool {
+        let home = self.defs.get(d).file.and_then(|f| self.pkg_of.get(&f));
+        let at = self.pkg_of.get(&self.file);
+        self.defs
+            .get(d)
+            .vis
+            .reaches(home.map(String::as_str), at.map(String::as_str))
     }
 
     /// Give each generic type parameter the associated types its bounds
@@ -1001,7 +1019,7 @@ impl Resolver<'_> {
         let d = self
             .defs
             .resolve_alias(*self.defs.get(base).ns.members.get(name)?);
-        self.defs.get(d).vis.is_public().then_some(d)
+        self.reaches(d).then_some(d)
     }
 
     // ===< binding introduction >===

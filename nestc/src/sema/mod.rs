@@ -1132,10 +1132,11 @@ fn resolve_one(session: &mut Session, file: FileId) {
         asts,
         defs,
         diagnostics,
+        pkg_of,
         ..
     } = &mut *session;
     let ast = &asts[&file];
-    resolve::resolve_file(defs, diagnostics, ast, file, ns, &globs, builtins);
+    resolve::resolve_file(defs, diagnostics, ast, file, ns, &globs, builtins, pkg_of);
 }
 
 fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
@@ -1147,6 +1148,7 @@ fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
         decls,
         diagnostics,
         lang_items,
+        pkg_of,
         ..
     } = &mut *session;
     infer::infer_file(
@@ -1159,6 +1161,7 @@ fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {
         &globs,
         file_ns,
         file,
+        pkg_of,
     );
 }
 

@@ -7,7 +7,7 @@
 
 { Buf, Display } :: import <core/fmt>
 
-@public Error :: struct {
+@public(all) Error :: struct {
   message: str,
   // 1-based; zero when there is no document position.
   line: usize,

@@ -289,7 +289,7 @@ fn the_prelude_is_found_by_tag_not_by_name_or_path() {
             "fakecore",
             "@public\n#lang(\"prelude\")\nbag :: import \"misc.nest\"\n",
         )
-        .with("misc", "@public Widget :: struct { n: i32 }\n");
+        .with("misc", "@public(all) Widget :: struct { n: i32 }\n");
     let mut session = Session::with_loader(Box::new(loader));
     session.register_package("core", "fakecore");
     let file = session.load_entry("main").unwrap();
@@ -302,7 +302,7 @@ fn the_prelude_is_found_by_tag_not_by_name_or_path() {
             "main",
             "f :: func () -> Widget { return Widget { n: 1 } }\n",
         )
-        .with("fakecore", "@public Widget :: struct { n: i32 }\n");
+        .with("fakecore", "@public(all) Widget :: struct { n: i32 }\n");
     let mut session = Session::with_loader(Box::new(loader));
     session.register_package("core", "fakecore");
     let file = session.load_entry("main").unwrap();
@@ -2898,7 +2898,7 @@ fn an_entry_that_is_a_package_root_is_that_package() {
     let root = dir.join("package.nest");
     std::fs::write(
         &root,
-        "@public Point :: struct { x: i32 }\n@public util :: import \"util.nest\"\n",
+        "@public(all) Point :: struct { x: i32 }\n@public util :: import \"util.nest\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -2941,7 +2941,7 @@ fn two_packages(program: &str) -> Session {
     let loader = MemLoader::new()
         .with(
             "shapes",
-            "@public Circle :: struct { radius: f64 }\n\
+            "@public(all) Circle :: struct { radius: f64 }\n\
              impl Circle { @public area :: func (self: *Circle) -> f64 { return self.radius } }\n",
         )
         .with(
@@ -4020,6 +4020,102 @@ fn an_opaque_is_only_a_type_behind_a_pointer() {
     analyze_clean("f :: func (p: *opaque, q: *mut opaque, xs: []*opaque) -> i32 { return 0 }\n");
 }
 
+/// A field is private unless it is opened, and "private" is lexical (§4.4): the
+/// namespace that declares the struct, and what nests inside it, can read one.
+#[test]
+fn a_private_field_is_refused_outside_its_namespace() {
+    let src = "\
+geo :: namespace {
+  @public
+  Point :: struct { x: i32, y: i32 }
+}
+
+main :: func () -> i32 {
+  let p: geo.Point := geo.Point { x: 1, y: 2 }
+  return p.x
+}
+";
+    let session = analyze_mem(&[("main", src)], "main");
+    let msgs: Vec<String> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("the field `x` of `Point` is private")),
+        "{msgs:#?}"
+    );
+    // The literal that initializes one is refused for the same reason, not only
+    // the read.
+    assert!(
+        msgs.iter().filter(|m| m.contains("is private")).count() >= 2,
+        "a literal may not fill a private field either: {msgs:#?}"
+    );
+
+    // Beside the struct, and inside its own impl, the field is ordinary.
+    analyze_clean(
+        "\
+geo :: namespace {
+  @public
+  Point :: struct { x: i32 }
+
+  @public make :: func () -> Point { return Point { x: 1 } }
+
+  impl Point {
+    @public get :: func (self: Self) -> i32 { return self.x }
+  }
+}
+
+main :: func () -> i32 { return geo.make().get() }
+",
+    );
+}
+
+/// `@public(all)` opens every field, `@public(fields: package)` opens them to
+/// the package, and a field may say it for itself either way (§4.4).
+#[test]
+fn a_struct_says_how_far_its_fields_reach() {
+    analyze_clean(
+        "\
+geo :: namespace {
+  @public(all)
+  Open :: struct { x: i32 }
+
+  @public(fields: package)
+  Ours :: struct { y: i32 }
+
+  @public
+  One :: struct { @public z: i32, hidden: i32 }
+
+  @public hide :: func () -> One { return One { z: 1, hidden: 2 } }
+}
+
+main :: func () -> i32 {
+  let a: geo.Open := geo.Open { x: 1 }
+  let b: geo.Ours := geo.Ours { y: 2 }
+  return a.x + b.y + geo.hide().z
+}
+",
+    );
+    // A field re-hidden inside an aggregate that opened the rest.
+    let src = "\
+geo :: namespace {
+  @public(all)
+  P :: struct { x: i32, @private secret: i32 }
+}
+
+main :: func () -> i32 {
+  let p: geo.P := geo.P { x: 1, secret: 2 }
+  return p.x
+}
+";
+    assert!(
+        first_error(src).contains("`secret`"),
+        "{}",
+        first_error(src)
+    );
+}
+
 /// `f :: func { a, b }` is how one name reaches several functions (§4.3), and
 /// what they take is what tells them apart.
 #[test]
@@ -4802,7 +4898,7 @@ fn a_trait_named_by_a_dyn_or_a_bound_selects_where_it_is_not_imported() {
         (
             "dog",
             "{ Speak } :: import \"tr.nest\"\n\
-             @public Dog :: struct { n: i32 }\n\
+             @public(all) Dog :: struct { n: i32 }\n\
              impl Speak for Dog { speak :: func (self: *Self) -> i32 { return self.n } }\n",
         ),
         (
@@ -6996,7 +7092,7 @@ fn a_defer_captures_its_arguments_where_it_is_registered() {
 #[test]
 fn a_qualified_name_heads_a_composite_literal() {
     analyze_clean(
-        "ns :: namespace { @public P :: struct { x: i32 } }\n\
+        "ns :: namespace { @public(all) P :: struct { x: i32 } }\n\
          f :: func () -> i32 { let q: ns.P := ns.P { x: 7 }; return q.x }\n",
     );
     // Across files, which is the shape a package dependency has.
@@ -7007,7 +7103,7 @@ fn a_qualified_name_heads_a_composite_literal() {
                 "p :: import \"other\"\n\
                  f :: func () -> i32 { return (p.P { x: 7 }).x }\n",
             ),
-            ("other", "@public P :: struct { x: i32 }\n"),
+            ("other", "@public(all) P :: struct { x: i32 }\n"),
         ],
         "main",
     );

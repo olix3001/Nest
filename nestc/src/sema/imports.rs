@@ -117,8 +117,19 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
         }
         // Disjoint field borrows: reading `asts` while mutating `defs`.
         let mut missing: Vec<(NodeId, String)> = Vec::new();
-        let Session { asts, defs, .. } = &mut *session;
+        let Session {
+            asts,
+            defs,
+            pkg_of,
+            ..
+        } = &mut *session;
         let ast = &asts[&file];
+        // Where this import is written, so a `@public(package)` member of the
+        // same package is nameable and one of another package is not.
+        let at = Pkgs {
+            of: Some(pkg_of),
+            at: pkg_of.get(&file).map(String::as_str),
+        };
         bind_pattern(
             defs,
             ast,
@@ -128,6 +139,7 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
             imp.reexport,
             file,
             &mut missing,
+            &at,
         );
         for (at, msg) in missing {
             let span = session.asts[&file].node(at).span;
@@ -138,6 +150,7 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
 
 /// Apply an import binding pattern, inserting the resulting names into `scope`.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn bind_pattern(
     defs: &mut DefTable,
     ast: &Ast,
@@ -147,6 +160,7 @@ fn bind_pattern(
     reexport: bool,
     file: crate::common::source::FileId,
     missing: &mut Vec<(NodeId, String)>,
+    at: &Pkgs<'_>,
 ) {
     let kind = ast.node(pattern).kind.clone();
     match kind {
@@ -160,7 +174,7 @@ fn bind_pattern(
             if let Some(base) = base {
                 if reexport {
                     // Re-export: the globbed members become public members here.
-                    for (name, member) in public_members(defs, base) {
+                    for (name, member) in public_members(defs, base, at) {
                         insert(defs, scope, name, member, true);
                     }
                 } else {
@@ -171,7 +185,7 @@ fn bind_pattern(
         // `{ a, b: pat, c: * } :: import ...` — selective destructuring.
         NodeKind::StructPat { fields, .. } => {
             for field in fields {
-                bind_field(defs, ast, field, scope, base, reexport, file, missing);
+                bind_field(defs, ast, field, scope, base, reexport, file, missing, at);
             }
         }
         // Anything else in import position is meaningless; ignore (collection
@@ -191,12 +205,13 @@ fn bind_field(
     reexport: bool,
     file: crate::common::source::FileId,
     missing: &mut Vec<(NodeId, String)>,
+    at: &Pkgs<'_>,
 ) {
     let NodeKind::FieldPat { name, pattern, .. } = ast.node(field).kind.clone() else {
         return;
     };
     // Look the member up in the target namespace.
-    let member = base.and_then(|b| lookup_public(defs, b, &name));
+    let member = base.and_then(|b| lookup_visible(defs, b, &name, at));
     // A name the namespace does not publish is an error **here**, where it is
     // written. The `external` stand-in below is for a namespace that could not
     // be *loaded* — there the whole import is already reported and one more
@@ -240,7 +255,7 @@ fn bind_field(
             if let Some(member) = member {
                 let member = defs.resolve_alias(member);
                 if reexport {
-                    for (n, m) in public_members(defs, member) {
+                    for (n, m) in public_members(defs, member, at) {
                         insert(defs, scope, n, m, true);
                     }
                 } else {
@@ -252,7 +267,7 @@ fn bind_field(
         Some(NodeKind::StructPat { .. }) => {
             let sub = member.map(|m| defs.resolve_alias(m));
             if let Some(p) = pattern {
-                bind_pattern(defs, ast, p, scope, sub, reexport, file, missing);
+                bind_pattern(defs, ast, p, scope, sub, reexport, file, missing, at);
             }
         }
         _ => {}
@@ -329,10 +344,47 @@ fn insert(defs: &mut DefTable, scope: DefId, name: Symbol, def: DefId, reexport:
 
 /// Public member `name` of namespace-like `base`, following alias chains.
 pub fn lookup_public(defs: &DefTable, base: DefId, name: &Symbol) -> Option<DefId> {
+    lookup_visible(defs, base, name, &Pkgs::ANY)
+}
+
+/// The same, for an import written in a file of package `at`: a
+/// `@public(package)` member is reachable from its own package (§4.4).
+fn lookup_visible(
+    defs: &DefTable,
+    base: DefId,
+    name: &Symbol,
+    at: &Pkgs<'_>,
+) -> Option<DefId> {
     let base = defs.resolve_alias(base);
     let member = defs.get(base).ns.members.get(name).copied()?;
     let member = defs.resolve_alias(member);
-    defs.get(member).vis.is_public().then_some(member)
+    at.reaches(defs, member).then_some(member)
+}
+
+/// Which package an import is written in, and which package each file belongs
+/// to — the pair a `@public(package)` member is judged against.
+pub(crate) struct Pkgs<'a> {
+    of: Option<&'a std::collections::HashMap<crate::common::source::FileId, String>>,
+    at: Option<&'a str>,
+}
+
+impl Pkgs<'_> {
+    /// For the lookups that are not an import written anywhere — a package walk
+    /// while resolving an `import <pkg/member>` path, which crosses packages by
+    /// definition and so sees only what is `@public`.
+    const ANY: Pkgs<'static> = Pkgs { of: None, at: None };
+
+    fn reaches(&self, defs: &DefTable, member: DefId) -> bool {
+        let home = self
+            .of
+            .and_then(|of| defs.get(member).file.and_then(|f| of.get(&f)))
+            .map(String::as_str);
+        match self.of {
+            // Nothing said where this is written: only `@public` crosses.
+            None => defs.get(member).vis.is_public(),
+            Some(_) => defs.get(member).vis.reaches(home, self.at),
+        }
+    }
 }
 
 /// The `impl` block inside `base` that declares `name`, if one does.
@@ -350,8 +402,9 @@ fn impl_member_owner(defs: &DefTable, base: DefId, name: &Symbol) -> Option<Stri
         .map(|d| d.name.to_string())
 }
 
-/// All public members of `base` (following aliases), as `(name, def)` pairs.
-fn public_members(defs: &DefTable, base: DefId) -> Vec<(Symbol, DefId)> {
+/// All members of `base` (following aliases) an import in package `at` may
+/// name, as `(name, def)` pairs.
+fn public_members(defs: &DefTable, base: DefId, at: &Pkgs<'_>) -> Vec<(Symbol, DefId)> {
     let base = defs.resolve_alias(base);
     defs.get(base)
         .ns
@@ -359,7 +412,7 @@ fn public_members(defs: &DefTable, base: DefId) -> Vec<(Symbol, DefId)> {
         .iter()
         .filter_map(|(n, &d)| {
             let d = defs.resolve_alias(d);
-            defs.get(d).vis.is_public().then(|| (n.clone(), d))
+            at.reaches(defs, d).then(|| (n.clone(), d))
         })
         .collect()
 }

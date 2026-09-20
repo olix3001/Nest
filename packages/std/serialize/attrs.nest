@@ -12,7 +12,7 @@
 //     }
 
 // The key this member is written under, instead of its own name.
-@public @attribute rename :: struct { name: str }
+@public(all) @attribute rename :: struct { name: str }
 
 // Leave this member out: it is not written, and not read — decoding leaves it
 // zeroed.

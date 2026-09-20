@@ -20,7 +20,7 @@ Frame :: struct {
   first: bool,
 }
 
-@public Writer :: struct {
+@public(fields: package) Writer :: struct {
   out: String,
   pretty: bool,
   stack: Vec.<Frame>,

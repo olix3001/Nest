@@ -68,7 +68,7 @@ libc :: import "libc.nest"
 }
 
 // One entry of the environment, already split.
-@public EnvVar :: struct {
+@public(all) EnvVar :: struct {
   name: str,
   value: str,
 }
@@ -212,7 +212,7 @@ impl Child {
 
 // What `output` answers: how the program ended, and everything it wrote to
 // stdout.
-@public Output :: struct {
+@public(all) Output :: struct {
   status: Status,
   stdout: []u8,
 }

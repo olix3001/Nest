@@ -79,27 +79,37 @@ struct Collector<'a> {
     anon_impls: usize,
 }
 
+/// One argument of `@public`: a level for the item, or for its members.
+#[derive(Clone, Copy)]
+enum VisArg {
+    Item(Visibility),
+    Fields(Visibility),
+}
+
 /// Visibility gathered from an item's attributes.
 #[derive(Clone, Copy)]
 struct Vis {
-    /// `@public` (or `@public(all)`) present.
-    public: bool,
-    /// `@public(all)` — also export aggregate fields/variants.
-    all: bool,
+    /// What the item itself is: `@public`, `@public(package)`, or neither.
+    level: Visibility,
+    /// What its **members** are, when it is an aggregate and said so:
+    /// `@public(all)` is `fields: public`, and `@public(fields: package)` says
+    /// it in full. `None` leaves them private, which is the default (§3.1).
+    fields: Option<Visibility>,
 }
 
 impl Vis {
     const PRIVATE: Vis = Vis {
-        public: false,
-        all: false,
+        level: Visibility::Private,
+        fields: None,
     };
 
     fn level(self) -> Visibility {
-        if self.public {
-            Visibility::Public
-        } else {
-            Visibility::Private
-        }
+        self.level
+    }
+
+    /// What a member of this item is, unless it says otherwise itself.
+    fn member_level(self) -> Visibility {
+        self.fields.unwrap_or(Visibility::Private)
     }
 }
 
@@ -279,11 +289,9 @@ impl Collector<'_> {
                 self.collect_struct(kind, def, vis);
             }
             NodeKind::EnumType { variants, .. } => {
-                let member_vis = if vis.public {
-                    Visibility::Public
-                } else {
-                    Visibility::Private
-                };
+                // A variant is named wherever its enum is: an enum whose
+                // variants are private is an enum nothing can match on.
+                let member_vis = vis.level();
                 for v in variants {
                     if let NodeKind::Variant { name, .. } = self.ast.node(v).kind.clone() {
                         self.define(name, DefKind::Variant, member_vis, def, v, None);
@@ -435,11 +443,7 @@ impl Collector<'_> {
             // typing, `Pair(1, 2)`'s argument check, and `.0` all go through the
             // same path a record's named field does.
             StructKind::Tuple(types) => {
-                let member_vis = if vis.all {
-                    Visibility::Public
-                } else {
-                    Visibility::Private
-                };
+                let member_vis = vis.member_level();
                 for (i, t) in types.iter().enumerate() {
                     self.define(
                         Symbol::new(&i.to_string()),
@@ -465,11 +469,16 @@ impl Collector<'_> {
                 ..
             } = self.ast.node(f).kind.clone()
             {
-                let hidden = attrs.iter().any(|&a| self.is_attr(a, "private"));
-                let member_vis = if vis.all && !hidden {
-                    Visibility::Public
-                } else {
+                // A field says it for itself when it carries an attribute of
+                // its own — `@public`, `@public(package)`, `@private` — and
+                // otherwise takes what the aggregate said its fields are.
+                let own = self.visibility(&attrs);
+                let member_vis = if attrs.iter().any(|&a| self.is_attr(a, "private")) {
                     Visibility::Private
+                } else if attrs.iter().any(|&a| self.is_attr(a, "public")) {
+                    own.level()
+                } else {
+                    vis.member_level()
                 };
                 let def = self.define(name, DefKind::Field, member_vis, ty, f, None);
                 self.defs.get_mut(def).directives = self.directives(&directives);
@@ -643,7 +652,7 @@ impl Collector<'_> {
         self.imports.push(RawImport {
             pattern,
             scope,
-            reexport: vis.public,
+            reexport: !matches!(vis.level(), Visibility::Private),
             target,
             lang,
             span,
@@ -770,29 +779,71 @@ impl Collector<'_> {
         })
     }
 
-    fn visibility(&self, attrs: &[NodeId]) -> Vis {
+    /// What an item's attributes say about who may name it, and who may name
+    /// its members (§4.4).
+    ///
+    /// `@public` is the item alone. Its argument list carries two independent
+    /// things: a **level** for the item — `@public(package)` — and a level for
+    /// its members, written `fields: <level>`, of which `all` is the shorthand
+    /// for `fields: public`. So `@public(package, fields: package)` is a type a
+    /// package keeps to itself, fields and all.
+    fn visibility(&mut self, attrs: &[NodeId]) -> Vis {
         let mut vis = Vis::PRIVATE;
         for &a in attrs {
-            if let NodeKind::Attribute { name, args } = &self.ast.node(a).kind {
-                if name.as_str() == "public" {
-                    vis.public = true;
-                    // `@public(all)` — a single positional `all` argument.
-                    if args.iter().any(|&arg| self.is_all_arg(arg)) {
-                        vis.all = true;
-                    }
+            let NodeKind::Attribute { name, args } = self.ast.node(a).kind.clone() else {
+                continue;
+            };
+            if name.as_str() != "public" {
+                continue;
+            }
+            vis.level = Visibility::Public;
+            for arg in args {
+                match self.vis_arg(arg) {
+                    Some(VisArg::Item(level)) => vis.level = level,
+                    Some(VisArg::Fields(level)) => vis.fields = Some(level),
+                    None => self.report(
+                        arg,
+                        "`@public` takes `package`, `all`, or `fields: <public|package|private>`",
+                    ),
                 }
             }
         }
         vis
     }
 
-    fn is_all_arg(&self, arg: NodeId) -> bool {
-        if let NodeKind::Arg { value, .. } = &self.ast.node(arg).kind {
-            if let NodeKind::Path { segments } = &self.ast.node(*value).kind {
-                return segments.len() == 1 && segments[0].as_str() == "all";
+    /// One argument of `@public`.
+    fn vis_arg(&self, arg: NodeId) -> Option<VisArg> {
+        let NodeKind::Arg { name, value } = self.ast.node(arg).kind.clone() else {
+            return None;
+        };
+        let level = self.level_named(value)?;
+        match name.as_ref().map(|n| n.to_string()).as_deref() {
+            // `all` is the old spelling of `fields: public`, and the common one.
+            None if self.written_level(value)?.as_str() == "all" => {
+                Some(VisArg::Fields(Visibility::Public))
             }
+            None => Some(VisArg::Item(level)),
+            Some("fields") => Some(VisArg::Fields(level)),
+            Some(_) => None,
         }
-        false
+    }
+
+    /// The bare word an argument is, if it is one.
+    fn written_level(&self, value: NodeId) -> Option<String> {
+        match &self.ast.node(value).kind {
+            NodeKind::Path { segments } if segments.len() == 1 => Some(segments[0].to_string()),
+            _ => None,
+        }
+    }
+
+    /// The visibility a bare word names.
+    fn level_named(&self, value: NodeId) -> Option<Visibility> {
+        match self.written_level(value)?.as_str() {
+            "public" | "all" => Some(Visibility::Public),
+            "package" => Some(Visibility::Package),
+            "private" => Some(Visibility::Private),
+            _ => None,
+        }
     }
 
     /// The directives a `::`-RHS form carries on itself (`f :: #inline func …`).

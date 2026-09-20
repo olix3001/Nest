@@ -48,14 +48,38 @@ reflection.
 
 ## 9.2 Attributes
 
-### `@public`, `@public(all)`, `@private`
+### `@public`, `@public(...)`, `@private`
 
 The visibility attributes — the only access control in the language, and the only
 attributes the compiler acts on.
 
-- `@public` exports the item from its enclosing namespace.
-- `@public(all)` (struct/enum) exports the type **and** every field/variant.
-- `@private` (field) re-hides one field inside a `@public(all)` aggregate.
+`@public` carries two independent things: how far the **item** is exported, and
+how far its **members** are.
+
+- `@public` exports the item from its enclosing namespace; its fields stay
+  private.
+- `@public(package)` exports it to the package that declares it, and no further.
+  A program's own files, which belong to no package, are one such unit.
+- `@public(fields: <level>)` sets what its fields are, where `<level>` is
+  `public`, `package` or `private`. `@public(all)` is the shorthand for
+  `fields: public`.
+- The two combine: `@public(package, fields: package)` is a type a package keeps
+  to itself, fields and all.
+- A **field** may say it for itself, and then it wins: `@public`,
+  `@public(package)`, or `@private` to re-hide one inside an aggregate that
+  opened the rest.
+
+```
+@public(fields: package)
+Res :: struct {
+  n: isize,
+  @public err: Error,      // this one is everyone's
+  @private cache: i32,     // and this one is nobody's
+}
+```
+
+An `enum`'s variants are named wherever the enum itself is: an enum whose
+variants could not be named is an enum nothing could match on.
 
 The one further built-in attribute that the compiler acts on is `@using`, which
 belongs to the same name-resolution family: on a struct field it grants an

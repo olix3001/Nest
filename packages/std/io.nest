@@ -34,7 +34,7 @@ libc :: import "libc.nest"
 // ===< Errors >===
 
 // Why an operation on the outside world did not happen.
-@public Error :: struct {
+@public(fields: package) Error :: struct {
   // What was being attempted — `"open"`, `"read"`, `"spawn"`. A short verb, so
   // that the report below reads as a sentence.
   op: str,

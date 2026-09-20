@@ -174,8 +174,21 @@ nested inside it, never to the outside.
 |--------|--------|
 | *(none)* | private to the enclosing namespace (and its descendants) |
 | `@public` | export the item from its namespace |
-| `@public(all)` | (struct/enum) export the type **and** all fields/variants |
-| `@private` | (field) re-hide one field inside a `@public(all)` aggregate |
+| `@public(package)` | export the item to its own **package**, and no further |
+| `@public(all)` | (struct/enum) export the type **and** all its fields |
+| `@public(fields: L)` | (struct) the fields are `L` — `public`, `package`, or `private`; `all` is `fields: public` |
+| `@private` | (field) re-hide one field inside an aggregate that opened the rest |
+
+**Fields are private by default**, whatever the struct is: `@public` on a struct
+exports the *type*, and a field of it is reachable only from the namespace that
+declares the struct and from namespaces nested inside it — which is where its
+own impls and the functions written beside it are. `@public(fields: package)` is
+what a package's own files share; `@public(all)` is what everyone gets.
+
+The **package** is the unit `@public(package)` means: every file of one package,
+and, for code that belongs to no package, the program's own files between them.
+A package is the thing released as a whole, so a type one of its files declares
+for the others has nowhere smaller to live and no business being outside.
 
 ```
 @public CatId :: distinct str

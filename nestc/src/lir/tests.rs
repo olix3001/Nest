@@ -859,7 +859,7 @@ fn lir_snapshot_a_split_carries_declarations_for_what_it_calls() {
 @public main :: func () { let q := scale(Point { x: 1, y: 2 }, 3) }
 ";
     let shapes = "\
-@public Point :: struct { x: i32, y: i32 }
+@public(all) Point :: struct { x: i32, y: i32 }
 @public scale :: func (p: Point, k: i32) -> Point { return Point { x: p.x * k, y: p.y * k } }
 ";
     let mut session = Session::with_loader(Box::new(

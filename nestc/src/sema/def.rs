@@ -28,12 +28,35 @@ pub struct DefId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Visibility {
     Public,
+    /// `@public(package)` — exported to the package that declares it, and to
+    /// nothing outside it (§4.4).
+    ///
+    /// The unit is the **package**, not the file: a package's files are written
+    /// together and released together, so a type one of them declares for the
+    /// others is an ordinary thing to want and has nowhere else to live. A
+    /// program's own files, which belong to no package, are one such unit
+    /// between them.
+    Package,
     Private,
 }
 
 impl Visibility {
     pub fn is_public(self) -> bool {
         matches!(self, Visibility::Public)
+    }
+
+    /// Whether an item with this visibility, declared in package `home`, may be
+    /// named from package `at`. `None` is "no package": a program's own files.
+    ///
+    /// Lexical privacy — a private item inside its own namespace — is the
+    /// caller's question and is answered before this one; what is left here is
+    /// whether the item is exported far enough to be reached from `at` at all.
+    pub fn reaches(self, home: Option<&str>, at: Option<&str>) -> bool {
+        match self {
+            Visibility::Public => true,
+            Visibility::Package => home == at,
+            Visibility::Private => false,
+        }
     }
 }
 

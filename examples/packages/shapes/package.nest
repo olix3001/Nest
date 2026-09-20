@@ -4,10 +4,10 @@
 // see `render/package.nest` for the other, and `use_packages.nest` for what a
 // program may and may not write about both of them.
 
-@public
+@public(all)
 Circle :: struct { radius: f64 }
 
-@public
+@public(all)
 Square :: struct { side: f64 }
 
 // An **inherent** impl on a type this package owns: always allowed, and the only

@@ -480,6 +480,8 @@ pub fn resolve_impl_targets(
             in_scope_traits: &empty,
             lang_traits: &empty,
             in_default: false,
+            ctx: None,
+            pkg_of: None,
             file: imp.file,
             cx: InferCtxt::new(),
             env: HashMap::new(),
@@ -573,6 +575,8 @@ pub fn resolve_param_decls(
         in_scope_traits: &empty,
         lang_traits: &empty,
         in_default: false,
+        ctx: None,
+        pkg_of: None,
         file,
         cx: InferCtxt::new(),
         env: HashMap::new(),
@@ -663,6 +667,8 @@ pub fn fold_const_values(
         in_scope_traits: &empty,
         lang_traits: &empty,
         in_default: false,
+        ctx: None,
+        pkg_of: None,
         file,
         cx: InferCtxt::new(),
         env: HashMap::new(),
@@ -728,6 +734,8 @@ pub(crate) fn signature_from_tree(
         in_scope_traits: &empty,
         lang_traits: &empty,
         in_default: false,
+        ctx: None,
+        pkg_of: None,
         file,
         cx: InferCtxt::new(),
         env: HashMap::new(),
@@ -757,6 +765,7 @@ pub fn infer_file(
     prelude_globs: &[DefId],
     file_ns: DefId,
     file: FileId,
+    pkg_of: &HashMap<FileId, String>,
 ) {
     let ast = &asts[&file];
     // The set of trait defs a use site in this file may select impls of: only
@@ -829,6 +838,8 @@ pub fn infer_file(
                 in_scope_traits: &in_scope_traits,
                 lang_traits: &lang_traits,
                 in_default: false,
+                ctx: Some(file_ns),
+                pkg_of: Some(pkg_of),
                 file,
                 cx: {
                     let mut cx = InferCtxt::new();
@@ -1307,6 +1318,18 @@ struct Inferer<'a> {
     /// why it names the caller (§5.2).
     in_default: bool,
     file: FileId,
+    /// Where the expressions being inferred are **written**, for privacy (§4.4):
+    /// the function whose body this is, or the namespace of the file when it is
+    /// not a body at all (a constant's initializer, a default argument).
+    ///
+    /// `None` for the pass that resolves impl targets, which types no
+    /// expression and so asks nothing about a private member.
+    ctx: Option<DefId>,
+    /// Which package each file belongs to, for `@public(package)` (§4.4).
+    ///
+    /// `None` in the passes that check nothing about privacy, which are the
+    /// same ones that carry no `ctx`.
+    pkg_of: Option<&'a HashMap<FileId, String>>,
     cx: InferCtxt,
     /// Type of each in-scope value def (params, locals) by [`DefId`].
     env: HashMap<super::def::DefId, Ty>,
@@ -1342,6 +1365,13 @@ impl Inferer<'_> {
         else {
             return;
         };
+        // Whose body this is, for privacy (§4.4): a private field is readable
+        // from the namespace that declares its struct and from anything nested
+        // in it, and a method of that struct is exactly such a place.
+        let outer = self.ctx;
+        if let Some(def) = self.func_owner(func) {
+            self.ctx = Some(def);
+        }
         // A defaulted parameter must trail the required ones (§5.2): a call
         // supplies its positional arguments left to right, so a hole in the
         // middle could never be filled without naming the ones after it — which
@@ -1399,6 +1429,9 @@ impl Inferer<'_> {
             self.expect_return(b, &bty, &ret);
         }
         self.stamp_generics(func);
+        // A closure's body is inferred inside the body that wrote it, so the
+        // place a name is written in is restored rather than dropped.
+        self.ctx = outer;
     }
 
     /// Record what this function is generic over, in the order every
@@ -1754,7 +1787,7 @@ impl Inferer<'_> {
                 let bty = self.infer_expr(base);
                 let bty = self.pin_str(&bty);
                 let bty = self.settle(&bty);
-                if let Some(ft) = self.field_ty(&bty, name.as_str()) {
+                if let Some(ft) = self.field_ty_at(Some(node), &bty, name.as_str()) {
                     return ft;
                 }
                 // Not *absent* — **not yet known**. A base that is still a
@@ -1792,7 +1825,7 @@ impl Inferer<'_> {
                 // A tuple struct's positional members are real fields named
                 // `0`, `1`, … (see `collect_struct`), so `p.0` outside a tuple
                 // is the very lookup a named field access does (§3.3).
-                match self.field_ty(&bty, &index.to_string()) {
+                match self.field_ty_at(Some(node), &bty, &index.to_string()) {
                     Some(ft) => ft,
                     None => self.no_such_field(node, &bty, &index.to_string()),
                 }
@@ -2756,7 +2789,7 @@ impl Inferer<'_> {
                     return Outcome::Deferred;
                 }
                 let (name, out, origin) = (name.clone(), out.clone(), *origin);
-                match self.field_ty(&target, name.as_str()) {
+                match self.field_ty_at(Some(origin), &target, name.as_str()) {
                     Some(t) => self.expect(origin, &t, &out),
                     None => {
                         self.no_such_field(origin, &target, name.as_str());
@@ -2869,7 +2902,7 @@ impl Inferer<'_> {
             let NodeKind::FieldInit { name, value } = self.ast.node(f).kind.clone() else {
                 continue;
             };
-            match self.field_ty(target, name.as_str()) {
+            match self.field_ty_at(Some(f), target, name.as_str()) {
                 Some(ft) => {
                     let vty = self.node_ty(value);
                     self.expect(value, &vty, &ft);
@@ -5552,6 +5585,88 @@ impl Inferer<'_> {
 
     // ===< names and defs >===
 
+    /// The def whose body `func` is, when a definition owns it — `None` for a
+    /// closure, which is written inside whatever body already owns it.
+    fn func_owner(&self, func: NodeId) -> Option<DefId> {
+        self.defs
+            .iter()
+            .find(|d| {
+                d.kind == DefKind::Func
+                    && d.file == Some(self.file)
+                    && d.node.is_some_and(|n| {
+                        n == func
+                            || matches!(self.ast.node(n).kind, NodeKind::ConstBind { rhs, .. } if rhs == func)
+                    })
+            })
+            .map(|d| d.id)
+    }
+
+    /// Whether a **private** member of `owner` may be named where the current
+    /// expression is written (§4.4).
+    ///
+    /// Privacy is lexical: a private item is visible to the namespace that
+    /// declares it and to everything nested inside that namespace. For a field
+    /// that means the namespace the *struct* was declared in — so a function
+    /// beside the struct may build one, and a method of it may read one, while
+    /// another namespace may do neither.
+    fn visible_here(&self, owner: DefId) -> bool {
+        let Some(ctx) = self.ctx else {
+            // A pass that types no expression of a program's own (impl targets,
+            // a folded constant) asks nothing about privacy.
+            return true;
+        };
+        let home = self.defs.get(owner).parent.unwrap_or(owner);
+        let mut at = Some(ctx);
+        while let Some(d) = at {
+            if d == home || d == owner {
+                return true;
+            }
+            at = self.defs.get(d).parent;
+        }
+        false
+    }
+
+    /// Whether a field is exported far enough to be named in the file being
+    /// inferred: `@public` always, `@public(package)` inside its own package.
+    fn field_reaches_here(&self, field: DefId) -> bool {
+        let Some(pkgs) = self.pkg_of else {
+            return true;
+        };
+        let home = self
+            .defs
+            .get(field)
+            .file
+            .and_then(|f| pkgs.get(&f))
+            .map(String::as_str);
+        let at = pkgs.get(&self.file).map(String::as_str);
+        self.defs.get(field).vis.reaches(home, at)
+    }
+
+    /// Report a field named from outside the namespace that declares its struct.
+    ///
+    /// One message for every way of naming one — a read, an assignment, a
+    /// literal that initializes it, a pattern that binds it — because they are
+    /// one rule, and the fix is the same: `@public(all)` on the struct, or
+    /// `@public` on the field.
+    fn check_field_visible(&mut self, at: NodeId, owner: DefId, field: DefId) {
+        if self.field_reaches_here(field) || self.visible_here(owner) {
+            return;
+        }
+        let (f, t) = (
+            self.defs.get(field).name.clone(),
+            self.defs.get(owner).name.clone(),
+        );
+        self.report_with_note(
+            at,
+            format!("the field `{f}` of `{t}` is private"),
+            format!(
+                "a field is private unless `{t}` says otherwise — `@public(all)`, \
+                 `@public(fields: package)` — or the field itself is `@public` / \
+                 `@public(package)`"
+            ),
+        );
+    }
+
     /// The type of a path expression from the def it resolved to.
     fn path_ty(&mut self, node: NodeId) -> Ty {
         match self.resolved_def(node) {
@@ -6371,6 +6486,14 @@ impl Inferer<'_> {
     }
 
     fn field_ty(&mut self, base: &Ty, name: &str) -> Option<Ty> {
+        self.field_ty_at(None, base, name)
+    }
+
+    /// The same, for a field the **program wrote** at `at`: its privacy is
+    /// checked there (§4.4). `field_ty` is the form for the compiler's own
+    /// lookups — an `@using` upcast, a structural conversion — which name no
+    /// field on the program's behalf and so check nothing.
+    fn field_ty_at(&mut self, at: Option<NodeId>, base: &Ty, name: &str) -> Option<Ty> {
         let base = self.autoderef(base);
         // An anonymous struct carries its fields in the type: there is no def
         // to look up and no generics to substitute.
@@ -6391,6 +6514,9 @@ impl Inferer<'_> {
             .get(&crate::common::symbol::Symbol::new(name))?;
         if self.defs.get(field).kind != DefKind::Field {
             return None;
+        }
+        if let Some(at) = at {
+            self.check_field_visible(at, def, field);
         }
         let t = match self.decls().field_ty(field) {
             Some(t) => t,

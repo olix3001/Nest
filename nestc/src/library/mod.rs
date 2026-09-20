@@ -295,7 +295,7 @@ mod tests {
 
 @public Shape :: trait { area :: func (self: *Self) -> i32 }
 
-@public Square :: struct { side: i32 }
+@public(all) Square :: struct { side: i32 }
 
 impl Shape for Square {
     @public area :: func (self: *Square) -> i32 { return self.side * self.side }
@@ -338,6 +338,13 @@ impl Scale.<u8> for Square {
 // The bound carries an **argument**, and `Square` implements the trait twice —
 // so which impl this reaches is decided by the `i32`, and by nothing else.
 @public scaled_by :: func <T: Scale.<i32>> (s: *T) -> i32 { return s.scale(4) }
+
+// A struct whose fields this package keeps to itself (§4.4). A program reading
+// this library names the type and calls the function, and cannot touch the
+// fields.
+@public(fields: package) Meters :: struct { m: i32 }
+
+@public meters :: func (m: i32) -> Meters { return Meters { m: m } }
 
 // An overload set (§4.3) — a name for two functions, which a program reading
 // this library has to be able to choose between.
@@ -545,6 +552,41 @@ main :: func () {
         assert!(
             session.ir_meta.get::<crate::ir::DefaultValue>(id).is_some(),
             "the default's expression is not in the metadata that travelled"
+        );
+    }
+
+    /// `@public(fields: package)` reaches the package's own files and stops
+    /// there: a program that reads the library names the type, not its fields.
+    #[test]
+    fn a_package_private_field_does_not_leave_its_package() {
+        let (session, file) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let m := shapes.meters(3)
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+
+        let (session, _) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let m := shapes.meters(3)
+    let n := m.m
+}
+"#,
+            &[core(), shapes()],
+        );
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("the field `m` of `Meters` is private")),
+            "{:#?}",
+            session.diagnostics
         );
     }
 
