@@ -214,14 +214,27 @@ mod tests {
             super::write::members(&core_session, "core", core_root).expect("core is writable");
 
         // A package of our own, compiled against `core` as a library.
-        let shapes_src = "@public\n\
+        let shapes_src = "{ Location } :: import <core/loc>\n\
+                          @public\n\
                           Circle :: struct { radius: f64 }\n\
                           @public\n\
                           Shape :: trait { area :: func (self: *Self) -> f64 }\n\
                           impl Shape for Circle {\n\
                           @public\n\
                           area :: func (self: *Circle) -> f64 { return self.radius }\n\
-                          }\n";
+                          }\n\
+                          @public\n\
+                          SIDES :: 6\n\
+                          @public\n\
+                          ALSO :: SIDES\n\
+                          @public\n\
+                          NAME :: \"circle\"\n\
+                          @public\n\
+                          WIDTH: u16 :: 80\n\
+                          @public\n\
+                          scaled :: func (radius: f64, by: f64 := 2.0) -> f64 { return radius * by }\n\
+                          @public\n\
+                          line_of :: func (loc: Location := #caller_location) -> u32 { return loc.line }\n";
         let mut shapes_session = Session::with_loader(Box::new(
             MemLoader::new().with("shapes", shapes_src).with("main", ""),
         ));
@@ -236,12 +249,25 @@ mod tests {
         // The call goes through a **trait object**, so the impl has to be
         // selected and a vtable built out of it — which is the question only
         // the library's metadata can answer, its tree being elsewhere.
+        //
+        // The constants and the two defaults are the rest of what only the
+        // metadata can answer: a comptime constant settles on a different width
+        // at each of the two uses below, an omitted argument is filled from the
+        // expression the library lowered once, and `#caller_location` is filled
+        // from *this* file rather than from the declaration's own line.
         let program = "shapes :: import <shapes>\n\
                        main :: func () {\n\
                        let c := shapes.Circle { radius: 2.0 }\n\
                        const obj: *dyn shapes.Shape := &c\n\
                        let a := obj.area()\n\
                        let b := a + 1.0\n\
+                       let small: u8 := shapes.SIDES\n\
+                       let big: i64 := shapes.ALSO\n\
+                       let name: str := shapes.NAME\n\
+                       let width := shapes.WIDTH\n\
+                       let twice := shapes.scaled(2.0)\n\
+                       let by := shapes.scaled(2.0, 3.0)\n\
+                       let here := shapes.line_of()\n\
                        }\n";
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", program)));
         super::read::load(&mut session, &core_meta, &core_ir, path, true)
@@ -251,5 +277,48 @@ mod tests {
         let file = session.load_entry("main").expect("the program loads");
         crate::sema::analyze(&mut session, file);
         assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+
+        // Nothing in the program lowered to an error type. A question about a
+        // library that went unanswered is not a diagnostic — it is a
+        // well-formed node of type `Ty::Error`, and an unfilled default
+        // argument is exactly that — so this is the check that sees it.
+        let mut residue = Vec::new();
+        crate::ir::check::residue::check(
+            &session.defs,
+            &session.ir_meta,
+            &session.linked,
+            &mut residue,
+        );
+        assert!(residue.is_empty(), "{residue:#?}");
+
+        // And the two defaults arrived as what they are: one an expression the
+        // library lowered and kept on its parameter, the other the marker that
+        // says the value is the *call's* own position.
+        let param = |name: &str, i: usize| {
+            let def = session
+                .defs
+                .iter()
+                .find(|d| d.name.as_str() == name)
+                .unwrap_or_else(|| panic!("`{name}` is in the def table"));
+            match session.decls.get(&def.id) {
+                Some(crate::sema::decl::Decl::Func(f)) => f.params[i].lowered,
+                other => panic!("`{name}` is recorded as {other:#?}"),
+            }
+        };
+        let Some(crate::sema::decl::ParamDefault::Value(id)) = param("scaled", 1) else {
+            panic!("`scaled`'s default did not travel: {:?}", param("scaled", 1));
+        };
+        assert!(
+            session.ir_meta.get::<crate::ir::DefaultValue>(id).is_some(),
+            "the default's expression is not in the metadata that travelled"
+        );
+        assert!(
+            matches!(
+                param("line_of", 0),
+                Some(crate::sema::decl::ParamDefault::CallerLocation)
+            ),
+            "`line_of`'s `#caller_location` did not travel: {:?}",
+            param("line_of", 0)
+        );
     }
 }
