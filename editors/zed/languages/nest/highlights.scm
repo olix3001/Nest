@@ -43,6 +43,21 @@
   pattern: (identifier) @function
   value: (func_expression))
 
+; An overload set is a name for several functions (spec §4.3): the name it binds
+; is a function, and so is every member it lists — a bare one, or the last hop
+; of a qualified `m.f`.
+(const_binding
+  pattern: (identifier) @function
+  value: (overload_set))
+
+(overload_set
+  member: (identifier) @function)
+
+(overload_set
+  member: (field_expression
+    value: (identifier) @namespace
+    field: (field_identifier) @function))
+
 (const_binding
   pattern: (identifier) @namespace
   value: [(import_expression) (namespace_expression)])
@@ -75,6 +90,18 @@
   name: (attribute_name) @attribute)
 
 (directive_name) @preproc
+(when_directive_name) @preproc
+
+; `#when`'s conditions: the key and the combinators read as the compiler's own
+; words, the variant as the `core/os.nest` variant it is spelled after.
+(when_condition
+  key: (identifier) @property)
+(when_condition
+  name: (identifier) @function.builtin)
+(when_condition
+  flag: (identifier) @constant.builtin)
+(when_condition
+  "not" @keyword.operator)
 
 (package_path) @string.special
 

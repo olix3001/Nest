@@ -7,6 +7,14 @@
     value: (func_expression
       "func" @context))) @item
 
+; An overload set is a name for several functions, and belongs in the outline
+; the way a function does.
+(declaration
+  (const_binding
+    pattern: (identifier) @name
+    value: (overload_set
+      "func" @context))) @item
+
 (declaration
   (const_binding
     pattern: (identifier) @name
