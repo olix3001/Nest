@@ -11,7 +11,7 @@
 //! signature, a block with two terminators — and it is how the `*dyn Trait`
 //! receiver bug was found.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::codegen::Codegen;
@@ -1348,7 +1348,21 @@ fn run_on_host(src: &str) -> std::process::Output {
 
 /// [`run_on_host`], as a **test binary**: the `@test` functions are what runs.
 fn run_tests_on_host(src: &str) -> std::process::Output {
-    run_on_host_in_mode(src, &[], &[], true)
+    run_on_host_in_mode(src, &[], &[], true, None)
+}
+
+/// [`run_on_host`], with the program's own stack limited to `bytes`.
+///
+/// How big a stack is, is the machine's business and not a program's — with one
+/// exception, the test that is *about* reaching the end of one. Left to the
+/// platform's default that test asserts about whatever the machine running the
+/// suite was configured with: eight megabytes on a developer's, and enough more
+/// than that on a CI runner that a recursion deep enough to overflow eight
+/// returned cleanly there and the test failed. Setting the limit in the child
+/// makes the depth that overflows a property of the test rather than of the
+/// machine.
+fn run_on_host_with_stack(src: &str, bytes: u64) -> std::process::Output {
+    run_on_host_in_mode(src, &[], &[], false, Some(bytes))
 }
 
 /// [`run_on_host`], with `-C` settings applied on top of the host's.
@@ -1362,15 +1376,17 @@ fn run_on_host_in(
     settings: &[(&str, &str)],
     env: &[(&str, &str)],
 ) -> std::process::Output {
-    run_on_host_in_mode(src, settings, env, false)
+    run_on_host_in_mode(src, settings, env, false, None)
 }
 
-/// [`run_on_host_in`], saying whether this is a `--test` build.
+/// [`run_on_host_in`], saying whether this is a `--test` build and how much
+/// stack the program is allowed.
 fn run_on_host_in_mode(
     src: &str,
     settings: &[(&str, &str)],
     env: &[(&str, &str)],
     test: bool,
+    stack: Option<u64>,
 ) -> std::process::Output {
     let mut probe = LlvmBackend::default();
     let info = probe.target_info(None).expect("the host resolves");
@@ -1422,10 +1438,36 @@ fn run_on_host_in_mode(
         &crate::codegen::link::LinkOptions::default(),
     )
     .unwrap_or_else(|e| panic!("linking:\n{e}"));
-    std::process::Command::new(&exe)
-        .envs(env.iter().copied())
-        .output()
-        .expect("it runs")
+    let mut command = match stack {
+        None => std::process::Command::new(&exe),
+        Some(bytes) => with_stack(&exe, bytes),
+    };
+    command.envs(env.iter().copied());
+    command.output().expect("it runs")
+}
+
+/// A command that runs `exe` with its stack limited to `bytes`.
+///
+/// Through `sh`, whose `ulimit` is exactly this, rather than a `setrlimit` in a
+/// `pre_exec` hook: macOS refuses `setrlimit(RLIMIT_STACK, ...)` with `EINVAL`
+/// from inside the test binary — that was written first and is what this
+/// comment is here for — while a freshly exec'd shell is allowed to set it.
+///
+/// `exec` is what keeps the answers honest. The shell is **replaced** by the
+/// program, so the status the caller reads is the program's own, a signal and
+/// an abort included, and not a shell's report of one. A limit the shell cannot
+/// set exits `111` rather than running the program at whatever the machine's
+/// limit happens to be, which is the failure this whole helper exists to stop.
+fn with_stack(exe: &Path, bytes: u64) -> std::process::Command {
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(format!(
+            "ulimit -s {} || exit 111; exec \"$0\"",
+            bytes / 1024
+        ))
+        .arg(exe);
+    command
 }
 
 // ===< The collector >===
@@ -1492,14 +1534,26 @@ fn a_leaked_object_lives_until_it_is_dropped() {
 /// *does* fit is untouched, which is the half worth guarding: a check that
 /// fired early would make the language's own depth limit smaller than the
 /// platform's.
+///
+/// **Both halves run with a stack this test chose**, not the machine's. A frame
+/// of `f` is 96 bytes on both of this project's targets, so a hundred thousand
+/// of them want about 9.6 MB: over a two-megabyte stack several times over, and
+/// over the eight a developer's machine gives by default — but *under* what a
+/// CI runner turned out to give, where the recursion simply returned and the
+/// test failed with "it exited instead of trapping".
 #[test]
 fn recursion_past_the_end_of_the_stack_traps() {
     let Some(_) = crate::codegen::link::built_runtime() else {
         return;
     };
-    let deep = run_on_host(
+    /// Two megabytes: far under what the deep recursion below needs and far
+    /// over what the shallow one does, so neither half is near the edge.
+    const STACK: u64 = 2 * 1024 * 1024;
+
+    let deep = run_on_host_with_stack(
         "f :: func (n: i32) -> i32 { if n == 0 { return 0 }; return f(n - 1) }\n\
          main :: func () -> i32 { return f(100000) }\n",
+        STACK,
     );
     assert_eq!(
         deep.status.code(),
@@ -1512,9 +1566,10 @@ fn recursion_past_the_end_of_the_stack_traps() {
         "it did not say what happened: {said}"
     );
 
-    let shallow = run_on_host(
+    let shallow = run_on_host_with_stack(
         "f :: func (n: i32) -> i32 { if n == 0 { return 0 }; return f(n - 1) + 1 }\n\
          main :: func () -> i32 { return f(1000) - 990 }\n",
+        STACK,
     );
     assert_eq!(
         shallow.status.code(),

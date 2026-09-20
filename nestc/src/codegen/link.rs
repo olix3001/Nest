@@ -136,11 +136,26 @@ pub fn combine(objects: &[PathBuf], out: &Path, options: &LinkOptions) -> Result
     Ok(())
 }
 
+/// Warnings the linker emits that nobody reading them can act on.
+///
+/// Apple's linker reports the `REFERENCED_DYNAMICALLY` bit as deprecated for
+/// three Mach exception handlers — `_catch_exception_raise` and its two
+/// neighbours — which Boehm sets with a `.desc` directive in its own source.
+/// They are in the collector's archive, they are printed **once per link** on
+/// macOS, and a Nest program's link is where they surface. There is nothing to
+/// fix here and nothing to fix there; the only thing they do is bury a real
+/// warning under three that are not.
+///
+/// This is a *line* filter and not `-Wl,-w`: every other thing the linker has
+/// to say still reaches the person who ran it.
+const MUFFLED: [&str; 1] = ["REFERENCED_DYNAMICALLY flag on symbol"];
+
 /// Link `objects` into an executable at `out`.
 ///
-/// The linker's own output is **not** captured: a linker's diagnostics are
-/// already addressed to a person, and rewrapping them in this compiler's voice
-/// would only hide which tool actually failed.
+/// The linker's own output is **not** rewrapped in this compiler's voice: a
+/// linker's diagnostics are already addressed to a person, and restating them
+/// would only hide which tool actually failed. It is passed through line by
+/// line rather than inherited only so that [`MUFFLED`] can be dropped.
 pub fn link(objects: &[PathBuf], out: &Path, options: &LinkOptions) -> Result<(), String> {
     let runtime = options.runtime_path()?;
     let mut command = Command::new(&options.linker);
@@ -158,14 +173,31 @@ pub fn link(objects: &[PathBuf], out: &Path, options: &LinkOptions) -> Result<()
         command.arg(format!("-l{lib}"));
     }
 
-    let status = command.status().map_err(|e| {
+    let done = command.output().map_err(|e| {
         format!(
             "cannot run the linker `{}`: {e}\nset another with `-C linker=<path>`",
             options.linker
         )
     })?;
-    if !status.success() {
-        return Err(format!("`{}` failed: {status}", options.linker));
+    say(&done.stdout, &mut std::io::stdout());
+    say(&done.stderr, &mut std::io::stderr());
+    if !done.status.success() {
+        return Err(format!("`{}` failed: {}", options.linker, done.status));
     }
     Ok(())
+}
+
+/// Write what the linker said, without the lines that say nothing.
+///
+/// A line the filter does not recognize is written **as bytes**: a linker names
+/// files, and a path is not required to be UTF-8.
+fn say(said: &[u8], to: &mut impl std::io::Write) {
+    for line in said.split_inclusive(|b| *b == b'\n') {
+        let text = String::from_utf8_lossy(line);
+        if MUFFLED.iter().any(|m| text.contains(m)) {
+            continue;
+        }
+        let _ = to.write_all(line);
+    }
+    let _ = to.flush();
 }
