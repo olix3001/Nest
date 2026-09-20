@@ -518,6 +518,78 @@ pub fn resolve_impl_targets(
     out
 }
 
+/// Fold the **value** of every constant declared in `file`, for the declaration
+/// table to record (`super::decl::record_const_values`).
+///
+/// An array length and a `const` generic argument are the two places a
+/// constant's value, rather than its type, is what a use site needs: `[SIZE]T`
+/// is a `[4]T`, and a package compiled against this one has no right-hand side
+/// to read the `4` from. It is the same fold a use in this package does
+/// ([`Inferer::const_operand`]), run once at the declaration instead.
+///
+/// **Nothing is reported.** A constant whose value does not fold — one that
+/// calls a function, say — is simply not recorded, and a use of it meets the
+/// same limit and the same diagnostic it always did, where it is written.
+pub fn fold_const_values(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    decls: &DeclTable,
+    lang: &LangItems,
+    impls: &ImplTable,
+    file: FileId,
+) -> Vec<(DefId, ConstValue)> {
+    let Some(ast) = asts.get(&file) else {
+        return Vec::new();
+    };
+    let empty: HashSet<DefId> = HashSet::new();
+    // Thrown away: this pass answers "does it fold", and the diagnostics for
+    // "it does not" belong to the use site that asked for a value.
+    let mut discarded = Vec::new();
+    let mut cx = Inferer {
+        defs,
+        asts,
+        decls,
+        ast,
+        diags: &mut discarded,
+        lang,
+        impls,
+        in_scope_traits: &empty,
+        lang_traits: &empty,
+        in_default: false,
+        file,
+        cx: InferCtxt::new(),
+        env: HashMap::new(),
+        types: HashMap::new(),
+        ret: Ty::Void,
+        breaks: Vec::new(),
+        alias_stack: Vec::new(),
+        const_stack: Vec::new(),
+        int_values: HashMap::new(),
+        float_values: HashMap::new(),
+    };
+    let mut out = Vec::new();
+    for d in defs.iter() {
+        if d.kind != DefKind::Const || d.file != Some(file) {
+            continue;
+        }
+        let Some(node) = d.node else { continue };
+        // Both spellings of a constant (§2.5): `SIZE :: 4` binds the value, and
+        // `SIZE: u16 :: 4` writes the type before the binder and parses as an
+        // `AssocConst` holding the two apart.
+        let rhs = match ast.node(node).kind.clone() {
+            NodeKind::ConstBind { rhs, .. } => rhs,
+            NodeKind::AssocConst {
+                default: Some(rhs), ..
+            } => rhs,
+            _ => continue,
+        };
+        if let Some(v) = cx.const_operand(file, rhs, "a constant", 0) {
+            out.push((d.id, v));
+        }
+    }
+    out
+}
+
 /// The signature of `def`, worked out from the tree the way a call site used to
 /// ask for it — for the test that the recorded one is the same
 /// (`super::decl::tests`).
@@ -6831,6 +6903,9 @@ impl Inferer<'_> {
                 let d = self.defs.get(def);
                 match d.kind {
                     DefKind::Const => {
+                        if let Some(v) = self.decls().const_value(def) {
+                            return Some(v);
+                        }
                         let (cfile, cnode) = (d.file?, d.node?);
                         let rhs = match self.asts[&cfile].node(cnode).kind.clone() {
                             NodeKind::ConstBind { rhs, .. } => rhs,
@@ -7043,6 +7118,13 @@ impl Inferer<'_> {
                 Const::Param(def)
             }
             DefKind::Const => {
+                // The recorded value first, always: a constant in another
+                // package has one and no right-hand side here, and while a
+                // tree-first read would work for this package it would mean the
+                // recorded answer was never exercised by anything.
+                if let Some(v) = self.decls().const_value(def) {
+                    return self.const_from_value(file, node, v, want, what);
+                }
                 let (Some(cfile), Some(cnode)) = (d.file, d.node) else {
                     return Const::Error;
                 };

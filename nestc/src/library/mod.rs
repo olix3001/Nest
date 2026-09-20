@@ -48,7 +48,7 @@ pub const MAGIC: &[u8; 8] = b"NESTMETA";
 
 /// The layout of what follows the magic. Raised whenever anything written
 /// changes shape, so an old library is refused by name rather than misread.
-pub const FORMAT: u32 = 8;
+pub const FORMAT: u32 = 9;
 
 /// What a reader checks before it reads anything else.
 #[derive(Debug, Serialize, Deserialize)]
@@ -256,6 +256,7 @@ mod tests {
         // expression the library lowered once, and `#caller_location` is filled
         // from *this* file rather than from the declaration's own line.
         let program = "shapes :: import <shapes>\n\
+                       { SIDES } :: import <shapes>\n\
                        main :: func () {\n\
                        let c := shapes.Circle { radius: 2.0 }\n\
                        const obj: *dyn shapes.Shape := &c\n\
@@ -268,6 +269,7 @@ mod tests {
                        let twice := shapes.scaled(2.0)\n\
                        let by := shapes.scaled(2.0, 3.0)\n\
                        let here := shapes.line_of()\n\
+                       let arr: [SIDES]u8 := [_]u8 { 1, 2, 3, 4, 5, 6 }\n\
                        }\n";
         let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", program)));
         super::read::load(&mut session, &core_meta, &core_ir, path, true)

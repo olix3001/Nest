@@ -349,6 +349,22 @@ pub fn analyze(session: &mut Session, entry: FileId) {
         } = &mut *session;
         decl::record_types(defs, asts, decls, file);
     }
+    // And each constant's value, which an array length in another package needs
+    // and which is the same fold a length in this one does. After the types,
+    // because it fills in entries `record_types` put there.
+    for &file in &files {
+        let values = {
+            let Session {
+                defs,
+                asts,
+                decls,
+                lang_items,
+                ..
+            } = &*session;
+            infer::fold_const_values(defs, asts, decls, lang_items, &impls, file)
+        };
+        decl::record_const_values(&mut session.decls, values);
+    }
     // Field uses can only be bound once their bases are typed, so this runs
     // after inference and before lowering reads the links.
     for &file in &files {

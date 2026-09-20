@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
 use crate::ir::IrId;
+use crate::ir::const_eval::ConstValue;
 use crate::parser::ast::{Ast, Lit, NodeId, NodeKind, StructKind};
 
 use super::Resolution;
@@ -126,6 +127,9 @@ pub struct AliasDecl {
 pub struct ConstDecl {
     /// The type a **use** of it has.
     pub ty: ConstTy,
+    /// Its **value**, when it has one that folds without running any code —
+    /// see [`Decls::const_value`].
+    pub value: Option<ConstValue>,
 }
 
 /// What type a use of a constant has, which is not always *a* type.
@@ -158,6 +162,11 @@ pub struct AssocDecl {
     /// An associated constant's declared type — the one every impl's value must
     /// have. `None` for an associated type, which declares no type of its own.
     pub ty: Option<Ty>,
+    /// Its **value**, for the same reason and in the same cases as
+    /// [`ConstDecl::value`]: `SIZE: u16 :: 4` declares its type and so is
+    /// recorded here rather than as a [`ConstDecl`], and `[SIZE]T` in another
+    /// package still has to know it is a `4`.
+    pub value: Option<ConstValue>,
 }
 
 /// One generic parameter, as a declaration lists it.
@@ -338,6 +347,21 @@ impl<'a> Decls<'a> {
         }
     }
 
+    /// The **value** of the constant `def`, as the declaration folded it.
+    ///
+    /// What an array length or a `const` generic argument needs: `[SIZE]T` is a
+    /// `[4]T`, and the `4` is in the declaring package. Only a value that folds
+    /// out of literals and operators is here — a call cannot be evaluated
+    /// before there is IR to evaluate — which is the same limit a use in this
+    /// package meets.
+    pub fn const_value(&self, def: DefId) -> Option<ConstValue> {
+        match self.table.get(&def)? {
+            Decl::Const(c) => c.value.clone(),
+            Decl::Assoc(a) => a.value.clone(),
+            _ => None,
+        }
+    }
+
     /// The declared type of an associated constant.
     pub fn assoc_const_ty(&self, def: DefId) -> Option<Ty> {
         match self.table.get(&def)? {
@@ -510,6 +534,7 @@ impl<'a> Decls<'a> {
             kind,
             answered,
             ty: None,
+            value: None,
         })
     }
 
@@ -684,6 +709,16 @@ impl<'a> Decls<'a> {
         for _ in 0..16 {
             if self.defs.get(def).kind != DefKind::Const {
                 return None;
+            }
+            // The recorded value first: a constant in another package has one
+            // and has no right-hand side here to read instead. A chain of `::`
+            // constants folded to its end when it was recorded, so there is
+            // nothing left to follow.
+            match self.const_value(def) {
+                Some(ConstValue::Int(n)) => return Some(Lit::Int(n)),
+                Some(ConstValue::Float(f)) => return Some(Lit::Float(f)),
+                Some(_) => return None,
+                None => {}
             }
             let (cfile, rhs) = self.const_binding(def)?;
             match self.asts[&cfile].node(rhs).kind.clone() {
@@ -1069,7 +1104,7 @@ pub fn record_types(
                             // what type it has, and that is the one question
                             // about a constant a caller cannot answer from its
                             // own file.
-                            table.insert(d.id, Decl::Const(ConstDecl { ty }));
+                            table.insert(d.id, Decl::Const(ConstDecl { ty, value: None }));
                         } else {
                             table.insert(
                                 d.id,
@@ -1109,6 +1144,24 @@ pub fn record_types(
                     table.insert(d.id, Decl::Type(t));
                 }
             }
+            _ => {}
+        }
+    }
+}
+
+/// Record each constant's **value**, as the declaration folded it.
+///
+/// Called with what [`super::infer::fold_const_values`] worked out, for the same
+/// reason [`record_types`] is separate from [`record`]: a constant's value is an
+/// expression, and folding one is inference's work.
+///
+/// A constant with no entry is one recorded as something other than a constant —
+/// a binding that names a type — and a value it folded to is not about it.
+pub fn record_const_values(table: &mut DeclTable, values: Vec<(DefId, ConstValue)>) {
+    for (def, value) in values {
+        match table.get_mut(&def) {
+            Some(Decl::Const(c)) => c.value = Some(value),
+            Some(Decl::Assoc(a)) => a.value = Some(value),
             _ => {}
         }
     }
