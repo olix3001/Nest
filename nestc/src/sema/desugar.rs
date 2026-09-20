@@ -25,14 +25,17 @@
 //! resolved on the spot; the lang-item method names (`next`, `branch`) are left
 //! for the type checker, exactly like any hand-written method call.
 
+use num_bigint::BigInt;
+
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::{FileId, FileSpan};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{
-    AssignOp, Ast, BinOp, CompositeBody, NodeId, NodeKind, TryKind, UnOp, VariantArgs,
+    AssignOp, Ast, BinOp, CompositeBody, Lit, NodeId, NodeKind, TryKind, UnOp, VariantArgs,
     VariantPatArgs,
 };
+use crate::parser::fmt::{FormatSpec, SpecKind};
 
 use super::def::{DefId, DefKind, DefTable, LangItems, Visibility};
 use super::{DefMeta, Resolution, SpreadBase};
@@ -371,14 +374,12 @@ impl Desugar<'_> {
             },
         );
 
-        // One `piece.display(&mut __fmt)` per piece, at the piece's own span, so
-        // "no impl of `Display`" points at the `{x}` that has none rather than
-        // at the whole string.
+        // One call per piece, at the piece's own span, so "no impl of `Display`"
+        // points at the `{x}` that has none rather than at the whole string.
         let mut stmts = vec![bind];
         for piece in parts {
-            let at = self.ast.node(piece).span;
-            let out = self.buf_ref(at, &name, buf_local);
-            stmts.push(self.method_call(at, piece, "display", vec![out]));
+            let spec = self.ast.meta::<FormatSpec>(piece).unwrap_or_default();
+            self.write_piece(&mut stmts, piece, spec, &name, buf_local);
         }
 
         let out = self.buf_ref(span, &name, buf_local);
@@ -390,6 +391,120 @@ impl Desugar<'_> {
                 tail: Some(finish),
             },
         );
+    }
+
+    /// One piece of an `f"..."`, with whatever its specifier asks for written
+    /// around it (§6.11).
+    ///
+    /// ```text
+    /// {x}      →  x.display(&mut __fmt1)
+    /// {x:?}    →  x.debug(&mut __fmt1)
+    /// {x:>8}   →  __mark2 :: format.mark(&mut __fmt1)
+    ///             x.display(&mut __fmt1)
+    ///             format.pad(&mut __fmt1, __mark2, 8, ' ', 2, 0, false)
+    /// ```
+    ///
+    /// The specifier is **spent here**: it decides which method the hole calls
+    /// and which calls surround it, and nothing about it reaches the program.
+    /// A hole without one costs exactly what it cost before there were any.
+    fn write_piece(
+        &mut self,
+        stmts: &mut Vec<NodeId>,
+        piece: NodeId,
+        spec: FormatSpec,
+        buf: &Symbol,
+        buf_local: DefId,
+    ) {
+        let at = self.ast.node(piece).span;
+        let method = match spec.kind {
+            SpecKind::Display => "display",
+            SpecKind::Debug => {
+                if self.lang.get("debug").is_none() {
+                    self.report(piece, "`{...:?}` requires the `#lang(\"debug\")` item");
+                    return;
+                }
+                "debug"
+            }
+            SpecKind::LowerHex | SpecKind::UpperHex | SpecKind::Binary | SpecKind::Octal => {
+                self.report(piece, "a radix format specifier is not implemented yet");
+                return;
+            }
+        };
+        if spec.precision.is_some() {
+            self.report(piece, "a precision format specifier is not implemented yet");
+            return;
+        }
+
+        // Where the value's own bytes begin. Only a specifier that writes
+        // something around them needs to know.
+        let mark = if spec.wraps() {
+            let Some(def) = self.lang_def("format_mark") else {
+                self.report(piece, "a padded `{...}` requires the `#lang(\"format_mark\")` item");
+                return;
+            };
+            let name = self.fresh("mark");
+            let (pat, local) = self.binding_pat(at, &name, false);
+            let out = self.buf_ref(at, buf, buf_local);
+            let call = self.static_call(at, def, vec![out]);
+            stmts.push(self.alloc(
+                at,
+                NodeKind::ConstBind {
+                    pattern: pat,
+                    rhs: call,
+                },
+            ));
+            Some((name, local))
+        } else {
+            None
+        };
+
+        let out = self.buf_ref(at, buf, buf_local);
+        stmts.push(self.method_call(at, piece, method, vec![out]));
+
+        let Some((mark, mark_local)) = mark else {
+            return;
+        };
+
+        // `+` is applied to what was written rather than decided in front of
+        // it: whether a value has a sign of its own is a run-time question, and
+        // the bytes answer it.
+        if spec.plus {
+            let Some(def) = self.lang_def("format_plus") else {
+                self.report(piece, "`{...:+}` requires the `#lang(\"format_plus\")` item");
+                return;
+            };
+            let out = self.buf_ref(at, buf, buf_local);
+            let from = self.local_ref(at, &mark, mark_local);
+            let call = self.static_call(at, def, vec![out, from]);
+            stmts.push(call);
+        }
+
+        if let Some(width) = spec.width {
+            let Some(def) = self.lang_def("format_pad") else {
+                self.report(piece, "a width requires the `#lang(\"format_pad\")` item");
+                return;
+            };
+            let out = self.buf_ref(at, buf, buf_local);
+            let from = self.local_ref(at, &mark, mark_local);
+            let width = self.int_lit(at, width);
+            let fill = self.alloc(at, NodeKind::Lit(Lit::Char(spec.padding())));
+            let align = self.int_lit(at, spec.alignment().code());
+            // The radix prefix `#` writes, which padding goes after and the
+            // width counts. There is none until there are radix specifiers.
+            let prefix = self.int_lit(at, 0u32);
+            let after_sign = self.alloc(at, NodeKind::Lit(Lit::Bool(spec.zero)));
+            let call = self.static_call(at, def, vec![out, from, width, fill, align, prefix, after_sign]);
+            stmts.push(call);
+        }
+    }
+
+    /// The definition a `#lang` tag names, with an alias followed through.
+    fn lang_def(&self, tag: &str) -> Option<DefId> {
+        self.lang.get(tag).map(|d| self.defs.resolve_alias(d))
+    }
+
+    fn int_lit(&mut self, span: Span, value: impl Into<BigInt>) -> NodeId {
+        self.alloc(span, NodeKind::Lit(Lit::Int(value.into())))
     }
 
     // ===< c"..." >===

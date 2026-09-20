@@ -213,6 +213,20 @@ the result of `expr` (which must implement `core`'s `Display`; see
 [06-expressions-and-operators.md](06-expressions-and-operators.md)). Braces are
 escaped by doubling: `{{` and `}}`.
 
+A hole may end with a **format specifier**, after a `:`:
+
+```
+spec = [[fill] align] ['+'] ['#'] ['0'] [width] ['.' precision] [type]
+align = '<' | '^' | '>'
+type  = '?' | 'x' | 'X' | 'b' | 'o'
+```
+
+`width` and `precision` are decimal digits, written where they are read: there
+is no form naming a binding for either, because the whole specifier is read
+while the literal is lexed and spent while it is desugared (§6.11). The `:` that
+begins it is the first one **outside** anything the expression opened, which is
+why `f"{P { x: 1 }}"` needs no escaping and `f"{n:>8}"` is not ambiguous.
+
 A **lone** `}` is an error rather than a literal brace. Accepting it would mean a
 program that gains a `{` earlier in the same literal silently changes what the
 `}` means.
@@ -226,6 +240,8 @@ literal is one line, and so is everything spliced into it.
 f"{w}x{h}"
 f"Invalid dimensions: {w}x{h}"
 f"literal brace: {{"
+f"{value:?}"                  // what it is, rather than what it shows
+f"{n:>8}"  f"{n:08}"  f"{s:*^12}"
 ```
 
 An interpolated string is syntactic sugar for a formatting call; see

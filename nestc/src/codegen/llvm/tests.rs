@@ -2031,3 +2031,121 @@ fn a_repr_c_enums_tag_is_a_c_int() {
         "without the directive the tag should be one byte:\n{plain}"
     );
 }
+
+// ===< Format specifiers >===
+//
+// What `{x:?}`, `{x:>8}` and the rest of §6.11's specifiers come out as, run
+// rather than read: a specifier is spent while desugaring, so the only place its
+// effect exists is the bytes the program writes.
+
+/// `{x:?}` calls `Debug` where `{x}` calls `Display`, and the two differ on
+/// exactly the values they are meant to: text is quoted and a struct is spelled
+/// out.
+#[test]
+fn a_question_mark_specifier_is_the_debug_trait() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+
+Point :: struct { x: i32, label: str }
+
+main :: func () -> i32 {
+    let p: Point := Point { x: 1, label: "hi" }
+    io.println(f"{p:?}")
+    io.println(f"{"hi"} {"hi":?}")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "Point { x: 1, label: \"hi\" }\nhi \"hi\"\n",
+        "{ran:?}"
+    );
+}
+
+/// A width pads the value out to it, at whichever end the alignment names, with
+/// whatever the fill is — and a value already that wide is left alone.
+#[test]
+fn a_width_pads_the_value_to_it() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+
+main :: func () -> i32 {
+    io.println(f"[{42:6}]")
+    io.println(f"[{42:<6}]")
+    io.println(f"[{42:>6}]")
+    io.println(f"[{7:^5}]")
+    io.println(f"[{"ab":*^6}]")
+    io.println(f"[{123456:3}]")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "[42    ]\n[42    ]\n[    42]\n[  7  ]\n[**ab**]\n[123456]\n",
+        "{ran:?}"
+    );
+}
+
+/// `0` pads with zeroes **after** the sign, and `+` writes a sign onto a value
+/// that has none of its own — the one after the other, so `{n:+06}` is a signed
+/// number in a zero-filled field rather than zeroes in front of a sign.
+#[test]
+fn the_zero_and_plus_flags_write_around_the_sign() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+
+main :: func () -> i32 {
+    io.println(f"[{-42:06}]")
+    io.println(f"[{42:06}]")
+    io.println(f"[{42:+}]")
+    io.println(f"[{-42:+}]")
+    io.println(f"[{42:+06}]")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "[-00042]\n[000042]\n[+42]\n[-42]\n[+00042]\n",
+        "{ran:?}"
+    );
+}
+
+/// A width counts **characters**, not bytes: padding a value whose text is not
+/// ASCII fills it to the width a reader sees.
+#[test]
+fn a_width_counts_characters_and_not_bytes() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+
+main :: func () -> i32 {
+    io.println(f"[{"äö":>4}]")
+    io.println(f"[{"äö":ä<4}]")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "[  äö]\n[äöää]\n",
+        "{ran:?}"
+    );
+}

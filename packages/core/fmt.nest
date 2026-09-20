@@ -40,9 +40,10 @@
 // `f"{x}"` on an `f64` is "no impl of `Display`" at the call, which is a
 // readable thing to be told.
 //
-// **Width, alignment and precision** — `{x:>8.2}`. The syntax has no place to
-// put them (§1.5 is `{ expr }` and nothing else), so adding them is a language
-// change rather than a library one.
+// **Precision** — `{x:.2}`. The syntax has a place for it (§1.5) and nothing
+// answers it yet; width and alignment do work, and are at the bottom of this
+// file rather than in any impl, because padding is done to the bytes a value
+// wrote rather than by the value itself.
 //
 // **An owned string type.** `Buf` is the formatter's scratch space, not a
 // `String`: it grows, it is written into once, and `end` hands back a `str` view
@@ -501,11 +502,139 @@ representation :: func () -> Member {
     }
 }
 
+// ===< What a format specifier asks for >===
+
+// A specifier is spent at compile time (§6.11). `{x:?}` is a `debug` call where
+// `{x}` is a `display` one, and a width becomes the two functions below, called
+// either side of the value's own. There is no formatting *object*: nothing on
+// the buffer says how wide the field is, and a program that writes no specifier
+// never reaches any of this.
+
+// Where the next value's bytes will begin.
+@public mark :: #lang("format_mark") func (out: *mut Buf) -> usize {
+    return out.len
+}
+
+// `{x:+}` — a `+` in front of a value that wrote no sign of its own.
+//
+// The sign is *found* rather than predicted: what a value looks like is its
+// `Display` impl's business, and the byte at `from` is the first one it wrote.
+@public plus :: #lang("format_plus") func (out: *mut Buf, from: usize) -> void {
+    if from < out.len {
+        let first: u8 := out.data[from]
+        if first == MINUS || first == PLUS { return }
+    }
+    out.byte(PLUS)
+    rotate(out, from, out.len - 1)
+}
+
+// `{x:>8}` — fill the value out to `width` characters.
+//
+// `from` is where the value started, `prefix` is how many characters of it the
+// desugaring wrote itself (a radix prefix), and `after_sign` says the fill
+// belongs *inside* the value rather than in front of it — which is what `{n:08}`
+// means and `{n:8}` does not.
+//
+// `align` is a number rather than an enum because the desugaring writes it, and
+// a desugaring reaches `core` by `#lang` tag and never by path (§6.11): 0 is
+// left, 1 is centre, 2 is right.
+@public pad :: #lang("format_pad") func (out: *mut Buf, from: usize, width: usize, fill: char, align: u8, prefix: usize, after_sign: bool) -> void {
+    let written: usize := chars_from(out, from)
+    if written >= width { return }
+    let missing: usize := width - written
+    let at: usize := inside(out, from, prefix, after_sign)
+    align.match {
+        // Left: the fill is already where it goes.
+        0 => fill_with(out, fill, missing),
+        1 => {
+            // The odd character goes on the right, as Rust's `^` does.
+            let left: usize := missing / 2
+            fill_with(out, fill, missing - left)
+            let mid: usize := out.len
+            fill_with(out, fill, left)
+            rotate(out, at, mid)
+        },
+        _ => {
+            let mid: usize := out.len
+            fill_with(out, fill, missing)
+            rotate(out, at, mid)
+        },
+    }
+}
+
+// How many characters have been written since `from`.
+//
+// The buffer holds bytes and a width counts characters, so the two differ the
+// moment anything is not ASCII. Every byte that is not a UTF-8 continuation
+// (`0b10xxxxxx`) begins a character, which is the whole of the count.
+chars_from :: func (out: *mut Buf, from: usize) -> usize {
+    let mut n: usize := 0
+    let mut i: usize := from
+    while i < out.len {
+        if (out.data[i] & 192) != 128 { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// Where the fill goes when it goes in front of the value: past the sign the
+// value wrote, and past the prefix the desugaring wrote.
+inside :: func (out: *mut Buf, from: usize, prefix: usize, after_sign: bool) -> usize {
+    if after_sign == false { return from }
+    let mut at: usize := from
+    if at < out.len {
+        let first: u8 := out.data[at]
+        if first == MINUS || first == PLUS { at = at + 1 }
+    }
+    // A radix prefix is ASCII (`0x`, `0b`, `0o`), so its characters are bytes.
+    at = at + prefix
+    if at > out.len { return out.len }
+    return at
+}
+
+// `times` copies of the fill, at the end of the buffer. A `char` is a code
+// point and the buffer is UTF-8, so the encoding is the one `Display` already
+// wrote.
+fill_with :: func (out: *mut Buf, fill: char, times: usize) -> void {
+    let mut i: usize := 0
+    while i < times {
+        fill.display(out)
+        i = i + 1
+    }
+}
+
+// Swap the two halves of what is in the buffer from `start` on, `mid` being
+// where the second half begins — which is how the fill written at the end ends
+// up in front of the value.
+//
+// Three reversals, so there is no second buffer and nothing to allocate. The
+// bytes move as bytes, and a character spanning several of them survives
+// because a reversed block reversed again is itself.
+rotate :: func (out: *mut Buf, start: usize, mid: usize) -> void {
+    reverse(out, start, mid)
+    reverse(out, mid, out.len)
+    reverse(out, start, out.len)
+}
+
+reverse :: func (out: *mut Buf, from: usize, to: usize) -> void {
+    if to <= from { return }
+    let mut i: usize := from
+    let mut j: usize := to - 1
+    while i < j {
+        let t: u8 := out.data[i]
+        out.data[i] = out.data[j]
+        out.data[j] = t
+        i = i + 1
+        j = j - 1
+    }
+}
+
 // The bytes the loops above and the `Debug` impls below need by name. A
 // character literal would be clearer still, but a `char` is a code point and
 // these are being appended as bytes.
 ZERO: u8 :: 48
 MINUS: u8 :: 45
+PLUS: u8 :: 43
 QUOTE: u8 :: 34
 TICK: u8 :: 39
 BACKSLASH: u8 :: 92

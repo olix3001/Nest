@@ -327,7 +327,17 @@ impl Parser {
                 }
                 Some(TokenKind::InterpOpen) => {
                     self.bump();
-                    parts.push(self.parse_expr());
+                    let expr = self.parse_expr();
+                    // `{x:>8}` — the specifier the lexer read is kept beside the
+                    // expression rather than inside the node, because it is a
+                    // fact about *this hole* and not about the expression, which
+                    // types and lowers as the ordinary one it is (§6.11).
+                    if let Some(TokenKind::InterpSpec(spec)) = self.peek() {
+                        let spec = *spec;
+                        self.bump();
+                        self.set_meta(expr, spec);
+                    }
+                    parts.push(expr);
                     // The lexer matched these braces by depth, so a failure here
                     // is the expression parser having stopped early — the error
                     // belongs at the token it stopped on, and the loop carries

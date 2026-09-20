@@ -129,6 +129,9 @@
   "{" @punctuation.special
   "}" @punctuation.special) @embedded
 
+; `:>8`, `:?` — not code, and not the string around it either.
+(format_spec) @string.special
+
 [(line_comment) (block_comment)] @comment
 
 ; ===< Keywords >===

@@ -247,7 +247,11 @@ primary = literal
 // and a lone `}` is an error. The braces around an embedded expression are
 // matched by lexing it, so it may contain a string holding a brace or a nested
 // interpolation, but it may not contain a newline.
-interpolated_string = 'f"' { string_segment | '{' expr '}' } '"'
+interpolated_string = 'f"' { string_segment | '{' expr [ ':' format_spec ] '}' } '"'
+format_spec         = [ [ fill ] align ] [ '+' ] [ '#' ] [ '0' ] [ width ]
+                      [ '.' precision ] [ format_type ]
+align               = '<' | '^' | '>'
+format_type         = '?' | 'x' | 'X' | 'b' | 'o'
 
 composite_literal =
     type '{' composite_body '}'                      // typed record OR array (by type)

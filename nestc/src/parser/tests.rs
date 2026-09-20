@@ -414,6 +414,20 @@ fn an_interpolation_holds_an_ordinary_expression() {
     ));
 }
 
+/// A specifier the grammar has no place for is refused, and the message names
+/// the character it stopped at (§1.5, §6.11).
+///
+/// The span is the literal's, as it is for every other lexing failure inside an
+/// `f"..."`: the specifier is read by a `logos` callback, which yields a reason
+/// and lets the lexer place it. What follows the failure is re-lexed as ordinary
+/// source, which is where the errors after the first come from.
+#[test]
+fn a_malformed_format_specifier_is_refused_at_itself() {
+    assert_snapshot!(tree_with_errors(
+        "go :: func (n: i32) -> str { return f\"{n:q}\" }\n"
+    ));
+}
+
 /// Several statements may share a line when a `;` separates them, and the
 /// classifier that decides what a statement *is* looks ahead to the end of that
 /// statement.

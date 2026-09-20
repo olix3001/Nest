@@ -8,6 +8,7 @@
 use logos::{FilterResult, Logos};
 use num_bigint::BigInt;
 
+use super::fmt::{self, FormatSpec};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 
@@ -89,6 +90,9 @@ pub enum TokenKind {
     InterpOpen,
     /// The `}` that closes one. Synthesized.
     InterpClose,
+    /// The `:spec` at the end of an embedded expression — `{x:>8}`, `{x:?}`
+    /// (§6.11). Synthesized, and present only where one was written.
+    InterpSpec(FormatSpec),
     /// The `"` that closes an interpolated string. Synthesized.
     InterpEnd,
 
@@ -227,13 +231,19 @@ fn push_expanded(tokens: &mut Vec<LexResult<Token>>, entry: LexResult<Token>) {
     for piece in pieces {
         match piece {
             InterpPiece::Lit(text, at) => tokens.push(Ok(Token::new(TokenKind::Str(text), at))),
-            InterpPiece::Expr(sub, at) => {
+            InterpPiece::Expr(sub, spec, at) => {
                 tokens.push(Ok(Token::new(
                     TokenKind::InterpOpen,
                     Span::new(at.start, at.start + 1),
                 )));
                 for token in sub {
                     push_expanded(tokens, token);
+                }
+                // After the expression's tokens, because that is where it was
+                // written and because the parser has then already read the
+                // expression it belongs to.
+                if let Some((spec, at)) = spec {
+                    tokens.push(Ok(Token::new(TokenKind::InterpSpec(spec), at)));
                 }
                 tokens.push(Ok(Token::new(
                     TokenKind::InterpClose,
@@ -258,8 +268,10 @@ fn push_expanded(tokens: &mut Vec<LexResult<Token>>, entry: LexResult<Token>) {
 pub enum InterpPiece {
     /// A run of literal text, and the source it came from.
     Lit(String, Span),
-    /// The tokens of one `{ expr }`, and the span of the braces around them.
-    Expr(Vec<LexResult<Token>>, Span),
+    /// The tokens of one `{ expr }`, the specifier written after its `:` (with
+    /// the span of the specifier's own text), and the span of the braces around
+    /// the whole hole.
+    Expr(Vec<LexResult<Token>>, Option<(FormatSpec, Span)>, Span),
 }
 
 /// A lexed token: a [`TokenKind`] paired with its source [`Span`].
@@ -307,6 +319,13 @@ pub enum LexErrorKind {
     EmptyInterpolation,
     #[error("an unmatched `}}` in an interpolated string; write `}}}}` for a literal one")]
     UnmatchedInterpolation,
+    #[error(
+        "`{0}` is not a format specifier; write `{{value:[[fill]align][+][#][0][width][.precision][type]}}`, \
+         where `align` is `<`, `^` or `>` and `type` is `?`, `x`, `X`, `b` or `o`"
+    )]
+    UnknownFormatType(char),
+    #[error("a malformed format specifier")]
+    MalformedFormatSpec,
 }
 
 /// Lexing error with [`Span`] included.
@@ -627,9 +646,10 @@ fn lex_interp_string(lex: &mut logos::Lexer<TokenKind>) -> Result<Vec<InterpPiec
             '}' => return Err(LexErrorKind::UnmatchedInterpolation),
             '{' => {
                 flush!(i);
-                let (tokens, end) = lex_interp_expr(&rest, i + 1, base)?;
+                let (tokens, spec, end) = lex_interp_expr(&rest, i + 1, base)?;
                 pieces.push(InterpPiece::Expr(
                     tokens,
+                    spec,
                     Span::new(base + i, base + end + 1),
                 ));
                 i = end + 1;
@@ -645,15 +665,22 @@ fn lex_interp_string(lex: &mut logos::Lexer<TokenKind>) -> Result<Vec<InterpPiec
     Err(LexErrorKind::UnterminatedString)
 }
 
-/// The tokens of one `{ expr }`, starting at `start` (just past the `{`), and
+/// The tokens of one `{ expr }`, the specifier after its `:` if it has one, and
 /// the offset of the `}` that closed it.
 ///
 /// `base` is where `rest` sits in the file; every span handed back is absolute.
+///
+/// A `:` at **depth zero** ends the expression and begins the specifier, which
+/// is the same rule Rust's holes have and is unambiguous for the same reason:
+/// every colon an expression can contain is inside something — a struct
+/// literal's braces, a `match`'s arms — and so is at a depth above zero. The
+/// specifier itself is not lexed as tokens: `>8`, `#x` and `.3` are not Nest
+/// expressions, and reading them as characters is what [`super::fmt`] does.
 fn lex_interp_expr(
     rest: &str,
     start: usize,
     base: usize,
-) -> Result<(Vec<LexResult<Token>>, usize), LexErrorKind> {
+) -> Result<(Vec<LexResult<Token>>, Option<(FormatSpec, Span)>, usize), LexErrorKind> {
     let mut sub = TokenKind::lexer(&rest[start..]);
     let mut tokens: Vec<LexResult<Token>> = Vec::new();
     let mut depth = 0usize;
@@ -672,7 +699,27 @@ fn lex_interp_expr(
                 if tokens.is_empty() {
                     return Err(LexErrorKind::EmptyInterpolation);
                 }
-                return Ok((tokens, start + at.start));
+                return Ok((tokens, None, start + at.start));
+            }
+            // `{x:>8}`: the expression stops here and the rest of the hole is
+            // the specifier.
+            Ok(TokenKind::Colon) if depth == 0 => {
+                if tokens.is_empty() {
+                    return Err(LexErrorKind::EmptyInterpolation);
+                }
+                let from = start + at.end;
+                // The specifier runs to the `}`. A newline or a quote before it
+                // is the literal ending without one, which is the same mistake
+                // an unterminated string is and reads best as that.
+                let end = match rest[from..].find(['}', '\n', '"']) {
+                    Some(len) if rest[from + len..].starts_with('}') => from + len,
+                    _ => return Err(LexErrorKind::UnterminatedString),
+                };
+                let spec = fmt::parse(&rest[from..end])?;
+                // The span covers the `:` as well as what follows it, so that a
+                // hole written `{x:}` still has somewhere to point.
+                let at = Span::new(base + start + at.start, base + end);
+                return Ok((tokens, Some((spec, at)), end));
             }
             Ok(TokenKind::RBrace) => {
                 depth -= 1;

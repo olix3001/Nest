@@ -192,3 +192,44 @@ f :: func () {
               (identifier)
               (byte_string
                 (escape_sequence)))))))))
+
+=================
+Format specifiers
+=================
+
+f :: func () {
+  io.println(f"{n:>8} {n:?} {P { x: 1 }.x}")
+}
+
+---
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (func_expression
+        (parameters)
+        (block
+          (expression_statement
+            (call_expression
+              (field_expression
+                (identifier)
+                (field_identifier))
+              (arguments
+                (interpolated_string
+                  (interpolation
+                    (identifier)
+                    (format_spec))
+                  (string_content)
+                  (interpolation
+                    (identifier)
+                    (format_spec))
+                  (string_content)
+                  (interpolation
+                    (field_expression
+                      (composite_literal
+                        (identifier)
+                        (field_initializer
+                          (field_identifier)
+                          (integer)))
+                      (field_identifier))))))))))))

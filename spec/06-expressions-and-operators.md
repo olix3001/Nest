@@ -516,15 +516,43 @@ without a compiler change. There is no formatting *intrinsic*: what a value look
 like is a library question, and a compiler that answered it would leave a user's
 own type with nowhere to.
 
-Width, alignment and precision (`{x:>8.2}`) are **not** in the syntax: `{ }`
-holds an expression and nothing else (§1.5). Nor is `{x:?}`, though what it
-would select exists: `core` has a second trait tagged `#lang("debug")`, one
-method `debug(self: *Self, out: *mut Buf)`, which writes what a value *is*
-rather than what it shows — text quoted and escaped, a struct's members named,
-the variant an enum holds. Every type has an impl of it, a concrete one where
-`core` wrote it and a reflective one otherwise, so `Debug` is not a bound a
-program has to satisfy. Nothing in the language reaches it yet: it is called by
-name, and the specifier that would select it arrives with the rest of them.
+### Format specifiers
+
+A hole may end with a specifier after a `:` — `{x:?}`, `{n:>8}`, `{n:08}` — whose
+grammar is in §1.5. **A specifier is spent at compile time.** It decides which
+method the hole calls and which calls are written around it; nothing about it
+reaches the program, there is no formatting object, and no value is ever handed
+a description of the field it is being written into.
+
+| hole | what it calls |
+|---|---|
+| `{x}` | `Display.display` — `#lang("display")` |
+| `{x:?}` | `Debug.debug` — `#lang("debug")` |
+
+`Debug` is `core`'s second formatting trait, one method
+`debug(self: *Self, out: *mut Buf)`, and it writes what a value *is* rather than
+what it shows: text quoted and escaped, a struct's members named, the variant an
+enum holds. Every type has an impl of it — a concrete one where `core` wrote one
+and a reflective one otherwise — so it is not a bound a program has to satisfy.
+
+Width, fill and alignment are **not** the value's impl's business. Desugaring
+records where the value's bytes begin (`#lang("format_mark")`) and pads what was
+written once the value has written it (`#lang("format_pad")`), so a width works
+for every `Display` there is, a user's own included, without that impl knowing
+that specifiers exist. `+` is `#lang("format_plus")` and is applied the same way,
+because whether a value wrote a sign of its own is answered by looking at what it
+wrote.
+
+A width counts **characters**, not bytes. Alignment defaults to left for every
+type, and to right when `0` is written; Rust's default depends on whether the
+value is a number, which it can decide because it decides inside each impl at run
+time, where this is decided while the literal is lexed and nothing has a type yet.
+`0` also puts the padding *after* the value's sign, which is the difference
+between `{n:08}` and `{n:8}`.
+
+The remaining type characters — `x`, `X`, `b`, `o` — and `.precision` are part of
+the grammar and are **not implemented yet**; a hole that writes one is an error
+saying so.
 
 ## 6.12 Ranges
 

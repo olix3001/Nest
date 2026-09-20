@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod fmt;
 pub mod lexer;
 pub mod visitor;
 

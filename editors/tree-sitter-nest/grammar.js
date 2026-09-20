@@ -727,7 +727,18 @@ module.exports = grammar({
       token.immediate('"'),
     ),
 
-    interpolation: $ => seq(token.immediate('{'), $._expression, '}'),
+    interpolation: $ => seq(
+      token.immediate('{'),
+      $._expression,
+      optional($.format_spec),
+      '}',
+    ),
+
+    // `:>8`, `:?` — the specifier of one hole (§1.5). One token, because it is
+    // not Nest syntax: `>8` and `#x` are read as characters by the compiler's
+    // lexer, and giving them rules here would be a second, disagreeing grammar
+    // for them.
+    format_spec: _ => token(seq(':', /[^}"\n]*/)),
 
     char: _ => token(seq(
       '\'',

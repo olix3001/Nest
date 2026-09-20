@@ -1,0 +1,25 @@
+---
+source: src/parser/tests.rs
+expression: "tree_with_errors(\"go :: func (n: i32) -> str { return f\\\"{n:q}\\\" }\\n\")"
+---
+File
+  ConstBind ::
+    BindingPat go
+    FuncExpr
+      Param n:
+        TypePath
+          Path `i32`
+      TypePath
+        Path `str`
+      Block
+        Return
+          Block (has tail)
+            Path `n`
+            Error
+            Path `q`
+
+--- errors ---
+36..38: `q` is not a format specifier; write `{value:[[fill]align][+][#][0][width][.precision][type]}`, where `align` is `<`, `^` or `>` and `type` is `?`, `x`, `X`, `b` or `o`
+43..44: unterminated string literal
+40..41: expected `;` or a newline after a statement, found Colon
+40..41: expected an expression
