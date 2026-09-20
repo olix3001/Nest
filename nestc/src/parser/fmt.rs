@@ -238,7 +238,11 @@ fn number(chars: &[char], mut i: usize) -> (Option<u32>, usize) {
         value = value.saturating_mul(10).saturating_add(d);
         i += 1;
     }
-    if i == start { (None, i) } else { (Some(value), i) }
+    if i == start {
+        (None, i)
+    } else {
+        (Some(value), i)
+    }
 }
 
 #[cfg(test)]

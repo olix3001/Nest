@@ -443,7 +443,10 @@ impl Desugar<'_> {
             (false, _) => None,
             (true, Some(text)) => Some(text),
             (true, None) => {
-                self.report(piece, "`#` writes a radix prefix, and this `{...}` has no radix");
+                self.report(
+                    piece,
+                    "`#` writes a radix prefix, and this `{...}` has no radix",
+                );
                 return;
             }
         };
@@ -452,7 +455,10 @@ impl Desugar<'_> {
         // something around them needs to know.
         let mark = if spec.wraps() {
             let Some(def) = self.lang_def("format_mark") else {
-                self.report(piece, "a padded `{...}` requires the `#lang(\"format_mark\")` item");
+                self.report(
+                    piece,
+                    "a padded `{...}` requires the `#lang(\"format_mark\")` item",
+                );
                 return;
             };
             let name = self.fresh("mark");
@@ -491,7 +497,10 @@ impl Desugar<'_> {
         // the bytes answer it.
         if spec.plus {
             let Some(def) = self.lang_def("format_plus") else {
-                self.report(piece, "`{...:+}` requires the `#lang(\"format_plus\")` item");
+                self.report(
+                    piece,
+                    "`{...:+}` requires the `#lang(\"format_plus\")` item",
+                );
                 return;
             };
             let out = self.buf_ref(at, buf, buf_local);
@@ -514,7 +523,11 @@ impl Desugar<'_> {
             // after it, and the width counts it.
             let prefix = self.int_lit(at, prefix.map_or(0, |t| t.chars().count()) as u32);
             let after_sign = self.alloc(at, NodeKind::Lit(Lit::Bool(spec.zero)));
-            let call = self.static_call(at, def, vec![out, from, width, fill, align, prefix, after_sign]);
+            let call = self.static_call(
+                at,
+                def,
+                vec![out, from, width, fill, align, prefix, after_sign],
+            );
             stmts.push(call);
         }
     }
