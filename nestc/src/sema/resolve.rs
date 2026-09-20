@@ -852,8 +852,7 @@ impl Resolver<'_> {
             // it — `impl <T: Float> Display for T` applies to a float and to
             // nothing else, and a bound nobody recorded reads as no bound at
             // all, which is every type in the program.
-            self.defs.get_mut(param).param_bounds =
-                Some(traits.iter().map(|&(t, _)| t).collect());
+            self.defs.get_mut(param).param_bounds = Some(traits.iter().map(|&(t, _)| t).collect());
             self.project_bounds(param, name.as_str(), &traits, g, 0);
         }
     }
