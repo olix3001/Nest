@@ -389,10 +389,26 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // annotation.
     for &file in &files {
         infer_one(session, &impls, file);
-        let Session {
-            defs, asts, decls, ..
-        } = &mut *session;
-        decl::record_types(defs, asts, decls, file);
+        {
+            let Session {
+                defs, asts, decls, ..
+            } = &mut *session;
+            decl::record_types(defs, asts, decls, file);
+        }
+        // And what each generic parameter's bounds carry — the types in them,
+        // which only inference could resolve and which no tree here answers for
+        // a parameter that arrived with a library (see [`decl::ParamDecl`]).
+        let params = {
+            let Session {
+                defs,
+                asts,
+                decls,
+                lang_items,
+                ..
+            } = &*session;
+            infer::resolve_param_decls(defs, asts, decls, lang_items, &impls, file)
+        };
+        decl::record_param_decls(&mut session.decls, params);
     }
     // And each constant's value, which an array length in another package needs
     // and which is the same fold a length in this one does. After the types,

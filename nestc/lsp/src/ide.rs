@@ -205,11 +205,21 @@ pub fn declaration(s: &Session, def: DefId, use_ty: Option<Ty>) -> String {
         _ => {}
     }
     let text = (|| {
-        let (file, node) = (d.file?, d.node?);
-        let ast = s.asts.get(&file)?;
+        // The **span** travels with the def and the tree does not, and
+        // `source` already falls back to the file on disk — so a library's
+        // declaration is quotable here without anything this compilation
+        // parsed. The tree is used only to find where a function's body
+        // starts; without one, the first brace serves.
+        let file = d.file?;
+        let ast = s.asts.get(&file);
         let src = source(s, file)?;
-        let span = d.span.unwrap_or(ast.node(node).span);
-        let end = body_start(ast, node).unwrap_or(span.end);
+        let span = d
+            .span
+            .or_else(|| Some(ast?.node(d.node?).span))?;
+        let end = match (ast, d.node) {
+            (Some(ast), Some(node)) => body_start(ast, node).unwrap_or(span.end),
+            _ => text_body_start(&src, span.start).unwrap_or(span.end),
+        };
         let text = src.get(span.start..end.max(span.start))?.trim_end();
         Some(clip(text))
     })();
@@ -241,6 +251,18 @@ fn body_start(ast: &Ast, node: NodeId) -> Option<usize> {
     }
 }
 
+/// Where a declaration's body starts, found in the text rather than in a tree.
+///
+/// For a def read out of a library, which has no tree here. The first `{` after
+/// the declaration's start opens a function's body — a parameter list and a
+/// return type cannot contain one, because every type that could is written
+/// with `[`, `(` or `.<`. A declaration with no brace at all (an `extern`
+/// function, a constant) has no body and answers `None`, which leaves the whole
+/// span quoted, as it should be.
+fn text_body_start(src: &str, from: usize) -> Option<usize> {
+    src.get(from..)?.find('{').map(|i| from + i)
+}
+
 /// `text`, cut after [`DECLARATION_LINES`] lines.
 fn clip(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -253,6 +275,19 @@ fn clip(text: &str) -> String {
 /// The type of a value definition, from its own node or from a use of it.
 fn def_ty(s: &Session, def: DefId) -> Option<Ty> {
     let d = s.defs.get(def);
+    // What the declaration table knows first: a field's type, a function's
+    // signature, an associated constant's — all of which travel, and none of
+    // which the tree below can answer for a definition out of a library.
+    let decls = nestc::sema::decl::Decls::new(&s.defs, &s.asts, &s.decls);
+    let recorded = match d.kind {
+        DefKind::Func => decls.signature(def),
+        DefKind::Field => decls.field_ty(def),
+        DefKind::Const => decls.assoc_const_ty(def),
+        _ => None,
+    };
+    if let Some(t) = recorded.filter(|t| !matches!(t, Ty::Error | Ty::Var(_))) {
+        return Some(t);
+    }
     let ast = s.asts.get(&d.file?)?;
     let usable = |t: &Ty| !matches!(t, Ty::Error | Ty::Var(_));
     if let Some(node) = d.node {

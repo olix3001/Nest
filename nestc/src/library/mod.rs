@@ -48,7 +48,7 @@ pub const MAGIC: &[u8; 8] = b"NESTMETA";
 
 /// The layout of what follows the magic. Raised whenever anything written
 /// changes shape, so an old library is refused by name rather than misread.
-pub const FORMAT: u32 = 10;
+pub const FORMAT: u32 = 11;
 
 /// What a reader checks before it reads anything else.
 #[derive(Debug, Serialize, Deserialize)]
@@ -324,6 +324,20 @@ impl Shape for Square {
 @public line_of :: func (loc: Location := #caller_location) -> u32 { return loc.line }
 
 @public doubled :: func <T: Shape> (s: *T) -> i32 { return s.area() * 2 }
+
+@public Scale :: trait <By> { scale :: func (self: *Self, by: By) -> i32 }
+
+impl Scale.<i32> for Square {
+    @public scale :: func (self: *Square, by: i32) -> i32 { return self.side * by }
+}
+
+impl Scale.<u8> for Square {
+    @public scale :: func (self: *Square, by: u8) -> i32 { return self.side + cast.<i32>(by) }
+}
+
+// The bound carries an **argument**, and `Square` implements the trait twice —
+// so which impl this reaches is decided by the `i32`, and by nothing else.
+@public scaled_by :: func <T: Scale.<i32>> (s: *T) -> i32 { return s.scale(4) }
 "#,
                 &[core()],
             )
@@ -657,6 +671,90 @@ main :: func () {
             &[core(), shapes()],
         );
         clean(&session, file);
+    }
+
+    /// A bound's **arguments** travel with the parameter.
+    ///
+    /// `scaled_by` is declared `<T: Scale.<i32>>` and `Square` implements
+    /// `Scale` twice, so the `i32` is the whole of what tells the two apart —
+    /// and the tree that wrote it is not in this compilation. The *trait* half
+    /// of a bound was already on the parameter's def; this is the half that is
+    /// a type, and so had to wait for inference and be written down.
+    ///
+    /// Asserted against the table rather than through a program on purpose. No
+    /// program reaches the old behaviour today: a library's body is inferred
+    /// where the library was compiled, and every call it makes through a bound
+    /// arrives here already resolved, so nothing asks this question of a
+    /// foreign parameter yet. What the recording buys is that the answer is
+    /// there when something does, instead of an empty list that reads as "no
+    /// arguments were written" — and that the read is not a panic on a tree
+    /// this compilation does not have.
+    #[test]
+    fn a_bounds_arguments_travel_with_the_parameter() {
+        let (session, file) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let sq := shapes.Square { side: 3 }
+    let n := shapes.scaled_by.<shapes.Square>(&sq)
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+
+        let func = session
+            .defs
+            .iter()
+            .find(|d| d.name.as_str() == "scaled_by")
+            .expect("`scaled_by` came out of the library");
+        let param = match session.decls.get(&func.id) {
+            Some(crate::sema::decl::Decl::Func(f)) => f
+                .generics
+                .first()
+                .and_then(|g| g.def)
+                .expect("its parameter has a def"),
+            other => panic!("`scaled_by` is not a function: {other:?}"),
+        };
+        let scale = session
+            .defs
+            .iter()
+            .find(|d| {
+                d.kind == crate::sema::def::DefKind::Trait && d.name.as_str() == "Scale"
+            })
+            .expect("`Scale` came out of the library");
+        let decls = crate::sema::decl::Decls::new(&session.defs, &session.asts, &session.decls);
+        let args = decls
+            .param_bound_args(param, scale.id)
+            .expect("the bound was recorded");
+        assert_eq!(args, vec![crate::sema::ty::Ty::int(32, true)], "{args:?}");
+    }
+
+    /// Whether a function takes a **receiver** travels.
+    ///
+    /// It is not derivable from the recorded parameters, which leave the
+    /// receiver out, and the tree that would say so is not here. The language
+    /// server is what asks — a method is offered after `value.` and a free
+    /// function is not — so before this every function in `core` and `std`
+    /// looked like a method.
+    #[test]
+    fn whether_a_function_takes_a_receiver_travels() {
+        let (session, file) = program("main :: func () { }\n", &[core(), shapes()]);
+        clean(&session, file);
+        let decls = crate::sema::decl::Decls::new(&session.defs, &session.asts, &session.decls);
+        let by_name = |name: &str| {
+            session
+                .defs
+                .iter()
+                .find(|d| d.kind == crate::sema::def::DefKind::Func && d.name.as_str() == name)
+                .unwrap_or_else(|| panic!("no function `{name}`"))
+                .id
+        };
+        assert!(decls.takes_receiver(by_name("area")), "`area` is a method");
+        assert!(
+            !decls.takes_receiver(by_name("doubled")),
+            "`doubled` is a free function"
+        );
     }
 
     /// The same library read twice — once directly, once as another's

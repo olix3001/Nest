@@ -61,6 +61,35 @@ pub enum Decl {
     Alias(AliasDecl),
     /// A namespace-level `::` constant that names a **value**.
     Const(ConstDecl),
+    /// A generic **type** parameter: what bounds it, and what a pinned
+    /// projection fixes it to.
+    Param(ParamDecl),
+}
+
+/// One generic type parameter, as the declaration that listed it wrote it.
+///
+/// Its bounds are on [`Def::param_bounds`] as well, and deliberately: impl
+/// selection asks which traits bound a parameter on every trial of every
+/// obligation, and that is a question about the def, not about a declaration
+/// anyone looked up. What is *here* is everything a bound carries beyond the
+/// trait's identity — the arguments it was written with, and what an
+/// `<Assoc = T>` binding pinned — because those are types, and a type is not
+/// known until inference has run.
+///
+/// Both exist because a parameter that arrived with a **library** has no syntax
+/// tree in this compilation: `<T: Add.<f64>>` is `f64` only if something wrote
+/// `f64` down, and the tree that said so is not here (see
+/// [`Inferer::bound_trait_args`](super::infer)).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamDecl {
+    /// Each bound, as `(trait, the arguments it was written with)`. A bound
+    /// with no arguments — the common case — carries an empty list, which is
+    /// not the same answer as "not recorded".
+    pub bounds: Vec<(DefId, Vec<Ty>)>,
+    /// What a **pinned** associated-type parameter *is*: `<T: Holder.<Item =
+    /// i32>>` says `T.Item` is `i32` inside the generic body, before any call
+    /// site exists. `None` for every parameter nothing pinned.
+    pub pinned: Option<Ty>,
 }
 
 /// What a call site needs to know about a function it is calling.
@@ -77,6 +106,14 @@ pub struct FuncDecl {
     /// Whether it has a body. A trait method without one is a requirement an
     /// impl must satisfy; with one it is a default the impl may inherit.
     pub has_body: bool,
+    /// Whether its first parameter is a **receiver** — a `self`, making it a
+    /// method rather than a free function.
+    ///
+    /// Not derivable from [`params`](FuncDecl::params), which leaves the
+    /// receiver out; and the tree that would say so is not in a compilation
+    /// that reads this function out of a library. The language server is what
+    /// asks: a method is offered after `value.` and a free function is not.
+    pub recv: bool,
     /// Its signature, generics left standing: the `Ty::Func` a call site
     /// instantiates and unifies its arguments against.
     ///
@@ -362,6 +399,36 @@ impl<'a> Decls<'a> {
         }
     }
 
+    /// The arguments the bound of `def` naming `trait_def` was written with.
+    ///
+    /// `None` when nothing recorded this parameter — an older library, or a
+    /// parameter this compilation has the tree for and never recorded — which
+    /// is the caller's cue to read the tree. An empty `Vec` is a different
+    /// answer: the bound was written, and it took no arguments.
+    pub fn param_bound_args(&self, def: DefId, trait_def: DefId) -> Option<Vec<Ty>> {
+        let Decl::Param(p) = self.table.get(&def)? else {
+            return None;
+        };
+        p.bounds
+            .iter()
+            .find(|(t, _)| *t == trait_def)
+            .map(|(_, args)| args.clone())
+    }
+
+    /// What a pinned associated-type parameter stands for — see
+    /// [`ParamDecl::pinned`].
+    pub fn param_pinned(&self, def: DefId) -> Option<Ty> {
+        match self.table.get(&def)? {
+            Decl::Param(p) => p.pinned.clone(),
+            _ => None,
+        }
+    }
+
+    /// Whether `def` was recorded as a generic parameter at all.
+    pub fn has_param_decl(&self, def: DefId) -> bool {
+        matches!(self.table.get(&def), Some(Decl::Param(_)))
+    }
+
     /// The declared type of an associated constant.
     pub fn assoc_const_ty(&self, def: DefId) -> Option<Ty> {
         match self.table.get(&def)? {
@@ -416,6 +483,28 @@ impl<'a> Decls<'a> {
                 })
                 .collect(),
         )
+    }
+
+    /// Whether a function's first parameter is a `self` receiver.
+    ///
+    /// The recorded answer first, as everywhere: the tree this reads is not in
+    /// a compilation that got the function out of a library.
+    pub fn takes_receiver(&self, def: DefId) -> bool {
+        if let Some(f) = self.func_decl(def) {
+            return f.recv;
+        }
+        let Some((file, func)) = self.func(def) else {
+            return false;
+        };
+        let Some(ast) = self.asts.get(&file) else {
+            return false;
+        };
+        let NodeKind::FuncExpr { params, .. } = &ast.node(func).kind else {
+            return false;
+        };
+        params.first().is_some_and(|&p| {
+            matches!(&ast.node(p).kind, NodeKind::Param { name, .. } if name.as_str() == "self")
+        })
     }
 
     /// The **value** parameter names of a function def, in declaration order.
@@ -794,6 +883,7 @@ pub fn record(defs: &DefTable, asts: &HashMap<FileId, Ast>, table: &mut DeclTabl
                     .collect(),
                 generics: q.generic_params(d.id),
                 has_body: q.has_body(d.id),
+                recv: q.takes_receiver(d.id),
                 sig: None,
             }),
             DefKind::Struct | DefKind::Enum | DefKind::Trait => Decl::Type(TypeDecl {
@@ -1164,6 +1254,21 @@ pub fn record_const_values(table: &mut DeclTable, values: Vec<(DefId, ConstValue
             Some(Decl::Assoc(a)) => a.value = Some(value),
             _ => {}
         }
+    }
+}
+
+/// Record what each generic type parameter's bounds carry, as inference
+/// resolved them.
+///
+/// The bounds' *identity* is written by name resolution, on the parameter's own
+/// def; what this adds is the types in them — see [`ParamDecl`].
+pub fn record_param_decls(table: &mut DeclTable, params: Vec<(DefId, ParamDecl)>) {
+    for (def, decl) in params {
+        // `record` wrote nothing for a type parameter, so there is nothing here
+        // to overwrite and no guard needed — but if that ever changes, the rule
+        // is the same one `record_types` follows: what an earlier pass put
+        // there stands.
+        table.entry(def).or_insert(Decl::Param(decl));
     }
 }
 

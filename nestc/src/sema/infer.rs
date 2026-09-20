@@ -530,6 +530,101 @@ pub fn resolve_impl_targets(
     out
 }
 
+/// Resolve what every generic **type parameter** declared in `file` is bounded
+/// by, for the declaration table to record
+/// (`super::decl::record_param_decls`).
+///
+/// The trait's identity is already on the parameter's own def
+/// ([`Def::param_bounds`]), written by name resolution. What needs inference is
+/// everything a bound carries beyond it: the arguments it was written with
+/// (`<T: Add.<f64>>`), and what an `<Assoc = T>` binding pinned. Both are
+/// *types*, and a type is not known until now.
+///
+/// It is recorded because it does not otherwise survive: a parameter that
+/// arrives with a library has no tree in the compilation reading it, so every
+/// question asked of one used to be answered "nothing was written" — which for
+/// a bound with arguments is not a conservative answer but a wrong one. A
+/// method call through `<T: Add.<f64>>` in a library's generic function picked
+/// its impl with an empty argument list.
+///
+/// **Nothing is reported.** A bound that does not resolve was reported where it
+/// was written, by the pass that checked the declaration.
+pub fn resolve_param_decls(
+    defs: &DefTable,
+    asts: &HashMap<FileId, Ast>,
+    decls: &DeclTable,
+    lang: &LangItems,
+    impls: &ImplTable,
+    file: FileId,
+) -> Vec<(DefId, super::decl::ParamDecl)> {
+    let Some(ast) = asts.get(&file) else {
+        return Vec::new();
+    };
+    let empty: HashSet<DefId> = HashSet::new();
+    let mut discarded = Vec::new();
+    let mut cx = Inferer {
+        defs,
+        asts,
+        decls,
+        ast,
+        diags: &mut discarded,
+        lang,
+        impls,
+        in_scope_traits: &empty,
+        lang_traits: &empty,
+        in_default: false,
+        file,
+        cx: InferCtxt::new(),
+        env: HashMap::new(),
+        types: HashMap::new(),
+        ret: Ty::Void,
+        breaks: Vec::new(),
+        alias_stack: Vec::new(),
+        const_stack: Vec::new(),
+        int_values: HashMap::new(),
+        float_values: HashMap::new(),
+    };
+    let mut out = Vec::new();
+    for d in defs.iter() {
+        if d.kind != DefKind::TypeParam || d.file != Some(file) {
+            continue;
+        }
+        // A **synthesized** projection parameter — the `Item` of `T.Item` — has
+        // no declaration of its own to read; what bounds it is recorded on the
+        // associated type's def instead (`Def::assoc_bounds`), and what pins it
+        // is the binding on the *base* parameter's bound, resolved below.
+        let pinned = d
+            .projection
+            .as_ref()
+            .and_then(|p| p.pinned)
+            .map(|n| cx.ty_from_node_in(file, n))
+            .filter(|t| !t.mentions_error());
+        let bounds: Vec<(DefId, Vec<Ty>)> = match d.node {
+            Some(node) => match ast.node(node).kind.clone() {
+                NodeKind::GenericTypeParam {
+                    constraint: Some(c),
+                    ..
+                } => cx
+                    .bound_nodes(file, c)
+                    .into_iter()
+                    .filter_map(|b| {
+                        let t = cx.type_head_def_in(file, b)?;
+                        (defs.get(t).kind == DefKind::Trait)
+                            .then(|| (t, cx.bound_trait_args_in(file, b)))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        if bounds.is_empty() && pinned.is_none() {
+            continue;
+        }
+        out.push((d.id, super::decl::ParamDecl { bounds, pinned }));
+    }
+    out
+}
+
 /// Fold the **value** of every constant declared in `file`, for the declaration
 /// table to record (`super::decl::record_const_values`).
 ///
@@ -4282,16 +4377,25 @@ impl Inferer<'_> {
         // declaration, which a synthesized one does not have; a bounded
         // associated type is written `Item :: type: Holder`, with no place to
         // put arguments, so an empty list is the whole truth there.
+        // The tree the bound was written in, when this compilation has it. A
+        // **synthesized** parameter has no declaration of its own, and a
+        // parameter that came out of a library names a file nothing here
+        // parsed — both answer `None`, and the recorded arguments below are
+        // what serves them.
         let written = match self.defs.get(def).projection {
             Some(_) => None,
             None => {
                 let d = self.defs.get(def);
                 match (d.file, d.node) {
-                    (Some(file), Some(node)) => match self.asts[&file].node(node).kind.clone() {
-                        NodeKind::GenericTypeParam {
+                    (Some(file), Some(node)) => match self
+                        .asts
+                        .get(&file)
+                        .map(|a| a.node(node).kind.clone())
+                    {
+                        Some(NodeKind::GenericTypeParam {
                             constraint: Some(c),
                             ..
-                        } => Some((file, self.bound_nodes(file, c))),
+                        }) => Some((file, self.bound_nodes(file, c))),
                         _ => None,
                     },
                     _ => None,
@@ -4308,6 +4412,14 @@ impl Inferer<'_> {
             if self.defs.get(m).kind != DefKind::Func {
                 continue;
             }
+            // **The recorded answer first, always.** `<T: Add.<f64>>` is an
+            // `f64` only because something wrote `f64` down, and for a
+            // parameter out of a library the writing is not here — an empty
+            // list there is not a cautious answer but a wrong one, and it
+            // picked the wrong impl.
+            if let Some(args) = self.decls().param_bound_args(def, t) {
+                return Some((m, args));
+            }
             let args = match &written {
                 Some((file, bounds)) => {
                     let (file, bounds) = (*file, bounds.clone());
@@ -4315,7 +4427,7 @@ impl Inferer<'_> {
                         .into_iter()
                         .find(|&b| self.type_head_def_in(file, b) == Some(t))
                     {
-                        Some(b) => self.bound_trait_args(file, b),
+                        Some(b) => self.bound_trait_args_in(file, b),
                         None => Vec::new(),
                     }
                 }
@@ -4334,8 +4446,15 @@ impl Inferer<'_> {
     /// which is exactly where it has to be true, since that is where a function
     /// declared to return `i32` has to accept what `t.get()` gives back.
     fn param_ty(&mut self, def: DefId) -> Ty {
+        // The recorded answer first: the node `pinned` names is in the file
+        // that declared the parameter, and for one out of a library that file
+        // was never parsed here — reading it would panic rather than answer.
+        if let Some(t) = self.decls().param_pinned(def) {
+            return t;
+        }
         if let Some(p) = self.defs.get(def).projection.clone()
             && let (Some(file), Some(node)) = (self.defs.get(def).file, p.pinned)
+            && self.asts.contains_key(&file)
         {
             return self.ty_from_node_in(file, node);
         }
@@ -4416,12 +4535,34 @@ impl Inferer<'_> {
     /// arguments; `<T: Add.<f64>>` gives `[f64]`. An `<Assoc = T>` binding is
     /// **not** one of them — it constrains a projection rather than filling a
     /// parameter — which is the same line [`ImplInfo::trait_args`] draws.
-    fn bound_trait_args(&mut self, file: FileId, bound: NodeId) -> Vec<Ty> {
-        let NodeKind::GenericApply { args, .. } = self.asts[&file].node(bound).kind.clone() else {
+    fn bound_trait_args_in(&mut self, file: FileId, bound: NodeId) -> Vec<Ty> {
+        // The tree, and only where there is one: a parameter that arrived with
+        // a library names a file this compilation never parsed. The recorded
+        // answer is what that case reads (`Decls::param_bound_args`), and this
+        // is what recorded it.
+        let Some(ast) = self.asts.get(&file) else {
             return Vec::new();
         };
+        // Both spellings of an applied name: a bound is written in **type**
+        // position, where `Scale.<i32>` is a `TypePath` carrying its arguments;
+        // the postfix `GenericApply` is the expression-position form, and
+        // reaches here through the paths that share this helper.
+        let args = match ast.node(bound).kind.clone() {
+            NodeKind::TypePath { generic_args, .. } => generic_args,
+            NodeKind::GenericApply { args, .. } => args,
+            _ => return Vec::new(),
+        };
+        let args: Vec<NodeId> = args
+            .iter()
+            .copied()
+            .filter(|&a| {
+                !self
+                    .asts
+                    .get(&file)
+                    .is_some_and(|a2| matches!(a2.node(a).kind, NodeKind::AssocBinding { .. }))
+            })
+            .collect();
         args.iter()
-            .filter(|&&a| !matches!(self.asts[&file].node(a).kind, NodeKind::AssocBinding { .. }))
             .map(|&a| self.ty_from_node_in(file, a))
             .collect()
     }
@@ -6875,7 +7016,14 @@ impl Inferer<'_> {
             // type" is not something we know.
             DefKind::External => Ty::Error,
             kind => {
-                if self.asts[&file].meta::<TyPathReported>(node).is_none() {
+                // **Only about a file this compilation is looking at.** The
+                // arm reports a mistake in a declaration, and a declaration
+                // that arrived with a library was checked where the library was
+                // compiled — there is no tree here to quote the name from, and
+                // nothing to tell the reader to change. `Ty::Error` is still
+                // the answer; the silence is the whole difference.
+                let ours = self.asts.contains_key(&file);
+                if ours && self.asts[&file].meta::<TyPathReported>(node).is_none() {
                     self.asts[&file].set_meta(node, TyPathReported);
                     let name = self.written_path_in(file, node, def);
                     let msg = format!("`{name}` is a {}, not a type", kind.label());
@@ -6910,8 +7058,17 @@ impl Inferer<'_> {
     /// Not the def's own name: `str :: import <std/str>` resolves to a namespace
     /// called `std`, and naming that in the diagnostic points at a package the
     /// program never wrote instead of the word under the caret.
+    ///
+    /// The *use* site's file is the one read, because the use site is what the
+    /// caret is under. A file this compilation never parsed has no such text,
+    /// and is answered with the def's own name — deliberately, rather than by
+    /// recording the string: every name in type position in every library would
+    /// have to carry one, to word a diagnostic that can only ever be reported
+    /// about a program being compiled now.
     fn written_path_in(&self, file: FileId, node: NodeId, def: DefId) -> String {
-        let ast = &self.asts[&file];
+        let Some(ast) = self.asts.get(&file) else {
+            return self.defs.get(def).name.to_string();
+        };
         let path = match ast.node(node).kind {
             NodeKind::TypePath { path, .. } => path,
             _ => node,

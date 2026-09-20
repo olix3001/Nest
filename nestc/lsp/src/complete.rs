@@ -784,6 +784,12 @@ fn starts_with(name: &str, typed: &str) -> bool {
 /// The traits the generic parameter `param` is bounded by.
 fn bounds(s: &Session, param: DefId) -> Vec<DefId> {
     let d = s.defs.get(param);
+    // Name resolution wrote these down on the parameter itself, which is what
+    // makes them readable for a parameter that came out of a library — there is
+    // no constraint node here to walk.
+    if let Some(recorded) = d.param_bounds.clone() {
+        return recorded;
+    }
     let (Some(file), Some(node)) = (d.file, d.node) else {
         return Vec::new();
     };
@@ -837,23 +843,10 @@ fn representation(s: &Session, def: DefId) -> Option<Ty> {
 
 /// Whether the function `def` is a method: its first parameter is `self`.
 fn takes_self(s: &Session, def: DefId) -> bool {
-    let d = s.defs.get(def);
-    let (Some(file), Some(node)) = (d.file, d.node) else {
-        return true;
-    };
-    let Some(ast) = s.asts.get(&file) else {
-        return true;
-    };
-    let rhs = match ast.node(node).kind {
-        NodeKind::ConstBind { rhs, .. } => rhs,
-        _ => node,
-    };
-    let NodeKind::FuncExpr { params, .. } = &ast.node(rhs).kind else {
-        return true;
-    };
-    params.first().is_some_and(
-        |&p| matches!(&ast.node(p).kind, NodeKind::Param { name, .. } if name.as_str() == "self"),
-    )
+    // The declaration table, which a function out of a library has and a tree
+    // it does not: every `core` and `std` function used to answer "yes" here,
+    // so every one of them was offered after a `.`.
+    nestc::sema::decl::Decls::new(&s.defs, &s.asts, &s.decls).takes_receiver(def)
 }
 
 /// The members of a namespace or a type that a `.` reaches: every member of a
