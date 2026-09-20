@@ -9,7 +9,6 @@ use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
 use crate::ir::{IrId, Program};
 
-use crate::parser::ast::{Ast, NodeId};
 use crate::sema::decl::Decl;
 use crate::sema::def::{Def, DefId, DefKind};
 use crate::sema::impls::ImplInfo;
@@ -44,8 +43,6 @@ struct FileRecord<'a> {
     name: &'a str,
     src: &'a str,
     ns: DefId,
-    ast: &'a Ast,
-    facts: Vec<(NodeId, MetaValue)>,
 }
 
 /// The library members of `package`, which `session` compiled from source with
@@ -142,10 +139,6 @@ pub fn members(
     let (bodies, encoding) = codec::encode(encoding, || -> Result<(Vec<u8>, Vec<u8>), String> {
         let mut records = Vec::with_capacity(files.len());
         for file in &files {
-            let ast = session
-                .asts
-                .get(&file.id)
-                .ok_or_else(|| format!("`{}` was never parsed", file.name))?;
             let meta = session
                 .files
                 .get(&file.id)
@@ -154,9 +147,6 @@ pub fn members(
                 name: &file.name,
                 src: &file.src,
                 ns: meta.ns,
-                ast,
-                facts: metas::export(ast.meta_store(), |_| true)
-                    .map_err(|e| format!("`{}`: {e}", file.name))?,
             });
         }
         let meta = Meta {

@@ -37,7 +37,6 @@ use serde::{Deserialize, Serialize};
 use crate::common::source::FileId;
 use crate::common::symbol::Symbol;
 use crate::ir::{IrId, Program};
-use crate::parser::ast::{Ast, NodeId};
 use crate::sema::decl::Decl;
 use crate::sema::def::{Def, DefId};
 use crate::sema::impls::ImplInfo;
@@ -49,7 +48,7 @@ pub const MAGIC: &[u8; 8] = b"NESTMETA";
 
 /// The layout of what follows the magic. Raised whenever anything written
 /// changes shape, so an old library is refused by name rather than misread.
-pub const FORMAT: u32 = 7;
+pub const FORMAT: u32 = 8;
 
 /// What a reader checks before it reads anything else.
 #[derive(Debug, Serialize, Deserialize)]
@@ -117,20 +116,21 @@ pub struct Ir {
 
 /// One file of the package.
 ///
-/// The `ast` and its `facts` are on their way out, and are the bulk of what a
-/// library costs to read: **67%** of `std`'s metadata, against 1.6% for the
-/// table of what each definition declares (`crate::sema::decl`) that is
-/// replacing them. What still reaches for a dependency's tree is a short list —
-/// a constant's type, a generic parameter's bounds, a default argument — and
-/// each one is a fact to record rather than a tree to keep.
+/// **No tree.** A library carries what analysis concluded about the file, not
+/// the syntax it concluded it from: the declaration table
+/// (`crate::sema::decl`), the impls, and the IR. The tree used to be here and
+/// was **67%** of `std`'s metadata, against 1.6% for the table that replaced
+/// it; reading it was nearly the whole cost of using a library.
+///
+/// The `src` stays, and is the one thing about the file that is still the
+/// source: a diagnostic that points into a dependency shows the line, and
+/// nothing in the metadata can reconstruct that.
 #[derive(Serialize, Deserialize)]
 pub struct FileRecord {
     pub name: String,
     pub src: String,
     /// The namespace the file is.
     pub ns: DefId,
-    pub ast: Ast,
-    pub facts: Vec<(NodeId, metas::MetaValue)>,
 }
 
 /// A package a session read from a library, and where its ids landed.

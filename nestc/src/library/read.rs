@@ -116,8 +116,9 @@ pub fn load(
         if id.0 != own.file + i as u32 {
             return Err(format!("`{}` landed at the wrong file id", file.name));
         }
-        metas::import(file.ast.meta_store(), file.facts);
-        session.asts.insert(id, file.ast);
+        // No tree is inserted: the package's files have none here, and every
+        // question asked of a definition in them is answered from the
+        // declaration table instead (see [`FileRecord`]).
         session.files.insert(
             id,
             FileMeta {
