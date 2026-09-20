@@ -35,10 +35,27 @@
 
 // Set every element of `dst` to `value`.
 //
-// A loop, because a general `T` is not one byte and there is no byte pattern
-// that means "this element". `zero` below is the case that *is* a byte pattern.
+// Not a `memset`: that writes a *byte* pattern, and a general `T` is not one
+// byte — `zero` below is the case that is. What it is instead is a `memcpy`
+// that doubles. Write the value once, then copy the filled prefix onto the
+// front of what is still empty, which doubles the filled length each time; a
+// run of `n` elements is filled by `ceil(log2(n))` block moves rather than by
+// `n` element writes.
+//
+// The two slices handed to each copy never overlap: the source is `[0, take)`
+// and the destination starts at `done`, which is never less than `take`.
 @public fill :: func <T> (dst: []mut T, value: T) -> void {
-  for i in 0..<dst.len() { dst[i] = value }
+  let n: usize := dst.len()
+  if n == 0 { return }
+  dst[0] = value
+  let mut done: usize := 1
+  while done < n {
+    let mut take: usize := done
+    let left: usize := n - done
+    if left < take { take = left }
+    copy_nonoverlapping.<T>(dst[done..<done + take], cast.<[]T>(dst[0..<take]))
+    done = done + take
+  }
 }
 
 // Set every byte of `dst` to zero.
@@ -54,10 +71,12 @@
 //
 // The one function here that allocates, and it is here because the alternative
 // is every caller writing the same three lines. The copy is independent of the
-// original: writing to one does not change the other.
+// original: writing to one does not change the other — and the fresh slice
+// cannot overlap what it was made from, which is what lets this be the block
+// move rather than a loop.
 @public clone :: func <T> (src: []T) -> []mut T {
   let out: []mut T := make.<[]T>(src.len())
-  for i in 0..<src.len() { out[i] = src[i] }
+  copy_nonoverlapping.<T>(out, src)
   return out
 }
 
@@ -66,6 +85,10 @@
 // Generic over any `T: Eq`, where `core`'s `bytes_eq` is bytes only — that one
 // is what a `str` comparison and a `"..."` pattern both call, and it stays
 // where it is because the compiler reaches it by tag.
+// A loop over `T`'s own `eq`, deliberately: a block *comparison* is a test on
+// bytes, and two values that compare equal need not have equal bytes — padding
+// in a struct, and any `Eq` a program wrote itself. `core`'s `bytes_eq` is the
+// byte test, and it is what `str` uses because a `str`'s bytes *are* its value.
 @public equal :: func <T: Eq> (a: []T, b: []T) -> bool {
   if a.len() != b.len() { return false }
   for i in 0..<a.len() {
@@ -95,6 +118,11 @@
 }
 
 // Move `a`'s elements into `b` and `b`'s into `a`, for as many as both have.
+//
+// An element at a time, and not a block move: every byte of both slices is both
+// a source and a destination, so a `memcpy` either way would overwrite what it
+// still has to read. Doing it in blocks needs somewhere to hold one side, and
+// nothing in this file allocates.
 @public swap_ranges :: func <T> (a: []mut T, b: []mut T) -> usize {
   let mut n: usize := a.len()
   if b.len() < n { n = b.len() }
@@ -107,6 +135,10 @@
 }
 
 // Reverse `xs` where it lies.
+//
+// An element at a time, for the same reason `swap_ranges` is: the two halves
+// are each other's source and destination, and a block move reads what it has
+// already written.
 @public reverse :: func <T> (xs: []mut T) -> void {
   if xs.len() < 2 { return }
   let mut lo: usize := 0
@@ -118,4 +150,109 @@
     lo = lo + 1
     hi = hi - 1
   }
+}
+
+// The tests, in a namespace of their own — beside what they test, gathered so
+// that what a reader skips is one block.
+//
+// `fill` gets the most of them because it is the one whose *shape* is not
+// obvious: it doubles, so the interesting lengths are the ones where the last
+// block is a partial one, and 0 and 1, which never copy at all.
+tests :: #when(test) namespace {
+    filled :: func (n: usize) -> []mut i32 {
+        let xs: []mut i32 := make.<[]i32>(n)
+        fill.<i32>(xs, 7)
+        return xs
+    }
+
+    all_are :: func (xs: []i32, value: i32) -> bool {
+        for i in 0..<xs.len() {
+            if xs[i] != value { return false }
+        }
+        return true
+    }
+
+    @test
+    filling :: func () {
+        // Zero copies and one copy: the two the doubling never reaches.
+        assert(filled(0).len() == 0, "an empty fill writes nothing")
+        assert(all_are(filled(1), 7))
+        // A power of two divides exactly; everything else ends on a partial
+        // block, which is where a doubling fill goes wrong if it goes wrong.
+        assert(all_are(filled(2), 7))
+        assert(all_are(filled(3), 7))
+        assert(all_are(filled(5), 7))
+        assert(all_are(filled(8), 7))
+        assert(all_are(filled(17), 7))
+        assert(all_are(filled(64), 7))
+    }
+
+    @test
+    filling_touches_nothing_after_it :: func () {
+        let xs: []mut i32 := make.<[]i32>(6)
+        fill.<i32>(xs, 1)
+        fill.<i32>(xs[0..<3], 9)
+        assert(xs[0] == 9 && xs[1] == 9 && xs[2] == 9)
+        assert(xs[3] == 1 && xs[4] == 1 && xs[5] == 1, "the tail is untouched")
+    }
+
+    @test
+    cloning :: func () {
+        let src: []mut i32 := make.<[]i32>(4)
+        for i in 0..<4 { src[i] = cast.<i32>(i) }
+        let out: []mut i32 := clone.<i32>(cast.<[]i32>(src))
+        assert(equal.<i32>(cast.<[]i32>(out), cast.<[]i32>(src)))
+        // Independent: writing to one does not change the other.
+        out[0] = 99
+        assert(src[0] == 0, "a clone is its own storage")
+    }
+
+    @test
+    copying_clamps_to_the_shorter :: func () {
+        let src: []mut i32 := make.<[]i32>(4)
+        for i in 0..<4 { src[i] = cast.<i32>(i) + 1 }
+        let dst: []mut i32 := make.<[]i32>(2)
+        let moved: usize := copy.<i32>(dst, cast.<[]i32>(src))
+        assert(moved == 2, "a short destination takes what it can hold")
+        assert(dst[0] == 1 && dst[1] == 2)
+    }
+
+    @test
+    zeroing :: func () {
+        let xs: []mut i32 := make.<[]i32>(3)
+        fill.<i32>(xs, 5)
+        zero.<i32>(xs)
+        assert(all_are(cast.<[]i32>(xs), 0))
+    }
+
+    @test
+    exchanging :: func () {
+        let a: []mut i32 := make.<[]i32>(3)
+        let b: []mut i32 := make.<[]i32>(2)
+        fill.<i32>(a, 1)
+        fill.<i32>(b, 2)
+        let n: usize := swap_ranges.<i32>(a, b)
+        assert(n == 2, "as many as both have")
+        assert(a[0] == 2 && a[1] == 2 && a[2] == 1)
+        assert(b[0] == 1 && b[1] == 1)
+    }
+
+    @test
+    reversing :: func () {
+        let xs: []mut i32 := make.<[]i32>(5)
+        for i in 0..<5 { xs[i] = cast.<i32>(i) }
+        reverse.<i32>(xs)
+        assert(xs[0] == 4 && xs[1] == 3 && xs[2] == 2 && xs[3] == 1 && xs[4] == 0)
+    }
+
+    @test
+    searching :: func () {
+        let xs: []mut i32 := make.<[]i32>(3)
+        xs[0] = 4
+        xs[1] = 5
+        xs[2] = 6
+        assert(contains.<i32>(cast.<[]i32>(xs), 5))
+        assert(contains.<i32>(cast.<[]i32>(xs), 9) == false)
+        assert(index_of.<i32>(cast.<[]i32>(xs), 6).match { .some(i) => i == 2, .none => false })
+    }
 }
