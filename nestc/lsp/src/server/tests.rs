@@ -63,6 +63,12 @@ struct Client {
 
 impl Client {
     fn start(toolchain: Fake) -> Client {
+        Client::start_with(toolchain, serde_json::to_value(InitializeParams::default()).unwrap())
+    }
+
+    /// The same, for a test that needs the editor to declare something — the
+    /// snippet support that decides how a chosen function is written, say.
+    fn start_with(toolchain: Fake, params: serde_json::Value) -> Client {
         let (server, conn) = Connection::memory();
         let toolchain: Arc<dyn Toolchain> = Arc::new(toolchain);
         let handle = std::thread::spawn(move || run(&server, |_| toolchain));
@@ -72,7 +78,7 @@ impl Client {
             version: 0,
             published: Vec::new(),
         };
-        client.request(1, Initialize::METHOD, InitializeParams::default());
+        client.request(1, Initialize::METHOD, params);
         client.expect_response(1);
         client.notify(Initialized::METHOD, serde_json::json!({}));
         client
@@ -479,6 +485,68 @@ fn completion_offers_members_and_names_in_scope() {
         !names.contains(&"n".to_string()),
         "`n` is declared later: {names:?}"
     );
+}
+
+/// Choosing a function writes the call it is: an editor that understands
+/// snippets gets the parentheses with the cursor between them, and one that does
+/// not gets them only when there is nothing to type there.
+#[test]
+fn completion_writes_a_call_for_a_function() {
+    // With snippets: `$0` is where the cursor lands.
+    let dir = Scratch::new();
+    let file = dir.0.join("main.nest");
+    let snippet = serde_json::json!({
+        "capabilities": {
+            "textDocument": { "completion": { "completionItem": { "snippetSupport": true } } }
+        }
+    });
+    let mut client = Client::start_with(Fake(Err("no workspace here".to_string())), snippet);
+    client.open(&file, PROGRAM);
+    let text = PROGRAM.replace("  return p.sum() + n", "  let m: i32 := p.\n  return p.sum() + n");
+    client.change(&file, &text);
+    let items = client.at(Completion::METHOD, &file, position(&text, "p.\n", 0, 2));
+    let sum = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "sum")
+        .expect("`sum` is offered")
+        .clone();
+    assert_eq!(sum["insertText"], "sum($0)", "{sum}");
+    assert_eq!(sum["insertTextFormat"], 2, "not a snippet: {sum}");
+    // A field is not called, so it is written as it is.
+    let x = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "x")
+        .expect("`x` is offered")
+        .clone();
+    assert!(x["insertText"].is_null(), "{x}");
+
+    // Without snippets: `sum` takes no written argument, so the parentheses are
+    // still written; `add`, which takes two, is left to the caller.
+    let (_dir, file, mut client) = program();
+    client.change(&file, &text);
+    let items = client.at(Completion::METHOD, &file, position(&text, "p.\n", 0, 2));
+    let sum = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "sum")
+        .expect("`sum` is offered")
+        .clone();
+    assert_eq!(sum["insertText"], "sum()", "{sum}");
+    assert!(sum["insertTextFormat"].is_null(), "{sum}");
+    let names = client.at(Completion::METHOD, &file, position(&text, "add(p.x", 0, 0));
+    let add = names["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "add")
+        .expect("`add` is offered")
+        .clone();
+    assert!(add["insertText"].is_null(), "{add}");
 }
 
 /// Inside a struct literal, the struct's own fields — the ones it has not

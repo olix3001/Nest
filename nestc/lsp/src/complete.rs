@@ -28,12 +28,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionItemLabelDetails, Documentation, MarkupContent,
-    MarkupKind, Range, TextEdit,
+    CompletionItem, CompletionItemKind, CompletionItemLabelDetails, Documentation,
+    InsertTextFormat, MarkupContent, MarkupKind, Range, TextEdit,
 };
 use nestc::common::source::FileId;
 use nestc::common::span::Span;
 use nestc::parser::ast::{Ast, CompositeBody, NodeId, NodeKind};
+use nestc::sema::decl::Decls;
 use nestc::sema::def::{Def, DefId, DefKind, Visibility};
 use nestc::sema::session::Session;
 use nestc::sema::ty::Ty;
@@ -79,6 +80,7 @@ pub fn complete(
     text: &str,
     offset: usize,
     placeholder: &str,
+    snippets: bool,
 ) -> Vec<CompletionItem> {
     let Some(ast) = s.asts.get(&file) else {
         return Vec::new();
@@ -99,6 +101,7 @@ pub fn complete(
         edits: &edits,
         placeholder,
         visible: visible(s, file),
+        snippets,
     };
     cx.run()
 }
@@ -112,6 +115,7 @@ pub fn from_analysis(
     text: &str,
     cursor: usize,
     edits: &Edits,
+    snippets: bool,
 ) -> Option<Vec<CompletionItem>> {
     let ast = s.asts.get(&file)?;
     let analyzed = ide::source(s, file)?;
@@ -138,6 +142,7 @@ pub fn from_analysis(
         edits,
         placeholder: "",
         visible: visible(s, file),
+        snippets,
     };
     let Some(end) = base else {
         return Some(cx.literal_fields().unwrap_or_else(|| cx.scope()));
@@ -255,6 +260,9 @@ struct Cx<'a> {
     placeholder: &'a str,
     /// Every definition the file can name without another import.
     visible: HashSet<DefId>,
+    /// Whether the editor understands a snippet, which is what lets a chosen
+    /// function be written with its parentheses and the cursor inside them.
+    snippets: bool,
 }
 
 /// How an import reaches a definition.
@@ -430,7 +438,7 @@ impl Cx<'_> {
                 .into_iter()
                 .filter(|&f| !written.contains(self.s.defs.get(f).name.as_str()))
                 .map(|f| {
-                    let mut it = item(self.s, f);
+                    let mut it = item(self.s, f, self.snippets);
                     // A field in a literal is written `name: value`, so the `:`
                     // comes with the name and the cursor lands after it.
                     it.insert_text = Some(format!("{}: ", self.s.defs.get(f).name));
@@ -582,7 +590,7 @@ impl Cx<'_> {
                         via.describe() + "." + name,
                     ))
                 });
-            let mut it = item(s, m);
+            let mut it = item(s, m, self.snippets);
             if let Some((edit, from)) = import {
                 it.additional_text_edits = Some(vec![edit]);
                 it.label_details = Some(CompletionItemLabelDetails {
@@ -729,7 +737,7 @@ impl Cx<'_> {
             });
             for (def, via, name) in offers {
                 let namespace = s.defs.get(def).kind == DefKind::Namespace;
-                let mut it = item(s, def);
+                let mut it = item(s, def, self.snippets);
                 it.label = name.clone();
                 it.additional_text_edits =
                     Some(vec![self.import_edit(&via.line(&name, namespace))]);
@@ -809,7 +817,7 @@ impl Cx<'_> {
                 let name = self.s.defs.get(d).name.as_str();
                 written(name) && seen.insert(name.to_string())
             })
-            .map(|d| item(self.s, d))
+            .map(|d| item(self.s, d, self.snippets))
             .collect()
     }
 
@@ -1142,7 +1150,7 @@ fn in_scope(ast: &Ast, d: &Def, offset: usize) -> bool {
 
 /// The completion item for `def`: its kind, the first line of its declaration,
 /// and its documentation.
-fn item(s: &Session, def: DefId) -> CompletionItem {
+fn item(s: &Session, def: DefId, snippets: bool) -> CompletionItem {
     let real = target(s, def);
     let kind = match s.defs.get(real).kind {
         DefKind::Namespace | DefKind::External | DefKind::Import => CompletionItemKind::MODULE,
@@ -1160,8 +1168,9 @@ fn item(s: &Session, def: DefId) -> CompletionItem {
         DefKind::Param | DefKind::Local => CompletionItemKind::VARIABLE,
     };
     let declared = ide::declaration(s, real, None);
-    CompletionItem {
-        label: s.defs.get(def).name.to_string(),
+    let name = s.defs.get(def).name.to_string();
+    let mut it = CompletionItem {
+        label: name.clone(),
         kind: Some(kind),
         detail: declared.lines().next().map(str::to_string),
         documentation: ide::docs(s, real).map(|value| {
@@ -1171,7 +1180,34 @@ fn item(s: &Session, def: DefId) -> CompletionItem {
             })
         }),
         ..Default::default()
+    };
+    // A function is called, so choosing one writes the call: its parentheses,
+    // with the cursor between them where the arguments go. An editor that
+    // understands snippets puts the cursor there; one that does not gets the
+    // parentheses only when there is nothing to type between them, since
+    // landing *after* a `)` the caller still has to go back through would be
+    // worse than not writing it.
+    if matches!(s.defs.get(real).kind, DefKind::Func | DefKind::Overload) {
+        let takes_args = match s.defs.get(real).kind {
+            DefKind::Overload => true,
+            _ => params_of(s, real) != Some(0),
+        };
+        if snippets {
+            it.insert_text = Some(format!("{name}($0)"));
+            it.insert_text_format = Some(InsertTextFormat::SNIPPET);
+        } else if !takes_args {
+            it.insert_text = Some(format!("{name}()"));
+        }
     }
+    it
+}
+
+/// How many **written** arguments a function takes — `self` excluded, since a
+/// method call does not write it. `None` when nothing recorded its parameters.
+fn params_of(s: &Session, def: DefId) -> Option<usize> {
+    Decls::new(&s.defs, &s.asts, &s.decls)
+        .param_names(def)
+        .map(|p| p.len())
 }
 
 #[cfg(test)]
@@ -1234,7 +1270,7 @@ main :: func () -> i32 {
                 .collect(),
         );
         let cursor = after.last()?.find('‸')?;
-        let items = from_analysis(&o.session, file, texts.last()?, cursor, &edits)?;
+        let items = from_analysis(&o.session, file, texts.last()?, cursor, &edits, false)?;
         let mut labels: Vec<String> = items.into_iter().map(|i| i.label).collect();
         labels.sort();
         Some(labels)

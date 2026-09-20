@@ -131,8 +131,14 @@ pub fn run(
             }
         }
     });
+    // Whether the editor understands a snippet, which is what lets a chosen
+    // function be written with its parentheses and the cursor between them.
+    let snippets = params.pointer(
+        "/capabilities/textDocument/completion/completionItem/snippetSupport",
+    ) == Some(&serde_json::Value::Bool(true));
     let mut server = Server {
         sender: conn.sender.clone(),
+        snippets,
         toolchain: toolchain(&options),
         docs: HashMap::new(),
         versions: HashMap::new(),
@@ -337,6 +343,8 @@ impl UnitKey {
 
 struct Server {
     sender: Sender<Message>,
+    /// Whether the editor understands snippets (see where it is read).
+    snippets: bool,
     toolchain: Arc<dyn Toolchain>,
     /// The open documents' text.
     docs: HashMap<PathBuf, String>,
@@ -537,7 +545,8 @@ impl Server {
             }))
         };
         if let Some((o, file, edits)) = self.parsed_for(&path)
-            && let Some(items) = complete::from_analysis(&o.session, file, text, offset, &edits)
+            && let Some(items) =
+                complete::from_analysis(&o.session, file, text, offset, &edits, self.snippets)
         {
             log::line!(
                 "  completion: {} items from the analysis already made",
@@ -555,7 +564,7 @@ impl Server {
         buffers.insert(path.clone(), written);
         let o = analysis::analyze(&key.args, Arc::new(buffers)).ok()?;
         let file = ide::file_of(&o.session, &path)?;
-        let items = complete::complete(&o.session, file, text, offset, PLACEHOLDER);
+        let items = complete::complete(&o.session, file, text, offset, PLACEHOLDER, self.snippets);
         log::line!("  completion: {} items from that analysis", items.len());
         list(items)
     }
