@@ -189,8 +189,12 @@ impl FormatCall {
             );
         }
         match self.kind {
-            SpecKind::Display => format!("`{ty}` has no `Display` impl, so `{{...}}` cannot write it"),
-            SpecKind::Debug => format!("`{ty}` has no `Debug` impl, so `{{...:?}}` cannot write it"),
+            SpecKind::Display => {
+                format!("`{ty}` has no `Display` impl, so `{{...}}` cannot write it")
+            }
+            SpecKind::Debug => {
+                format!("`{ty}` has no `Debug` impl, so `{{...:?}}` cannot write it")
+            }
             k => format!(
                 "`{{...:{}}}` writes an integer in another base, and `{ty}` is not one",
                 k.letter()

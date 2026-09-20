@@ -448,7 +448,9 @@ impl Desugar<'_> {
             Some(digits) if digits > i32::MAX as u32 => {
                 self.report(
                     piece,
-                    format!("a precision of {digits} digits is more than one value can be written to"),
+                    format!(
+                        "a precision of {digits} digits is more than one value can be written to"
+                    ),
                 );
                 return;
             }
