@@ -254,8 +254,11 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     session.own_ir_base = session.ir_meta.allocated();
     // The prelude is globbed into every scope, so `core` must be collected
     // before anything resolves against it.
+    let mut core_files: Vec<FileId> = Vec::new();
     if let Some(core_root) = session.load_package("core") {
         collect_reachable(session, vec![core_root]);
+        core_files = session.files.keys().copied().collect();
+        core_files.sort_unstable();
     }
 
     // Collect the entry file and its transitive imports.
@@ -264,13 +267,48 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // The remaining stages run over every collected file (core included) —
     // except a library's, which were analyzed where the library was compiled,
     // and arrived with everything these stages would have worked out.
-    let all_files: Vec<FileId> = session.files.keys().copied().collect();
-    let files: Vec<FileId> = all_files
-        .iter()
+    // **`core` first, then everything else in load order, then dependency
+    // order within that.** Every pass below runs over this list, and several of
+    // them write answers a later file reads — so the order is part of what they
+    // mean, not a detail.
+    //
+    // `session.files` is a hash map, whose iteration order differs between two
+    // runs of this compiler on the same program. `decl::record_types` is where
+    // that showed: a constant in `core` whose right-hand side is not a literal
+    // has its type recorded when `core` is inferred, and a program inferred
+    // *before* `core` found nothing there — so `u8.MAX` needed a type
+    // annotation on one run and not on the next.
+    //
+    // `core` is listed first explicitly rather than by id, because the entry
+    // file is given its id before `core` is loaded, and because the prelude is
+    // **not** an import: a file that writes `cast` names nothing `core` owns,
+    // so no edge in `wire_order` would put `core` ahead of it.
+    let mut rest: Vec<FileId> = session
+        .files
+        .keys()
         .copied()
+        .filter(|f| !core_files.contains(f))
+        .collect();
+    rest.sort_unstable();
+    let roots: Vec<FileId> = core_files
+        .into_iter()
+        .chain(rest)
         .filter(|&f| !session.is_foreign_file(f))
         .collect();
-    for file in wire_order(session, &files) {
+    let ordered = dependency_order(session, &roots);
+    // A **library's** files are reached by the walk — they are what a
+    // dependency edge points at — and are dropped again here: they were
+    // analyzed where the library was compiled, and this compilation holds no
+    // tree for them. They still have to be walked, because the order of what is
+    // left depends on where they sit.
+    let files: Vec<FileId> = ordered
+        .into_iter()
+        .filter(|&f| !session.is_foreign_file(f))
+        .collect();
+    // Two packages that depend on each other have no build order at all, and
+    // the passes below would be analyzing one against a half-formed other.
+    report_package_cycles(session);
+    for &file in &files {
         imports::wire(session, file);
     }
 
@@ -337,13 +375,20 @@ pub fn analyze(session: &mut Session, entry: FileId) {
         } = &mut *session;
         infer::resolve_impl_targets(defs, asts, decls, diagnostics, lang_items, &mut impls)
     };
-    for &file in &files {
-        infer_one(session, &impls, file);
-    }
     // The types every declaration declares — a field's, a variant's payload,
     // a `distinct`'s representation — which only inference could work out, and
     // now has. The second half of the table `decl::record` started.
+    //
+    // Recorded **per file, as soon as that file is inferred**, rather than in a
+    // sweep afterwards. `files` is in dependency order, so this is what puts a
+    // package's answers in the table before anything that imports it is
+    // inferred — and a use site asks during inference, not after it. A constant
+    // whose type is not a literal is the case that needs it: `u8.MAX` reads
+    // `core`'s `MAX`, whose type only `core`'s own inference worked out, and a
+    // table still empty there would leave every read of it needing an
+    // annotation.
     for &file in &files {
+        infer_one(session, &impls, file);
         let Session {
             defs, asts, decls, ..
         } = &mut *session;
@@ -445,6 +490,7 @@ fn monomorphize(session: &mut Session) {
         .iter()
         .map(|(_, item, args)| (*item, args.clone()))
         .collect();
+    let target = session.options.target;
     let Session {
         defs,
         ir_meta,
@@ -465,6 +511,15 @@ fn monomorphize(session: &mut Session) {
     // once above.
     let fresh: Vec<DefId> = linked.defs().filter(|d| !before.contains(d)).collect();
     crate::ir::check::constness::check_only(defs, ir_meta, linked, &fresh, &mut diags);
+
+    // A constant a generic `impl` declares is evaluated **where it is read**,
+    // and a read inside a generic body only has concrete arguments once the
+    // body has been instantiated — so this is the first moment it can be asked
+    // at all (see [`crate::ir::check::constants::use_sites`]).
+    {
+        let layouts = crate::ir::layout::Layouts::new(defs, ir_meta, linked, target);
+        crate::ir::check::constants::use_sites(defs, ir_meta, linked, &layouts, &mut diags);
+    }
     session.diagnostics.extend(diags);
     for ((test, _, _), instance) in wanted.iter().zip(instances) {
         session.test_wrappers.insert(*test, instance);
@@ -659,35 +714,183 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
 /// legal (`option.nest` and `control.nest` are one), so a file already being
 /// visited is left where it is: something in a cycle has to be wired first, and
 /// which one is arbitrary by construction.
-fn wire_order(session: &Session, files: &[FileId]) -> Vec<FileId> {
+/// The files of this compilation in **dependency order**, and every import
+/// cycle found on the way.
+///
+/// Every pass in `analyze` runs over one list of files, and several of them
+/// write answers a later file reads — what a declaration declares
+/// ([`decl::record`], [`decl::record_types`]), what a constant is worth
+/// ([`decl::record_const_values`]). A file inferred before the file it imports
+/// finds nothing recorded there, so the order is part of what those passes
+/// mean.
+///
+/// The import graph is a DAG, and this is its topological sort: a
+/// depth-first walk that emits a file only once everything it imports has been
+/// emitted. Roots are visited in the order given, which is what makes the
+/// result the same on every run — the callers hand over a list they ordered
+/// themselves rather than a hash map's iteration.
+///
+/// A **cycle** is the one thing a DAG cannot have, and a file graph can. Files
+/// within one package may import each other freely — a package root that
+/// re-exports a member the member reaches back through is an ordinary shape,
+/// not a mistake — so a back edge is *broken* here and nothing is said about
+/// it: the walk emits the file anyway, the order stays total, and every later
+/// pass still runs. What is refused is a cycle between **packages**, which is a
+/// different question with a different answer (see
+/// [`report_package_cycles`]).
+///
+/// Breaking the edge is what the grey/black colouring below is for: grey is "on
+/// the walk's own stack", and an edge to a grey file is the one edge not
+/// followed.
+fn dependency_order(session: &Session, files: &[FileId]) -> Vec<FileId> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Colour {
+        /// On the walk's own stack: an edge back to one of these is a cycle.
+        Grey,
+        /// Emitted, with everything it depends on already emitted.
+        Black,
+    }
+
     fn visit(
         session: &Session,
         file: FileId,
-        seen: &mut std::collections::HashSet<FileId>,
+        colour: &mut std::collections::HashMap<FileId, Colour>,
         out: &mut Vec<FileId>,
     ) {
-        if !seen.insert(file) {
-            return;
+        match colour.get(&file) {
+            Some(Colour::Black) => return,
+            // A back edge: this file is already on the walk's own stack, so
+            // following it again would not terminate. Break it and let the
+            // file be emitted by the frame that is already working on it.
+            Some(Colour::Grey) => return,
+            None => {}
         }
-        let Some(meta) = session.files.get(&file) else {
-            return;
-        };
-        for imp in &meta.imports {
-            match imp.target {
-                ImportTarget::File(f) | ImportTarget::PackageMember(f, _) => {
-                    visit(session, f, seen, out)
+        colour.insert(file, Colour::Grey);
+        if let Some(meta) = session.files.get(&file) {
+            for imp in &meta.imports {
+                match imp.target {
+                    ImportTarget::File(f) | ImportTarget::PackageMember(f, _) => {
+                        visit(session, f, colour, out)
+                    }
+                    ImportTarget::Broken => {}
                 }
-                ImportTarget::Broken => {}
             }
         }
+        colour.insert(file, Colour::Black);
         out.push(file);
     }
-    let mut seen = std::collections::HashSet::new();
+
+    let mut colour = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(files.len());
     for &file in files {
-        visit(session, file, &mut seen, &mut out);
+        visit(session, file, &mut colour, &mut out);
     }
     out
+}
+
+/// Refuse a cycle between **packages**, and say which import closes it.
+///
+/// Files inside one package may import each other however they like: a package
+/// is compiled as a unit, and a root that re-exports a member the member
+/// reaches back through is an ordinary shape. Two *packages* that depend on
+/// each other are not the same thing. Each is built, published and read as a
+/// whole — a library carries the answers a later compilation reads back — so
+/// neither can be built first, and there is no build order that produces them
+/// at all. Saying so here beats a link that fails, or a `.nlib` compiled
+/// against a half-finished version of the package it depends on.
+///
+/// The graph is packages, one node each, with an edge wherever a file of one
+/// imports a file of another. It is walked in name order so the same program
+/// reports the same cycle every time, and each cycle is reported once, anchored
+/// at the import that closes it.
+fn report_package_cycles(session: &mut Session) {
+    // package -> (package it depends on, the file and import span that says so)
+    let mut edges: std::collections::BTreeMap<String, Vec<(String, FileId, crate::common::span::Span)>> =
+        std::collections::BTreeMap::new();
+    for (&file, meta) in &session.files {
+        let Some(from) = session.pkg_of.get(&file) else {
+            continue;
+        };
+        for imp in &meta.imports {
+            let target = match imp.target {
+                ImportTarget::File(f) | ImportTarget::PackageMember(f, _) => f,
+                ImportTarget::Broken => continue,
+            };
+            let Some(to) = session.pkg_of.get(&target) else {
+                continue;
+            };
+            if to == from {
+                continue;
+            }
+            let row = edges.entry(from.clone()).or_default();
+            if !row.iter().any(|(p, _, _)| p == to) {
+                row.push((to.clone(), file, imp.span));
+            }
+        }
+    }
+    for row in edges.values_mut() {
+        row.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Colour {
+        Grey,
+        Black,
+    }
+    fn visit(
+        pkg: &str,
+        edges: &std::collections::BTreeMap<String, Vec<(String, FileId, crate::common::span::Span)>>,
+        colour: &mut std::collections::HashMap<String, Colour>,
+        path: &mut Vec<String>,
+        found: &mut Vec<(Vec<String>, FileId, crate::common::span::Span)>,
+    ) {
+        match colour.get(pkg) {
+            Some(Colour::Black) => return,
+            Some(Colour::Grey) => return,
+            None => {}
+        }
+        colour.insert(pkg.to_string(), Colour::Grey);
+        path.push(pkg.to_string());
+        for (next, file, span) in edges.get(pkg).map(Vec::as_slice).unwrap_or(&[]) {
+            if let Some(at) = path.iter().position(|p| p == next) {
+                let mut cycle: Vec<String> = path[at..].to_vec();
+                cycle.push(next.clone());
+                found.push((cycle, *file, *span));
+                continue;
+            }
+            visit(next, edges, colour, path, found);
+        }
+        path.pop();
+        colour.insert(pkg.to_string(), Colour::Black);
+    }
+
+    let mut colour = std::collections::HashMap::new();
+    let mut path = Vec::new();
+    let mut found: Vec<(Vec<String>, FileId, crate::common::span::Span)> = Vec::new();
+    for pkg in edges.keys() {
+        visit(pkg, &edges, &mut colour, &mut path, &mut found);
+    }
+    // One diagnostic per distinct loop, however many walks reached it.
+    let mut said: Vec<Vec<String>> = Vec::new();
+    for (cycle, file, span) in found {
+        let mut key = cycle.clone();
+        key.pop();
+        key.sort();
+        key.dedup();
+        if said.contains(&key) {
+            continue;
+        }
+        said.push(key);
+        let loop_text = cycle.join(" -> ");
+        session.error(
+            file,
+            span,
+            format!(
+                "this import closes a cycle between packages, and neither can be built \
+                 before the other: {loop_text}"
+            ),
+        );
+    }
 }
 
 /// Load a [`RawImport`]'s target once, returning the resolved [`ImportTarget`]

@@ -9582,3 +9582,154 @@ fn a_blanket_impl_applies_only_where_its_bounds_hold() {
         "{messages:#?}"
     );
 }
+
+// ===< An associated item read through a type name (§3.4, §4.4) >===
+
+/// `u8.MAX` is a member of a **family** impl reached through a primitive's
+/// name. No namespace hop can find it — `uint` names no collected type, so the
+/// impl parks its members anonymously, and `u8` is a primitive with no
+/// namespace at all — so it is found by matching the impl's target instead.
+#[test]
+fn an_associated_constant_is_read_through_a_primitive_type_name() {
+    let session = analyze_clean(
+        "S: usize :: cast.<usize>(u8.MAX)\n@public main :: func () { const z := S }\n",
+    );
+    assert_eq!(const_value(&session, "S"), 255);
+}
+
+/// One declaration, a value per width: `MAX` on `impl <const N: u16> uint.<N>`
+/// mentions the impl's own parameter, so it is evaluated where it is *read*, at
+/// whatever that read made `N`.
+#[test]
+fn an_integer_family_constant_has_a_value_per_width() {
+    for (ty, want) in [("u8", 255u64), ("u16", 65535), ("u32", 4294967295)] {
+        let src = format!(
+            "S: usize :: cast.<usize>({ty}.MAX)\n@public main :: func () {{ const z := S }}\n"
+        );
+        assert_eq!(const_value(&analyze_clean(&src), "S"), want, "{ty}.MAX");
+    }
+}
+
+/// The signed family's floor and ceiling, which are computed through the
+/// unsigned family of the same width because that is where the intermediate
+/// values fit.
+#[test]
+fn a_signed_family_constant_spans_the_whole_width() {
+    let session = analyze_clean(
+        "MN: i32 :: i8.MIN\nMX: i32 :: i8.MAX\n\
+         @public main :: func () { const a := MN\n const b := MX }\n",
+    );
+    let g = |name: &str| {
+        let g = session
+            .linked
+            .globals()
+            .find(|g| g.name.as_str() == name)
+            .expect("the constant is lowered");
+        match session.ir_meta.get::<crate::ir::ConstValue>(g.id) {
+            Some(crate::ir::ConstValue::Int(n)) => i64::try_from(&n).expect("an integer"),
+            other => panic!("`{name}` did not evaluate: {other:?}"),
+        }
+    };
+    assert_eq!((g("MN"), g("MX")), (-128, 127));
+}
+
+/// A `distinct` type inherits its representation's associated items the way it
+/// inherits its methods (§2.4): `usize` is `distinct uint.<PTR_BITS>`, and the
+/// width's ceiling is as much a fact about it as `wrapping_add` is.
+#[test]
+fn a_distinct_type_inherits_an_associated_constant() {
+    let session = analyze_clean(
+        "S: usize :: usize.MAX\n@public main :: func () { const z := S }\n",
+    );
+    assert_eq!(const_value(&session, "S"), u64::MAX);
+}
+
+/// `Self.BITS` inside `impl <T: Widthy> ... for T` is the **trait's**
+/// declaration, which holds no value. Monomorphization points it at whichever
+/// impl the instantiation selected, so each `Self` reads its own.
+#[test]
+fn an_associated_constant_is_read_through_self_in_a_blanket_impl() {
+    let session = analyze_mem(
+        &[(
+            "main",
+            "Widthy :: trait { BITS: u16 }\n\
+             Shown :: trait { shown :: func (self: *Self) -> u16 }\n\
+             impl Widthy for u8 { BITS :: 8 }\n\
+             impl Widthy for u16 { BITS :: 16 }\n\
+             impl <T: Widthy> Shown for T {\n\
+                 shown :: func (self: *Self) -> u16 { return Self.BITS }\n\
+             }\n\
+             main :: func () -> i32 {\n\
+                 let a: u8 := 1\n\
+                 let b: u16 := 1\n\
+                 return cast.<i32>(a.shown()) + cast.<i32>(b.shown())\n\
+             }\n",
+        )],
+        "main",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    // Two instantiations of one body, each reading the constant its own impl
+    // supplied — 8 and 16, never one of them twice.
+    let bits: Vec<i64> = session
+        .linked
+        .globals()
+        .filter(|g| g.name.as_str() == "BITS")
+        .filter_map(|g| match session.ir_meta.get::<crate::ir::ConstValue>(g.id) {
+            Some(crate::ir::ConstValue::Int(n)) => i64::try_from(&n).ok(),
+            _ => None,
+        })
+        .collect();
+    assert!(bits.contains(&8) && bits.contains(&16), "{bits:?}");
+}
+
+/// A read of an item no impl supplies is still the ordinary "no such member",
+/// not a silent variable.
+#[test]
+fn an_associated_item_a_type_does_not_have_is_refused() {
+    let msg = first_error("main :: func () -> i32 { return cast.<i32>(u8.NOPE) }\n");
+    assert_eq!(msg, "`u8` has no associated item `NOPE`");
+}
+
+// ===< Package dependency order (§4.5) >===
+
+/// Two packages that depend on each other have no build order: each is
+/// compiled, published and read as a whole, so neither can be built first.
+/// Files **within** one package are a different question and are left alone —
+/// `an_entry_that_is_a_package_root_is_that_package` is exactly that shape.
+#[test]
+fn a_cycle_between_packages_is_refused() {
+    let dir = std::env::temp_dir().join(format!("nestc-pkg-cycle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let alpha = dir.join("alpha.nest");
+    let beta = dir.join("beta.nest");
+    std::fs::write(
+        &alpha,
+        "b :: import <beta>\n@public one :: func () -> i32 { return b.two() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &beta,
+        "a :: import <alpha>\n@public two :: func () -> i32 { return 2 }\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.nest");
+    std::fs::write(
+        &entry,
+        "a :: import <alpha>\nmain :: func () -> i32 { return a.one() }\n",
+    )
+    .unwrap();
+
+    let mut session = Session::new();
+    session.register_package("alpha", &alpha.to_string_lossy());
+    session.register_package("beta", &beta.to_string_lossy());
+    let file = session
+        .load_entry(&entry.to_string_lossy())
+        .expect("the entry loads");
+    analyze(&mut session, file);
+    let found = session
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("cycle between packages"));
+    assert!(found, "{:#?}", session.diagnostics);
+    let _ = std::fs::remove_dir_all(&dir);
+}

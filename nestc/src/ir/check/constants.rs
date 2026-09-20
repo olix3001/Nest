@@ -58,6 +58,18 @@ pub fn check(
             continue;
         }
 
+        // A constant declared in a **generic impl** has no single value:
+        // `MAX` on `impl <const N: u16> uint.<N>` is 255 read through `u8` and
+        // 65535 read through `u16`. There is nothing to record here and nothing
+        // to report — each *read* is evaluated at what it bound the impl's
+        // parameters to, by `use_sites` below.
+        if meta
+            .get::<crate::sema::infer::Generics>(global.id)
+            .is_some_and(|g| !g.params.is_empty())
+        {
+            continue;
+        }
+
         match cx.eval(init) {
             Ok(value) => {
                 meta.set(global.id, value);
@@ -91,6 +103,81 @@ pub fn check(
         }
     }
     comptime_assertions(defs, meta, linked, layouts, out);
+}
+
+/// Evaluate every **read** of a constant that a generic impl declares, and
+/// record the value that read produces.
+///
+/// `MAX` on `impl <const N: u16> uint.<N>` is one declaration and a value per
+/// width, so there is nothing to fold once and put on the declaration — the
+/// value belongs to the read. `u8.MAX` is 255 and `u16.MAX` is 65535, and both
+/// are the same `Global` naming the same def; what separates them is the
+/// [`Instantiation`](crate::sema::infer::Instantiation) inference stamped on
+/// the read, which is what the evaluator zips against the declaration's
+/// parameters.
+///
+/// It runs **after** monomorphization, and has to: a read inside a generic body
+/// names that body's parameters until an instantiation replaces them, and
+/// `Cloner` is what carries the substituted arguments onto the copy.
+pub fn use_sites(
+    defs: &DefTable,
+    meta: &Meta,
+    linked: &Linked,
+    layouts: &Layouts,
+    out: &mut Vec<Diagnostic>,
+) {
+    let mut v = GenericReads {
+        cx: ConstEval::new(defs, meta, linked, layouts),
+        defs,
+        meta,
+        linked,
+        out,
+    };
+    for func in linked.funcs() {
+        if let Some(body) = &func.body {
+            v.visit_block(body);
+        }
+    }
+}
+
+struct GenericReads<'a, 'b> {
+    cx: ConstEval<'a>,
+    defs: &'a DefTable,
+    meta: &'a Meta,
+    linked: &'a Linked,
+    out: &'b mut Vec<Diagnostic>,
+}
+
+impl Visitor for GenericReads<'_, '_> {
+    fn visit_expr(&mut self, e: &Expr) {
+        if let ExprKind::Global(def) = &e.kind {
+            let def = self.defs.resolve_alias(*def);
+            let generic = self
+                .linked
+                .global(def)
+                .map(|g| g.id)
+                .and_then(|id| self.meta.get::<crate::sema::infer::Generics>(id))
+                .is_some_and(|g| !g.params.is_empty());
+            if generic && self.meta.get::<ConstValue>(e.id).is_none() {
+                match self.cx.eval_global_at(def, e.id) {
+                    // Recorded on the **read**, not on the declaration: that is
+                    // the node that has one answer.
+                    Ok(value) => {
+                        self.meta.set(e.id, value);
+                    }
+                    Err(err) if err.reported => {}
+                    Err(err) => {
+                        let what = format!("the constant `{}`", self.defs.get(def).name);
+                        self.out.push(err.to_diagnostic(self.meta, &what).with_note(
+                            "a constant an `impl`'s generics appear in is evaluated where it is \
+                             read, at whatever that read makes them (§2.5)",
+                        ));
+                    }
+                }
+            }
+        }
+        walk_expr(self, e);
+    }
 }
 
 /// Judge every `comptime_assert(cond)` in the program (§6.10).

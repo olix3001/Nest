@@ -57,6 +57,26 @@
 @public isize :: #lang("isize") distinct int.<PTR_BITS>
 
 impl <const N: u16> int.<N> {
+  // The extremes of the width (§6.6). They are ordinary associated constants
+  // rather than anything the compiler knows: `N` is in scope here, so what the
+  // bounds *are* is arithmetic, and writing it down is both the definition and
+  // the documentation.
+  //
+  // A constant an impl's generics appear in has a value per width — `i8.MIN` is
+  // -128 and `i32.MIN` is -2147483648, and both are this one declaration — so it
+  // is evaluated where it is read, at whatever that read made `N`.
+  //
+  // Both are computed in the **unsigned** family of the same width, which is the
+  // only place every one of the intermediate values fits: `~0` there is every
+  // bit of the width, half of it is the signed ceiling, and one past that is the
+  // signed floor — a value no signed arithmetic could reach without overflowing
+  // on the way. The `cast` is explicit and reduces modulo 2^N, which is what
+  // lands `MIN` on the sign bit. Writing them as `2^(N-1)` instead would need a
+  // number one bit wider than the type, and the operand of a shift does not have
+  // one: an operator on the numeric core is homogeneous (§6.6).
+  @public MAX :: cast.<Self>(~cast.<uint.<N>>(0) / 2)
+  @public MIN :: cast.<Self>(~cast.<uint.<N>>(0) / 2 + 1)
+
   // Wrapping arithmetic (§6.6): the result is reduced modulo 2^N, which is what
   // the machine instruction does. This is the *stated* overflow behaviour, as
   // against the `+` operator, whose overflow is a separate question the language
@@ -72,6 +92,16 @@ impl <const N: u16> int.<N> {
 }
 
 impl <const N: u16> uint.<N> {
+  // The same two, for a family with no sign bit: every value is a magnitude, so
+  // the floor is zero and the ceiling is every bit of the width set — which is
+  // the complement of none of them, and so needs no number wider than the type.
+  @public MIN :: cast.<Self>(0)
+  @public MAX :: cast.<Self>(~cast.<Self>(0))
+  //                ^ the outer cast is not redundant: it is what gives the
+  // binding a written type, and a `::` whose type came only from an operator's
+  // `Output` projection is left as a variable for the declaration (see the
+  // handoff's note on `infer_global`).
+
   @public wrapping_add :: #intrinsic("wrapping_add") func (self: Self, rhs: Self) -> Self
   @public wrapping_sub :: #intrinsic("wrapping_sub") func (self: Self, rhs: Self) -> Self
   @public wrapping_mul :: #intrinsic("wrapping_mul") func (self: Self, rhs: Self) -> Self

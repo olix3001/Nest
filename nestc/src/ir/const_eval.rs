@@ -253,7 +253,7 @@ pub struct ConstEval<'a> {
     /// It is a stack beside `frames` and not a field in them for the reason a
     /// type argument is not a local: it never has a value, and nothing in the
     /// body can rebind it.
-    ty_frames: Vec<HashMap<DefId, Ty>>,
+    ty_frames: Vec<super::mono::Subst>,
     /// Globals currently being evaluated, to catch `A :: B` / `B :: A`. A cycle
     /// has no value, and following it would not terminate.
     in_progress: Vec<DefId>,
@@ -283,7 +283,7 @@ impl<'a> ConstEval<'a> {
             linked,
             layouts,
             frames: vec![HashMap::new()],
-            ty_frames: vec![HashMap::new()],
+            ty_frames: vec![super::mono::Subst::default()],
             in_progress: Vec::new(),
             steps: 0,
             depth: 0,
@@ -330,6 +330,22 @@ impl<'a> ConstEval<'a> {
     /// This is also how a reference to one is resolved mid-expression, which is
     /// why the cycle set lives on the evaluator rather than on the call.
     pub fn eval_global(&mut self, def: DefId) -> EvalResult {
+        self.eval_global_at(def, IrId(0))
+    }
+
+    /// The same, read **at a use site**.
+    ///
+    /// A constant declared in a generic impl has no single value: `MAX` on
+    /// `impl <const N: u16> uint.<N>` is 255 read through `u8` and 65535 read
+    /// through `u16`. What the read bound the impl's parameters to travels on
+    /// the use as an [`Instantiation`], against the [`Generics`] the
+    /// declaration carries, and the two are zipped here into the frames the
+    /// body is evaluated under — the identical shape a generic `#const` call
+    /// gets, for the identical reason.
+    ///
+    /// `at` is `IrId(0)` for a read with no use site: a constant asked about on
+    /// its own, which a generic one has no answer for.
+    pub fn eval_global_at(&mut self, def: DefId, at: IrId) -> EvalResult {
         let def = self.defs.resolve_alias(def);
         let Some(global) = self.linked.global(def) else {
             // A def with no lowered global: a function used as a value, an
@@ -354,10 +370,62 @@ impl<'a> ConstEval<'a> {
                 format!("`{}` has no initializer; its region is zeroed", global.name),
             ));
         };
+        let frames = self.generic_frames(global.id, at);
         self.in_progress.push(def);
+        if let Some((frame, ty_frame)) = frames.clone() {
+            self.frames.push(frame);
+            self.ty_frames.push(ty_frame);
+        }
         let out = self.expr(init);
+        if frames.is_some() {
+            self.frames.pop();
+            self.ty_frames.pop();
+        }
         self.in_progress.pop();
         out
+    }
+
+    /// The value and type frames a generic declaration's body is evaluated
+    /// under, zipping what it is generic over against what the use site bound.
+    ///
+    /// `None` when the declaration is not generic, which is the common case and
+    /// the one that must push no frame at all: an empty frame would hide the
+    /// enclosing one from [`ConstEval::lookup`].
+    fn generic_frames(
+        &self,
+        decl: IrId,
+        at: IrId,
+    ) -> Option<(HashMap<DefId, ConstValue>, super::mono::Subst)> {
+        let params = self
+            .meta
+            .get::<crate::sema::infer::Generics>(decl)
+            .map(|g| g.params)
+            .unwrap_or_default();
+        if params.is_empty() {
+            return None;
+        }
+        let crate::sema::infer::Instantiation(args) = self.meta.get(at)?;
+        let mut frame = HashMap::new();
+        let mut ty_frame = super::mono::Subst::default();
+        for (p, a) in params.iter().zip(&args) {
+            // The reader's own frame first, for the same reason a generic
+            // `#const` call consults it: a constant read from inside another
+            // generic body names that body's parameters, and what *they* were
+            // bound to is the answer.
+            match a {
+                crate::sema::infer::GenericArg::Const(k) => {
+                    let k = self.substituted_const(k);
+                    if let Some(v) = const_arg_value(&k) {
+                        frame.insert(*p, v);
+                    }
+                    ty_frame.consts.insert(*p, k);
+                }
+                crate::sema::infer::GenericArg::Ty(t) => {
+                    ty_frame.tys.insert(*p, self.substituted(t));
+                }
+            }
+        }
+        Some((frame, ty_frame))
     }
 
     // ===< Expressions >===
@@ -394,7 +462,7 @@ impl<'a> ConstEval<'a> {
                         ),
                     ));
                 }
-                self.eval_global(def).map_err(|err| {
+                self.eval_global_at(def, e.id).map_err(|err| {
                     // Re-point an error raised against the *definition* at the
                     // use site when the definition has no span of its own.
                     if self.meta.span(err.at).is_none() {
@@ -709,13 +777,20 @@ impl<'a> ConstEval<'a> {
             .get::<crate::sema::infer::Generics>(func.id)
             .map(|g| g.params)
             .unwrap_or_default();
-        let mut ty_frame = HashMap::new();
+        let mut ty_frame = super::mono::Subst::default();
         for (p, a) in params.iter().zip(&generic_args) {
             match a {
                 crate::sema::infer::GenericArg::Const(k) => {
                     if let Some(v) = const_arg_value(k) {
                         frame.insert(*p, v);
                     }
+                    // A `const` parameter is a value *and* part of a type: the
+                    // `N` of `uint.<N>` is what says how wide the type is. So
+                    // it goes in both, and a question about a type inside the
+                    // body finds a width rather than a name.
+                    ty_frame
+                        .consts
+                        .insert(*p, self.substituted_const(k));
                 }
                 // A **type** argument, which is not a value and lives in its own
                 // frame. It is substituted through when the body asks a question
@@ -724,11 +799,7 @@ impl<'a> ConstEval<'a> {
                     // The caller's own frame first: a chain of generic `#const`
                     // calls passes `T` along, and each link has to resolve it
                     // against where it came from rather than pass the name on.
-                    let t = match self.ty_frames.last() {
-                        Some(m) if !m.is_empty() => super::layout::subst_ty(m, t),
-                        _ => t.clone(),
-                    };
-                    ty_frame.insert(*p, t);
+                    ty_frame.tys.insert(*p, self.substituted(t));
                 }
             }
         }
@@ -1144,10 +1215,43 @@ impl<'a> ConstEval<'a> {
                 _ => Err(ConstError::new(at, "`-` wants one operand")),
             },
             BuiltinOp::BitNot => match args {
-                [v] => unary_op(UnOp::BitNot, v).map_err(|m| ConstError::new(at, m)),
+                // Complementing is the one operation whose answer is not the
+                // same number at every width: `~0` is -1 over the integers and
+                // 255 in a `u8`. The value the machine holds is the width's, so
+                // it is reduced into the width here — see
+                // [`ConstEval::in_width`].
+                [v] => {
+                    let out = unary_op(UnOp::BitNot, v).map_err(|m| ConstError::new(at, m))?;
+                    Ok(self.in_width(at, out))
+                }
                 _ => Err(ConstError::new(at, "`~` wants one operand")),
             },
         }
+    }
+
+    /// Reduce an integer into the **unsigned** type the operation produced,
+    /// when that is what it produced.
+    ///
+    /// The evaluator works over arbitrary-precision integers, which is right
+    /// for everything but the operations whose answer *is* the width: `~0` is
+    /// -1 over the integers and 255 in a `u8`, and the second is what the
+    /// machine would hold. A signed result needs nothing — two's complement is
+    /// what the bignum already computed — and neither does a width still
+    /// symbolic, which has no number to reduce into.
+    fn in_width(&self, at: IrId, v: ConstValue) -> ConstValue {
+        let ConstValue::Int(n) = &v else { return v };
+        let Some((signed, bits)) = self.repr_of(&self.ty_at(at)).int_parts() else {
+            return v;
+        };
+        if signed || bits == 0 {
+            return v;
+        }
+        let modulus = num_bigint::BigInt::from(1u8) << bits;
+        let mut r = n % &modulus;
+        if r.sign() == num_bigint::Sign::Minus {
+            r += &modulus;
+        }
+        ConstValue::Int(r)
     }
 
     // ===< Intrinsics >===
@@ -1171,7 +1275,7 @@ impl<'a> ConstEval<'a> {
                     Some(_) => CastMode::Implicit,
                     None => CastMode::Explicit,
                 };
-                self.cast(e.id, value, &self.meta.ty_or_error(e.id), mode)
+                self.cast(e.id, value, &self.ty_at(e.id), mode)
             }
             // `$size_of` / `$align_of` are the program asking what a type *is*
             // in memory, and that is a question with an answer now (§7 layout).
@@ -1266,10 +1370,34 @@ impl<'a> ConstEval<'a> {
         // Inside a generic `#const` body the argument is the enclosing
         // function's own parameter — `size_of.<T>()` in `func <T> ()`. What the
         // *caller* bound it to is what the question is about.
+        Some(self.substituted(&ty))
+    }
+
+    /// `ty` with whatever the enclosing instantiation bound the declaration's
+    /// parameters to substituted in.
+    ///
+    /// Both halves: a type parameter becomes a type, and a `const` parameter
+    /// becomes a width or a length. The second is what lets a constant declared
+    /// on `impl <const N: u16> uint.<N>` cast to `Self` — `uint.<N>` has no
+    /// width until `N` is a number.
+    fn substituted(&self, ty: &Ty) -> Ty {
         match self.ty_frames.last() {
-            Some(map) if !map.is_empty() => Some(super::layout::subst_ty(map, &ty)),
-            _ => Some(ty),
+            Some(s) if !s.tys.is_empty() || !s.consts.is_empty() => super::mono::subst_ty(s, ty),
+            _ => ty.clone(),
         }
+    }
+
+    fn substituted_const(&self, k: &crate::sema::ty::Const) -> crate::sema::ty::Const {
+        match self.ty_frames.last() {
+            Some(s) if !s.consts.is_empty() => super::mono::subst_const(s, k),
+            _ => k.clone(),
+        }
+    }
+
+    /// The type recorded for `id`, read from inside whatever instantiation is
+    /// evaluating it (see [`ConstEval::substituted`]).
+    fn ty_at(&self, id: IrId) -> Ty {
+        self.substituted(&self.meta.ty_or_error(id))
     }
 
     /// The signedness and width of the integer type a cast targets.

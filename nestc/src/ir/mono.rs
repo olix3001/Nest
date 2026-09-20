@@ -614,6 +614,26 @@ impl Mono<'_> {
             subst.tys.insert(trait_def, t.clone());
             self.bind_assoc_items(trait_def, t, &mut subst, &mut assoc);
         }
+        // The same question, asked of a **bounded generic parameter** rather
+        // than of a default body's `Self`. `impl <T: Float> Display for T`
+        // writes `Self.BITS`, which is `T.BITS`, which is the *trait's*
+        // declaration: it holds no value, and a body left pointing at it reads
+        // whatever happens to be at that symbol. The bound is the promise that
+        // an impl supplies one, and the argument here is what it supplies it
+        // for, so this is the first point at which the two meet — exactly as
+        // above.
+        //
+        // A declaration already bound is left alone: two parameters sharing a
+        // bound would each answer, and the first is the one `Self` came from.
+        for (p, a) in params.iter().zip(args) {
+            let GenericArg::Ty(t) = a else { continue };
+            let Some(bounds) = self.defs.get(*p).param_bounds.clone() else {
+                continue;
+            };
+            for trait_def in bounds {
+                self.bind_assoc_items(trait_def, t, &mut subst, &mut assoc);
+            }
+        }
 
         let mut func = original.clone();
         func.def = def;
@@ -989,14 +1009,16 @@ impl Mono<'_> {
                     // The impl's own generics may appear in what it chose —
                     // `impl <T> Holder for Box.<T> { Item :: T }` — and the
                     // match above is what bound them.
-                    if let Some(t) = chosen.get(name) {
+                    if let Some(t) = chosen.get(name)
+                        && !subst.tys.contains_key(&decl)
+                    {
                         subst.tys.insert(decl, subst_ty(&bindings, t));
                     }
                 }
                 DefKind::Const => {
                     if let Some(&supplied) = imp.members.get(name) {
                         let supplied = self.defs.resolve_alias(supplied);
-                        if supplied != decl {
+                        if supplied != decl && !assoc.contains_key(&decl) {
                             assoc.insert(decl, supplied);
                         }
                     }
@@ -1319,9 +1341,9 @@ fn display_name(
 
 /// A binding of generic parameters to what they stand for.
 #[derive(Debug, Clone, Default)]
-struct Subst {
-    tys: HashMap<DefId, Ty>,
-    consts: HashMap<DefId, Const>,
+pub(crate) struct Subst {
+    pub(crate) tys: HashMap<DefId, Ty>,
+    pub(crate) consts: HashMap<DefId, Const>,
 }
 
 /// Replace every generic parameter in `ty` by what `subst` binds it to.
@@ -1329,7 +1351,7 @@ struct Subst {
 /// A parameter this substitution says nothing about is left alone rather than
 /// erased: a nested generic's parameters travel through here untouched on their
 /// way to their own instantiation.
-fn subst_ty(subst: &Subst, ty: &Ty) -> Ty {
+pub(crate) fn subst_ty(subst: &Subst, ty: &Ty) -> Ty {
     match ty {
         Ty::Nominal { def, args } if args.is_empty() => {
             subst.tys.get(def).cloned().unwrap_or_else(|| ty.clone())
@@ -1368,7 +1390,7 @@ fn subst_ty(subst: &Subst, ty: &Ty) -> Ty {
     }
 }
 
-fn subst_const(subst: &Subst, k: &Const) -> Const {
+pub(crate) fn subst_const(subst: &Subst, k: &Const) -> Const {
     match k {
         Const::Param(d) => subst.consts.get(d).cloned().unwrap_or_else(|| k.clone()),
         _ => k.clone(),

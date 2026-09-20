@@ -2427,7 +2427,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 let p = self.place_of(e)?;
                 Some(Rvalue::Use(Operand::Copy(p)))
             }
-            ExprKind::Global(def) => Some(Rvalue::Use(self.global_operand(*def))),
+            ExprKind::Global(def) => Some(Rvalue::Use(self.global_operand(*def, e.id))),
             // Monomorphization replaced every one of these with the literal the
             // instantiation chose. One still here is a program that did not get
             // that far.
@@ -2493,7 +2493,16 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     }
 
     /// A reference to a top-level item, as a value.
-    fn global_operand(&mut self, def: DefId) -> Operand {
+    fn global_operand(&mut self, def: DefId, at: IrId) -> Operand {
+        // A constant a generic `impl` declares has a value per **read**, and
+        // `check::constants::use_sites` put it on the read: `u8.MAX` and
+        // `u16.MAX` are the same global and different numbers. The read's own
+        // answer therefore comes first, and the declaration's is the one every
+        // ordinary constant has.
+        if let Some(v) = self.cx.meta.get::<ConstValue>(at) {
+            let ty = self.cx.ty_of(at);
+            return self.const_operand(&v, &ty, None);
+        }
         if let Some(g) = self.cx.linked.global(def) {
             // A `#static` is a **place**: the region exists for the whole run
             // and code may have written to it since the initializer ran.

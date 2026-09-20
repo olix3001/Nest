@@ -328,6 +328,13 @@ impl Lowerer<'_> {
         // right would have defaulted on its own.
         self.meta.set_ty(id, self.ty(node));
         self.meta.set_directives(id, directives);
+        // What a constant declared in a **generic impl** is generic over,
+        // carried across the way a function's is: its initializer mentions the
+        // impl's parameters, so it has no value until a use site says what they
+        // are (see [`Generics`]).
+        if let Some(g) = self.ast.meta::<Generics>(node) {
+            self.meta.set(id, g);
+        }
         let init = init.map(|e| self.lower_expr(e));
         Some(Global {
             id,
@@ -2184,7 +2191,15 @@ impl Lowerer<'_> {
             DefKind::ConstParam => ExprKind::ConstParam(def),
             _ => ExprKind::Global(def),
         };
-        self.expr(node, ty, kind)
+        let e = self.expr(node, ty, kind);
+        // A read of a constant a generic `impl` declares carries what it bound
+        // that impl's parameters to, the way a call carries a callee's (see
+        // [`Lowerer::carry_instantiation`]). Without it `u8.MAX` and `u16.MAX`
+        // are the same global with nothing to tell them apart.
+        if let Some(inst) = self.ast.meta::<Instantiation>(node) {
+            self.meta.set(e.id, inst);
+        }
+        e
     }
 
     /// The type def a `TypePath`/`Path` type node names, if it is a struct/enum.

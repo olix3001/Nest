@@ -174,6 +174,7 @@ impl Resolver<'_> {
                 if let Some(t) = for_ty {
                     self.resolve_node(t);
                 }
+                self.record_param_bounds(&generics);
                 // The self type is the `for` target of a trait impl, else the
                 // head type of an inherent impl. `Self` and the member host
                 // namespace both follow it (never the implemented trait).
@@ -825,6 +826,7 @@ impl Resolver<'_> {
     /// Runs after the constraints are resolved, which is why it is not part of
     /// `bind_generics` — a bound cannot be read until its trait name has been.
     fn introduce_bound_projections(&mut self, generics: &[NodeId]) {
+        self.record_param_bounds(generics);
         for &g in generics {
             let NodeKind::GenericTypeParam {
                 name,
@@ -845,15 +847,45 @@ impl Resolver<'_> {
                 .iter()
                 .filter_map(|&b| self.bound_trait_def(b).map(|t| (t, Some(b))))
                 .collect();
-            // The bounds go **on the def**, for the same reason an abstract
-            // associated type's do (see [`Def::assoc_bounds`] above): a later
-            // compilation reading this parameter out of a library has no syntax
-            // tree to read the constraint from, and impl selection has to know
-            // it — `impl <T: Float> Display for T` applies to a float and to
-            // nothing else, and a bound nobody recorded reads as no bound at
-            // all, which is every type in the program.
-            self.defs.get_mut(param).param_bounds = Some(traits.iter().map(|&(t, _)| t).collect());
             self.project_bounds(param, name.as_str(), &traits, g, 0);
+        }
+    }
+
+    /// Record what each generic parameter's bounds resolved to, on the
+    /// parameter's own def.
+    ///
+    /// The bounds go **on the def**, for the same reason an abstract associated
+    /// type's do (see [`Def::assoc_bounds`]): a later compilation reading this
+    /// parameter out of a library has no syntax tree to read the constraint
+    /// from, and impl selection has to know it — `impl <T: Float> Display for T`
+    /// applies to a float and to nothing else, and a bound nobody recorded reads
+    /// as no bound at all, which is every type in the program.
+    ///
+    /// Every declaration that takes parameters records them, not functions
+    /// alone. An **impl**'s are the ones monomorphization asks about: a blanket
+    /// impl's body writes `Self.BITS`, which is the *trait's* declaration, and
+    /// the bound is the only thing that says which impl supplies the value.
+    fn record_param_bounds(&mut self, generics: &[NodeId]) {
+        for &g in generics {
+            let NodeKind::GenericTypeParam {
+                constraint: Some(constraint),
+                ..
+            } = self.ast.node(g).kind.clone()
+            else {
+                continue;
+            };
+            let Some(param) = self.def_of(g) else {
+                continue;
+            };
+            let bounds = match self.ast.node(constraint).kind.clone() {
+                NodeKind::Bounds { bounds } => bounds,
+                _ => vec![constraint],
+            };
+            let traits: Vec<DefId> = bounds
+                .iter()
+                .filter_map(|&b| self.bound_trait_def(b))
+                .collect();
+            self.defs.get_mut(param).param_bounds = Some(traits);
         }
     }
 

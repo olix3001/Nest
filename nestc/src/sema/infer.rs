@@ -345,6 +345,18 @@ pub enum GenericArg {
     Const(Const),
 }
 
+/// The type a `Type.MEMBER` read has, kept on the read's own node.
+///
+/// A member reached through a type rather than a value is worked out by
+/// inference (see [`Inferer::assoc_through_type`]), which stamps the member's
+/// resolution so lowering emits a global for it. That stamp makes the node look
+/// like an ordinary resolved name to any later visit, and an ordinary resolved
+/// name is typed from its *declaration* — which for a constant in a generic
+/// impl is `uint.<N>`, with nothing at the declaration to say what `N` is. So
+/// the answer is recorded where it was computed.
+#[derive(Debug, Clone)]
+pub struct AssocTy(pub Ty);
+
 /// What one call site instantiated its callee's [`Generics`] with, in the same
 /// order.
 ///
@@ -788,6 +800,14 @@ pub fn infer_file(
     {
         let mut cx = fresh!();
         cx.stamp_variant_tags();
+    }
+    // Declaration-level: what a **generic impl's associated constants** are
+    // generic over. `impl <const N: u16> uint.<N> { MAX :: ... }` declares one
+    // constant with a different value for every width, and nothing else records
+    // that — [`Inferer::stamp_generics`] answers for functions alone.
+    {
+        let mut cx = fresh!();
+        cx.stamp_assoc_const_generics();
     }
     // Declaration-level, and the last of them: expand every type alias the file
     // declares.
@@ -1322,6 +1342,46 @@ impl Inferer<'_> {
         self.ast.set_meta(func, Generics { params: order, own });
     }
 
+    /// Record what each of this file's **generic impls** makes its associated
+    /// constants generic over.
+    ///
+    /// `impl <const N: u16> uint.<N> { MAX :: cast.<Self>((1 << N) - 1) }` is
+    /// one declaration and 65535 values: a constant in a generic impl has no
+    /// single one, and which it has is decided where it is read. So it is
+    /// treated the way a generic function is — the parameters here, the
+    /// arguments on the use ([`Instantiation`]), and the evaluator zipping the
+    /// two — and this is the half nothing else would record, because
+    /// [`Inferer::stamp_generics`] answers for `func` alone.
+    ///
+    /// `own` is the whole list: an impl's parameters are not split between the
+    /// impl and anything else, there being no enclosing declaration to inherit
+    /// from.
+    fn stamp_assoc_const_generics(&mut self) {
+        let mine: Vec<usize> = (0..self.impls.impls.len())
+            .filter(|&i| self.impls.impls[i].file == self.file)
+            .filter(|&i| !self.impls.impls[i].generics.is_empty())
+            .collect();
+        for i in mine {
+            let imp = self.impls.impls[i].clone();
+            for &m in imp.members.values() {
+                let m = self.defs.resolve_alias(m);
+                if self.defs.get(m).kind != DefKind::Const {
+                    continue;
+                }
+                let Some(node) = self.defs.get(m).node else {
+                    continue;
+                };
+                self.ast.set_meta(
+                    node,
+                    Generics {
+                        params: imp.generics.clone(),
+                        own: imp.generics.len(),
+                    },
+                );
+            }
+        }
+    }
+
     /// Extend a generic-parameter list with every associated-type parameter
     /// reachable from it, transitively.
     ///
@@ -1373,7 +1433,18 @@ impl Inferer<'_> {
         for ob in leftover {
             self.report_unsolved(&ob);
         }
-        let entries: Vec<(NodeId, Ty)> = self.types.drain().collect();
+        // **In node order.** Finalizing one entry defaults the variables it
+        // mentions, and a variable defaulted early is a variable a later entry
+        // no longer gets to solve — so the order decides which node a leftover
+        // is reported against, and in the worst case whether it is reported at
+        // all. Draining a `HashMap` makes that order the hasher's, which
+        // differs between runs of the same compiler on the same program: a
+        // constant whose type came out settled on one run came out "type
+        // annotations needed" on the next. Node order is arbitrary too, but it
+        // is the *same* arbitrary order every time, and it is the order the
+        // program was written in.
+        let mut entries: Vec<(NodeId, Ty)> = self.types.drain().collect();
+        entries.sort_unstable_by_key(|(node, _)| *node);
         for (node, ty) in entries {
             // Inference is now complete enough to trust: a leftover **general**
             // variable is a real "type annotations needed" error (numeric ones
@@ -1546,6 +1617,15 @@ impl Inferer<'_> {
                 }
             }
             NodeKind::FieldAccess { base, name } => {
+                // A member reached through a type, already worked out on an
+                // earlier visit to this node. It has to come first: the answer
+                // below stamped the member's resolution so lowering can emit a
+                // global, and reading that back would re-derive the
+                // *declaration's* type — `uint.<N>`, with nothing here to say
+                // what `N` is — instead of this read's.
+                if let Some(AssocTy(t)) = self.ast.meta::<AssocTy>(node) {
+                    return t;
+                }
                 // A `namespace.member` access the resolver already linked to a def
                 // (a function, type, or const) is typed from that def; a value
                 // `place.field` is typed from the base's struct type.
@@ -1553,6 +1633,30 @@ impl Inferer<'_> {
                     return self.def_ty(node, def);
                 }
                 if self.failed_resolution(node) {
+                    return Ty::Error;
+                }
+                // A member reached through a **type** rather than through a
+                // value: `u8.MAX`, `Self.BITS` inside `impl <T: Float> ... for
+                // T`. The resolver could not link these — a primitive and a
+                // type parameter own no namespace, and a family impl's members
+                // are parked anonymously because `uint` names no collected type
+                // — so the type is worked out here, where types are known, and
+                // the item found by the same impl search a method call uses.
+                if let Some(t) = self.type_denoted_by(base) {
+                    if let Some(ty) = self.assoc_through_type(node, &t, &name) {
+                        return ty;
+                    }
+                    // A type names no value to take a field of, so there is
+                    // nothing further to try: say what was asked for and which
+                    // type was asked. Falling through would type the base as a
+                    // value and report a missing *field*, which for `u8.NOPE`
+                    // is a question about the compiler rather than the program.
+                    let what = self.cx.resolve(&t).display(self.defs);
+                    self.report(
+                        node,
+                        format!("`{what}` has no associated item `{name}`"),
+                    );
+                    self.ast.set_meta(node, Resolution::Error);
                     return Ty::Error;
                 }
                 let bty = self.infer_expr(base);
@@ -3978,6 +4082,188 @@ impl Inferer<'_> {
         }
     }
 
+    /// The type a **type-denoting** expression names, or `None` when the
+    /// expression is a value.
+    ///
+    /// `u8`, `Self`, `T`, `Vec3`, `uint.<8>` in expression position all name a
+    /// type; `x`, `f()`, `p.field` do not. The distinction is the def the
+    /// resolver put on the head: only a type's def qualifies, and a `Ty` is
+    /// then built by the ordinary type-expression path, so `Self` expands and a
+    /// family application carries its width.
+    ///
+    /// A *namespace* is deliberately not one of them. `ns.MEMBER` is a name the
+    /// resolver already linked, and reading it as a type here would answer a
+    /// second time for something already answered.
+    fn type_denoted_by(&mut self, node: NodeId) -> Option<Ty> {
+        let head = match self.ast.node(node).kind.clone() {
+            NodeKind::GenericApply { base, .. } => base,
+            NodeKind::Path { .. } | NodeKind::FieldAccess { .. } => node,
+            _ => return None,
+        };
+        let def = self.defs.resolve_alias(self.resolved_def(head)?);
+        if !matches!(
+            self.defs.get(def).kind,
+            DefKind::Primitive
+                | DefKind::Struct
+                | DefKind::Enum
+                | DefKind::TypeAlias
+                | DefKind::TypeParam
+                // A `::` binding whose right-hand side names a type is a type
+                // (§2.4): `usize :: distinct uint.<PTR_BITS>` is a `Const` def
+                // like every other `::`, and `usize.MAX` is as much a read
+                // through a type name as `u64.MAX` is. One that binds a *value*
+                // is filtered out below, by having no type to give.
+                | DefKind::Const
+        ) {
+            return None;
+        }
+        let ty = self.ty_from_node(node);
+        (!matches!(ty, Ty::Error) && !is_var(&self.cx.shallow(&ty))).then_some(ty)
+    }
+
+    /// Resolve `name` as an associated item of the **type** `ty`, in expression
+    /// position, and give the type a use of it has.
+    ///
+    /// Two routes, and which one applies is decided by what `ty` is.
+    ///
+    /// A **type parameter** has no impls of its own — it is not a type yet — so
+    /// its bounds are the proof, exactly as they are for a method call through
+    /// one ([`Inferer::bound_method_def`]). The item found is the *trait's*
+    /// declaration, which holds no value; monomorphization points it at
+    /// whichever impl the instantiation selected. This is what makes `Self.BITS`
+    /// work inside `impl <T: Float> Display for T`.
+    ///
+    /// Anything else goes through the impls, by unifying each impl's target
+    /// against `ty` the way [`Inferer::impl_method_def`] does. That is the only
+    /// route to a member of a **family** impl: `impl <const N: u16> uint.<N>`
+    /// parks its members anonymously, so `u8.MAX` is found by matching `uint.<N>`
+    /// against `u8` and never by a namespace hop. The match also says what the
+    /// impl's generics are here, and the item's type is written in their terms
+    /// (`MAX :: cast.<Self>(...)` is a `Self`), so it is substituted through.
+    fn assoc_through_type(&mut self, node: NodeId, ty: &Ty, name: &Symbol) -> Option<Ty> {
+        let s = self.cx.shallow(ty);
+        if let Ty::Nominal { def, .. } = &s
+            && self.defs.get(*def).kind == DefKind::TypeParam
+        {
+            let def = *def;
+            for t in self.param_bound_traits(def) {
+                let Some(&m) = self.defs.get(t).ns.members.get(name) else {
+                    continue;
+                };
+                let m = self.defs.resolve_alias(m);
+                if self.defs.get(m).kind != DefKind::Const {
+                    continue;
+                }
+                self.ast.set_meta(node, Resolution::Def(m));
+                let out = self.def_ty(node, m);
+                self.ast.set_meta(node, AssocTy(out.clone()));
+                return Some(out);
+            }
+            return None;
+        }
+        // A `distinct` type inherits its representation's associated items the
+        // way it inherits its methods (§2.4, [`Inferer::distinct_method_def`]):
+        // `usize` is `distinct uint.<PTR_BITS>`, and the width's ceiling is as
+        // much a fact about it as `wrapping_add` is. Tried **last**, so an item
+        // the distinct type declares itself always wins.
+        //
+        // What is matched is the representation; what `Self` *means* is not. An
+        // item whose type is the one the impl was selected for comes back as the
+        // distinct type, for the same reason `Meters + Meters` is `Meters` and
+        // not an `f64`.
+        let (matched, i, m) = match self.impl_assoc_def(&s, name) {
+            Some((i, m)) => (s.clone(), i, m),
+            None => {
+                let repr = self.distinct_repr(&s)?;
+                let repr = self.cx.shallow(&repr);
+                let (i, m) = self.impl_assoc_def(&repr, name)?;
+                (repr, i, m)
+            }
+        };
+        let s = matched;
+        let map = self.commit_impl(i, &s, &[]);
+        self.ast.set_meta(node, Resolution::Def(m));
+        // What this read bound the impl's parameters to, in the order
+        // `stamp_assoc_const_generics` recorded them. A constant in a generic
+        // impl is a different value for every one of them, and this is the
+        // pairing the evaluator zips against (see [`Instantiation`]).
+        let generics = self.impls.impls[i].generics.clone();
+        if !generics.is_empty() {
+            let args = generics
+                .iter()
+                .map(|d| match map.consts.get(d) {
+                    Some(k) => GenericArg::Const(k.clone()),
+                    None => GenericArg::Ty(map.tys.get(d).cloned().unwrap_or(Ty::Error)),
+                })
+                .collect();
+            self.ast.set_meta(node, Instantiation(args));
+        }
+        let raw = self.def_ty(node, m);
+        // Resolved, not merely substituted: the match bound the impl's width to
+        // a variable and then solved it against the type read through, and a
+        // `uint.<?0>` handed back would be "type annotations needed" wherever
+        // the context does not pin it down a second time.
+        let out = self.subst_type_params(&raw, &map);
+        let out = self.cx.resolve(&out);
+        // `Self` back in the distinct type's terms, where that is what was read
+        // through: `usize.MAX` is a `usize`.
+        let out = if out == s { ty.clone() } else { out };
+        self.ast.set_meta(node, AssocTy(out.clone()));
+        Some(out)
+    }
+
+    /// The impl providing the associated **constant** `name` for `ty`, and the
+    /// member itself.
+    ///
+    /// The same walk and the same ranking [`Inferer::impl_method_def`] does —
+    /// an inherent impl beats a trait's, a concrete target beats a blanket one,
+    /// and a tie is a question the program has to answer — asking for a
+    /// constant instead of a function.
+    fn impl_assoc_def(&mut self, ty: &Ty, name: &Symbol) -> Option<(usize, DefId)> {
+        if matches!(ty, Ty::Error) || is_var(ty) {
+            return None;
+        }
+        let mut best: Option<(u8, usize, DefId)> = None;
+        let mut ambiguous = false;
+        for i in 0..self.impls.impls.len() {
+            let imp = self.impls.impls[i].clone();
+            if let Some(td) = imp.trait_def
+                && !self.in_scope_traits.contains(&td)
+                && !self.lang_traits.contains(&td)
+            {
+                continue;
+            }
+            let Some(&member) = imp.members.get(name) else {
+                continue;
+            };
+            let member = self.defs.resolve_alias(member);
+            if self.defs.get(member).kind != DefKind::Const {
+                continue;
+            }
+            if !self.trial_impl(i, ty, &[]) {
+                continue;
+            }
+            let score = match (imp.trait_def.is_none(), imp.self_is_generic()) {
+                (true, false) => 4,
+                (true, true) => 3,
+                (false, false) => 2,
+                (false, true) => 1,
+            };
+            match best {
+                Some((bs, _, _)) if bs > score => {}
+                Some((bs, _, _)) if bs == score => ambiguous = true,
+                _ => {
+                    best = Some((score, i, member));
+                    ambiguous = false;
+                }
+            }
+        }
+        if ambiguous {
+            return None;
+        }
+        best.map(|(_, i, m)| (i, m))
+    }
+
     /// Resolve `name` through the trait bounds of a generic type parameter
     /// receiver (`<I: Summing>` → `it.total()` is `Summing.total`).
     fn bound_method_def(&mut self, recv: &Ty, name: &str) -> Option<(DefId, Vec<Ty>)> {
@@ -5241,7 +5527,7 @@ impl Inferer<'_> {
             return self.cx.fresh();
         };
         self.const_stack.push(def);
-        let ty = self.const_rhs_ty(file, rhs);
+        let ty = self.const_rhs_ty(file, node, rhs);
         self.const_stack.pop();
         ty
     }
@@ -5265,7 +5551,7 @@ impl Inferer<'_> {
 
     /// The type a constant's right-hand side gives it, read in the file the
     /// constant was declared in.
-    fn const_rhs_ty(&mut self, file: FileId, rhs: NodeId) -> Ty {
+    fn const_rhs_ty(&mut self, file: FileId, node: NodeId, rhs: NodeId) -> Ty {
         match self.asts[&file].node(rhs).kind.clone() {
             // Literals stay comptime: a fresh variable per use, so one use of
             // `A :: "hi"` may be a `str` and another a `[]u8`, exactly as one
@@ -5274,7 +5560,7 @@ impl Inferer<'_> {
             NodeKind::Lit(Lit::Float(_)) => self.cx.fresh_of(TyVarKind::Float),
             NodeKind::Lit(l) => self.lit_ty(&l),
             // `-1` / `+1` are still literals for this purpose.
-            NodeKind::Unary { operand, .. } => self.const_rhs_ty(file, operand),
+            NodeKind::Unary { operand, .. } => self.const_rhs_ty(file, node, operand),
             // A constant naming another constant inherits its comptime-ness.
             NodeKind::Path { .. } => match self.resolved_def_in(file, rhs) {
                 Some(d) => self.def_ty(rhs, d),
@@ -5290,7 +5576,25 @@ impl Inferer<'_> {
             NodeKind::AssocConst { ty, .. } => self.ty_from_node_in(file, ty),
             // Anything else has a concrete type; infer it where it is written.
             _ if file == self.file => self.infer_expr(rhs),
-            _ => self.cx.fresh(),
+            // Another file's, and the recorded shape could not answer: it is
+            // recorded only once **every** file has been inferred
+            // (`decl::record_types`), and a use site asks during. Inference of
+            // that file has already run — files are inferred in dependency
+            // order — so what it stamped on the declaration is the same answer,
+            // one pass earlier. This is the route `u8.MAX` takes: `core`'s
+            // `MAX` is a `cast`, not a literal, and a fresh variable here would
+            // leave every read of it needing an annotation.
+            //
+            // Only what is settled. A type still carrying a variable is a
+            // question that file did not answer either, and a generic impl's
+            // own parameters are not variables — `uint.<N>` arrives rigid and
+            // the caller substitutes it.
+            _ => self
+                .asts
+                .get(&file)
+                .and_then(|a| a.meta::<Ty>(node))
+                .filter(|t| !t.mentions_var() && !t.mentions_error())
+                .unwrap_or_else(|| self.cx.fresh()),
         }
     }
 
