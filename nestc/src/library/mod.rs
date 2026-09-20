@@ -170,10 +170,19 @@ pub fn compiler_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::common::source::FileId;
     use crate::sema::session::{MemLoader, Session};
 
+    /// A library's two members: its metadata and its IR.
+    type Members = (Vec<u8>, Vec<u8>);
+
+    /// Where a library is said to have come from. Nothing reads it back — the
+    /// objects are the only thing a path is needed for, and these tests link
+    /// nothing.
+    const NOWHERE: &str = "<test>";
+
     /// One package's library members, and the session that produced them.
-    fn compile_library(mut session: Session, package: &str) -> (Vec<u8>, Vec<u8>) {
+    fn compile_library(mut session: Session, package: &str) -> Members {
         // Through `load_package`, so the session knows the file is the
         // package's root — which is what makes it a library's to write.
         let root = session
@@ -188,102 +197,60 @@ mod tests {
         super::write::members(&session, package, root).expect("the library is writable")
     }
 
-    /// A program compiled against a library sees what the library's own
-    /// compilation concluded, and nothing it would have had to re-read.
+    /// `core`, from its real source, written once for every test below.
     ///
-    /// The whole chain in one process: `core` written as a library, a package
-    /// written against that, and a program written against both. It is the
-    /// shape `just build` has, and the one a `cargo test` alone never takes —
-    /// which is how a library that links against nothing got onto `main` once
-    /// already (see `codegen::llvm::tests::a_library_internalizes_nothing`).
-    #[test]
-    fn a_program_compiles_against_a_library() {
-        let path = std::path::Path::new("<test>");
+    /// A mock `core` would not exercise the shapes a library actually has to
+    /// carry, and analyzing the real one per test is most of what these would
+    /// cost.
+    fn core() -> &'static Members {
+        static CORE: std::sync::OnceLock<Members> = std::sync::OnceLock::new();
+        CORE.get_or_init(|| {
+            let mut session = Session::new();
+            let root = session.load_package("core").expect("core loads");
+            crate::sema::analyze(&mut session, root);
+            assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+            super::write::members(&session, "core", root).expect("core is writable")
+        })
+    }
 
-        // `core`, from its real source: a mock one would not exercise the
-        // shapes a library actually has to carry.
-        let mut core_session = Session::new();
-        let core_root = core_session.load_package("core").expect("core loads");
-        crate::sema::analyze(&mut core_session, core_root);
-        assert!(
-            !core_session.has_errors(),
-            "{:#?}",
-            core_session.diagnostics
-        );
-        let (core_meta, core_ir) =
-            super::write::members(&core_session, "core", core_root).expect("core is writable");
-
-        // A package of our own, compiled against `core` as a library.
-        let shapes_src = "{ Location } :: import <core/loc>\n\
-                          @public\n\
-                          Circle :: struct { radius: f64 }\n\
-                          @public\n\
-                          Shape :: trait { area :: func (self: *Self) -> f64 }\n\
-                          impl Shape for Circle {\n\
-                          @public\n\
-                          area :: func (self: *Circle) -> f64 { return self.radius }\n\
-                          }\n\
-                          @public\n\
-                          SIDES :: 6\n\
-                          @public\n\
-                          ALSO :: SIDES\n\
-                          @public\n\
-                          NAME :: \"circle\"\n\
-                          @public\n\
-                          WIDTH: u16 :: 80\n\
-                          @public\n\
-                          scaled :: func (radius: f64, by: f64 := 2.0) -> f64 { return radius * by }\n\
-                          @public\n\
-                          line_of :: func (loc: Location := #caller_location) -> u32 { return loc.line }\n";
-        let mut shapes_session = Session::with_loader(Box::new(
-            MemLoader::new().with("shapes", shapes_src).with("main", ""),
+    /// The library `name` is, compiled from `src` against `against` — which is
+    /// `core` and whatever other libraries the source imports.
+    fn library(name: &str, src: &str, against: &[&Members]) -> Members {
+        let mut session = Session::with_loader(Box::new(
+            MemLoader::new().with(name, src).with("main", ""),
         ));
-        super::read::load(&mut shapes_session, &core_meta, &core_ir, path, true)
-            .expect("core loads as a library");
-        shapes_session.register_package("shapes", "shapes");
-        let (shapes_meta, shapes_ir) = compile_library(shapes_session, "shapes");
+        for (meta, ir) in against {
+            super::read::load(&mut session, meta, ir, std::path::Path::new(NOWHERE), true)
+                .expect("a library loads");
+        }
+        session.register_package(name, name);
+        compile_library(session, name)
+    }
 
-        // And a program against both. The call goes through a trait `impl`
-        // declared in one library over a type declared in the same one — every
-        // answer it needs is metadata, since neither tree is here.
-        // The call goes through a **trait object**, so the impl has to be
-        // selected and a vtable built out of it — which is the question only
-        // the library's metadata can answer, its tree being elsewhere.
-        //
-        // The constants and the two defaults are the rest of what only the
-        // metadata can answer: a comptime constant settles on a different width
-        // at each of the two uses below, an omitted argument is filled from the
-        // expression the library lowered once, and `#caller_location` is filled
-        // from *this* file rather than from the declaration's own line.
-        let program = "shapes :: import <shapes>\n\
-                       { SIDES } :: import <shapes>\n\
-                       main :: func () {\n\
-                       let c := shapes.Circle { radius: 2.0 }\n\
-                       const obj: *dyn shapes.Shape := &c\n\
-                       let a := obj.area()\n\
-                       let b := a + 1.0\n\
-                       let small: u8 := shapes.SIDES\n\
-                       let big: i64 := shapes.ALSO\n\
-                       let name: str := shapes.NAME\n\
-                       let width := shapes.WIDTH\n\
-                       let twice := shapes.scaled(2.0)\n\
-                       let by := shapes.scaled(2.0, 3.0)\n\
-                       let here := shapes.line_of()\n\
-                       let arr: [SIDES]u8 := [_]u8 { 1, 2, 3, 4, 5, 6 }\n\
-                       }\n";
-        let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", program)));
-        super::read::load(&mut session, &core_meta, &core_ir, path, true)
-            .expect("core loads as a library");
-        super::read::load(&mut session, &shapes_meta, &shapes_ir, path, true)
-            .expect("shapes loads as a library");
+    /// A program compiled against `against`, and the file it was written in.
+    ///
+    /// This is the shape that matters: **neither tree is here**. Every question
+    /// the program's inference and lowering ask about a definition in one of
+    /// those libraries is answered from its metadata or not at all.
+    fn program(src: &str, against: &[&Members]) -> (Session, FileId) {
+        let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
+        for (meta, ir) in against {
+            super::read::load(&mut session, meta, ir, std::path::Path::new(NOWHERE), true)
+                .expect("a library loads");
+        }
         let file = session.load_entry("main").expect("the program loads");
         crate::sema::analyze(&mut session, file);
-        assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+        (session, file)
+    }
 
-        // Nothing in the program lowered to an error type. A question about a
-        // library that went unanswered is not a diagnostic — it is a
-        // well-formed node of type `Ty::Error`, and an unfilled default
-        // argument is exactly that — so this is the check that sees it.
+    /// The program compiled, and lowered to no error type.
+    ///
+    /// Both halves are needed. A question about a library that went unanswered
+    /// is usually **not** a diagnostic: it is a well-formed IR node of type
+    /// `Ty::Error` — an argument nothing filled in, a length nothing knew — and
+    /// the residue check is what sees one.
+    fn clean(session: &Session, file: FileId) {
+        assert!(!session.has_errors(), "{:#?}", session.diagnostics);
         let mut residue = Vec::new();
         crate::ir::check::residue::check(
             &session.defs,
@@ -292,35 +259,432 @@ mod tests {
             &mut residue,
         );
         assert!(residue.is_empty(), "{residue:#?}");
+        assert!(
+            session.ir.contains_key(&file),
+            "the program produced no IR at all"
+        );
+    }
 
-        // And the two defaults arrived as what they are: one an expression the
-        // library lowered and kept on its parameter, the other the marker that
-        // says the value is the *call's* own position.
-        let param = |name: &str, i: usize| {
-            let def = session
-                .defs
+    /// What compiling the program reported, as messages.
+    fn errors(session: &Session) -> Vec<String> {
+        session
+            .diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect()
+    }
+
+    /// A library of one of everything whose answer used to be read off a tree.
+    ///
+    /// Shared by the tests below so that each names the one thing it is about,
+    /// and so that they all read the *same* metadata — a fact that travels for
+    /// one question and not another is a bug these would otherwise miss.
+    fn shapes() -> &'static Members {
+        static SHAPES: std::sync::OnceLock<Members> = std::sync::OnceLock::new();
+        SHAPES.get_or_init(|| {
+            library(
+                "shapes",
+                r#"{ Location } :: import <core/loc>
+{ cast } :: import <core/mem>
+
+@public SIDES :: 6
+@public ALSO :: SIDES
+@public BIG :: 300
+@public WIDTH: u16 :: 80
+@public LIMIT :: SIDES * 2
+@public NAME :: "circle"
+
+@public Shape :: trait { area :: func (self: *Self) -> i32 }
+
+@public Square :: struct { side: i32 }
+
+impl Shape for Square {
+    @public area :: func (self: *Square) -> i32 { return self.side * self.side }
+}
+
+@public Tag :: distinct u16
+
+@public width_of :: func (t: Tag) -> u16 { return cast.<u16>(t) }
+
+@public Side :: Square
+
+@public Either :: enum {
+    left(i32),
+    right(str),
+}
+
+@public describe :: func (e: Either) -> i32 {
+    return e.match {
+        .left(n) => n,
+        .right(_) => 0,
+    }
+}
+
+@public scaled :: func (n: i32, by: i32 := 3) -> i32 { return n * by }
+
+@public line_of :: func (loc: Location := #caller_location) -> u32 { return loc.line }
+
+@public doubled :: func <T: Shape> (s: *T) -> i32 { return s.area() * 2 }
+"#,
+                &[core()],
+            )
+        })
+    }
+
+    /// The file of `shapes` a program is given is **name, text and namespace**.
+    ///
+    /// The tree is what this format no longer has, and the reason for every
+    /// other test here: it is 67% of what `std`'s metadata used to be, and each
+    /// question below is one that had been answered by reading it.
+    #[test]
+    fn a_library_brings_no_syntax_tree() {
+        let (session, file) = program("main :: func () { }\n", &[core(), shapes()]);
+        clean(&session, file);
+        let foreign: Vec<FileId> = session
+            .sources
+            .files()
+            .map(|f| f.id)
+            .filter(|&id| session.is_foreign_file(id))
+            .collect();
+        assert!(
+            foreign.len() > 1,
+            "only {} foreign files: the libraries did not load",
+            foreign.len()
+        );
+        for id in foreign {
+            let name = &session.sources.file(id).expect("the file is there").name;
+            assert!(
+                !session.asts.contains_key(&id),
+                "`{name}` arrived with a tree"
+            );
+            // Its text did arrive: a diagnostic pointing into a dependency
+            // shows the line, and nothing in the metadata could rebuild it.
+            assert!(
+                !session.sources.file(id).expect("the file is there").src.is_empty(),
+                "`{name}` arrived without its text"
+            );
+        }
+    }
+
+    /// A trait impl written in one library, over a type from the same one, is
+    /// selected through a **trait object** by a program that has neither tree.
+    ///
+    /// The call goes through a `*dyn`, so the impl has to be found and a vtable
+    /// built out of it — which is the question only the metadata can answer.
+    #[test]
+    fn an_impl_travels_and_is_selected_through_a_trait_object() {
+        let (session, file) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let sq := shapes.Square { side: 4 }
+    const obj: *dyn shapes.Shape := &sq
+    let a := obj.area()
+    let b := a + 1
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+    }
+
+    /// A library compiled against a library: three packages deep, with the
+    /// middle one's metadata naming ids that belong to the first.
+    #[test]
+    fn a_library_compiled_against_a_library_is_read_through_both() {
+        let middle = library(
+            "middle",
+            r#"shapes :: import <shapes>
+{ SIDES, Shape, Square } :: import <shapes>
+
+@public sides :: func () -> [SIDES]u8 {
+    return [_]u8 { 1, 2, 3, 4, 5, 6 }
+}
+
+@public area_of :: func (side: i32) -> i32 {
+    let sq := Square { side: side }
+    const obj: *dyn Shape := &sq
+    return obj.area()
+}
+
+@public doubled :: func (n: i32) -> i32 { return shapes.scaled(n) }
+"#,
+            &[core(), shapes()],
+        );
+        let (session, file) = program(
+            r#"middle :: import <middle>
+
+main :: func () {
+    let a := middle.area_of(3)
+    let d := middle.doubled(5)
+    let n := middle.sides().len()
+}
+"#,
+            &[core(), shapes(), &middle],
+        );
+        clean(&session, file);
+    }
+
+    /// A comptime constant from a library settles **per use**: `SIDES` is a `u8`
+    /// here and an `i64` there, which is why what travels is its shape and not a
+    /// type.
+    #[test]
+    fn a_comptime_constant_from_a_library_settles_at_each_use() {
+        let (session, file) = program(
+            r#"{ SIDES, ALSO, NAME, WIDTH } :: import <shapes>
+
+main :: func () {
+    let narrow: u8 := SIDES
+    let wide: i64 := SIDES
+    // A constant that names another inherits its comptime-ness.
+    let also: u16 := ALSO
+    // A declared type is the same at every use.
+    let w := WIDTH
+    let name: str := NAME
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+    }
+
+    /// And its **value** travels with it, so a literal that does not fit is
+    /// refused where it is written — the check a program gets for free in its
+    /// own package.
+    #[test]
+    fn a_constant_that_does_not_fit_is_refused_across_a_library() {
+        let (session, _) = program(
+            r#"{ BIG } :: import <shapes>
+
+main :: func () {
+    let small: u8 := BIG
+}
+"#,
+            &[core(), shapes()],
+        );
+        assert!(
+            errors(&session)
                 .iter()
-                .find(|d| d.name.as_str() == name)
-                .unwrap_or_else(|| panic!("`{name}` is in the def table"));
-            match session.decls.get(&def.id) {
-                Some(crate::sema::decl::Decl::Func(f)) => f.params[i].lowered,
-                other => panic!("`{name}` is recorded as {other:#?}"),
-            }
+                .any(|m| m.contains("does not fit in `u8`")),
+            "{:#?}",
+            errors(&session)
+        );
+    }
+
+    /// A constant is an **array length** in another package, folded expression
+    /// included: that needs the value, not the type.
+    #[test]
+    fn a_constant_from_a_library_is_an_array_length() {
+        let (session, file) = program(
+            r#"{ SIDES, LIMIT } :: import <shapes>
+
+main :: func () {
+    let six: [SIDES]u8 := [_]u8 { 1, 2, 3, 4, 5, 6 }
+    let twelve: [LIMIT]u8 := [_]u8 { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }
+    let n := six.len() + twelve.len()
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+    }
+
+    /// An omitted argument is filled in from the expression the **library**
+    /// lowered, which is the one thing in the declaration table that is IR.
+    #[test]
+    fn an_omitted_argument_is_filled_in_from_the_library() {
+        let (session, file) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let three := shapes.scaled(1)
+    let six := shapes.scaled(2, 3)
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+
+        // The default arrived as what it is, and its expression is in the
+        // metadata that travelled with it.
+        let def = session
+            .defs
+            .iter()
+            .find(|d| d.name.as_str() == "scaled")
+            .expect("`scaled` is in the def table");
+        let Some(crate::sema::decl::Decl::Func(f)) = session.decls.get(&def.id) else {
+            panic!("`scaled` is not recorded as a function");
         };
-        let Some(crate::sema::decl::ParamDefault::Value(id)) = param("scaled", 1) else {
-            panic!("`scaled`'s default did not travel: {:?}", param("scaled", 1));
+        let Some(crate::sema::decl::ParamDefault::Value(id)) = f.params[1].lowered else {
+            panic!("`scaled`'s default did not travel: {:?}", f.params[1]);
         };
         assert!(
             session.ir_meta.get::<crate::ir::DefaultValue>(id).is_some(),
             "the default's expression is not in the metadata that travelled"
         );
+    }
+
+    /// `#caller_location` is the exception among defaults: what travels is the
+    /// marker, because the value is **which call site asked** and the
+    /// declaration's own lowering of it is never the answer.
+    #[test]
+    fn a_caller_location_default_is_filled_in_at_the_call() {
+        let (session, file) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let here := shapes.line_of()
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+
+        let def = session
+            .defs
+            .iter()
+            .find(|d| d.name.as_str() == "line_of")
+            .expect("`line_of` is in the def table");
+        let Some(crate::sema::decl::Decl::Func(f)) = session.decls.get(&def.id) else {
+            panic!("`line_of` is not recorded as a function");
+        };
         assert!(
             matches!(
-                param("line_of", 0),
+                f.params[0].lowered,
                 Some(crate::sema::decl::ParamDefault::CallerLocation)
             ),
             "`line_of`'s `#caller_location` did not travel: {:?}",
-            param("line_of", 0)
+            f.params[0]
         );
+
+        // And the location it was filled in with is the program's own file,
+        // not the library's: the literal is in `main`'s body.
+        let main = session.ir[&file]
+            .funcs
+            .iter()
+            .find(|f| session.defs.get(f.def).name.as_str() == "main")
+            .expect("`main` was lowered");
+        let body = main.body.as_ref().expect("`main` has a body");
+        let mut files = Vec::new();
+        collect_strings(body, &mut files);
+        assert!(
+            files.iter().any(|f| f.ends_with("main")),
+            "the location filled in names {files:?}, not the program's own file"
+        );
+    }
+
+    /// Every string literal in `block`, however deep — for the one assertion
+    /// that has to look at what a default was filled in *with*.
+    fn collect_strings(block: &crate::ir::Block, out: &mut Vec<String>) {
+        use crate::ir::{ExprKind, StmtKind};
+        fn expr(e: &crate::ir::Expr, out: &mut Vec<String>) {
+            match &e.kind {
+                ExprKind::Lit(crate::parser::ast::Lit::Str(s)) => out.push(s.clone()),
+                ExprKind::Construct { fields, .. } => {
+                    for (_, f) in fields {
+                        expr(f, out);
+                    }
+                }
+                ExprKind::Call { args, .. } => {
+                    for a in args {
+                        expr(a, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for s in &block.stmts {
+            match &s.kind {
+                StmtKind::Let { init, .. } => expr(init, out),
+                StmtKind::Expr(e) => expr(e, out),
+                _ => {}
+            }
+        }
+    }
+
+    /// A `distinct` type keeps its **representation**: a literal reaches it, and
+    /// the library's own function reads it back out.
+    #[test]
+    fn a_distinct_type_keeps_its_representation() {
+        let (session, file) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let w := shapes.width_of(7)
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+    }
+
+    /// An `enum`'s payload and a type **alias**'s expansion: one is matched in
+    /// the package that declared it, the other names a type here.
+    #[test]
+    fn an_enum_payload_and_an_alias_travel() {
+        let (session, file) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let n := shapes.describe(.left(3))
+    let s := shapes.describe(.right("no"))
+    // `Side` is an alias for `Square`, so this is a `Square`.
+    let sq: shapes.Side := shapes.Square { side: 2 }
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+    }
+
+    /// A generic function from a library, instantiated **here**: its bound is
+    /// satisfied by an impl that also came out of metadata, and its body is
+    /// monomorphized from the IR the library carried.
+    #[test]
+    fn a_generic_function_from_a_library_is_instantiated_here() {
+        let (session, file) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let sq := shapes.Square { side: 3 }
+    let d := shapes.doubled.<shapes.Square>(&sq)
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+    }
+
+    /// The same library read twice — once directly, once as another's
+    /// dependency — is one library, and the ids it brought are not placed twice.
+    #[test]
+    fn a_library_named_twice_is_read_once() {
+        let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", "")));
+        let path = std::path::Path::new(NOWHERE);
+        super::read::load(&mut session, &core().0, &core().1, path, true).expect("core loads");
+        let after_first = session.defs.len();
+        super::read::load(&mut session, &core().0, &core().1, path, false)
+            .expect("core loads again");
+        assert_eq!(
+            session.defs.len(),
+            after_first,
+            "reading `core` twice placed its definitions twice"
+        );
+    }
+
+    /// Metadata of another format is refused by name rather than misread.
+    #[test]
+    fn metadata_of_another_format_is_refused() {
+        let (meta, _) = core().clone();
+        let (header, _) = super::read::header(&meta).expect("the header reads");
+        assert_eq!(header.format, super::FORMAT);
+
+        // The format is the first field of the header, and the header is
+        // postcard: a `u32` there is a varint, so a small value is one byte.
+        let at = super::MAGIC.len() + 4;
+        let mut bent = meta.clone();
+        bent[at] = bent[at].wrapping_add(1);
+        let why = super::read::header(&bent).expect_err("a bent format is refused");
+        assert!(why.contains("format"), "{why}");
     }
 }
