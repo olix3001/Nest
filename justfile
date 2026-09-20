@@ -140,11 +140,14 @@ test-grammar:
 # `std`'s own tests, run the way any package's are. `core` has none yet: its
 # test runner is the thing under test, so a failing one there has nowhere to be
 # reported from.
+#
+# `--build-dir` keeps the build out of `packages/std`: `std` ships with the
+# compiler, and a build has no business writing into a package it only reads.
 [doc("`std`'s own tests, through `twig test`.")]
 test-std:
     @just _step "Testing std"
     @if [ -x "{{ twig }}" ]; then \
-        cd {{ root }}/packages/std && {{ twig }} test; \
+        cd {{ root }}/packages/std && {{ twig }} test --build-dir {{ root }}/twig/build/tests/std; \
     else \
         echo "twig is not built — skipping std's tests"; \
     fi
@@ -185,9 +188,13 @@ fmt:
 fmt-check:
     cd {{ root }}/nestc && cargo fmt --check
 
-# Everything built, in both profiles, plus the package build directories. A
-# serialized-format change needs this — see design/library.md.
-[doc("Everything built, in both profiles, plus the package build directories.")]
+# Everything built, in both profiles. A serialized-format change needs this —
+# see design/library.md.
+#
+# Two directories, because a build writes to two: `cargo`'s and twig's. Nothing
+# under `packages/` is built into any more — `test-std` passes `--build-dir` —
+# but a `build/` left there by an older toolchain is still removed.
+[doc("Everything built, in both profiles.")]
 clean:
     cd {{ root }}/nestc && cargo clean -p nestc && cargo clean -p nest-lsp
     rm -rf {{ root }}/twig/build

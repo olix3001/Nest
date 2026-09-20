@@ -52,6 +52,11 @@ string :: import <std/string>
   // The compiler's dumps to write for the root package's targets, beside their
   // objects: any of `ast`, `ir`, `mono`, `lir`, `llvm-ir` and `asm`.
   emit: []str,
+  // Where the build writes, when it is not the root package's own `build/`:
+  // `twig --build-dir`. A build of a package that is only *depended on* — the
+  // shipped `std`, whose own tests `just test` runs — would otherwise put a
+  // `build/` inside a directory the build has no business writing to.
+  build_dir: Option.<str>,
   // Print each compiler command before running it (`-v`). Here beside `emit`
   // because it is the same kind of thing: what this *invocation* asked for,
   // rather than what the profile says a build is.
@@ -67,9 +72,9 @@ string :: import <std/string>
 // program's decision.
 @public profile :: func (m: *Manifest, release: bool) -> Profile {
   let mut p: Profile := if release {
-    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3", emit: .{}, verbose: false, nestc_args: .{} }
+    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3", emit: .{}, build_dir: .none, verbose: false, nestc_args: .{} }
   } else {
-    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0", emit: .{}, verbose: false, nestc_args: .{} }
+    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0", emit: .{}, build_dir: .none, verbose: false, nestc_args: .{} }
   }
   let settings: Option.<ProfileSettings> := m.profile.match {
     .some(ps) => if release { ps.release } else { ps.debug },
@@ -151,9 +156,20 @@ library :: func (m: *Member) -> Target {
   }
 }
 
-// Where a build with `p` writes.
+// Where a build with `p` writes: the root package's `build/`, or what
+// `--build-dir` named instead.
+//
+// Everything a build produces is under this one directory — every dependency's
+// `.nlib` and every object included — so a package that is merely depended on
+// is never written to. `--build-dir` is for the case where even the *root*
+// package's directory should be left alone: `std` ships with the compiler and
+// its own tests are still built from its sources.
 @public out_dir :: func (ws: *Workspace, p: Profile) -> str {
-  return path.join(path.join(ws.root.dir, "build"), p.name)
+  let base: str := p.build_dir.match {
+    .some(d) => d,
+    .none => path.join(ws.root.dir, "build"),
+  }
+  return path.join(base, p.name)
 }
 
 // The file `t` produces.
@@ -417,6 +433,7 @@ tests :: #when(test) namespace {
             codegen_units: 1,
             opt_level: "0",
             emit: .{},
+            build_dir: .none,
             verbose: false,
             nestc_args: .{},
         }
@@ -514,6 +531,28 @@ tests :: #when(test) namespace {
         assert(has(util, "overflow=wrap") == false)
         // What the profile decided still reaches it.
         assert(pair(util, "-C", "overflow=trap"))
+    }
+
+    // `--build-dir` moves **everything** a build writes, a dependency's
+    // `.nlib` and the objects included. What it is for is a root package whose
+    // directory is not the build's to write in — `std` ships with the compiler,
+    // and `just test` builds its tests from its sources.
+    @test
+    a_build_dir_moves_everything_the_build_writes :: func () {
+        let ws: Workspace := workspace(.none)
+        let mut p: Profile := profile()
+        p.build_dir = .some("/out")
+        assert(out_dir(&ws, p) == "/out/debug")
+        assert(output(&ws, p, binary(&ws)) == "/out/debug/app")
+        assert(library_file(&ws, p, "util") == "/out/debug/deps/util.nlib")
+        assert(objects(&ws, p, binary(&ws)) == "/out/debug/obj/bin/app")
+        // Including what the command line says the dependency is read from.
+        let app: []str := command(&ws, p, binary(&ws)).args
+        assert(pair(app, "--extern", "util=/out/debug/deps/util.nlib"))
+
+        // With nothing said, the root package's own `build/`, as before.
+        let d: Profile := profile()
+        assert(out_dir(&ws, d) == "/w/app/build/debug")
     }
 
     @test
