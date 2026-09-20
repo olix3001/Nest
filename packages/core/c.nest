@@ -164,7 +164,11 @@ impl <T> ptr.<T> {
 // each is missing what the other has. A Nest `str` is a pointer and a length
 // with no NUL anywhere; a `cstr` is a NUL and no length. Going one way costs an
 // allocation and going the other costs a scan, so both are written.
-@public cstr :: ptr.<uchar>
+//
+// The pointee is `char`, the target's own, because that is what a C header
+// says: `strlen` takes a `char *`, and a `cstr` that was `uchar` could not be
+// passed to one on a target where `char` is signed.
+@public cstr :: ptr.<char>
 
 // What a `c"..."` literal becomes.
 //
@@ -174,7 +178,7 @@ impl <T> ptr.<T> {
 // whatever claims the tag, exactly the way `f"..."` is desugared into calls to
 // `Display.display`.
 @public cstr_of :: #lang("cstr_of") #inline func (s: str) -> cstr {
-  return ptr.<uchar> { addr: transmute.<usize>(&s.as_bytes()[0]) }
+  return ptr.<char> { addr: transmute.<usize>(&s.as_bytes()[0]) }
 }
 
 // The length of a C string, in bytes, not counting the NUL. The scan C's
@@ -190,7 +194,10 @@ impl <T> ptr.<T> {
 // that memory does.
 @public from_cstr :: func (s: cstr) -> str {
   let n: usize := strlen(s)
-  return cast.<str>(transmute.<[]u8>(Raw { ptr: s.to_ptr(), len: n }))
+  // The bytes are the same bytes whichever way `char` is signed; only the
+  // pointer's type differs, and a `str` holds them as `u8`.
+  let p: *u8 := transmute.<*u8>(s.addr)
+  return cast.<str>(transmute.<[]u8>(Raw { ptr: p, len: n }))
 }
 
 // A `str` as a C string: an allocation and a copy, because the NUL has to go
@@ -205,7 +212,7 @@ impl <T> ptr.<T> {
     i = i + 1
   }
   out[b.len()] = 0
-  return ptr.<uchar> { addr: transmute.<usize>(&out[0]) }
+  return ptr.<char> { addr: transmute.<usize>(&out[0]) }
 }
 
 // The two words a slice is (`design/lir.md` §7b), so that one can be built out

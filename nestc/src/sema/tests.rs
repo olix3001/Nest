@@ -4305,6 +4305,19 @@ fn a_distinct_over_an_opaque_is_a_nominal_handle() {
     );
 }
 
+/// A `cstr` is a `char *`, which is what every C function that takes a string
+/// is declared with — so a `c"..."` passes to one without a cast, on a target
+/// where `char` is signed as much as on one where it is not (§11.1).
+#[test]
+fn a_cstr_is_a_pointer_to_the_targets_char() {
+    analyze_clean(
+        "c :: import <core/c>\n\
+         strlen :: extern(\"c\") func (s: c.ptr.<c.char>) -> c.size_t\n\
+         f :: func () -> c.size_t { return strlen(c\"hi\") }\n\
+         g :: func (s: str) -> c.size_t { return strlen(c.to_cstr(s)) }\n",
+    );
+}
+
 #[test]
 fn c_void_is_the_unit_type_and_c_anyopaque_is_the_pointee() {
     // C spells two things `void` and the language spells them apart (§11.1): a

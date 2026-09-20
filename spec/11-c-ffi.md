@@ -22,6 +22,7 @@ c.short  c.ushort c.int    c.uint   c.long  c.ulong  c.longlong c.ulonglong
 c.float  c.double
 c.bool
 c.size_t c.ssize_t c.ptrdiff_t c.intptr_t c.uintptr_t
+c.cstr                          // a pointer to NUL-terminated bytes — `char *`
 c.void                          // the unit type — what a C function returning `void` returns
 c.anyopaque                     // an alias for `opaque` — the pointee of a `void *`
 c.ptr.<T>                       // a raw, nullable, non-GC C pointer to T

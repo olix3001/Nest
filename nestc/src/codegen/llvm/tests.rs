@@ -566,7 +566,7 @@ fn a_program_links_and_runs() {
             "c :: import <core/c>\n\
              extern(\"c\") {\n\
             \x20 write :: func (fd: c.int, buf: c.ptr.<c.uchar>, n: c.size_t) -> c.ssize_t\n\
-            \x20 strlen :: func (s: c.cstr) -> c.size_t\n\
+            \x20 strlen :: func (s: c.ptr.<c.char>) -> c.size_t\n\
              }\n\
              main :: func () -> i32 {\n\
             \x20 let s: str := \"write through libc\\n\"\n\

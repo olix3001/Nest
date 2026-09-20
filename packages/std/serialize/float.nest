@@ -35,7 +35,10 @@ libc :: import "../libc.nest"
   let mut precision: i32 := 1
   while precision <= 17 {
     n = cast.<usize>(libc.snprintf(at, 40, c"%.*g", precision, v))
-    if libc.strtod(c.from_ptr(&buf[0]), c.null.<c.cstr>()) == v { break }
+    // The same address, read as C reads a string: `snprintf` wrote bytes and
+    // `strtod` takes a `char *`, which is what a `cstr` is (§11.1).
+    let text: c.cstr := c.ptr.<c.char> { addr: at.addr_of() }
+    if libc.strtod(text, c.null.<c.cstr>()) == v { break }
     precision = precision + 1
   }
   let mut plain: bool := true
