@@ -2149,3 +2149,61 @@ main :: func () -> i32 {
         "{ran:?}"
     );
 }
+
+/// A radix specifier calls the trait for that base, and `#` writes the prefix
+/// that names it — inside the field, so a width counts it and zero-padding
+/// lands after it.
+#[test]
+fn a_radix_specifier_writes_the_value_in_that_base() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+
+main :: func () -> i32 {
+    io.println(f"{255:x} {255:X} {255:b} {255:o}")
+    io.println(f"{255:#x} {255:#X} {255:#b} {255:#o}")
+    io.println(f"[{255:#08x}]")
+    io.println(f"[{255:>8x}]")
+    io.println(f"{0:x} {0:b}")
+    // `usize` is `distinct`, and inherits the methods the family has.
+    let n: usize := 48879
+    io.println(f"{n:x}")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "ff FF 11111111 377\n0xff 0xFF 0b11111111 0o377\n[0x0000ff]\n[      ff]\n0 0\nbeef\n",
+        "{ran:?}"
+    );
+}
+
+/// A radix writes the **bits**, so a negative number comes out as the two's
+/// complement it is rather than as a sign and a magnitude.
+#[test]
+fn a_radix_writes_a_signed_value_as_its_bits() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let ran = run_on_host(
+        r#"
+io :: import <std/io>
+
+main :: func () -> i32 {
+    let n: i32 := -1
+    let b: i8 := -2
+    io.println(f"{n:x} {b:b}")
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "ffffffff 11111110\n",
+        "{ran:?}"
+    );
+}

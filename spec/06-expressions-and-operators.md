@@ -528,6 +528,10 @@ a description of the field it is being written into.
 |---|---|
 | `{x}` | `Display.display` — `#lang("display")` |
 | `{x:?}` | `Debug.debug` — `#lang("debug")` |
+| `{x:x}` | `lower_hex`, a method |
+| `{x:X}` | `upper_hex`, a method |
+| `{x:b}` | `binary`, a method |
+| `{x:o}` | `octal`, a method |
 
 `Debug` is `core`'s second formatting trait, one method
 `debug(self: *Self, out: *mut Buf)`, and it writes what a value *is* rather than
@@ -550,9 +554,24 @@ time, where this is decided while the literal is lexed and nothing has a type ye
 `0` also puts the padding *after* the value's sign, which is the difference
 between `{n:08}` and `{n:8}`.
 
-The remaining type characters — `x`, `X`, `b`, `o` — and `.precision` are part of
-the grammar and are **not implemented yet**; a hole that writes one is an error
-saying so.
+**A radix is not a trait.** Only `Display` and `Debug` are: a base is a fact
+about an integer's bits, nothing that is not an integer has one, and a trait for
+it would have been an extension point for something that does not extend. The
+four are ordinary methods on the integer families, which `core` writes once for
+every width, and the hole calls the one its type character names — so `{s:x}` on
+text is "no member `lower_hex`", reported where it is written. `usize` and
+`isize` inherit them, as a `distinct` type inherits every inherent method.
+
+A radix writes the **bits**: `{n:x}` of `-1` is every bit set, not a minus sign
+and a one, because that is what a program asking to see a base is asking for. `#`
+writes the prefix that names it (`0x`, `0b`, `0o`; `{n:#X}` writes `0x` with
+uppercase digits, as Rust's does) inside the field, so a width counts it and `0`
+pads after it. `#` on a hole with no radix is an error: Rust's `{x:#?}` is a
+second `Debug` rather than a flag on this one, and there is no second `Debug`
+here.
+
+`.precision` is part of the grammar and is **not implemented yet**; a hole that
+writes one is an error saying so.
 
 ## 6.12 Ranges
 

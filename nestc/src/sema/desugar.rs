@@ -416,24 +416,37 @@ impl Desugar<'_> {
         buf_local: DefId,
     ) {
         let at = self.ast.node(piece).span;
+        // The type character *is* the choice of method: the hole calls one name
+        // or another, and no base and no flag is passed to anything. Two of
+        // them are traits `core` tags, and the radices are inherent methods on
+        // the integer families — a base is a fact about bits, and a type that
+        // is not a number has no spelling in one.
         let method = match spec.kind {
             SpecKind::Display => "display",
-            SpecKind::Debug => {
-                if self.lang.get("debug").is_none() {
-                    self.report(piece, "`{...:?}` requires the `#lang(\"debug\")` item");
-                    return;
-                }
-                "debug"
-            }
-            SpecKind::LowerHex | SpecKind::UpperHex | SpecKind::Binary | SpecKind::Octal => {
-                self.report(piece, "a radix format specifier is not implemented yet");
-                return;
-            }
+            SpecKind::Debug => "debug",
+            SpecKind::LowerHex => "lower_hex",
+            SpecKind::UpperHex => "upper_hex",
+            SpecKind::Binary => "binary",
+            SpecKind::Octal => "octal",
         };
+        if spec.kind == SpecKind::Debug && self.lang.get("debug").is_none() {
+            self.report(piece, "`{...:?}` requires the `#lang(\"debug\")` item");
+            return;
+        }
         if spec.precision.is_some() {
             self.report(piece, "a precision format specifier is not implemented yet");
             return;
         }
+        // `#` is the radix prefix and nothing else: Rust's `{x:#?}`, which
+        // pretty-prints, is a second `Debug` and not a flag on this one.
+        let prefix = match (spec.alternate, spec.kind.alternate_prefix()) {
+            (false, _) => None,
+            (true, Some(text)) => Some(text),
+            (true, None) => {
+                self.report(piece, "`#` writes a radix prefix, and this `{...}` has no radix");
+                return;
+            }
+        };
 
         // Where the value's own bytes begin. Only a specifier that writes
         // something around them needs to know.
@@ -457,6 +470,14 @@ impl Desugar<'_> {
         } else {
             None
         };
+
+        // The prefix goes through `Display` like any other text, and inside the
+        // mark, so that a width counts it and zero-padding lands after it.
+        if let Some(text) = prefix {
+            let lit = self.alloc(at, NodeKind::Lit(Lit::Str(text.to_string())));
+            let out = self.buf_ref(at, buf, buf_local);
+            stmts.push(self.method_call(at, lit, "display", vec![out]));
+        }
 
         let out = self.buf_ref(at, buf, buf_local);
         stmts.push(self.method_call(at, piece, method, vec![out]));
@@ -489,9 +510,9 @@ impl Desugar<'_> {
             let width = self.int_lit(at, width);
             let fill = self.alloc(at, NodeKind::Lit(Lit::Char(spec.padding())));
             let align = self.int_lit(at, spec.alignment().code());
-            // The radix prefix `#` writes, which padding goes after and the
-            // width counts. There is none until there are radix specifiers.
-            let prefix = self.int_lit(at, 0u32);
+            // How much of what was written is the radix prefix: padding goes
+            // after it, and the width counts it.
+            let prefix = self.int_lit(at, prefix.map_or(0, |t| t.chars().count()) as u32);
             let after_sign = self.alloc(at, NodeKind::Lit(Lit::Bool(spec.zero)));
             let call = self.static_call(at, def, vec![out, from, width, fill, align, prefix, after_sign]);
             stmts.push(call);

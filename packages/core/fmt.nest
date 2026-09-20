@@ -271,6 +271,87 @@ impl Display for char {
   }
 }
 
+// ===< Radices >===
+
+// `{n:x}`, `{n:X}`, `{n:b}`, `{n:o}` — the same value, written in another base.
+//
+// **No trait.** A radix is a fact about an integer's bits, and nothing that is
+// not an integer has one: a trait here would have been a contract no user type
+// could honestly implement, and an extension point for something that does not
+// extend. These are private methods on the integer families instead, called by
+// name from the desugaring exactly as `display` is (§6.11), and a `{s:x}` on a
+// value that has none is "no member `lower_hex`" where it is written.
+//
+// `usize` and `isize` need none of their own: a `distinct` type inherits
+// inherent methods, which is the half of it that the `Display` impls above
+// cannot use.
+
+// An unsigned value in any base, for every width at once — the decimal loop at
+// the top of this file with the base as an argument, and for the same reason it
+// needs no scratch array: the largest power of the base that fits is found
+// first, so the digits come out most significant first and nothing is stored.
+base_digits :: func <const N: u16> (value: uint.<N>, out: *mut Buf, base: uint.<N>, upper: bool) -> void {
+    if value == 0 {
+        out.byte(ZERO)
+        return
+    }
+    // `place` never overflows: it is multiplied only while `rest` still has a
+    // digit above it, so it stays no larger than `value`.
+    let mut place: uint.<N> := 1
+    let mut rest: uint.<N> := value
+    while rest >= base {
+        place = place * base
+        rest = rest / base
+    }
+    while place > 0 {
+        digit(out, cast.<u8>((value / place) % base), upper)
+        if place == 1 { return }
+        place = place / base
+    }
+}
+
+// One digit: `0` to `9`, and then the letters.
+digit :: func (out: *mut Buf, value: u8, upper: bool) -> void {
+    if value < 10 {
+        out.byte(ZERO + value)
+        return
+    }
+    if upper {
+        out.byte(UPPER_A + value - 10)
+        return
+    }
+    out.byte(LOWER_A + value - 10)
+}
+
+impl <const N: u16> uint.<N> {
+    lower_hex :: func (self: Self, out: *mut Buf) -> void { base_digits(self, out, 16, false) }
+    upper_hex :: func (self: Self, out: *mut Buf) -> void { base_digits(self, out, 16, true) }
+    binary :: func (self: Self, out: *mut Buf) -> void { base_digits(self, out, 2, false) }
+    octal :: func (self: Self, out: *mut Buf) -> void { base_digits(self, out, 8, false) }
+}
+
+// A signed value is written as the **bits it is**, which is what asking for a
+// radix asks to see: `{n:x}` of `-1` is every bit set, not a minus sign and a
+// one. The cast reinterprets rather than converts, so nothing below has to know
+// about a sign.
+impl <const N: u16> int.<N> {
+    lower_hex :: func (self: Self, out: *mut Buf) -> void {
+        base_digits(cast.<uint.<N>>(self), out, 16, false)
+    }
+
+    upper_hex :: func (self: Self, out: *mut Buf) -> void {
+        base_digits(cast.<uint.<N>>(self), out, 16, true)
+    }
+
+    binary :: func (self: Self, out: *mut Buf) -> void {
+        base_digits(cast.<uint.<N>>(self), out, 2, false)
+    }
+
+    octal :: func (self: Self, out: *mut Buf) -> void {
+        base_digits(cast.<uint.<N>>(self), out, 8, false)
+    }
+}
+
 // ===< `Debug` >===
 
 // What a value **is**, written for whoever is reading the program.
@@ -633,6 +714,8 @@ reverse :: func (out: *mut Buf, from: usize, to: usize) -> void {
 // character literal would be clearer still, but a `char` is a code point and
 // these are being appended as bytes.
 ZERO: u8 :: 48
+LOWER_A: u8 :: 97
+UPPER_A: u8 :: 65
 MINUS: u8 :: 45
 PLUS: u8 :: 43
 QUOTE: u8 :: 34
