@@ -296,7 +296,12 @@ impl<'ctx> Cx<'ctx, '_> {
     /// question is put to LLVM, on a literal struct of the same fields, and the
     /// answer is believed rather than re-derived — there is still one layout
     /// engine here, and it is LIR's, with LLVM's asked only whether it agrees.
-    fn must_pack(&self, def: &crate::lir::TypeDef, fields: &[BasicTypeEnum<'ctx>], placed: &[(u32, u64)]) -> bool {
+    fn must_pack(
+        &self,
+        def: &crate::lir::TypeDef,
+        fields: &[BasicTypeEnum<'ctx>],
+        placed: &[(u32, u64)],
+    ) -> bool {
         let loose = self.context.struct_type(fields, false);
         if self.data.get_store_size(&loose) != def.layout.size
             || self.data.get_abi_alignment(&loose) as u64 != def.layout.align

@@ -4042,7 +4042,8 @@ main :: func () -> i32 {
         .map(|d| d.message.clone())
         .collect();
     assert!(
-        msgs.iter().any(|m| m.contains("the field `x` of `Point` is private")),
+        msgs.iter()
+            .any(|m| m.contains("the field `x` of `Point` is private")),
         "{msgs:#?}"
     );
     // The literal that initializes one is refused for the same reason, not only
@@ -4159,8 +4160,10 @@ fn an_overload_set_picks_by_what_a_call_passes() {
 #[test]
 fn two_functions_of_one_name_are_still_refused() {
     assert!(
-        first_error("f :: func (a: i32) -> i32 { return a }\nf :: func (a: bool) -> i32 { return 0 }\n")
-            .contains("already defined"),
+        first_error(
+            "f :: func (a: i32) -> i32 { return a }\nf :: func (a: bool) -> i32 { return 0 }\n"
+        )
+        .contains("already defined"),
     );
     assert!(
         first_error(
@@ -4240,8 +4243,16 @@ fn an_overload_set_flattens_and_reports_what_it_has() {
                 f :: func { a, b }\n\
                 g :: func () -> i32 { return f(1.5) }\n";
     let session = analyze_mem(&[("main", none)], "main");
-    let first = session.diagnostics.first().expect("a diagnostic").message.clone();
-    assert!(first.contains("no overload of `f` takes these arguments"), "{first}");
+    let first = session
+        .diagnostics
+        .first()
+        .expect("a diagnostic")
+        .message
+        .clone();
+    assert!(
+        first.contains("no overload of `f` takes these arguments"),
+        "{first}"
+    );
     assert_eq!(session.diagnostics.len(), 1, "{:#?}", session.diagnostics);
 }
 

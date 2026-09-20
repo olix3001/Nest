@@ -133,9 +133,9 @@ pub fn run(
     });
     // Whether the editor understands a snippet, which is what lets a chosen
     // function be written with its parentheses and the cursor between them.
-    let snippets = params.pointer(
-        "/capabilities/textDocument/completion/completionItem/snippetSupport",
-    ) == Some(&serde_json::Value::Bool(true));
+    let snippets = params
+        .pointer("/capabilities/textDocument/completion/completionItem/snippetSupport")
+        == Some(&serde_json::Value::Bool(true));
     let mut server = Server {
         sender: conn.sender.clone(),
         snippets,
@@ -494,10 +494,7 @@ impl Server {
         // A tuple's member is a position and not a definition, so it is asked
         // for separately — `find` has nothing to return for one.
         let (value, span) = match ide::find(&o.session, file, offset) {
-            Some(found) => (
-                ide::hover(&o.session, file, found),
-                found.span,
-            ),
+            Some(found) => (ide::hover(&o.session, file, found), found.span),
             None => ide::tuple_member(&o.session, file, offset)?,
         };
         Some(Hover {

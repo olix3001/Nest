@@ -63,7 +63,10 @@ struct Client {
 
 impl Client {
     fn start(toolchain: Fake) -> Client {
-        Client::start_with(toolchain, serde_json::to_value(InitializeParams::default()).unwrap())
+        Client::start_with(
+            toolchain,
+            serde_json::to_value(InitializeParams::default()).unwrap(),
+        )
     }
 
     /// The same, for a test that needs the editor to declare something — the
@@ -502,7 +505,10 @@ fn completion_writes_a_call_for_a_function() {
     });
     let mut client = Client::start_with(Fake(Err("no workspace here".to_string())), snippet);
     client.open(&file, PROGRAM);
-    let text = PROGRAM.replace("  return p.sum() + n", "  let m: i32 := p.\n  return p.sum() + n");
+    let text = PROGRAM.replace(
+        "  return p.sum() + n",
+        "  let m: i32 := p.\n  return p.sum() + n",
+    );
     client.change(&file, &text);
     let items = client.at(Completion::METHOD, &file, position(&text, "p.\n", 0, 2));
     let sum = items["items"]
@@ -601,11 +607,7 @@ fn completion_and_hover_know_a_tuple_s_members() {
     // And the index hovers as the member it is, with the tuple it came out of.
     let done = text.replace("let u: i32 := t.\n", "let u: i32 := t.0\n");
     client.change(&file, &done);
-    let at = hover_text(&client.at(
-        HoverRequest::METHOD,
-        &file,
-        position(&done, "t.0", 0, 2),
-    ));
+    let at = hover_text(&client.at(HoverRequest::METHOD, &file, position(&done, "t.0", 0, 2)));
     assert!(at.contains("0: i32"), "{at}");
     assert!(at.contains("(i32, bool)"), "{at}");
 }

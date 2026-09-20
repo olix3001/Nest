@@ -876,9 +876,7 @@ impl Cx<'_> {
 /// The nodes a composite literal's body holds.
 fn entries(body: &CompositeBody) -> Vec<NodeId> {
     match body {
-        CompositeBody::Named { fields, spread } => {
-            fields.iter().copied().chain(*spread).collect()
-        }
+        CompositeBody::Named { fields, spread } => fields.iter().copied().chain(*spread).collect(),
         CompositeBody::Positional(entries) => entries.clone(),
         CompositeBody::Repeat { value, count } => vec![*value, *count],
     }

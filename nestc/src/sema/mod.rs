@@ -68,8 +68,8 @@ use crate::parser::ast::{Ast, NodeId, NodeKind};
 
 use def::{DefId, DefKind, DefTable, Visibility};
 use imports::{ImportDecl, ImportTarget, RawImport, RawTarget};
-use ty::Ty;
 use session::{FileMeta, Session};
+use ty::Ty;
 
 // ===< Per-node metadata attached by the stages >===
 
@@ -845,7 +845,8 @@ fn report_overload_conflicts(session: &mut Session, files: &[FileId]) {
         let decls = decl::Decls::new(&session.defs, &session.asts, &session.decls);
         let members = decls.overload_members(set);
         let candidates = decls.overload_candidates(set);
-        let at = |session: &Session| match (session.defs.get(set).file, session.defs.get(set).span) {
+        let at = |session: &Session| match (session.defs.get(set).file, session.defs.get(set).span)
+        {
             (Some(file), Some(span)) => Some(FileSpan::new(file, span)),
             _ => None,
         };
@@ -948,14 +949,37 @@ fn same_ty(defs: &DefTable, a: &Ty, b: &Ty, map: &mut HashMap<DefId, DefId>) -> 
             }
             p == q && all(x, y, map)
         }
-        (Ty::Ptr { mutable: m, inner: x }, Ty::Ptr { mutable: n, inner: y })
+        (
+            Ty::Ptr {
+                mutable: m,
+                inner: x,
+            },
+            Ty::Ptr {
+                mutable: n,
+                inner: y,
+            },
+        )
         | (
-            Ty::Slice { mutable: m, inner: x },
-            Ty::Slice { mutable: n, inner: y },
+            Ty::Slice {
+                mutable: m,
+                inner: x,
+            },
+            Ty::Slice {
+                mutable: n,
+                inner: y,
+            },
         ) => m == n && same_ty(defs, x, y, map),
         (
-            Ty::Array { len: l, mutable: m, inner: x },
-            Ty::Array { len: k, mutable: n, inner: y },
+            Ty::Array {
+                len: l,
+                mutable: m,
+                inner: x,
+            },
+            Ty::Array {
+                len: k,
+                mutable: n,
+                inner: y,
+            },
         ) => l == k && m == n && same_ty(defs, x, y, map),
         (Ty::Tuple(x), Ty::Tuple(y)) => all(x, y, map),
         (Ty::Struct(x), Ty::Struct(y)) => {

@@ -3827,9 +3827,9 @@ impl Inferer<'_> {
         let Some(first) = params(self, fit[0]) else {
             return false;
         };
-        fit[1..].iter().all(|&c| {
-            params(self, c).is_some_and(|p| super::same_params(self.defs, &first, &p))
-        })
+        fit[1..]
+            .iter()
+            .all(|&c| params(self, c).is_some_and(|p| super::same_params(self.defs, &first, &p)))
     }
 
     /// Whether what this trial bound a candidate's generic parameters to meets

@@ -118,10 +118,7 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
         // Disjoint field borrows: reading `asts` while mutating `defs`.
         let mut missing: Vec<(NodeId, String)> = Vec::new();
         let Session {
-            asts,
-            defs,
-            pkg_of,
-            ..
+            asts, defs, pkg_of, ..
         } = &mut *session;
         let ast = &asts[&file];
         // Where this import is written, so a `@public(package)` member of the
@@ -349,12 +346,7 @@ pub fn lookup_public(defs: &DefTable, base: DefId, name: &Symbol) -> Option<DefI
 
 /// The same, for an import written in a file of package `at`: a
 /// `@public(package)` member is reachable from its own package (§4.4).
-fn lookup_visible(
-    defs: &DefTable,
-    base: DefId,
-    name: &Symbol,
-    at: &Pkgs<'_>,
-) -> Option<DefId> {
+fn lookup_visible(defs: &DefTable, base: DefId, name: &Symbol, at: &Pkgs<'_>) -> Option<DefId> {
     let base = defs.resolve_alias(base);
     let member = defs.get(base).ns.members.get(name).copied()?;
     let member = defs.resolve_alias(member);
