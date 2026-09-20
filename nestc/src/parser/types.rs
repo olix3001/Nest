@@ -728,6 +728,11 @@ impl Parser {
             .map_or_else(|| self.cur_span(), |&d| self.node_span(d));
         let extern_abi = self.parse_extern_spec();
         self.expect(&TokenKind::FuncKw);
+        // `func { a, b }` — an overload set rather than a function. A function
+        // always writes its parameter list, so the `{` is unambiguous here.
+        if extern_abi.is_none() && self.at(&TokenKind::LBrace) {
+            return self.parse_overload_set(start);
+        }
         let generics = self.parse_generics();
         let params = self.parse_params();
         let mut end = self.cur_span();
@@ -756,6 +761,28 @@ impl Parser {
                 body,
             },
         )
+    }
+
+    /// `{ a, b, m.c }` — the members of an overload set, after its `func`.
+    ///
+    /// Each member is an ordinary name expression, because that is what it is:
+    /// the set names functions that already exist, wherever they were declared.
+    /// What each name has to *be* is resolution's question, not the parser's.
+    fn parse_overload_set(&mut self, start: crate::common::span::Span) -> NodeId {
+        self.expect(&TokenKind::LBrace);
+        let mut members = Vec::new();
+        self.skip_newlines();
+        while !self.at(&TokenKind::RBrace) && !self.at_eof() {
+            members.push(self.parse_expr());
+            self.skip_newlines();
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        let end = self.cur_span();
+        self.expect(&TokenKind::RBrace);
+        self.alloc(start.to(end), NodeKind::OverloadSet { members })
     }
 
     /// `func [<g>] ( param_types ) [ '-> ret ]` — a function *type* (bare-type

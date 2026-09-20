@@ -226,3 +226,21 @@ posix :: namespace { }
       (identifier)
       (namespace_expression
         (item_body)))))
+
+==============================
+An overload set
+==============================
+
+add :: func { add_i32, math.add_f64 }
+
+---
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (overload_set
+        (identifier)
+        (field_expression
+          (identifier)
+          (field_identifier))))))

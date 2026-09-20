@@ -171,6 +171,7 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
                 "AssocConst".into()
             }
         }
+        OverloadSet { members } => format!("OverloadSet ({})", members.len()),
         FuncExpr {
             extern_abi, body, ..
         } => {

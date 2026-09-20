@@ -60,12 +60,15 @@ pub mod when;
 #[cfg(test)]
 pub(crate) mod tests;
 
+use std::collections::HashMap;
+
 use crate::common::source::{FileId, FileSpan};
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
-use def::{DefId, DefKind, Visibility};
+use def::{DefId, DefKind, DefTable, Visibility};
 use imports::{ImportDecl, ImportTarget, RawImport, RawTarget};
+use ty::Ty;
 use session::{FileMeta, Session};
 
 // ===< Per-node metadata attached by the stages >===
@@ -426,6 +429,10 @@ pub fn analyze(session: &mut Session, entry: FileId) {
         };
         decl::record_const_values(&mut session.decls, values);
     }
+    // Two overloads that take the same arguments, which only the signatures
+    // say — so it waits for them, where the rest of §4.3's duplicate rule is
+    // checked as the names are collected.
+    report_overload_conflicts(session, &files);
     // Field uses can only be bound once their bases are typed, so this runs
     // after inference and before lowering reads the links.
     for &file in &files {
@@ -819,6 +826,161 @@ fn dependency_order(session: &Session, files: &[FileId]) -> Vec<FileId> {
 /// imports a file of another. It is walked in name order so the same program
 /// reports the same cycle every time, and each cycle is reported once, anchored
 /// at the import that closes it.
+/// What an overload set names has to be callable, and has to be **tellable
+/// apart** (§4.3).
+///
+/// Checked once, where the set is written, rather than at each call through it:
+/// a member that is not a function, a set that reaches itself, and two members
+/// a call could never choose between are all mistakes in the declaration, and
+/// reporting them at call sites would report one mistake as many.
+fn report_overload_conflicts(session: &mut Session, files: &[FileId]) {
+    let sets: Vec<DefId> = session
+        .defs
+        .iter()
+        .filter(|d| d.kind == DefKind::Overload)
+        .filter(|d| d.file.is_some_and(|f| files.contains(&f)))
+        .map(|d| d.id)
+        .collect();
+    for set in sets {
+        let decls = decl::Decls::new(&session.defs, &session.asts, &session.decls);
+        let members = decls.overload_members(set);
+        let candidates = decls.overload_candidates(set);
+        let at = |session: &Session| match (session.defs.get(set).file, session.defs.get(set).span) {
+            (Some(file), Some(span)) => Some(FileSpan::new(file, span)),
+            _ => None,
+        };
+        // A member that is neither a function nor another set is not something
+        // a call can reach.
+        let wrong: Vec<Symbol> = members
+            .iter()
+            .filter(|&&m| !matches!(session.defs.get(m).kind, DefKind::Func | DefKind::Overload))
+            .map(|&m| session.defs.get(m).name.clone())
+            .collect();
+        for name in wrong {
+            if let Some(span) = at(session) {
+                session.diagnostics.push(
+                    crate::common::diagnostic::Diagnostic::error(format!(
+                        "`{name}` is not a function, so an overload set cannot name it"
+                    ))
+                    .with_primary(span, ""),
+                );
+            }
+        }
+        // A set that reaches itself has no members to speak of: the walk stops
+        // at the cycle, and saying so is better than a call with nothing to
+        // choose from.
+        if decls.overload_is_cyclic(set) {
+            if let Some(span) = at(session) {
+                let name = session.defs.get(set).name.clone();
+                session.diagnostics.push(
+                    crate::common::diagnostic::Diagnostic::error(format!(
+                        "the overload set `{name}` names itself"
+                    ))
+                    .with_primary(span, ""),
+                );
+            }
+            continue;
+        }
+        for (i, &later) in candidates.iter().enumerate() {
+            let Some(mine) = params_of(session, later) else {
+                continue;
+            };
+            for &earlier in &candidates[..i] {
+                let Some(theirs) = params_of(session, earlier) else {
+                    continue;
+                };
+                if !same_params(&session.defs, &mine, &theirs) {
+                    continue;
+                }
+                let (a, b) = (
+                    session.defs.get(earlier).name.clone(),
+                    session.defs.get(later).name.clone(),
+                );
+                if let Some(span) = at(session) {
+                    session.diagnostics.push(
+                        crate::common::diagnostic::Diagnostic::error(format!(
+                            "`{a}` and `{b}` take the same parameters, so a call through this \
+                             overload set could not choose between them"
+                        ))
+                        .with_primary(span, ""),
+                    );
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// The parameter types of a function, as its declaration recorded them.
+fn params_of(session: &Session, def: DefId) -> Option<Vec<Ty>> {
+    let decls = decl::Decls::new(&session.defs, &session.asts, &session.decls);
+    match decls.signature(def)? {
+        Ty::Func { params, .. } => Some(params),
+        _ => None,
+    }
+}
+
+/// Whether two parameter lists are the same signature — with each function's
+/// **generic parameters matched up** rather than compared by identity, since
+/// two declarations never share one: `func <T: Eq> (a: T)` twice is a conflict,
+/// and `func <T: Eq> (a: T)` against `func <T: Ord> (a: T)` is not, because a
+/// call with a type that is only `Eq` can tell them apart.
+pub(crate) fn same_params(defs: &DefTable, a: &[Ty], b: &[Ty]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut map: HashMap<DefId, DefId> = HashMap::new();
+    a.iter().zip(b).all(|(x, y)| same_ty(defs, x, y, &mut map))
+}
+
+fn same_ty(defs: &DefTable, a: &Ty, b: &Ty, map: &mut HashMap<DefId, DefId>) -> bool {
+    let all = |x: &[Ty], y: &[Ty], map: &mut HashMap<DefId, DefId>| {
+        x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_ty(defs, p, q, map))
+    };
+    match (a, b) {
+        (Ty::Nominal { def: p, args: x }, Ty::Nominal { def: q, args: y }) => {
+            let generic = |d: DefId| defs.get(d).kind == DefKind::TypeParam;
+            if generic(*p) || generic(*q) {
+                return generic(*p)
+                    && generic(*q)
+                    && bounds_of(defs, *p) == bounds_of(defs, *q)
+                    && *map.entry(*p).or_insert(*q) == *q;
+            }
+            p == q && all(x, y, map)
+        }
+        (Ty::Ptr { mutable: m, inner: x }, Ty::Ptr { mutable: n, inner: y })
+        | (
+            Ty::Slice { mutable: m, inner: x },
+            Ty::Slice { mutable: n, inner: y },
+        ) => m == n && same_ty(defs, x, y, map),
+        (
+            Ty::Array { len: l, mutable: m, inner: x },
+            Ty::Array { len: k, mutable: n, inner: y },
+        ) => l == k && m == n && same_ty(defs, x, y, map),
+        (Ty::Tuple(x), Ty::Tuple(y)) => all(x, y, map),
+        (Ty::Struct(x), Ty::Struct(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y)
+                    .all(|((n, p), (m, q))| n == m && same_ty(defs, p, q, map))
+        }
+        (Ty::Func { params: x, ret: p }, Ty::Func { params: y, ret: q }) => {
+            all(x, y, map) && same_ty(defs, p, q, map)
+        }
+        _ => a == b,
+    }
+}
+
+/// A generic parameter's bounds, as a set that can be compared.
+fn bounds_of(defs: &DefTable, def: DefId) -> std::collections::BTreeSet<DefId> {
+    defs.get(def)
+        .param_bounds
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
 fn report_package_cycles(session: &mut Session) {
     // package -> (package it depends on, the file and import span that says so)
     let mut edges: std::collections::BTreeMap<

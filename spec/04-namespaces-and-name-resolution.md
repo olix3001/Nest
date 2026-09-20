@@ -117,16 +117,52 @@ name are unioned (e.g. `foo :: namespace {...}` appearing at one qualified path 
 more than one place), they are treated as **one namespace**: their members are
 unioned. Consequently there can be **no duplicate members** — two functions,
 consts, or types with the same name in same-named namespaces is a conflict error,
-exactly as if they were written in one block. Because files are anonymous and
-never head-name themselves, whole-file merging by header no longer exists;
-assembly is explicit via `import`.
+exactly as if they were written in one block. One name reaching several functions
+is written down as an *overload set*, below. Because files are anonymous and never head-name
+themselves, whole-file merging by header no longer exists; assembly is explicit
+via `import`.
 
-The **sole exception** is impl namespaces. Any number of `impl` blocks may target
-the same type, and different trait impls may each define a method of the same name
-(e.g. two traits both requiring `render`). This is sound because a trait's methods
-are only reachable when that trait is in scope (imported) or accessed through an
-explicit `dyn`/`cast` (see §4.5). Inherent-method conflicts across `impl T`
-blocks are still errors.
+### Overload sets
+
+Two functions still may not share a name. A name reaches several functions only
+by being **declared** to, with a `func` body that lists them:
+
+```
+add_i32 :: func (a: i32, b: i32) -> i32 { ... }
+add_f64 :: func (a: f64, b: f64) -> f64 { ... }
+
+@public
+add :: func { add_i32, add_f64 }
+```
+
+The set is an ordinary member of its namespace: it has a name, a visibility and
+a place, and `add` is what a call writes. Its members keep their own names and
+are callable as themselves — the set adds a name, it does not take any away.
+Each member is emitted under its own symbol; the set has none.
+
+A member is any function name **in scope** where the set is written: a local
+one, an imported one, or a qualified `m.f`. A member may itself be a set, and is
+flattened into the one naming it; a set that reaches itself is an error.
+
+A call through a set picks one member by **what it passes**: the number of
+arguments, the parameter names it writes, and then the types of those arguments.
+
+- Exactly one member must be left. A call no member takes is an error that lists
+  what the set has; a call two members take is ambiguous.
+- A **concrete** signature beats a generic one that would also have taken the
+  arguments: with `f :: func { any, i }` where `any` is `func <T> (a: T)` and
+  `i` is `func (a: i32)`, `f(1)` is `i`.
+- Two **generic** members that differ only in a bound are told apart by the
+  bound: with `<T: Eq>` and `<T: Display>`, an argument that is only `Display`
+  picks the second. An argument meeting both is ambiguous.
+
+Two members a call could never tell apart — the same parameter types, whatever
+they return — are an error **where the set is written**, not at each call
+through it. A return type is never part of the choice: a call is read from its
+arguments inward, and the context it sits in is not available to pick a callee.
+
+A set is a name for several functions and not a value of its own: it can be
+called, and it cannot be bound, passed, or stored. Name the member for that.
 
 ## 4.4 Visibility and re-export
 

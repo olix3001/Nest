@@ -324,6 +324,17 @@ module.exports = grammar({
       optional(field('body', $.block)),
     )),
 
+    // `func { a, b, m.c }` — an overload set: one name for several functions
+    // (spec §4.3). A function always writes its parameter list, so the `{`
+    // after `func` tells the two apart.
+    overload_set: $ => seq(
+      'func',
+      '{',
+      optional(commaSep1(field('member', $._expression))),
+      optional(','),
+      '}',
+    ),
+
     extern_specifier: $ => seq('extern', '(', $.string, ')'),
 
     parameters: $ => seq('(', commaSep(choice($.parameter, $._type)), ')'),
@@ -421,6 +432,7 @@ module.exports = grammar({
       $.if_match_expression,
       $.match_expression,
       $.func_expression,
+      $.overload_set,
       $.loop_expression,
       $.slice_type,
       $.array_type,

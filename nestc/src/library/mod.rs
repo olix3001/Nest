@@ -48,7 +48,7 @@ pub const MAGIC: &[u8; 8] = b"NESTMETA";
 
 /// The layout of what follows the magic. Raised whenever anything written
 /// changes shape, so an old library is refused by name rather than misread.
-pub const FORMAT: u32 = 11;
+pub const FORMAT: u32 = 12;
 
 /// What a reader checks before it reads anything else.
 #[derive(Debug, Serialize, Deserialize)]
@@ -338,6 +338,12 @@ impl Scale.<u8> for Square {
 // The bound carries an **argument**, and `Square` implements the trait twice —
 // so which impl this reaches is decided by the `i32`, and by nothing else.
 @public scaled_by :: func <T: Scale.<i32>> (s: *T) -> i32 { return s.scale(4) }
+
+// An overload set (§4.3) — a name for two functions, which a program reading
+// this library has to be able to choose between.
+@public sized_n :: func (n: i32) -> i32 { return n }
+@public sized_s :: func (s: Square) -> i32 { return s.side }
+@public sized :: func { sized_n, sized_s }
 "#,
                 &[core()],
             )
@@ -539,6 +545,51 @@ main :: func () {
         assert!(
             session.ir_meta.get::<crate::ir::DefaultValue>(id).is_some(),
             "the default's expression is not in the metadata that travelled"
+        );
+    }
+
+    /// An overload set travels: the namespace a library brings carries every
+    /// function of a name, so a call here picks among all of them rather than
+    /// among the one `members` happens to hold.
+    #[test]
+    fn an_overload_set_travels_with_the_library() {
+        let (session, file) = program(
+            r#"shapes :: import <shapes>
+
+main :: func () {
+    let n := shapes.sized(7)
+    let s := shapes.sized(shapes.Square { side: 3 })
+}
+"#,
+            &[core(), shapes()],
+        );
+        clean(&session, file);
+
+        // The set's members are in the table, and the call to each chose its
+        // own.
+        let both: Vec<_> = session
+            .defs
+            .iter()
+            .filter(|d| matches!(d.name.as_str(), "sized_n" | "sized_s"))
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(both.len(), 2, "the overload set did not travel whole");
+        let ast = &session.asts[&file];
+        let chosen: std::collections::HashSet<_> = ast
+            .ids()
+            .filter_map(|id| match &ast.node(id).kind {
+                crate::parser::ast::NodeKind::Call { callee, .. } => {
+                    match ast.meta::<crate::sema::Resolution>(*callee) {
+                        Some(crate::sema::Resolution::Def(d)) => Some(d),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            both.iter().all(|d| chosen.contains(d)),
+            "the two calls did not pick one overload each: {chosen:?}"
         );
     }
 

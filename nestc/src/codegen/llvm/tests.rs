@@ -609,6 +609,37 @@ fn a_program_links_and_runs() {
              }\n",
             118,
         ),
+        // An overload set, end to end: one name for three functions, a call
+        // picking by argument type and by arity, and each member emitted under
+        // its own name. 2 + 20 + 7.
+        (
+            "show_i :: func (a: i32) -> i32 { return a + 1 }\n\
+             show_b :: func (a: bool) -> i32 { if a { return 20 }\n return 30 }\n\
+             show_2 :: func (a: i32, b: i32) -> i32 { return a + b }\n\
+             show :: func { show_i, show_b, show_2 }\n\
+             main :: func () -> i32 { return show(1) + show(true) + show(3, 4) }\n",
+            29,
+        ),
+        // And a generic overload beside a concrete one, and two generic ones
+        // told apart by their bounds: the concrete wins for an `i32`, and a
+        // type with only one of the two bounds picks the overload that asks
+        // for it. 2 + 1 + 20.
+        (
+            "{ Eq } :: import <core/cmp>\n\
+             { Display, Buf } :: import <core/fmt>\n\
+             Only :: struct { n: i32 }\n\
+             impl Eq for Only { eq :: func (self: Only, rhs: Only) -> bool { return true } }\n\
+             pick_any :: func <T> (a: T) -> i32 { return 1 }\n\
+             pick_i :: func (a: i32) -> i32 { return 2 }\n\
+             pick :: func { pick_any, pick_i }\n\
+             kind_eq :: func <T: Eq> (a: T) -> i32 { return 20 }\n\
+             kind_show :: func <T: Display> (a: T) -> i32 { return 30 }\n\
+             kind :: func { kind_eq, kind_show }\n\
+             main :: func () -> i32 {\n\
+            \x20 return pick(7) + pick(true) + kind(Only { n: 1 })\n\
+             }\n",
+            23,
+        ),
         // `Any`, over the `{ data, vtable }` pair that already existed: a
         // blanket impl answers `type_id_of` through the vtable the compiler
         // built for the trait object, and a downcast is that answer compared

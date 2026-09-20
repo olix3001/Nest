@@ -104,6 +104,10 @@
         "named": true
       },
       {
+        "type": "overload_set",
+        "named": true
+      },
+      {
         "type": "parenthesized_expression",
         "named": true
       },
@@ -1972,6 +1976,22 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "overload_set",
+    "named": true,
+    "fields": {
+      "member": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "_expression",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {

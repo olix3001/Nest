@@ -3596,6 +3596,21 @@ impl Inferer<'_> {
         // variable for every parameter it did not, so each call site infers its
         // own type arguments (Rust-style).
         if let Some(def) = self.resolved_def(callee) {
+            // An overload set is a name for several functions (§4.3); which one
+            // this call means is decided here, before anything instantiates a
+            // signature, and from here on it is an ordinary call to that one.
+            let def = match self.defs.get(def).kind {
+                DefKind::Overload => match self.select_overload(callee, def, args) {
+                    Some(chosen) => chosen,
+                    // Nothing in the set took this call, and that was reported:
+                    // the arguments are still inferred, for their own sake.
+                    None => {
+                        self.infer_args_only(args);
+                        return Ty::Error;
+                    }
+                },
+                _ => def,
+            };
             if self.defs.get(def).kind == DefKind::Func {
                 let sig = self.func_def_ty(def);
                 let (inst, map) = self.instantiate_parts(callee, &sig, def, &targs);
@@ -3630,6 +3645,194 @@ impl Inferer<'_> {
         );
         let slots: Vec<Option<NodeId>> = args.iter().copied().map(Some).collect();
         self.apply_call(callee, &cty, &slots)
+    }
+
+    /// Which function of an overload set this call means (§4.3).
+    ///
+    /// Overloading is explicit here: the callee named a `func { a, b }`, and
+    /// these are the functions it listed, with any set among them flattened in.
+    /// A callee that named a function is that function and never reaches this.
+    ///
+    /// Two rounds, cheapest first. **What the call looks like** — how many
+    /// arguments, and which parameters it names — settles most of it without
+    /// typing anything. What is left is settled by **what the arguments are**:
+    /// they are inferred once in a trial whose bindings are rolled back and
+    /// whose diagnostics are discarded, and a candidate survives when every
+    /// argument unifies with its parameter. A candidate with no generics beats
+    /// one with them, so `f(i32)` wins over `f<T>(T)` for an `i32` — the
+    /// generic one is what the concrete one exists to be overridden by.
+    ///
+    /// The choice is stamped on the callee, because everything after inference
+    /// — lowering, monomorphization, the symbol — reads the resolution there.
+    fn select_overload(&mut self, callee: NodeId, def: DefId, args: &[NodeId]) -> Option<DefId> {
+        let name = self.defs.get(def).name.clone();
+        let candidates = self.decls().overload_candidates(def);
+        // An empty set is a set whose members did not resolve, which is already
+        // reported where it was written.
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let written: Vec<Symbol> = args.iter().filter_map(|&a| self.arg_name(a)).collect();
+        let mut fit: Vec<DefId> = candidates
+            .iter()
+            .copied()
+            .filter(|&c| self.call_shape_fits(c, args.len(), &written))
+            .collect();
+        if fit.len() > 1 {
+            fit = self.overloads_matching(callee, &fit, args);
+        }
+        match fit.len() {
+            0 => {
+                let how = candidates
+                    .iter()
+                    .map(|&c| self.declaration_line(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.report(
+                    callee,
+                    format!("no overload of `{name}` takes these arguments; it has {how}"),
+                );
+                // And nothing further about this call: checking the arguments
+                // against a member the call did not choose would report the
+                // same mistake again, in the words of one candidate.
+                None
+            }
+            1 => Some(self.stamp_overload(callee, fit[0])),
+            _ => {
+                // Two members that take the same parameters are a mistake in
+                // the **set**, reported where it is written — every call
+                // through it would otherwise repeat that one mistake.
+                if !self.overloads_are_duplicates(&fit) {
+                    let how = fit
+                        .iter()
+                        .map(|&c| self.declaration_line(c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.report(
+                        callee,
+                        format!(
+                            "this call to `{name}` matches more than one of its overloads: {how}"
+                        ),
+                    );
+                }
+                Some(self.stamp_overload(callee, fit[0]))
+            }
+        }
+    }
+
+    /// Record which overload a call chose, so lowering calls that one.
+    fn stamp_overload(&mut self, callee: NodeId, def: DefId) -> DefId {
+        // A turbofish's base carries the resolution, not the `GenericApply` —
+        // `infer_call` peeled it before it got here, so `callee` is already the
+        // node the resolver wrote on.
+        self.ast.set_meta(callee, Resolution::Def(def));
+        def
+    }
+
+    /// Whether a candidate could take a call of `count` arguments naming
+    /// `written` parameters — the question the argument *types* do not answer.
+    fn call_shape_fits(&self, def: DefId, count: usize, written: &[Symbol]) -> bool {
+        let Some(names) = self.decls().param_names(def) else {
+            return true;
+        };
+        let defaults = self.decls().param_defaults(def).unwrap_or_default();
+        let required = defaults.iter().filter(|&&d| !d).count();
+        if self.defs.get(def).is_c_variadic() {
+            return count >= names.len();
+        }
+        if count > names.len() || count < required {
+            return false;
+        }
+        written.iter().all(|w| names.contains(w))
+    }
+
+    /// The candidates every argument's type fits, inferred once in a trial.
+    fn overloads_matching(&mut self, callee: NodeId, fit: &[DefId], args: &[NodeId]) -> Vec<DefId> {
+        let mark = self.diags.len();
+        let outer = self.cx.snapshot();
+        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.infer_expr(a)).collect();
+        let mut matched: Vec<(DefId, bool)> = Vec::new();
+        for &c in fit {
+            let snap = self.cx.snapshot();
+            let sig = self.func_def_ty(c);
+            let (inst, map) = self.instantiate_parts(callee, &sig, c, &[]);
+            if let Ty::Func { params, .. } = self.cx.shallow(&inst) {
+                let fits = params.len() == arg_tys.len()
+                    && params
+                        .iter()
+                        .zip(&arg_tys)
+                        .all(|(p, a)| self.cx.unify(a, p).is_ok())
+                    && self.bounds_hold(c, &map);
+                if fits {
+                    let generic = !self.func_generic_param_defs(c).is_empty();
+                    matched.push((c, generic));
+                }
+            }
+            self.cx.rollback(snap);
+        }
+        self.cx.rollback(outer);
+        self.diags.truncate(mark);
+        // A concrete signature beats a generic one that would also have taken
+        // these arguments.
+        if matched.iter().any(|&(_, generic)| !generic) {
+            matched.retain(|&(_, generic)| !generic);
+        }
+        matched.into_iter().map(|(c, _)| c).collect()
+    }
+
+    /// Whether every candidate left takes the same parameters, which is a
+    /// mistake in the declarations rather than in this call.
+    fn overloads_are_duplicates(&mut self, fit: &[DefId]) -> bool {
+        let params = |me: &mut Self, d: DefId| {
+            let sig = me.func_def_ty(d);
+            match me.cx.shallow(&sig) {
+                Ty::Func { params, .. } => Some(params),
+                _ => None,
+            }
+        };
+        let Some(first) = params(self, fit[0]) else {
+            return false;
+        };
+        fit[1..].iter().all(|&c| {
+            params(self, c).is_some_and(|p| super::same_params(self.defs, &first, &p))
+        })
+    }
+
+    /// Whether what this trial bound a candidate's generic parameters to meets
+    /// the bounds they were declared with.
+    ///
+    /// This is what makes two overloads that differ *only* in a bound —
+    /// `<T: Eq>` and `<T: Display>` — a pair a call can tell apart: without it
+    /// both signatures are `func(T)` and every call matches both. A parameter
+    /// whose argument is not known yet is left alone: nothing has gone wrong,
+    /// there is just nothing to check against.
+    fn bounds_hold(&mut self, def: DefId, map: &Subst) -> bool {
+        for g in self.func_generic_param_defs(def) {
+            let Some(bounds) = self.defs.get(g).param_bounds.clone() else {
+                continue;
+            };
+            let Some(arg) = map.tys.get(&g).cloned() else {
+                continue;
+            };
+            let arg = self.cx.resolve(&arg);
+            if is_var(&arg) || matches!(arg, Ty::Error) {
+                continue;
+            }
+            for t in bounds {
+                match self.select(&arg, t, &[]) {
+                    Select::Ok(_) | Select::ByBound | Select::Defer | Select::Error => {}
+                    Select::NoImpl | Select::Ambiguous => return false,
+                }
+            }
+        }
+        true
+    }
+
+    /// How a candidate reads in a diagnostic about which of them was meant.
+    fn declaration_line(&mut self, def: DefId) -> String {
+        let sig = self.func_def_ty(def);
+        format!("`{}`", self.cx.resolve(&sig).display(self.defs))
     }
 
     /// `Pair(1, 2)` — a call whose callee names a type builds a value of it
@@ -5386,6 +5589,20 @@ impl Inferer<'_> {
                     return Ty::Error;
                 }
                 self.func_def_ty(def)
+            }
+            // An overload set is a name for several functions and not a value of
+            // its own: which function it stands for is what a call's arguments
+            // decide, and a binding has no arguments to decide with (§4.3).
+            DefKind::Overload => {
+                let name = self.defs.get(def).name.clone();
+                self.report_with_note(
+                    node,
+                    format!("`{name}` is an overload set, which can only be called"),
+                    "which of its functions is meant is decided by the arguments of a call; \
+                     name the one you want instead"
+                        .to_string(),
+                );
+                Ty::Error
             }
             DefKind::Struct | DefKind::Enum => self.nominal_of(def),
             DefKind::Const => self.const_def_ty(node, def),

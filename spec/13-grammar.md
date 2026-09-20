@@ -36,6 +36,7 @@ const_bind  = pattern [ ':' type ] '::' const_rhs
 const_rhs   = expr
             | type_expr                   // a type alias / assoc-type binding
             | func_expr
+            | overload_set
             | trait_expr
             | namespace_expr
             | import_expr
@@ -152,6 +153,7 @@ impl is selected, and incomparable overlap is an error. See
 ```
 func_expr = { directive } [ extern_spec ] 'func' [ generics ] '(' [ params ] ')' [ '->' type ] [ block ]
                                           // block omitted => external declaration (extern, no body)
+overload_set = 'func' '{' [ path { ',' path } [ ',' ] ] '}'   // one name for several functions (§4.3)
 func_type = 'func' [ generics ] '(' [ param_types ] ')' [ '->' type ]
 extern_spec = 'extern' '(' string ')'      // ABI selector, next to `func`; string is e.g. "c"
 

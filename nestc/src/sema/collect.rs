@@ -495,6 +495,7 @@ impl Collector<'_> {
                 let kind = match self.ast.node(rhs).kind {
                     NodeKind::AssocType { .. } => DefKind::TypeAlias,
                     NodeKind::FuncExpr { .. } => DefKind::Func,
+                    NodeKind::OverloadSet { .. } => DefKind::Overload,
                     _ => DefKind::Const,
                 };
                 self.define(name, kind, Visibility::Public, trait_def, member, None);
@@ -673,17 +674,14 @@ impl Collector<'_> {
         // bound it, and a method through the impl selection chose (§4.8) — so
         // the entry is a convenience, not the authority. Two impls that really
         // do overlap are caught as an ambiguity when one of them is selected.
-        if !self.in_impl {
-            if let Some(&prev) = self.defs.get(scope).ns.members.get(&name) {
-                if !matches!(kind, DefKind::Func)
-                    || !matches!(self.defs.get(prev).kind, DefKind::Func)
-                {
-                    self.report(
-                        node,
-                        format!("`{name}` is already defined in this namespace"),
-                    );
-                }
-            }
+        // Overloading is **explicit** (§4.3): two functions never share a name,
+        // and `f :: func { a, b }` is how one name reaches several of them. So
+        // a second declaration of a name is the conflict it always was.
+        if !self.in_impl && self.defs.get(scope).ns.members.contains_key(&name) {
+            self.report(
+                node,
+                format!("`{name}` is already defined in this namespace"),
+            );
         }
         let id = self.defs.alloc(
             name.clone(),
@@ -969,6 +967,7 @@ impl Collector<'_> {
 fn def_kind_of(rhs: &NodeKind) -> DefKind {
     match rhs {
         NodeKind::FuncExpr { .. } => DefKind::Func,
+        NodeKind::OverloadSet { .. } => DefKind::Overload,
         NodeKind::StructType { .. } => DefKind::Struct,
         NodeKind::EnumType { .. } => DefKind::Enum,
         NodeKind::TraitType { .. } => DefKind::Trait,

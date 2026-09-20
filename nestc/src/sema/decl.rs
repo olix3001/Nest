@@ -64,6 +64,13 @@ pub enum Decl {
     /// A generic **type** parameter: what bounds it, and what a pinned
     /// projection fixes it to.
     Param(ParamDecl),
+    /// An overload set (§4.3): the functions it names, resolved, in the order
+    /// they were written.
+    ///
+    /// A member may itself be a set; it is flattened where the candidates are
+    /// asked for rather than here, because the set it names may not have been
+    /// recorded yet when this one is.
+    Overload(Vec<DefId>),
 }
 
 /// One generic type parameter, as the declaration that listed it wrote it.
@@ -350,6 +357,83 @@ impl<'a> Decls<'a> {
             Decl::Alias(a) => a.repr.clone(),
             _ => None,
         }
+    }
+
+    /// The functions an overload set names, as its declaration wrote them:
+    /// from the table when it was recorded, and otherwise off the tree.
+    pub fn overload_members(&self, def: DefId) -> Vec<DefId> {
+        if let Some(Decl::Overload(members)) = self.table.get(&def) {
+            return members.clone();
+        }
+        let d = self.defs.get(def);
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Vec::new();
+        };
+        let Some(ast) = self.asts.get(&file) else {
+            return Vec::new();
+        };
+        let set = match &ast.node(node).kind {
+            crate::parser::ast::NodeKind::ConstBind { rhs, .. } => *rhs,
+            _ => node,
+        };
+        let crate::parser::ast::NodeKind::OverloadSet { members } = &ast.node(set).kind else {
+            return Vec::new();
+        };
+        members
+            .iter()
+            .filter_map(|&m| match ast.meta::<crate::sema::Resolution>(m) {
+                Some(crate::sema::Resolution::Def(d)) => Some(self.defs.resolve_alias(d)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every function a call through `def` may reach: the set's members with
+    /// any set among them flattened into it, each listed once and in order.
+    pub fn overload_candidates(&self, def: DefId) -> Vec<DefId> {
+        let mut out: Vec<DefId> = Vec::new();
+        let mut seen: std::collections::HashSet<DefId> = std::collections::HashSet::new();
+        // A set that names itself, directly or through another, would otherwise
+        // be walked forever; `seen` is what ends it, and the cycle is reported
+        // where the set is checked. Depth first, so a nested set's members sit
+        // where the set was written rather than after everything else — the
+        // order is what a diagnostic lists them in.
+        seen.insert(def);
+        self.flatten_overload(def, &mut seen, &mut out);
+        out
+    }
+
+    fn flatten_overload(
+        &self,
+        set: DefId,
+        seen: &mut std::collections::HashSet<DefId>,
+        out: &mut Vec<DefId>,
+    ) {
+        for m in self.overload_members(set) {
+            if !seen.insert(m) {
+                continue;
+            }
+            match self.defs.get(m).kind {
+                DefKind::Overload => self.flatten_overload(m, seen, out),
+                _ => out.push(m),
+            }
+        }
+    }
+
+    /// Whether an overload set reaches itself through the sets it names.
+    pub fn overload_is_cyclic(&self, def: DefId) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue: Vec<DefId> = self.overload_members(def);
+        while let Some(m) = queue.pop() {
+            if m == def {
+                return true;
+            }
+            if !seen.insert(m) || self.defs.get(m).kind != DefKind::Overload {
+                continue;
+            }
+            queue.extend(self.overload_members(m));
+        }
+        false
     }
 
     /// The signature of a function: the `Ty::Func` a call instantiates.
@@ -869,6 +953,7 @@ pub fn record(defs: &DefTable, asts: &HashMap<FileId, Ast>, table: &mut DeclTabl
             continue;
         }
         let decl = match d.kind {
+            DefKind::Overload => Decl::Overload(q.overload_members(d.id)),
             DefKind::Func => Decl::Func(FuncDecl {
                 params: q
                     .param_names(d.id)

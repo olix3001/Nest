@@ -5,6 +5,7 @@
 use crate::common::options::Target;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
+use super::decl::Decls;
 use super::def::DefKind;
 use super::session::{MemLoader, Session};
 use super::{DefMeta, Resolution, analyze};
@@ -4017,6 +4018,152 @@ fn an_opaque_is_only_a_type_behind_a_pointer() {
     }
     // Behind a pointer it is an ordinary type, in every position a pointer is.
     analyze_clean("f :: func (p: *opaque, q: *mut opaque, xs: []*opaque) -> i32 { return 0 }\n");
+}
+
+/// `f :: func { a, b }` is how one name reaches several functions (§4.3), and
+/// what they take is what tells them apart.
+#[test]
+fn an_overload_set_picks_by_what_a_call_passes() {
+    analyze_clean(
+        "f_i :: func (a: i32) -> i32 { return a }\n\
+         f_b :: func (a: bool) -> i32 { return 0 }\n\
+         f_2 :: func (a: i32, b: i32) -> i32 { return a + b }\n\
+         f :: func { f_i, f_b, f_2 }\n\
+         g :: func () -> i32 { return f(1) + f(true) + f(1, 2) }\n",
+    );
+    // The choice is stamped on the callee, which is what lowering reads.
+    let session = analyze_clean(
+        "f_i :: func (a: i32) -> i32 { return a }\n\
+         f_b :: func (a: bool) -> i32 { return 0 }\n\
+         f :: func { f_i, f_b }\n\
+         g :: func () -> i32 { return f(true) }\n",
+    );
+    let file = entry_file(&session);
+    let ast = &session.asts[&file];
+    let chosen = ast
+        .ids()
+        .filter_map(|id| match &ast.node(id).kind {
+            NodeKind::Call { callee, .. } => match ast.meta::<Resolution>(*callee) {
+                Some(Resolution::Def(d)) => Some(d),
+                _ => None,
+            },
+            _ => None,
+        })
+        .next()
+        .expect("the call resolved");
+    assert_eq!(
+        session.defs.get(chosen).name.as_str(),
+        "f_b",
+        "the call took the `i32` member"
+    );
+}
+
+/// Overloading is explicit: two functions still may not share a name, and a set
+/// is not a value.
+#[test]
+fn two_functions_of_one_name_are_still_refused() {
+    assert!(
+        first_error("f :: func (a: i32) -> i32 { return a }\nf :: func (a: bool) -> i32 { return 0 }\n")
+            .contains("already defined"),
+    );
+    assert!(
+        first_error(
+            "a :: func (n: i32) -> i32 { return n }\n\
+             b :: func (n: bool) -> i32 { return 1 }\n\
+             f :: func { a, b }\n\
+             g :: func () -> void { let h := f }\n"
+        )
+        .contains("overload set, which can only be called"),
+    );
+}
+
+/// What a set names has to be callable and has to be tellable apart, and both
+/// are checked where the set is written rather than at each call through it.
+#[test]
+fn an_overload_set_is_checked_where_it_is_written() {
+    // Two members a call could never choose between.
+    let same = "a :: func (n: i32) -> i32 { return n }\n\
+                b :: func (n: i32) -> bool { return true }\n\
+                f :: func { a, b }\n";
+    assert!(
+        first_error(same).contains("take the same parameters"),
+        "{}",
+        first_error(same)
+    );
+    // A member that is not a function at all.
+    let wrong = "a :: func (n: i32) -> i32 { return n }\nN :: 3\nf :: func { a, N }\n";
+    assert!(
+        first_error(wrong).contains("is not a function"),
+        "{}",
+        first_error(wrong)
+    );
+    // A set that reaches itself.
+    let loop_ = "a :: func (n: i32) -> i32 { return n }\n\
+                 f :: func { a, g }\n\
+                 g :: func { f }\n";
+    assert!(
+        first_error(loop_).contains("names itself"),
+        "{}",
+        first_error(loop_)
+    );
+    // A generic member is matched up by its bounds, so two that differ only in
+    // a bound are a set a call can choose from...
+    analyze_clean(
+        "{ Eq } :: import <core/cmp>\n\
+         { Display } :: import <core/fmt>\n\
+         a :: func <T: Eq> (x: T) -> i32 { return 1 }\n\
+         b :: func <T: Display> (x: T) -> i32 { return 2 }\n\
+         f :: func { a, b }\n",
+    );
+    // ...while the same bounds twice is the conflict above.
+    let bounds = "{ Eq } :: import <core/cmp>\n\
+                  a :: func <T: Eq> (x: T) -> i32 { return 1 }\n\
+                  b :: func <T: Eq> (x: T) -> i32 { return 2 }\n\
+                  f :: func { a, b }\n";
+    assert!(
+        first_error(bounds).contains("take the same parameters"),
+        "{}",
+        first_error(bounds)
+    );
+}
+
+/// A set may name another set, which is flattened into it; and a call that no
+/// member takes says so once, naming what the set has.
+#[test]
+fn an_overload_set_flattens_and_reports_what_it_has() {
+    analyze_clean(
+        "a :: func (n: i32) -> i32 { return n }\n\
+         b :: func (n: bool) -> i32 { return 1 }\n\
+         c :: func (n: str) -> i32 { return 2 }\n\
+         inner :: func { a, b }\n\
+         outer :: func { inner, c }\n\
+         g :: func () -> i32 { return outer(1) + outer(true) + outer(\"x\") }\n",
+    );
+    let none = "a :: func (n: i32) -> i32 { return n }\n\
+                b :: func (n: bool) -> i32 { return 1 }\n\
+                f :: func { a, b }\n\
+                g :: func () -> i32 { return f(1.5) }\n";
+    let session = analyze_mem(&[("main", none)], "main");
+    let first = session.diagnostics.first().expect("a diagnostic").message.clone();
+    assert!(first.contains("no overload of `f` takes these arguments"), "{first}");
+    assert_eq!(session.diagnostics.len(), 1, "{:#?}", session.diagnostics);
+}
+
+/// An argument that meets two members' bounds picks neither, and the call is
+/// where that is reported — the set is fine.
+#[test]
+fn a_call_matching_two_overloads_is_ambiguous() {
+    let src = "{ Eq } :: import <core/cmp>\n\
+               { Display } :: import <core/fmt>\n\
+               a :: func <T: Eq> (x: T) -> i32 { return 1 }\n\
+               b :: func <T: Display> (x: T) -> i32 { return 2 }\n\
+               f :: func { a, b }\n\
+               g :: func () -> i32 { return f(1) }\n";
+    assert!(
+        first_error(src).contains("matches more than one of its overloads"),
+        "{}",
+        first_error(src)
+    );
 }
 
 #[test]

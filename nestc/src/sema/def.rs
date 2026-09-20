@@ -55,6 +55,13 @@ pub enum DefKind {
     Const,
     /// A `func` (free function, method, or associated function).
     Func,
+    /// An **overload set** — `f :: func { a, b }` (§4.3): one name reaching
+    /// several functions, of which a call picks one by what it passes.
+    ///
+    /// The members are the functions it lists, resolved and recorded in the
+    /// declaration table; the set itself has no body, no signature and no
+    /// symbol of its own.
+    Overload,
     /// A `struct`/`enum` record field.
     Field,
     /// An `enum` variant.
@@ -101,6 +108,7 @@ impl DefKind {
             DefKind::TypeAlias => "type",
             DefKind::Const => "const",
             DefKind::Func => "func",
+            DefKind::Overload => "overload set",
             DefKind::Field => "field",
             DefKind::Variant => "variant",
             DefKind::Param => "param",

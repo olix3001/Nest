@@ -1843,6 +1843,88 @@
         ]
       }
     },
+    "overload_set": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "func"
+        },
+        {
+          "type": "STRING",
+          "value": "{"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "FIELD",
+                  "name": "member",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_expression"
+                  }
+                },
+                {
+                  "type": "REPEAT",
+                  "content": {
+                    "type": "SEQ",
+                    "members": [
+                      {
+                        "type": "STRING",
+                        "value": ","
+                      },
+                      {
+                        "type": "FIELD",
+                        "name": "member",
+                        "content": {
+                          "type": "SYMBOL",
+                          "name": "_expression"
+                        }
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "STRING",
+                      "value": ","
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": ","
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "}"
+        }
+      ]
+    },
     "extern_specifier": {
       "type": "SEQ",
       "members": [
@@ -2493,6 +2575,10 @@
         {
           "type": "SYMBOL",
           "name": "func_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "overload_set"
         },
         {
           "type": "SYMBOL",

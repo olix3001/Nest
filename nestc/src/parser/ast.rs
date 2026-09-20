@@ -548,6 +548,14 @@ pub enum NodeKind {
         ret: Option<NodeId>,
         body: Option<NodeId>,
     },
+    /// `func { a, b, c }` — an **overload set**, named by its binding (§4.3).
+    ///
+    /// The members are written as ordinary name expressions — a local name, an
+    /// imported one, a qualified `m.f`, or another overload set, which is
+    /// flattened into this one. Overloading is explicit in this language: two
+    /// functions may not share a name, and a set is how one name reaches
+    /// several of them.
+    OverloadSet { members: Vec<NodeId> },
     /// `name [: constraint]` — a generic type parameter (bare `T` is
     /// unconstrained; `constraint` is trait bounds, there is no `type` kind).
     GenericTypeParam {
@@ -744,6 +752,7 @@ impl NodeKind {
                 push_opt(out, ty);
                 body.collect_children(out);
             }
+            OverloadSet { members } => out.extend_from_slice(members),
             VariantLit { args, .. } => args.collect_children(out),
             If { cond, then, els } => {
                 out.extend_from_slice(&[*cond, *then]);
