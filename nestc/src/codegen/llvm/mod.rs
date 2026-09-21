@@ -175,7 +175,8 @@ impl Codegen for LlvmBackend {
         let machine = machine(&triple.as_str().to_string_lossy(), &cpu, &features, level)?;
         let data = machine.get_target_data();
         let pointer_bytes = data.get_pointer_byte_size(None) as u64;
-        let module = unit::build(&context, unit, pointer_bytes, &data)?;
+        let (arch, _) = names(&triple.as_str().to_string_lossy())?;
+        let module = unit::build(&context, unit, pointer_bytes, &data, arch)?;
         module.set_triple(&triple);
         module.set_data_layout(&data.get_data_layout());
 

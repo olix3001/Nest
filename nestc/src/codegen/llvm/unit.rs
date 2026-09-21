@@ -97,6 +97,415 @@ fn llvm_conv(conv: CallConv) -> u32 {
     }
 }
 
+/// One scalar inside a value, flattened out of whatever structs and arrays
+/// held it: where it starts, how wide it is, and whether it is a float.
+///
+/// Those three are all a classification ever asks. Keeping LIR's types out of
+/// the conventions is what lets a new one be written against this module
+/// alone.
+#[derive(Clone, Copy)]
+struct Field {
+    offset: u64,
+    size: u64,
+    float: bool,
+}
+
+/// What a convention needs to know about one value in a signature.
+struct Shape {
+    size: u64,
+    /// Whether this is a struct or an array rather than a scalar. Only an
+    /// aggregate is ever reclassified — a scalar is already the shape every
+    /// convention here wants.
+    aggregate: bool,
+    /// The scalars inside, in offset order. A scalar's own shape is one field,
+    /// itself; a zero-sized value has none. Left empty for an aggregate too
+    /// big for any rule here to care about its fields — see
+    /// [`Cx::shape_of`].
+    fields: Vec<Field>,
+}
+
+impl Shape {
+    /// Whether the value travels in the integer register file. A float does
+    /// not, so it must not be counted against the integer budget.
+    fn integer(&self) -> bool {
+        !self.fields.iter().any(|f| f.float)
+    }
+
+    /// This value as a Homogeneous Floating-point Aggregate: one to four
+    /// floats of a single width, packed with no padding.
+    ///
+    /// AAPCS64 hands an HFA a run of FP registers whatever its *size*, so a
+    /// 24-byte `[3 x double]` still travels in them — which is why this is
+    /// asked before any size rule.
+    fn hfa(&self) -> Option<(u64, u32)> {
+        if !self.aggregate {
+            return None;
+        }
+        let first = self.fields.first()?;
+        let n = self.fields.len() as u64;
+        let same = self.fields.iter().all(|f| f.float && f.size == first.size);
+        (same && (1..=4).contains(&n) && self.size == n * first.size)
+            .then_some((first.size, n as u32))
+    }
+
+    /// Whether every field touching the bytes `[lo, hi)` is a float, and at
+    /// least one does — System V's SSE class for one eightbyte.
+    fn all_float_in(&self, lo: u64, hi: u64) -> bool {
+        let touching = self.fields.iter().filter(|f| f.offset < hi && lo < f.offset + f.size);
+        let mut any = false;
+        for f in touching {
+            if !f.float {
+                return false;
+            }
+            any = true;
+        }
+        any
+    }
+
+    /// How far into `[lo, hi)` the fields actually reach, measured from `lo`.
+    ///
+    /// Tail padding does not travel in a register: `{ i64, i32 }` is sixteen
+    /// bytes long and its second eightbyte is still an `i32`, because that is
+    /// all of it anything wrote to. Zero when the range is all padding.
+    fn used_in(&self, lo: u64, hi: u64) -> u64 {
+        let mut end = lo;
+        for f in &self.fields {
+            if f.offset < hi && lo < f.offset + f.size {
+                end = end.max((f.offset + f.size).min(hi));
+            }
+        }
+        end - lo
+    }
+
+    /// The width of a float field starting exactly at `offset`.
+    fn float_at(&self, offset: u64) -> Option<u64> {
+        self.fields.iter().find(|f| f.offset == offset && f.float).map(|f| f.size)
+    }
+}
+
+/// One register's worth of a split aggregate.
+#[derive(Clone, Copy)]
+enum Chunk {
+    /// An integer this many bits wide.
+    Int(u32),
+    /// `n` floats of `bytes` each, side by side — `float`, `double`, or the
+    /// `<2 x float>` that two of them in one eightbyte become.
+    Floats { bytes: u64, n: u32 },
+}
+
+impl Chunk {
+    /// Whether this chunk travels in the integer register file.
+    fn integer(self) -> bool {
+        matches!(self, Chunk::Int(_))
+    }
+}
+
+#[derive(Clone)]
+enum Class {
+    /// Passed as its own LLVM type; nothing here changes it.
+    Direct,
+    /// Passed as some other type of the same bytes — reinterpreted, which
+    /// costs nothing under opaque pointers.
+    Coerced(Coercion),
+    /// Passed through a pointer to storage the caller owns.
+    Indirect,
+}
+
+/// The LLVM shape a coerced aggregate takes. The distinction between the
+/// multi-register forms is not cosmetic: a convention whose registers must be
+/// *consecutive* has to stay one LLVM value, so that LLVM's own lowering can
+/// apply the all-or-nothing rule, while one that assigns each register
+/// independently has to be split, so that each lands where the convention
+/// says.
+#[derive(Clone)]
+enum Coercion {
+    /// One LLVM value **per chunk**, on System V's eightbyte grid: chunk `i`
+    /// is the bytes at `i * 8`, and a real C caller assigns each to its own
+    /// register. A 12-byte integer struct is `i64, i32`; one holding three
+    /// floats is `<2 x float>, float`.
+    Chunks(Vec<Chunk>),
+    /// **One** LLVM value of `n` 64-bit words — `[n x i64]`, or a bare `i64`
+    /// for one. AAPCS64 hands an aggregate a run of consecutive registers and
+    /// puts the whole thing on the stack when that run does not fit, which
+    /// only holds if LLVM sees one argument rather than `n`.
+    Words(u32),
+    /// **One** LLVM value: `[n x fN]`, `n` floats of `bytes` each. AAPCS64's
+    /// Homogeneous Floating-point Aggregate, which travels in `v0..v3`.
+    Floats { bytes: u64, n: u32 },
+}
+
+/// How the values in one signature cross a calling convention's boundary, on
+/// the target this unit is built for.
+///
+/// Kept out of LIR (§ design note): LIR says what a function *is*, and a
+/// convention says how a machine hands it its arguments, which is a fact about
+/// the target rather than about the program.
+///
+/// **Every** function goes through an `impl Abi`, Nest's own included
+/// ([`Native`], which coerces nothing). There is no path around the trait, so
+/// a convention added later — `extern("rust")`, a `#repr` that travels
+/// differently, a cross-unit Nest convention of its own — is a new `impl`
+/// plus an arm in [`abi_for`], and no change to the code that builds
+/// signatures, prologues, call sites or returns.
+///
+/// A convention is asked about a **whole signature** rather than one type at a
+/// time, because what is left of the register file when an argument is reached
+/// is part of how that argument travels (SysV demotes an aggregate it has no
+/// room for to memory), and because a return's own class can spend a register
+/// the arguments then do not have.
+///
+/// Both methods may refuse: a convention that meets a value its rules do not
+/// cover says so, and the compilation stops, rather than coercing it to
+/// something that would link and then misbehave.
+trait Abi {
+    /// What to call this convention in a diagnostic.
+    fn name(&self) -> &'static str;
+    /// How a returned value of this shape crosses.
+    fn ret(&self, shape: &Shape) -> Result<Class>;
+    /// How each argument crosses, in order, given the return's class.
+    fn args(&self, ret: &Class, shapes: &[Shape]) -> Result<Vec<Class>>;
+    /// Whether an indirect argument is a `byval` stack slot LLVM copies the
+    /// value into (x86-64), or a bare pointer to a copy the **caller** must
+    /// make itself before the call (AArch64). Meaningless for a convention
+    /// that never answers [`Class::Indirect`].
+    fn indirect_by_val(&self) -> bool {
+        false
+    }
+}
+
+/// Nest's own convention, which is not a foreign one at all: every LIR type is
+/// already the LLVM type it wants, so nothing is ever coerced and nothing is
+/// ever refused. It is an `impl Abi` rather than a branch around the trait so
+/// that one code path builds every signature.
+struct Native;
+
+impl Abi for Native {
+    fn name(&self) -> &'static str {
+        "nest"
+    }
+    fn ret(&self, _shape: &Shape) -> Result<Class> {
+        Ok(Class::Direct)
+    }
+    fn args(&self, _ret: &Class, shapes: &[Shape]) -> Result<Vec<Class>> {
+        Ok(shapes.iter().map(|_| Class::Direct).collect())
+    }
+}
+
+/// The argument registers System V x86-64 has: `rdi rsi rdx rcx r8 r9`, and
+/// `xmm0..xmm7`.
+const SYSV_INT_REGS: u32 = 6;
+const SYSV_SSE_REGS: u32 = 8;
+
+/// The System V x86-64 psABI: an aggregate up to 16 bytes is its eightbytes,
+/// each classified INTEGER or SSE and each its own argument; a larger one, or
+/// one the registers have no room left for, goes on the stack via `byval`.
+struct SysV64;
+
+impl SysV64 {
+    fn class(&self, shape: &Shape) -> Result<Class> {
+        if !shape.aggregate || shape.size == 0 {
+            return Ok(Class::Direct);
+        }
+        if shape.size > 16 {
+            return Ok(Class::Indirect);
+        }
+        match self.eightbytes(shape) {
+            Some(chunks) => Ok(Class::Coerced(Coercion::Chunks(chunks))),
+            None => Err(unsupported(format!(
+                "a {}-byte aggregate whose floats this backend cannot place in \
+                 System V's eightbytes — only `f32` and `f64` members are classified",
+                shape.size
+            ))),
+        }
+    }
+
+    /// The eightbytes of an aggregate, each with the LLVM type a C compiler
+    /// coerces it to. `None` when a float member falls outside the rules
+    /// written here.
+    fn eightbytes(&self, shape: &Shape) -> Option<Vec<Chunk>> {
+        let mut out = Vec::new();
+        let mut off = 0;
+        while off < shape.size {
+            let end = off + (shape.size - off).min(8);
+            // The bytes written rather than the bytes spanned: a
+            // `{ i64, i32 }` is sixteen long and ends in an `i32`. An
+            // eightbyte that is all padding has no class of its own, and a
+            // whole register of it is the harmless reading.
+            let used = shape.used_in(off, end).max(1);
+            out.push(match shape.all_float_in(off, end) {
+                true => self.sse_chunk(shape, off, used)?,
+                // Any integer or pointer overlapping the eightbyte makes the
+                // whole eightbyte INTEGER, as wide as it is used.
+                false => Chunk::Int((used * 8) as u32),
+            });
+            off += 8;
+        }
+        Some(out)
+    }
+
+    /// The type an SSE eightbyte coerces to, which a C compiler picks by
+    /// looking at what actually starts there: a `double`, two floats as a
+    /// `<2 x float>`, or a lone trailing `float`.
+    fn sse_chunk(&self, shape: &Shape, off: u64, used: u64) -> Option<Chunk> {
+        match shape.float_at(off)? {
+            8 => Some(Chunk::Floats { bytes: 8, n: 1 }),
+            4 if used > 4 && shape.float_at(off + 4) == Some(4) => {
+                Some(Chunk::Floats { bytes: 4, n: 2 })
+            }
+            4 => Some(Chunk::Floats { bytes: 4, n: 1 }),
+            // An `f16` eightbyte and an `f128`'s two have rules of their own,
+            // and guessing at them would be a call that links and then reads
+            // the wrong register.
+            _ => None,
+        }
+    }
+}
+
+impl Abi for SysV64 {
+    fn name(&self) -> &'static str {
+        "c (System V x86-64)"
+    }
+
+    fn ret(&self, shape: &Shape) -> Result<Class> {
+        // A returned aggregate comes back in `rax:rdx` and `xmm0:xmm1`, always
+        // free, so the return never has to ask what is left.
+        self.class(shape)
+    }
+
+    fn args(&self, ret: &Class, shapes: &[Shape]) -> Result<Vec<Class>> {
+        // An `sret` pointer arrives in `rdi` — one register the arguments no
+        // longer have, and forgetting it shifts every later aggregate.
+        let mut int = SYSV_INT_REGS - u32::from(matches!(ret, Class::Indirect));
+        let mut sse = SYSV_SSE_REGS;
+        shapes
+            .iter()
+            .map(|shape| {
+                let class = self.class(shape)?;
+                let (wants_int, wants_sse) = match &class {
+                    Class::Coerced(Coercion::Chunks(c)) => (
+                        c.iter().filter(|k| k.integer()).count() as u32,
+                        c.iter().filter(|k| !k.integer()).count() as u32,
+                    ),
+                    // A scalar: one register of whichever file it belongs to.
+                    // A zero-sized aggregate is `Direct` too and takes none.
+                    Class::Direct if shape.aggregate => (0, 0),
+                    Class::Direct if shape.integer() => (1, 0),
+                    Class::Direct => (0, 1),
+                    // Already on the stack.
+                    _ => (0, 0),
+                };
+                Ok(if wants_int <= int && wants_sse <= sse {
+                    int -= wants_int;
+                    sse -= wants_sse;
+                    class
+                } else if shape.aggregate {
+                    // No room for every eightbyte, so the *whole* aggregate is
+                    // MEMORY — never part of it in the last register.
+                    Class::Indirect
+                } else {
+                    // A scalar with no register left simply spills, which LLVM
+                    // does for a plain argument without being told.
+                    class
+                })
+            })
+            .collect()
+    }
+
+    fn indirect_by_val(&self) -> bool {
+        true
+    }
+}
+
+/// AAPCS64. A Homogeneous Floating-point Aggregate travels in the FP registers
+/// whatever its size; anything else up to 16 bytes travels in whole 64-bit
+/// integer registers — so an argument rounds *up* to them — and a larger one
+/// is a pointer to a copy the caller made, never a `byval` stack slot.
+struct Aapcs64;
+
+impl Aapcs64 {
+    fn class(&self, shape: &Shape, ret: bool) -> Class {
+        if !shape.aggregate || shape.size == 0 {
+            return Class::Direct;
+        }
+        if let Some((bytes, n)) = shape.hfa() {
+            return match ret {
+                // Returned, an HFA comes back in `v0..v3` as the struct it
+                // already is, which LLVM's AArch64 lowering does unaided.
+                true => Class::Direct,
+                false => Class::Coerced(Coercion::Floats { bytes, n }),
+            };
+        }
+        match shape.size {
+            // A return is narrower than an argument: up to eight bytes of it
+            // is an integer of exactly the aggregate's width, where an
+            // argument rounds up to a whole register.
+            1..=8 if ret => Class::Coerced(Coercion::Chunks(vec![Chunk::Int((shape.size * 8) as u32)])),
+            1..=8 => Class::Coerced(Coercion::Words(1)),
+            9..=16 => Class::Coerced(Coercion::Words(2)),
+            _ => Class::Indirect,
+        }
+    }
+}
+
+impl Abi for Aapcs64 {
+    fn name(&self) -> &'static str {
+        "c (AAPCS64)"
+    }
+
+    fn ret(&self, shape: &Shape) -> Result<Class> {
+        Ok(self.class(shape, true))
+    }
+
+    fn args(&self, _ret: &Class, shapes: &[Shape]) -> Result<Vec<Class>> {
+        // No budget to keep: every argument stays *one* LLVM value, so LLVM's
+        // own AArch64 lowering is the thing that runs out of registers, and it
+        // applies the consecutive-register rule while doing it.
+        Ok(shapes.iter().map(|s| self.class(s, false)).collect())
+    }
+
+    fn indirect_by_val(&self) -> bool {
+        false
+    }
+}
+
+/// The [`Abi`] for a convention on `arch`, the architecture spelled the way
+/// [`names`] spells it.
+///
+/// `convention` is a function's `extern_abi`: `None` is Nest's own. An
+/// architecture this compiler has no C rules for falls back to AAPCS64's
+/// rather than refusing outright, but an unknown *convention* is an error —
+/// guessing which registers a name like `"stdcall"` means would produce calls
+/// that link and then misbehave.
+fn abi_for(convention: Option<&str>, arch: &str) -> Result<Box<dyn Abi>> {
+    Ok(match convention {
+        None => Box::new(Native),
+        Some("c") => match arch {
+            "x86_64" => Box::new(SysV64) as Box<dyn Abi>,
+            _ => Box::new(Aapcs64),
+        },
+        Some(other) => {
+            return Err(unsupported(format!(
+                "this backend has no rules for the `{other}` calling convention"
+            )));
+        }
+    })
+}
+
+/// An [`Abi`] for every convention `unit` names, Nest's own included.
+fn abis_for(unit: &Unit, arch: &str) -> Result<Vec<(Option<String>, Box<dyn Abi>)>> {
+    let mut names: Vec<Option<String>> = vec![None];
+    for f in &unit.funcs {
+        let name = f.extern_abi.as_ref().map(|s| s.as_str().to_string());
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+        .into_iter()
+        .map(|n| Ok((n.clone(), abi_for(n.as_deref(), arch)?)))
+        .collect()
+}
+
 fn within(who: &str, e: CodegenError) -> CodegenError {
     match e {
         CodegenError::Unsupported(m) => CodegenError::Unsupported(format!("{who}: {m}")),
@@ -116,6 +525,7 @@ pub fn build<'ctx>(
     unit: &Unit,
     pointer_bytes: u64,
     data: &TargetData,
+    arch: &str,
 ) -> Result<Module<'ctx>> {
     let module = context.create_module(&unit.name);
     let mut cx = Cx {
@@ -125,6 +535,7 @@ pub fn build<'ctx>(
         unit,
         pointer_bytes,
         data,
+        abis: abis_for(unit, arch)?,
         types: Vec::new(),
         globals: Vec::new(),
         funcs: Vec::new(),
@@ -154,6 +565,12 @@ struct Cx<'ctx, 'u> {
     /// LLVM's own statement about the target, used to check that a struct type
     /// built here lays out the way LIR said it does.
     data: &'u TargetData,
+    /// One [`Abi`] per calling convention this unit's functions actually name,
+    /// keyed by the `extern_abi` that names it (`None` being Nest's own).
+    /// Built once, up front, so that a convention this backend has no rules
+    /// for is an error before any code is emitted rather than at the first
+    /// call that needs it.
+    abis: Vec<(Option<String>, Box<dyn Abi>)>,
     types: Vec<StructType<'ctx>>,
     globals: Vec<GlobalValue<'ctx>>,
     funcs: Vec<FunctionValue<'ctx>>,
@@ -319,6 +736,351 @@ impl<'ctx> Cx<'ctx, '_> {
     }
 }
 
+// ===< Calling conventions >===
+
+/// Every class in one signature, and the [`Abi`] that decided them. One
+/// lookup, so that a declaration, a prologue and a call site cannot disagree
+/// by asking different questions.
+struct Crossing<'a> {
+    abi: &'a dyn Abi,
+    ret: Class,
+    args: Vec<Class>,
+}
+
+impl<'ctx> Cx<'ctx, '_> {
+    /// What the conventions in this module need to know about a value of this
+    /// type. See [`Shape`]: no LIR type reaches an `impl Abi`.
+    fn shape_of(&self, ty: &Ty) -> Shape {
+        let size = self.size_of(ty);
+        let mut fields = Vec::new();
+        // Past this width no rule here looks at the fields: System V takes
+        // anything over 16 bytes to memory, and AAPCS64's largest homogeneous
+        // aggregate is four 16-byte floats. Flattening a big array would cost
+        // a field per element for an answer that does not depend on them.
+        if size <= 64 {
+            self.fields_of(ty, 0, &mut fields);
+        }
+        Shape {
+            size,
+            aggregate: matches!(ty, Ty::Named(_) | Ty::Array { .. }),
+            fields,
+        }
+    }
+
+    /// Flatten every scalar in `ty` into `out`, each at its byte offset within
+    /// the value that starts at `at`.
+    fn fields_of(&self, ty: &Ty, at: u64, out: &mut Vec<Field>) {
+        match ty {
+            Ty::Named(id) => {
+                for m in &self.unit.ty(*id).members {
+                    self.fields_of(&m.ty, at + m.offset, out);
+                }
+            }
+            Ty::Array { len, elem } => {
+                let stride = self.size_of(elem);
+                for i in 0..*len {
+                    self.fields_of(elem, at + i * stride, out);
+                }
+            }
+            // No storage, so nothing a register has to carry.
+            Ty::Void | Ty::Never => {}
+            other => out.push(Field {
+                offset: at,
+                size: self.size_of(other),
+                float: matches!(other, Ty::Float { .. }),
+            }),
+        }
+    }
+
+    /// The convention `f` is written in.
+    fn abi(&self, f: &Function) -> Result<&dyn Abi> {
+        let want = f.extern_abi.as_ref().map(|s| s.as_str());
+        self.abis
+            .iter()
+            .find(|(name, _)| name.as_deref() == want)
+            .map(|(_, abi)| &**abi)
+            .ok_or_else(|| failed(format!("{}: no rules for its convention", f.name)))
+    }
+
+    /// How every value in `f`'s signature crosses: the return, then one class
+    /// per fixed parameter, and the convention that said so.
+    ///
+    /// The whole signature at once, from the [`Function`] alone, is what makes
+    /// a declaration, a definition's prologue and every call site agree —
+    /// each of them derives the same answer from the same input, and a
+    /// convention that spends registers as it walks the list cannot be asked
+    /// about one parameter in isolation.
+    fn crossing(&self, f: &Function) -> Result<Crossing<'_>> {
+        let abi = self.abi(f)?;
+        let name = abi.name();
+        let blame = |e| within(&format!("crossing `{name}`"), e);
+        let ret = abi.ret(&self.shape_of(&f.ret)).map_err(blame)?;
+        let shapes: Vec<Shape> =
+            f.locals[..f.params].iter().map(|l| self.shape_of(&l.ty)).collect();
+        let args = abi.args(&ret, &shapes).map_err(blame)?;
+        Ok(Crossing { abi, ret, args })
+    }
+
+    /// The LLVM float type of this many bytes.
+    fn float_type(&self, bytes: u64) -> Result<inkwell::types::FloatType<'ctx>> {
+        Ok(match bytes {
+            2 => self.context.f16_type(),
+            4 => self.context.f32_type(),
+            8 => self.context.f64_type(),
+            16 => self.context.f128_type(),
+            n => return Err(unsupported(format!("no float type of {n} bytes"))),
+        })
+    }
+
+    /// The LLVM type one register's worth of a split aggregate takes. Two
+    /// floats in one eightbyte are a `<2 x float>`, which is the register a C
+    /// compiler puts them in, not two arguments.
+    fn chunk_ty(&self, chunk: Chunk) -> Result<BasicTypeEnum<'ctx>> {
+        Ok(match chunk {
+            Chunk::Int(bits) => self.int_type(bits)?.into(),
+            Chunk::Floats { bytes, n } => {
+                let t = self.float_type(bytes)?;
+                match n {
+                    1 => t.into(),
+                    n => t.vec_type(n).into(),
+                }
+            }
+        })
+    }
+
+    /// `[n x i64]`, or a bare `i64` for a single word — the type AAPCS64 gives
+    /// an aggregate that travels in whole registers.
+    fn words_type(&self, n: u32) -> BasicTypeEnum<'ctx> {
+        let word = self.context.i64_type();
+        match n {
+            1 => word.into(),
+            n => word.array_type(n).into(),
+        }
+    }
+
+    /// The LLVM type(s) a value of `ty` takes at the boundary under `class` —
+    /// more than one only for [`Coercion::Chunks`], where a real C caller
+    /// passes each chunk as its own argument.
+    fn abi_tys(&self, ty: &Ty, class: &Class) -> Result<Vec<BasicTypeEnum<'ctx>>> {
+        Ok(match class {
+            Class::Direct => vec![self.llty(ty)?],
+            Class::Indirect => vec![self.ptr().into()],
+            Class::Coerced(Coercion::Chunks(chunks)) => {
+                chunks.iter().map(|&c| self.chunk_ty(c)).collect::<Result<_>>()?
+            }
+            Class::Coerced(Coercion::Words(n)) => vec![self.words_type(*n)],
+            // Always an array, even for one float: `[1 x float]` is what a C
+            // compiler declares a one-member HFA as.
+            Class::Coerced(Coercion::Floats { bytes, n }) => {
+                vec![self.float_type(*bytes)?.array_type(*n).into()]
+            }
+        })
+    }
+
+    /// The LLVM type `ty` returns as. A function returns exactly one value, so
+    /// chunks that would be two arguments become one literal struct of them —
+    /// `{ i64, i32 }` for a 12-byte aggregate, which is the pair of registers
+    /// a C callee leaves it in. `Indirect` never reaches here: the caller
+    /// turns that into `sret` before asking.
+    fn abi_ret_ty(&self, ty: &Ty, class: &Class) -> Result<BasicTypeEnum<'ctx>> {
+        let tys = self.abi_tys(ty, class)?;
+        Ok(match tys.len() {
+            1 => tys[0],
+            _ => self.context.struct_type(&tys, false).into(),
+        })
+    }
+
+    /// The parameter attributes an `extern("c")` function's LLVM signature
+    /// needs — `sret` on an indirect return, `byval` on an indirect argument
+    /// where this target's ABI wants it — as `(index, kind, the LIR type)`.
+    /// Shared by the declaration and every call site, which must agree.
+    fn c_abi_attrs(&self, target: &Function) -> Result<Vec<(u32, &'static str, Ty)>> {
+        let Crossing { abi, ret, args } = self.crossing(target)?;
+        let mut out = Vec::new();
+        let mut idx = 0;
+        if matches!(ret, Class::Indirect) {
+            out.push((0, "sret", target.ret.clone()));
+            idx = 1;
+        }
+        for (local, class) in target.locals[..target.params].iter().zip(&args) {
+            if matches!(class, Class::Indirect) && abi.indirect_by_val() {
+                out.push((idx, "byval", local.ty.clone()));
+            }
+            idx += self.abi_tys(&local.ty, class)?.len() as u32;
+        }
+        Ok(out)
+    }
+
+    /// Apply [`Cx::c_abi_attrs`] to a value that takes `(AttributeLoc,
+    /// Attribute)` the way `FunctionValue` and `CallSiteValue` both do.
+    ///
+    /// Each attribute carries the pointee type *and* its alignment: a `byval`
+    /// slot LLVM aligns to a guess rather than to the type's own alignment is
+    /// a slot a C callee reads at the wrong offset.
+    fn apply_c_abi_attrs(
+        &self,
+        target: &Function,
+        add: impl Fn(inkwell::attributes::AttributeLoc, inkwell::attributes::Attribute),
+    ) -> Result<()> {
+        for (idx, kind, ty) in self.c_abi_attrs(target)? {
+            let t = self.llty(&ty)?;
+            let loc = inkwell::attributes::AttributeLoc::Param(idx);
+            add(
+                loc,
+                self.context.create_type_attribute(
+                    inkwell::attributes::Attribute::get_named_enum_kind_id(kind),
+                    inkwell::types::AnyType::as_any_type_enum(&t),
+                ),
+            );
+            add(
+                loc,
+                self.context.create_enum_attribute(
+                    inkwell::attributes::Attribute::get_named_enum_kind_id("align"),
+                    self.align_of(&ty) as u64,
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// Load one coercion-typed value out of the `size` bytes at `addr`.
+    ///
+    /// A coercion is often *wider* than the value it carries — AAPCS64 rounds
+    /// a 4-byte aggregate up to a whole `i64`, and SysV's `{ i64, i32 }` is
+    /// padded to 16 — so a load straight from the value's own storage would
+    /// read past it, off the end of a global or a slot the frame does not own.
+    /// When that is the case the bytes are copied into scratch of the
+    /// coercion's own size first, and the tail is whatever was in it, which is
+    /// exactly what the convention says about padding.
+    fn coerced_load(
+        &self,
+        addr: PointerValue<'ctx>,
+        size: u64,
+        align: u32,
+        into: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let wide = self.data.get_store_size(&into) > size;
+        let from = if wide {
+            let tmp = self.builder.build_alloca(into, "").map_err(failed)?;
+            let bytes = self.word().const_int(size, false);
+            let to_align = self.data.get_preferred_alignment(&into);
+            self.builder
+                .build_memcpy(tmp, to_align, addr, align, bytes)
+                .map_err(failed)?;
+            tmp
+        } else {
+            addr
+        };
+        self.builder.build_load(into, from, "").map_err(failed)
+    }
+
+    /// Put a coercion-typed value back into the `size` bytes at `addr`, the
+    /// other direction of [`Cx::coerced_load`] and wide for the same reasons:
+    /// storing an `i64` straight into a 4-byte slot writes over its
+    /// neighbours.
+    fn coerced_store(
+        &self,
+        addr: PointerValue<'ctx>,
+        size: u64,
+        align: u32,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<()> {
+        let ty = value.get_type();
+        if self.data.get_store_size(&ty) <= size {
+            let i = self.builder.build_store(addr, value).map_err(failed)?;
+            let _ = i.set_alignment(align);
+            return Ok(());
+        }
+        let tmp = self.builder.build_alloca(ty, "").map_err(failed)?;
+        self.builder.build_store(tmp, value).map_err(failed)?;
+        let bytes = self.word().const_int(size, false);
+        let from_align = self.data.get_preferred_alignment(&ty);
+        self.builder
+            .build_memcpy(addr, align, tmp, from_align, bytes)
+            .map_err(failed)?;
+        Ok(())
+    }
+
+    /// An argument at an `extern("c")` call site, in the shape its class wants
+    /// — one value, or one *per chunk*. `Cx::operand` handles `Direct`
+    /// unchanged; the other two read (or make) an address and load or pass it
+    /// under a different type, legal without a cast because an opaque pointer
+    /// carries none.
+    fn abi_arg(
+        &self,
+        fx: &FnCx<'ctx>,
+        f: &Function,
+        op: &Operand,
+        ty: &Ty,
+        class: &Class,
+        abi: &dyn Abi,
+    ) -> Result<Vec<BasicValueEnum<'ctx>>> {
+        if matches!(class, Class::Direct) {
+            return Ok(vec![self.operand(fx, f, op, ty)?]);
+        }
+        let size = self.size_of(ty);
+        let align = self.align_of(ty);
+        let addr = self.aggregate_addr(fx, f, op, ty)?;
+        match class {
+            Class::Direct => unreachable!("handled above"),
+            // Chunk `i` is the bytes at `i * 8` — the eightbyte grid the
+            // variant is defined on, rather than a running total, which a
+            // final chunk narrower than its eightbyte would throw off.
+            Class::Coerced(Coercion::Chunks(chunks)) => {
+                let mut out = Vec::with_capacity(chunks.len());
+                for (i, &chunk) in chunks.iter().enumerate() {
+                    let offset = i as u64 * 8;
+                    let at = self.at(addr, offset)?;
+                    let t = self.chunk_ty(chunk)?;
+                    out.push(self.coerced_load(at, size - offset, align, t)?);
+                }
+                Ok(out)
+            }
+            Class::Coerced(other) => {
+                let t = self.abi_tys(ty, &Class::Coerced(other.clone()))?[0];
+                Ok(vec![self.coerced_load(addr, size, align, t)?])
+            }
+            // The callee is handed a pointer it may write through. With
+            // `byval` that is a slot LLVM copies the value into; without it
+            // the copy is the **caller's** to make, and handing over the
+            // value's own address instead would let the callee scribble on a
+            // live local (§ AAPCS64: the argument is a copy).
+            Class::Indirect if abi.indirect_by_val() => Ok(vec![addr.into()]),
+            Class::Indirect => {
+                let copy = self.builder.build_alloca(self.llty(ty)?, "").map_err(failed)?;
+                let bytes = self.word().const_int(size, false);
+                self.builder
+                    .build_memcpy(copy, align, addr, align, bytes)
+                    .map_err(failed)?;
+                Ok(vec![copy.into()])
+            }
+        }
+    }
+
+    /// The address of an aggregate operand crossing the C ABI. Every aggregate
+    /// operand but `undef` is a place by the time it reaches codegen (§2.5: a
+    /// literal one is already a global), and `undef` is storage whose contents
+    /// nobody may look at — an uninitialized slot says that exactly.
+    fn aggregate_addr(
+        &self,
+        fx: &FnCx<'ctx>,
+        f: &Function,
+        op: &Operand,
+        ty: &Ty,
+    ) -> Result<PointerValue<'ctx>> {
+        match op {
+            Operand::Copy(p) => Ok(self.place(fx, f, p)?.0),
+            Operand::Const(Constant::Undef) => {
+                self.builder.build_alloca(self.llty(ty)?, "").map_err(failed)
+            }
+            Operand::Const(_) => Err(failed(format!(
+                "{}: a constant of aggregate type crossing the C ABI",
+                f.name
+            ))),
+        }
+    }
+}
+
 // ===< Globals and function signatures >===
 
 impl<'ctx> Cx<'ctx, '_> {
@@ -401,14 +1163,32 @@ impl<'ctx> Cx<'ctx, '_> {
     /// x86-64, whether a slot is spilled on AArch64 — so this flag is the whole
     /// of what a backend must do, and getting it wrong is silent.
     fn signature(&self, f: &Function) -> Result<inkwell::types::FunctionType<'ctx>> {
-        let mut params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
-        for local in &f.locals[..f.params] {
-            params.push(self.llty(&local.ty)?.into());
-        }
         let variadic = f.attrs.c_variadic;
-        Ok(match &f.ret {
-            Ty::Void | Ty::Never => self.context.void_type().fn_type(&params, variadic),
-            other => self.llty(other)?.fn_type(&params, variadic),
+        // One path for every convention. Each parameter goes through
+        // `abi_tys` — one LLVM parameter, or one per chunk where the
+        // convention splits an aggregate across a register pair — the return
+        // through `abi_ret_ty`, and an indirect return becomes a hidden `ptr`
+        // first parameter with a `void` return (`sret`, applied in
+        // `declare_funcs`). Under `Native` every class is `Direct`, so this
+        // reduces to the LIR types themselves.
+        let Crossing { ret, args, .. } = self.crossing(f)?;
+        let ret_indirect = matches!(ret, Class::Indirect);
+        let mut params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
+        if ret_indirect {
+            params.push(self.ptr().into());
+        }
+        for (local, class) in f.locals[..f.params].iter().zip(&args) {
+            for t in self.abi_tys(&local.ty, class)? {
+                params.push(t.into());
+            }
+        }
+        Ok(if ret_indirect {
+            self.context.void_type().fn_type(&params, variadic)
+        } else {
+            match &f.ret {
+                Ty::Void | Ty::Never => self.context.void_type().fn_type(&params, variadic),
+                other => self.abi_ret_ty(other, &ret)?.fn_type(&params, variadic),
+            }
         })
     }
 
@@ -472,6 +1252,8 @@ impl<'ctx> Cx<'ctx, '_> {
             // sites read it back off this value (see `call`), so this is the one
             // place it is decided.
             value.set_call_conventions(llvm_conv(f.attrs.conv));
+            self.apply_c_abi_attrs(f, |loc, attr| value.add_attribute(loc, attr))
+                .map_err(|e| within(&f.name, e))?;
             if f.blocks.is_empty() {
                 // A declaration. Nothing more to say about it.
             } else {
@@ -899,11 +1681,47 @@ impl<'ctx> Cx<'ctx, '_> {
         }
         // The parameters are the first locals, and a parameter arrives in a
         // register: store it into its slot so the body reads it like any other.
-        for (i, _) in f.locals[..f.params].iter().enumerate() {
-            let arg = value
-                .get_nth_param(i as u32)
-                .ok_or_else(|| failed(format!("{}: no parameter {i}", f.name)))?;
-            self.builder.build_store(slots[i], arg).map_err(failed)?;
+        //
+        // An `extern("c")` function's LLVM parameters are `signature`'s —
+        // one per LIR parameter, except a `Coerced` one with two chunks,
+        // which is two — offset by one when the return is `sret`. A coerced
+        // chunk is stored at its byte offset in the slot like any other value
+        // — the bytes are the same, and an opaque pointer does not care that
+        // its LLVM type disagrees with the slot's. An indirect one already
+        // *is* an address the caller made for this value, so the slot **is**
+        // that pointer, not a fresh copy of it.
+        {
+            let Crossing { ret, args, .. } = self.crossing(f)?;
+            let mut lparam = u32::from(matches!(ret, Class::Indirect));
+            for (i, local) in f.locals[..f.params].iter().enumerate() {
+                let mut next = || {
+                    let n = lparam;
+                    lparam += 1;
+                    value
+                        .get_nth_param(n)
+                        .ok_or_else(|| failed(format!("{}: no parameter {i}", f.name)))
+                };
+                let size = self.size_of(&local.ty);
+                let align = self.align_of(&local.ty);
+                match &args[i] {
+                    Class::Direct => {
+                        self.store(slots[i], next()?, &local.ty)?;
+                    }
+                    Class::Coerced(Coercion::Chunks(chunks)) => {
+                        for k in 0..chunks.len() as u64 {
+                            let offset = k * 8;
+                            let addr = self.at(slots[i], offset)?;
+                            self.coerced_store(addr, size - offset, align, next()?)?;
+                        }
+                    }
+                    Class::Coerced(_) => {
+                        self.coerced_store(slots[i], size, align, next()?)?;
+                    }
+                    Class::Indirect => {
+                        slots[i] = next()?.into_pointer_value();
+                    }
+                }
+            }
         }
         // The stack check, for a function that can reach itself (§7d). Its
         // frame is already allocated by this point — the `alloca`s above are it
@@ -1741,7 +2559,23 @@ impl<'ctx> Cx<'ctx, '_> {
             Callee::Static(id) => {
                 let target = &self.unit.funcs[id.0 as usize];
                 let value = self.funcs[id.0 as usize];
+                let crossing = self.crossing(target)?;
                 let mut built: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+                // An indirect return is a hidden first argument: the address
+                // to write the result at, which is `dest`'s own place when
+                // there is one, or scratch storage a discarded result still
+                // needs — `build_call` requires *some* address.
+                let ret_indirect = matches!(crossing.ret, Class::Indirect);
+                if ret_indirect {
+                    let ptr = match dest {
+                        Some(place) => self.place(fx, f, place)?.0,
+                        None => self
+                            .builder
+                            .build_alloca(self.llty(&target.ret)?, "")
+                            .map_err(failed)?,
+                    };
+                    built.push(ptr.into());
+                }
                 for (i, a) in args.iter().enumerate() {
                     // Past the fixed parameters of a `#c_vararg` callee there is
                     // no parameter to take a type from, so the argument's own is
@@ -1762,13 +2596,34 @@ impl<'ctx> Cx<'ctx, '_> {
                             )));
                         }
                     };
-                    built.push(self.operand(fx, f, a, &want)?.into());
+                    // A `#c_vararg` tail argument crosses uncoerced — C's own
+                    // variadic promotion already decided its shape, and this
+                    // backend's aggregate classification is only for the
+                    // fixed parameters `signature` declared.
+                    match crossing.args.get(i) {
+                        Some(class) => {
+                            for v in self.abi_arg(fx, f, a, &want, class, crossing.abi)? {
+                                built.push(v.into());
+                            }
+                        }
+                        // Past the fixed parameters of a `#c_vararg` callee
+                        // there is no class either: C's own variadic promotion
+                        // already decided the argument's shape.
+                        None => built.push(self.operand(fx, f, a, &want)?.into()),
+                    }
                 }
                 let site = self.builder.build_call(value, &built, "").map_err(failed)?;
                 // The callee's convention, read off the declaration: a call site
                 // LLVM leaves at the default would pass its arguments one way
                 // and the callee would read them another.
                 site.set_call_convention(value.get_call_conventions());
+                self.apply_c_abi_attrs(target, |loc, attr| site.add_attribute(loc, attr))?;
+                if ret_indirect {
+                    // Already written straight into `dest` (or discarded) by
+                    // the hidden pointer above; the call's own LLVM return is
+                    // `void`.
+                    return Ok(());
+                }
                 self.take(fx, f, dest, basic(site))
             }
             Callee::Indirect(operand) => {
@@ -2054,8 +2909,48 @@ impl<'ctx> Cx<'ctx, '_> {
                     .map_err(failed)?;
             }
             TermKind::Return(Some(o)) => {
-                let v = self.operand(fx, f, o, &f.ret)?;
-                self.builder.build_return(Some(&v)).map_err(failed)?;
+                // `f.extern_abi.is_some()` here is an **exported** `extern("c")
+                // func` with a body — the direction the ABI bug report calls
+                // out as wrong "the same way" as a call to one.
+                {
+                    let ret = self.crossing(f)?.ret;
+                    match &ret {
+                        Class::Direct => {
+                            let v = self.operand(fx, f, o, &f.ret)?;
+                            self.builder.build_return(Some(&v)).map_err(failed)?;
+                        }
+                        // One or two chunks, but a function returns exactly
+                        // one value — `c_abi_ret_ty` is a single int for one
+                        // chunk, an anonymous struct of both for two, and a
+                        // load straight into that type is bit-identical to
+                        // loading each chunk separately.
+                        Class::Coerced(_) => {
+                            let addr = self.aggregate_addr(fx, f, o, &f.ret)?;
+                            let t = self.abi_ret_ty(&f.ret, &ret)?;
+                            let v = self.coerced_load(
+                                addr,
+                                self.size_of(&f.ret),
+                                self.align_of(&f.ret),
+                                t,
+                            )?;
+                            self.builder.build_return(Some(&v)).map_err(failed)?;
+                        }
+                        Class::Indirect => {
+                            let addr = self.aggregate_addr(fx, f, o, &f.ret)?;
+                            let sret = fx
+                                .value
+                                .get_nth_param(0)
+                                .ok_or_else(|| failed(format!("{}: no `sret` parameter", f.name)))?
+                                .into_pointer_value();
+                            let v = self
+                                .builder
+                                .build_load(self.llty(&f.ret)?, addr, "")
+                                .map_err(failed)?;
+                            self.builder.build_store(sret, v).map_err(failed)?;
+                            self.builder.build_return(None).map_err(failed)?;
+                        }
+                    }
+                }
             }
             TermKind::Return(None) => {
                 self.builder.build_return(None).map_err(failed)?;

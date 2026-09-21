@@ -66,7 +66,7 @@ use crate::ir::{
 };
 use crate::parser::ast::{BinOp, Lit, UnOp};
 use crate::sema::builtins::BuiltinOp;
-use crate::sema::def::{DefId, DefTable, Directive, DirectiveArg, LangItems};
+use crate::sema::def::{DefId, DefKind, DefTable, Directive, DirectiveArg, LangItems};
 use crate::sema::ty::{CallConv, Ty};
 
 use super::{
@@ -2502,6 +2502,17 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         if let Some(v) = self.cx.meta.get::<ConstValue>(at) {
             let ty = self.cx.ty_of(at);
             return self.const_operand(&v, &ty, None);
+        }
+        // A unit variant named bare (`Key.LEFT`, no call) resolves to its
+        // `DefId` like any other name (`lower_name`'s `global_or_local`), not
+        // through `VariantLit` — that path is only taken when the source wrote
+        // arguments. Build it the same way a `VariantLit` with no args would.
+        if self.cx.defs.get(def).kind == DefKind::Variant {
+            let ty = self.cx.ty_of(at);
+            let span = self.cx.meta.span(at);
+            let name = self.cx.defs.get(def).name.clone();
+            let rv = self.lower_variant(&name, &[], &ty);
+            return self.into_temp(rv, ty, span);
         }
         if let Some(g) = self.cx.linked.global(def) {
             // A `#static` is a **place**: the region exists for the whole run

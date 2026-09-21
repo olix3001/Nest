@@ -37,7 +37,20 @@ fn library_ir(src: &str) -> String {
     ir_with(src, OptLevel::O0, true)
 }
 
+/// [`ir`], for a target other than the host. What it is for is a convention
+/// this machine cannot *run* — reading the IR is a weaker test than linking
+/// against a C shim, but for the other architecture it is the only one
+/// available, so the expectations are written as the exact signatures a C
+/// compiler emits for the same declarations.
+fn ir_for(triple: &str, src: &str) -> String {
+    ir_in(src, OptLevel::O0, false, Some(triple))
+}
+
 fn ir_with(src: &str, level: OptLevel, library: bool) -> String {
+    ir_in(src, level, library, None)
+}
+
+fn ir_in(src: &str, level: OptLevel, library: bool, triple: Option<&str>) -> String {
     let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
     session.options.library = library;
     let file = session.load_entry("main").expect("entry loads");
@@ -60,7 +73,7 @@ fn ir_with(src: &str, level: OptLevel, library: bool) -> String {
     );
 
     let mut backend = LlvmBackend::default();
-    backend.target_info(None).expect("the host resolves");
+    backend.target_info(triple).expect("the target resolves");
     let mut options = session.options.clone();
     options.opt_level = level;
     backend.configure(&options);
@@ -1409,7 +1422,7 @@ fn run_on_host(src: &str) -> std::process::Output {
 
 /// [`run_on_host`], as a **test binary**: the `@test` functions are what runs.
 fn run_tests_on_host(src: &str) -> std::process::Output {
-    run_on_host_in_mode(src, &[], &[], true, None)
+    run_on_host_in_mode(src, &[], &[], true, None, &[])
 }
 
 /// [`run_on_host`], with the program's own stack limited to `bytes`.
@@ -1423,7 +1436,7 @@ fn run_tests_on_host(src: &str) -> std::process::Output {
 /// makes the depth that overflows a property of the test rather than of the
 /// machine.
 fn run_on_host_with_stack(src: &str, bytes: u64) -> std::process::Output {
-    run_on_host_in_mode(src, &[], &[], false, Some(bytes))
+    run_on_host_in_mode(src, &[], &[], false, Some(bytes), &[])
 }
 
 /// [`run_on_host`], with `-C` settings applied on top of the host's.
@@ -1437,17 +1450,45 @@ fn run_on_host_in(
     settings: &[(&str, &str)],
     env: &[(&str, &str)],
 ) -> std::process::Output {
-    run_on_host_in_mode(src, settings, env, false, None)
+    run_on_host_in_mode(src, settings, env, false, None, &[])
 }
 
-/// [`run_on_host_in`], saying whether this is a `--test` build and how much
-/// stack the program is allowed.
+/// [`run_on_host`], linked against a small C shim compiled from `c_src` —
+/// what proves an `extern("c")` call crosses at the real machine convention
+/// rather than merely a self-consistent one (§ the ABI handoff).
+fn run_on_host_with_c_shim(src: &str, c_src: &str) -> std::process::Output {
+    let shim = compile_c_shim(c_src);
+    run_on_host_in_mode(src, &[], &[], false, None, &[shim])
+}
+
+/// Compile a C source file to an object with the host's `cc`, for
+/// [`run_on_host_with_c_shim`].
+fn compile_c_shim(c_src: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join("nestc-host-runs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stem = format!("cshim-{:x}.{}", hash(c_src), unique());
+    let c_path = dir.join(format!("{stem}.c"));
+    let o_path = dir.join(format!("{stem}.o"));
+    std::fs::write(&c_path, c_src).unwrap();
+    let status = std::process::Command::new("cc")
+        .args(["-c", "-O0", "-o"])
+        .arg(&o_path)
+        .arg(&c_path)
+        .status()
+        .expect("cc runs");
+    assert!(status.success(), "cc failed to compile the shim");
+    o_path
+}
+
+/// [`run_on_host_in`], saying whether this is a `--test` build, how much
+/// stack the program is allowed, and any extra objects (a C shim) to link in.
 fn run_on_host_in_mode(
     src: &str,
     settings: &[(&str, &str)],
     env: &[(&str, &str)],
     test: bool,
     stack: Option<u64>,
+    extra_objects: &[PathBuf],
 ) -> std::process::Output {
     let mut probe = LlvmBackend::default();
     let info = probe.target_info(None).expect("the host resolves");
@@ -1493,8 +1534,10 @@ fn run_on_host_in_mode(
     backend
         .emit_unit(program.unit(), OutputKind::Object, &object)
         .unwrap_or_else(|e| panic!("emitting:\n{e}"));
+    let mut objects = vec![object];
+    objects.extend(extra_objects.iter().cloned());
     crate::codegen::link::link(
-        &[object],
+        &objects,
         &exe,
         &crate::codegen::link::LinkOptions::default(),
     )
@@ -2471,4 +2514,359 @@ main :: func () -> i32 {
         "8 64 4 32\n",
         "{ran:?}"
     );
+}
+
+// ===< The C ABI >===
+//
+// Reading the emitted IR proves nothing here — a coercion this backend gets
+// wrong and a real C caller gets wrong the same way would still agree with
+// each other. These link against a small C shim built with the host's own
+// `cc` and run, which is the only thing that proves the machine convention
+// (§ the ABI handoff): a 4-byte and a 16-byte aggregate, each coerced into
+// registers; a 24-byte one, passed and returned indirectly; and a small
+// aggregate returned by value, the other direction the same coercion runs.
+const C_ABI_SHIM: &str = r#"
+#include <stdint.h>
+
+typedef struct { uint8_t r, g, b, a; } Color4;
+typedef struct { int64_t a, b; } Pair16;
+typedef struct { int64_t a, b, c; } Big24;
+
+int32_t sum_color4(Color4 c) { return (int32_t)c.r + c.g + c.b + c.a; }
+Color4 make_color4(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    Color4 c = { r, g, b, a };
+    return c;
+}
+int64_t sum_pair16(Pair16 p) { return p.a + p.b; }
+int64_t sum_big24(Big24 x) { return x.a + x.b + x.c; }
+Big24 make_big24(void) {
+    Big24 b = { 10, 20, 30 };
+    return b;
+}
+
+// Past the integer register file: an aggregate that needs two registers when
+// only one is left goes on the stack *whole*, never half in the last register.
+int64_t pair16_after7(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e,
+                      int64_t f, int64_t g, Pair16 p) {
+    return a + b + c + d + e + f + g + p.a + p.b;
+}
+
+// Two small aggregates past the register file, where the size of the stack
+// slot each one takes is the whole question.
+int32_t color4_pair_after8(int64_t a, int64_t b, int64_t c, int64_t d,
+                           int64_t e, int64_t f, int64_t g, int64_t h,
+                           Color4 x, Color4 y) {
+    return (int32_t)x.r * 1000 + y.r;
+}
+
+// An indirectly passed argument is the callee's own copy: a write through it
+// must not reach the caller's value.
+int64_t bump_big24(Big24 x) {
+    x.a += 100;
+    return x.a;
+}
+"#;
+
+#[test]
+fn an_extern_c_aggregate_crosses_at_the_real_machine_convention() {
+    let ran = run_on_host_with_c_shim(
+        r#"
+Color4 :: #repr("c") struct { r: u8, g: u8, b: u8, a: u8 }
+Pair16 :: #repr("c") struct { a: i64, b: i64 }
+Big24 :: #repr("c") struct { a: i64, b: i64, c: i64 }
+
+sum_color4 :: extern("c") func (c: Color4) -> i32
+make_color4 :: extern("c") func (r: u8, g: u8, b: u8, a: u8) -> Color4
+sum_pair16 :: extern("c") func (p: Pair16) -> i64
+sum_big24 :: extern("c") func (x: Big24) -> i64
+make_big24 :: extern("c") func () -> Big24
+
+@public main :: func () -> i32 {
+    const c := Color4 { r: 1, g: 2, b: 3, a: 4 }
+    if sum_color4(c) != 10 { return 1 }
+    const mc := make_color4(5, 6, 7, 8)
+    if mc.r != 5 { return 2 }
+    if mc.g != 6 { return 3 }
+    if mc.b != 7 { return 4 }
+    if mc.a != 8 { return 5 }
+    const p := Pair16 { a: 100, b: 23 }
+    if sum_pair16(p) != 123 { return 6 }
+    const big := Big24 { a: 1, b: 2, c: 3 }
+    if sum_big24(big) != 6 { return 7 }
+    const mb := make_big24()
+    if mb.a != 10 { return 8 }
+    if mb.b != 20 { return 9 }
+    if mb.c != 30 { return 10 }
+    return 0
+}
+"#,
+        C_ABI_SHIM,
+    );
+    assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+}
+
+#[test]
+fn an_extern_c_aggregate_past_the_register_file_goes_on_the_stack_whole() {
+    let ran = run_on_host_with_c_shim(
+        r#"
+Pair16 :: #repr("c") struct { a: i64, b: i64 }
+
+pair16_after7 :: extern("c") func (
+    a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, p: Pair16,
+) -> i64
+
+@public main :: func () -> i32 {
+    const p := Pair16 { a: 700, b: 20 }
+    if pair16_after7(1, 2, 3, 4, 5, 6, 7, p) != 748 { return 1 }
+    return 0
+}
+"#,
+        C_ABI_SHIM,
+    );
+    assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+}
+
+#[test]
+fn an_extern_c_aggregate_on_the_stack_takes_the_slot_the_abi_says() {
+    let ran = run_on_host_with_c_shim(
+        r#"
+Color4 :: #repr("c") struct { r: u8, g: u8, b: u8, a: u8 }
+
+color4_pair_after8 :: extern("c") func (
+    a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64,
+    x: Color4, y: Color4,
+) -> i32
+
+@public main :: func () -> i32 {
+    const x := Color4 { r: 11, g: 0, b: 0, a: 0 }
+    const y := Color4 { r: 22, g: 0, b: 0, a: 0 }
+    if color4_pair_after8(1, 2, 3, 4, 5, 6, 7, 8, x, y) != 11022 { return 1 }
+    return 0
+}
+"#,
+        C_ABI_SHIM,
+    );
+    assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+}
+
+#[test]
+fn an_indirect_extern_c_argument_is_the_callees_own_copy() {
+    let ran = run_on_host_with_c_shim(
+        r#"
+Big24 :: #repr("c") struct { a: i64, b: i64, c: i64 }
+
+bump_big24 :: extern("c") func (x: Big24) -> i64
+
+@public main :: func () -> i32 {
+    const big := Big24 { a: 1, b: 2, c: 3 }
+    if bump_big24(big) != 101 { return 1 }
+    // The callee wrote through the pointer it was handed. If that pointer was
+    // this value rather than a copy of it, `big.a` is 101 here.
+    if big.a != 1 { return 2 }
+    return 0
+}
+"#,
+        C_ABI_SHIM,
+    );
+    assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+}
+
+#[test]
+fn a_unit_variant_named_bare_is_its_value() {
+    let ran = run_on_host(
+        r#"
+Key :: enum { LEFT = 200, RIGHT = 201 }
+
+code :: func (k: Key) -> i32 { return k.match { .LEFT => 200, .RIGHT => 201 } }
+
+@public main :: func () -> i32 {
+    // Written bare — not the `.LEFT` shorthand, and not a call — which is the
+    // path that used to reach codegen as `undef`.
+    const k := Key.LEFT
+    if code(k) != 200 { return 1 }
+    if code(Key.RIGHT) != 201 { return 2 }
+    let m: Key := Key.LEFT
+    if code(m) != 200 { return 3 }
+    return 0
+}
+"#,
+    );
+    assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+}
+
+// A second shim, for the float classification: an aggregate whose eightbytes
+// belong in the floating-point file rather than the integer one. The two
+// conventions disagree about almost every case here — System V splits a
+// 12-byte float struct into `<2 x float>, float` while AAPCS64 keeps a
+// homogeneous one whole in `v0..v3` — so only running it proves either.
+const C_FLOAT_ABI_SHIM: &str = r#"
+#include <stdint.h>
+
+typedef struct { float x, y; } F2;
+typedef struct { float x, y, z; } F3;
+typedef struct { double a, b, c; } D3;
+typedef struct { float a; int32_t b; } FI;
+typedef struct { double a; int64_t b; } DI;
+typedef struct { int64_t a; double b; } ID;
+
+float sum_f2(F2 v) { return v.x + v.y; }
+F2 make_f2(float x, float y) { F2 v = { x, y }; return v; }
+float sum_f3(F3 v) { return v.x + v.y + v.z; }
+F3 make_f3(void) { F3 v = { 1.5f, 2.5f, 3.5f }; return v; }
+// Three doubles: 24 bytes, past System V's limit and so on the stack, but a
+// homogeneous aggregate on AArch64 and so still in registers.
+double sum_d3(D3 v) { return v.a + v.b + v.c; }
+D3 make_d3(void) { D3 v = { 10.5, 20.25, 30.125 }; return v; }
+// Mixed eightbytes, in both orders: one integer register and one SSE, and
+// which is which decides where each value is read from.
+double sum_fi(FI v) { return (double)v.a + v.b; }
+double sum_di(DI v) { return v.a + (double)v.b; }
+double sum_id(ID v) { return (double)v.a + v.b; }
+DI make_di(void) { DI v = { 1.25, 7 }; return v; }
+// Past the floating-point registers, where an aggregate that needs more than
+// are left goes to memory whole.
+float f2_after7(double a, double b, double c, double d, double e, double f,
+                double g, F2 v) {
+    return (float)(a + b + c + d + e + f + g) + v.x + v.y;
+}
+"#;
+
+#[test]
+fn an_extern_c_float_aggregate_crosses_at_the_real_machine_convention() {
+    let ran = run_on_host_with_c_shim(
+        r#"
+F2 :: #repr("c") struct { x: f32, y: f32 }
+F3 :: #repr("c") struct { x: f32, y: f32, z: f32 }
+D3 :: #repr("c") struct { a: f64, b: f64, c: f64 }
+FI :: #repr("c") struct { a: f32, b: i32 }
+DI :: #repr("c") struct { a: f64, b: i64 }
+ID :: #repr("c") struct { a: i64, b: f64 }
+
+sum_f2 :: extern("c") func (v: F2) -> f32
+make_f2 :: extern("c") func (x: f32, y: f32) -> F2
+sum_f3 :: extern("c") func (v: F3) -> f32
+make_f3 :: extern("c") func () -> F3
+sum_d3 :: extern("c") func (v: D3) -> f64
+make_d3 :: extern("c") func () -> D3
+sum_fi :: extern("c") func (v: FI) -> f64
+sum_di :: extern("c") func (v: DI) -> f64
+sum_id :: extern("c") func (v: ID) -> f64
+make_di :: extern("c") func () -> DI
+f2_after7 :: extern("c") func (
+    a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, v: F2,
+) -> f32
+
+@public main :: func () -> i32 {
+    const a := F2 { x: 1.5, y: 2.25 }
+    if sum_f2(a) != 3.75 { return 1 }
+    const ma := make_f2(4.5, 0.25)
+    if ma.x != 4.5 { return 2 }
+    if ma.y != 0.25 { return 3 }
+
+    const b := F3 { x: 1.5, y: 2.5, z: 3.5 }
+    if sum_f3(b) != 7.5 { return 4 }
+    const mb := make_f3()
+    if mb.x != 1.5 { return 5 }
+    if mb.y != 2.5 { return 6 }
+    if mb.z != 3.5 { return 7 }
+
+    const c := D3 { a: 1.5, b: 2.25, c: 4.125 }
+    if sum_d3(c) != 7.875 { return 8 }
+    const mc := make_d3()
+    if mc.a != 10.5 { return 9 }
+    if mc.b != 20.25 { return 10 }
+    if mc.c != 30.125 { return 11 }
+
+    if sum_fi(FI { a: 1.5, b: 2 }) != 3.5 { return 12 }
+    if sum_di(DI { a: 1.5, b: 2 }) != 3.5 { return 13 }
+    if sum_id(ID { a: 2, b: 1.5 }) != 3.5 { return 14 }
+    const md := make_di()
+    if md.a != 1.25 { return 15 }
+    if md.b != 7 { return 16 }
+
+    if f2_after7(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, F2 { x: 0.5, y: 0.25 }) != 28.75 { return 17 }
+    return 0
+}
+"#,
+        C_FLOAT_ABI_SHIM,
+    );
+    assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+}
+
+/// **The System V x86-64 signatures are the ones a C compiler emits.**
+///
+/// This machine cannot run them, so the test is the declarations themselves,
+/// each taken from `clang -S -emit-llvm` for the same C. They are what the
+/// eightbyte classification comes to: the integer split, the SSE split, an
+/// eightbyte of each, the `<2 x float>` that two floats in one eightbyte
+/// become, `byval` past sixteen bytes, `sret` coming back, and the
+/// demotion to memory of an aggregate the registers have no room left for.
+#[test]
+fn the_system_v_signatures_are_the_ones_a_c_compiler_emits() {
+    let text = ir_for(
+        "x86_64-unknown-linux-gnu",
+        r#"
+P16 :: #repr("c") struct { a: i64, b: i64 }
+I12 :: #repr("c") struct { a: i64, b: i32 }
+B24 :: #repr("c") struct { a: i64, b: i64, c: i64 }
+F2 :: #repr("c") struct { x: f32, y: f32 }
+F3 :: #repr("c") struct { x: f32, y: f32, z: f32 }
+D2 :: #repr("c") struct { a: f64, b: f64 }
+DI :: #repr("c") struct { a: f64, b: i64 }
+ID :: #repr("c") struct { a: i64, b: f64 }
+
+p16 :: extern("c") func (v: P16) -> i32
+i12 :: extern("c") func (v: I12) -> i32
+b24 :: extern("c") func (v: B24) -> i32
+f2 :: extern("c") func (v: F2) -> i32
+f3 :: extern("c") func (v: F3) -> i32
+d2 :: extern("c") func (v: D2) -> i32
+di :: extern("c") func (v: DI) -> i32
+id :: extern("c") func (v: ID) -> i32
+ret_i12 :: extern("c") func () -> I12
+ret_b24 :: extern("c") func () -> B24
+ret_f3 :: extern("c") func () -> F3
+crowded :: extern("c") func (a: i64, b: i64, c: i64, d: i64, e: i64, v: P16) -> i32
+
+@public main :: func () -> i32 {
+    const z16 := P16 { a: 0, b: 0 }
+    const zf2 := F2 { x: 0.0, y: 0.0 }
+    return p16(z16)
+        + i12(I12 { a: 0, b: 0 })
+        + b24(B24 { a: 0, b: 0, c: 0 })
+        + f2(zf2)
+        + f3(F3 { x: 0.0, y: 0.0, z: 0.0 })
+        + d2(D2 { a: 0.0, b: 0.0 })
+        + di(DI { a: 0.0, b: 0 })
+        + id(ID { a: 0, b: 0.0 })
+        + ret_i12().b
+        + cast.<i32>(ret_b24().a)
+        + cast.<i32>(ret_f3().x)
+        + crowded(0, 0, 0, 0, 0, z16)
+}
+"#,
+    );
+    for want in [
+        // Two integer eightbytes, then one and a narrow one.
+        "declare i32 @p16(i64, i64)",
+        "declare i32 @i12(i64, i32)",
+        // Past sixteen bytes: the stack, and the attribute that copies it.
+        "declare i32 @b24(ptr byval(%B24)",
+        // Two floats share an eightbyte and travel as one SSE register.
+        "declare i32 @f2(<2 x float>)",
+        "declare i32 @f3(<2 x float>, float)",
+        "declare i32 @d2(double, double)",
+        // One eightbyte of each, in both orders.
+        "declare i32 @di(double, i64)",
+        "declare i32 @id(i64, double)",
+        // Coming back: one value, so a pair of eightbytes is a literal struct.
+        "declare { i64, i32 } @ret_i12()",
+        "declare { <2 x float>, float } @ret_f3()",
+        "declare void @ret_b24(ptr sret(%B24)",
+        // Five integers leave one register, and a two-eightbyte aggregate
+        // needs two — so the whole thing goes to memory, never half of it.
+        "declare i32 @crowded(i64, i64, i64, i64, i64, ptr byval(%P16)",
+    ] {
+        assert!(text.contains(want), "no `{want}` in:\n{text}");
+    }
 }
