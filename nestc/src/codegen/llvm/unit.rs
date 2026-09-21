@@ -151,7 +151,10 @@ impl Shape {
     /// Whether every field touching the bytes `[lo, hi)` is a float, and at
     /// least one does — System V's SSE class for one eightbyte.
     fn all_float_in(&self, lo: u64, hi: u64) -> bool {
-        let touching = self.fields.iter().filter(|f| f.offset < hi && lo < f.offset + f.size);
+        let touching = self
+            .fields
+            .iter()
+            .filter(|f| f.offset < hi && lo < f.offset + f.size);
         let mut any = false;
         for f in touching {
             if !f.float {
@@ -179,7 +182,10 @@ impl Shape {
 
     /// The width of a float field starting exactly at `offset`.
     fn float_at(&self, offset: u64) -> Option<u64> {
-        self.fields.iter().find(|f| f.offset == offset && f.float).map(|f| f.size)
+        self.fields
+            .iter()
+            .find(|f| f.offset == offset && f.float)
+            .map(|f| f.size)
     }
 }
 
@@ -439,7 +445,9 @@ impl Aapcs64 {
             // A return is narrower than an argument: up to eight bytes of it
             // is an integer of exactly the aggregate's width, where an
             // argument rounds up to a whole register.
-            1..=8 if ret => Class::Coerced(Coercion::Chunks(vec![Chunk::Int((shape.size * 8) as u32)])),
+            1..=8 if ret => {
+                Class::Coerced(Coercion::Chunks(vec![Chunk::Int((shape.size * 8) as u32)]))
+            }
             1..=8 => Class::Coerced(Coercion::Words(1)),
             9..=16 => Class::Coerced(Coercion::Words(2)),
             _ => Class::Indirect,
@@ -815,8 +823,10 @@ impl<'ctx> Cx<'ctx, '_> {
         let name = abi.name();
         let blame = |e| within(&format!("crossing `{name}`"), e);
         let ret = abi.ret(&self.shape_of(&f.ret)).map_err(blame)?;
-        let shapes: Vec<Shape> =
-            f.locals[..f.params].iter().map(|l| self.shape_of(&l.ty)).collect();
+        let shapes: Vec<Shape> = f.locals[..f.params]
+            .iter()
+            .map(|l| self.shape_of(&l.ty))
+            .collect();
         let args = abi.args(&ret, &shapes).map_err(blame)?;
         Ok(Crossing { abi, ret, args })
     }
@@ -865,9 +875,10 @@ impl<'ctx> Cx<'ctx, '_> {
         Ok(match class {
             Class::Direct => vec![self.llty(ty)?],
             Class::Indirect => vec![self.ptr().into()],
-            Class::Coerced(Coercion::Chunks(chunks)) => {
-                chunks.iter().map(|&c| self.chunk_ty(c)).collect::<Result<_>>()?
-            }
+            Class::Coerced(Coercion::Chunks(chunks)) => chunks
+                .iter()
+                .map(|&c| self.chunk_ty(c))
+                .collect::<Result<_>>()?,
             Class::Coerced(Coercion::Words(n)) => vec![self.words_type(*n)],
             // Always an array, even for one float: `[1 x float]` is what a C
             // compiler declares a one-member HFA as.
@@ -1047,7 +1058,10 @@ impl<'ctx> Cx<'ctx, '_> {
             // live local (§ AAPCS64: the argument is a copy).
             Class::Indirect if abi.indirect_by_val() => Ok(vec![addr.into()]),
             Class::Indirect => {
-                let copy = self.builder.build_alloca(self.llty(ty)?, "").map_err(failed)?;
+                let copy = self
+                    .builder
+                    .build_alloca(self.llty(ty)?, "")
+                    .map_err(failed)?;
                 let bytes = self.word().const_int(size, false);
                 self.builder
                     .build_memcpy(copy, align, addr, align, bytes)
@@ -1070,9 +1084,10 @@ impl<'ctx> Cx<'ctx, '_> {
     ) -> Result<PointerValue<'ctx>> {
         match op {
             Operand::Copy(p) => Ok(self.place(fx, f, p)?.0),
-            Operand::Const(Constant::Undef) => {
-                self.builder.build_alloca(self.llty(ty)?, "").map_err(failed)
-            }
+            Operand::Const(Constant::Undef) => self
+                .builder
+                .build_alloca(self.llty(ty)?, "")
+                .map_err(failed),
             Operand::Const(_) => Err(failed(format!(
                 "{}: a constant of aggregate type crossing the C ABI",
                 f.name
