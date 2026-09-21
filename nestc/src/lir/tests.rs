@@ -1203,6 +1203,29 @@ f :: func (s: Shape) -> i32 { return s.match { .dot => 0, .circle(r) => r } }
     assert!(!lir.contains("discriminant"), "{lir}");
 }
 
+/// A unit variant standing where an **integer** is wanted is its discriminant
+/// (§11.5). `#repr("C")` makes the tag a C `int`, so `IsKeyDown(Key.LEFT)` passes
+/// the value the C declaration holds — not an `undef`, which is what a value the
+/// enum type was never built into used to lower to.
+#[test]
+fn a_repr_c_variant_passed_to_a_c_int_is_its_discriminant() {
+    let lir = lir_text(
+        "\
+c :: import <core/c>
+Key :: #repr(\"C\") enum { key_left = 263, key_right = 262 }
+extern(\"c\") {
+  is_key_down :: func (key: c.int) -> bool
+}
+main :: func () -> i32 {
+  if is_key_down(Key.key_left) { return 1 }
+  return 0
+}
+",
+    );
+    assert!(lir.contains("is_key_down(263)"), "{lir}");
+    assert!(!lir.contains("undef"), "{lir}");
+}
+
 /// The compiler's own failures go through `core`'s `panic`, found by its
 /// `#lang("panic")` tag — the same function a written `panic("...")` calls, so
 /// there is no `$panic` operation for a backend to invent a meaning for.

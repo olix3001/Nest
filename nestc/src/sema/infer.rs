@@ -2718,8 +2718,21 @@ impl Inferer<'_> {
                 match self.cx.shallow(recv) {
                     // Enum still unknown: retry once it is solved.
                     Ty::Var(_) => Outcome::Deferred,
-                    // Not an enum (or an error): nothing to constrain.
-                    base if !matches!(base, Ty::Nominal { .. }) => Outcome::Solved,
+                    // Already reported where it went wrong.
+                    Ty::Error => Outcome::Solved,
+                    // A variant literal names a variant of an **enum**, and the
+                    // context it was written in wants something that is not one.
+                    // `.left` in an `i32` slot has no enum to belong to, so the
+                    // program is wrong here rather than at lowering, where the
+                    // missing enum showed up as an `undef`.
+                    base if !matches!(base, Ty::Nominal { .. }) => {
+                        let msg = format!(
+                            "a variant literal needs an enum type, but this position wants `{}`",
+                            base.display(self.defs)
+                        );
+                        self.report(*origin, msg);
+                        Outcome::Solved
+                    }
                     base => {
                         let (variant, origin) = (variant.clone(), *origin);
                         let args = args.clone();

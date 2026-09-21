@@ -5518,6 +5518,24 @@ fn an_unknown_enum_variant_or_wrong_payload_is_reported() {
     );
 }
 
+/// A variant literal's enum comes from context, and an integer is not an enum:
+/// `.left` in an `i32` slot has no enum to belong to, so it is reported rather
+/// than reaching lowering, where the missing enum was an `undef`. A **qualified**
+/// variant names its enum itself, so an integer slot is fine — the value is the
+/// discriminant (§11.5).
+#[test]
+fn a_variant_literal_needs_an_enum_type() {
+    assert!(
+        first_error("E :: enum { left }\nf :: func () { const x: i32 := .left }\n")
+            .contains("needs an enum type")
+    );
+    analyze_clean(
+        "c :: import <core/c>\nE :: #repr(\"C\") enum { left = 263 }\n\
+         extern(\"c\") { down :: func (k: c.int) -> bool }\n\
+         f :: func () -> bool { return down(E.left) }\n",
+    );
+}
+
 #[test]
 fn break_and_continue_require_an_enclosing_loop() {
     assert!(first_error("f :: func () { break }\n").contains("`break` outside of a loop"));

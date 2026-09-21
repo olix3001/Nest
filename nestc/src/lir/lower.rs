@@ -2510,6 +2510,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         if self.cx.defs.get(def).kind == DefKind::Variant {
             let ty = self.cx.ty_of(at);
             let span = self.cx.meta.span(at);
+            // A variant value standing where an **integer** is wanted is its
+            // discriminant, not an enum aggregate to build. That is the shape
+            // C interop gives a `#repr("C")` enum: `IsKeyDown(Key.LEFT)` passes
+            // the tag a C `int` holds (§11.5). There is no enum type in the
+            // slot to construct into, so the tag is the whole of the value.
+            if ty.is_int() {
+                let tag = self.variant_def_tag(def);
+                return Operand::Const(Constant::Int(tag.into()));
+            }
             let name = self.cx.defs.get(def).name.clone();
             let rv = self.lower_variant(&name, &[], &ty);
             return self.into_temp(rv, ty, span);
@@ -4473,6 +4482,25 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             .iter()
             .position(|v| &v.name == name)
             .map(|i| (*def, i as u32))
+    }
+
+    /// The discriminant a **variant's own def** stores (§3.3).
+    ///
+    /// [`variant_index`](Self::variant_index) reads the tag off the enum type
+    /// the value is being used as; this reads it off the declaration, which is
+    /// what a variant value has when no enum type is in the slot — the
+    /// `#repr("C")` enum passed to a C `int` (§11.5).
+    fn variant_def_tag(&self, def: DefId) -> i128 {
+        let Some(enum_def) = self.cx.defs.get(def).parent else {
+            return 0;
+        };
+        let Some(t) = self.cx.linked.ty(enum_def) else {
+            return 0;
+        };
+        let TypeDefKind::Enum { variants } = &t.kind else {
+            return 0;
+        };
+        variants.iter().find(|v| v.def == def).map_or(0, |v| v.tag)
     }
 
     // ===< Control flow >===
