@@ -37,6 +37,17 @@
 // `new.<T>()` yields one zeroed, GC-managed `T`.
 @public new :: #intrinsic("new") func <T> () -> *mut T
 
+// `value`, moved onto the collected heap: `new`, and the value written in.
+//
+// It is what a value whose type has no name is put on the heap with — a
+// closure, which has to be somewhere that outlives the frame before it can be
+// stored as a `*dyn Func(...)` (§5.5). `new.<T>()` needs the `T` written.
+@public boxed :: func <T> (value: T) -> *mut T {
+  const p: *mut T := new.<T>()
+  p.* = value
+  return p
+}
+
 // `make.<[]T>(len)` yields a zeroed, GC-managed slice of `len` elements.
 //
 // This is one of the two intrinsics whose result the signature cannot state: the

@@ -3041,3 +3041,22 @@ fn a_function_returns_a_closure_as_impl_func() {
         assert_eq!(code, 6 + 11 + 7 + 3);
     }
 }
+
+/// Closures of different types stored as one `*dyn Func(i32) -> i32` and
+/// called through its vtable — directly, out of an array, and handed on to a
+/// generic `impl Func` parameter.
+#[test]
+fn a_closure_is_stored_as_a_dyn_func() {
+    let src = "{ boxed } :: import <core/mem>\n\
+               apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }\n\
+               main :: func () -> i32 {\n\
+                   let n := 10\n\
+                   const a: *dyn Func(i32) -> i32 := boxed({ x in x + n })\n\
+                   const b: *dyn Func(i32) -> i32 := boxed({ x in x * 3 })\n\
+                   const fs: [2]*dyn Func(i32) -> i32 := .{ a, b }\n\
+                   return fs[0](1) + fs[1](2) + apply(a, 5)\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 11 + 6 + 15);
+    }
+}

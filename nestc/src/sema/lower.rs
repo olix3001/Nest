@@ -850,7 +850,7 @@ impl Lowerer<'_> {
             let value = self.lower_expr_inner(node);
             let ty = Ty::Ptr {
                 mutable: matches!(self.ty(node), Ty::Ptr { mutable: true, .. }),
-                inner: Box::new(Ty::Dyn(dc.trait_def)),
+                inner: Box::new(dc.object),
             };
             return self.expr(
                 node,
@@ -2622,7 +2622,7 @@ impl Lowerer<'_> {
         let Ty::Ptr { inner, .. } = to else {
             return None;
         };
-        if !matches!(**inner, Ty::Dyn(_)) {
+        if !matches!(**inner, Ty::Dyn { .. }) {
             return None;
         }
         let Ty::Ptr {

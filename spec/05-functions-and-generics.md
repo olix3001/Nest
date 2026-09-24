@@ -426,13 +426,18 @@ function pointer (`*func(...)`, §3.5) have in common is the prelude trait
 `Func`:
 
 ```
-Func :: #lang("func") trait <Args> { Output :: type }
+Func :: #lang("func") trait {
+  Args :: type
+  Output :: type
+}
 ```
 
-`Func(A, B) -> R` is how a bound on it is written, and it means
-`Func.<(A, B), Output = R>` — the arguments as one tuple, `()` for none, and a
-missing `-> R` is `-> void`. Nothing implements `Func` but the compiler: a
-closure implements it with its own signature, and so does a `*func`.
+`Func(A, B) -> R` is how a bound on it is written, and it is sugar for
+`Func.<Args = (A, B), Output = R>` — the arguments as one tuple, `()` for none,
+and a missing `-> R` is `-> void`. Nothing implements `Func` but the compiler:
+a closure implements it with its own signature, and so does a `*func`. The
+trait declares no method; calling a value whose type implements it is a call,
+and the compiler knows what code that reaches.
 
 A value whose type implements `Func` is called like a function. Taking a
 closure is taking something that implements `Func`, and each closure passed
@@ -446,6 +451,24 @@ apply({ x in x + n }, 3)      // a closure
 ```
 
 A closure is an ordinary value: store it, pass it, call it later.
+
+To keep closures of **different** types together, put each on the heap and
+hold it as a trait object. `*dyn Func(i32) -> i32` is, like every trait object,
+the data pointer and the vtable (§3.4); the vtable's one entry is the closure's
+body. `core/mem`'s `boxed(value)` puts a value whose type has no name on the
+heap:
+
+```
+{ boxed } :: import <core/mem>
+
+const a: *dyn Func(i32) -> i32 := boxed({ x in x + n })
+const b: *dyn Func(i32) -> i32 := boxed({ x in x * 3 })
+const fs: [2]*dyn Func(i32) -> i32 := .{ a, b }
+fs[1](2)                               // 6
+```
+
+Only a closure becomes a `*dyn Func`; a function pointer is already one word
+and is passed as it is.
 
 ## 5.6 Entry point
 

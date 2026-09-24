@@ -72,7 +72,7 @@ impl Cx<'_> {
             ty = *inner;
         }
         match ty {
-            Ty::Dyn(def) => Some(self.defs.resolve_alias(def)),
+            Ty::Dyn { def, .. } => Some(self.defs.resolve_alias(def)),
             _ => None,
         }
     }

@@ -418,8 +418,18 @@ pub enum Ty {
         ret: Box<Ty>,
         c: bool,
     },
-    /// `dyn Trait` — a trait object (the trait's [`DefId`]).
-    Dyn(DefId),
+    /// `dyn Trait` — a trait object.
+    ///
+    /// `assoc` is what the type pinned the trait's associated types to, sorted
+    /// by name: a trait object has erased the type that would have answered
+    /// them, so the object's type is where they live. `dyn Func(i32) -> i32`
+    /// pins `Args` and `Output` — the call it takes, and what that call answers
+    /// — and `dyn Display` pins nothing. At run time a trait object is its data
+    /// and its vtable, and nothing else.
+    Dyn {
+        def: DefId,
+        assoc: Vec<(Symbol, Ty)>,
+    },
     /// `opaque` — a type with no size and no values, reachable only behind a
     /// pointer (§3.1, §11).
     ///
@@ -489,6 +499,9 @@ impl Ty {
                 inner.mentions_error()
             }
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_error),
+            Ty::Dyn { assoc, .. } => {
+                assoc.iter().any(|(_, t)| (Ty::mentions_error)(t))
+            }
             Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_error()),
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_error),
             Ty::Func { params, ret, .. } => {
@@ -513,6 +526,9 @@ impl Ty {
             Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } => inner.mentions_var(),
             Ty::Array { len, inner, .. } => len.mentions_var() || inner.mentions_var(),
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_var),
+            Ty::Dyn { assoc, .. } => {
+                assoc.iter().any(|(_, t)| (Ty::mentions_var)(t))
+            }
             Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_var()),
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_var),
             Ty::Func { params, ret, .. } => params.iter().any(Ty::mentions_var) || ret.mentions_var(),
@@ -666,7 +682,16 @@ impl Ty {
                 let abi = if *c { "extern(\"c\") " } else { "" };
                 format!("*{abi}func({ps}) -> {}", ret.display(defs))
             }
-            Ty::Dyn(def) => format!("dyn {}", defs.canonical_string(*def)),
+            Ty::Dyn { def, assoc } if assoc.is_empty() => {
+                format!("dyn {}", defs.canonical_string(*def))
+            }
+            Ty::Dyn { def, assoc } => {
+                let parts: Vec<String> = assoc
+                    .iter()
+                    .map(|(n, t)| format!("{n} = {}", t.display(defs)))
+                    .collect();
+                format!("dyn {}.<{}>", defs.canonical_string(*def), parts.join(", "))
+            }
             Ty::Error => "<error>".into(),
         }
     }
@@ -926,6 +951,10 @@ impl InferCtxt {
                 inner: Box::new(self.name_literals(&inner)),
             },
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.name_literals(e)).collect()),
+            Ty::Dyn { def, assoc } => Ty::Dyn {
+                def,
+                assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| self.name_literals(e))(t))).collect(),
+            },
             Ty::Struct(fields) => Ty::Struct(
                 fields
                     .iter()
@@ -1181,6 +1210,10 @@ impl InferCtxt {
                 width: self.shallow_const(&width),
             },
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.resolve(e)).collect()),
+            Ty::Dyn { def, assoc } => Ty::Dyn {
+                def,
+                assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| self.resolve(e))(t))).collect(),
+            },
             // Already sorted — resolving a field's type cannot change its name,
             // so this rebuilds the variant directly rather than through
             // `anon_struct` and its sort.
@@ -1363,7 +1396,24 @@ impl InferCtxt {
                 }
                 Ok(())
             }
-            (Ty::Dyn(d1), Ty::Dyn(d2)) if d1 == d2 => Ok(()),
+            (
+                Ty::Dyn {
+                    def: d1,
+                    assoc: s1,
+                },
+                Ty::Dyn {
+                    def: d2,
+                    assoc: s2,
+                },
+            ) if d1 == d2 && s1.len() == s2.len() => {
+                for ((n1, x), (n2, y)) in s1.iter().zip(s2) {
+                    if n1 != n2 {
+                        return Err((a.clone(), b.clone()));
+                    }
+                    self.unify(x, y)?;
+                }
+                Ok(())
+            }
 
             _ => Err((a, b)),
         }
@@ -1437,6 +1487,9 @@ impl InferCtxt {
                 self.occurs(v, &inner)
             }
             Ty::Tuple(elems) => elems.iter().any(|e| self.occurs(v, e)),
+            Ty::Dyn { assoc, .. } => {
+                assoc.iter().any(|(_, t)| (|e| self.occurs(v, e))(t))
+            }
             Ty::Struct(fields) => fields.iter().any(|(_, t)| self.occurs(v, t)),
             Ty::Func { params, ret, .. } => {
                 params.iter().any(|p| self.occurs(v, p)) || self.occurs(v, &ret)

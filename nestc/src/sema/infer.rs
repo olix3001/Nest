@@ -248,6 +248,9 @@ pub struct SliceCoerce {
 pub struct DynCoerce {
     /// The trait the object is typed as.
     pub trait_def: DefId,
+    /// The whole object type, `dyn Trait.<args>` — the arguments and pinned
+    /// associated types are part of what the fat pointer is typed as.
+    pub object: Ty,
     /// The pointee type being erased.
     pub concrete: Ty,
 }
@@ -1250,6 +1253,10 @@ fn rigid_self_in(ty: &Ty, trait_def: DefId, params: &[Ty]) -> Ty {
             inner: Box::new(go(inner)),
         },
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(go).collect()),
+        Ty::Dyn { def, assoc } => Ty::Dyn {
+            def: *def,
+            assoc: assoc.iter().map(|(n, t)| (n.clone(), (go)(t))).collect(),
+        },
         Ty::Struct(fields) => Ty::Struct(fields.iter().map(|(n, t)| (n.clone(), go(t))).collect()),
         Ty::Func { params: ps, ret, c } => Ty::Func {
             c: *c,
@@ -1714,7 +1721,15 @@ impl Inferer<'_> {
             }
             if let Some(d) = self.ast.meta::<DynCoerce>(node) {
                 let concrete = self.cx.finalize(&d.concrete, &mut || {});
-                self.ast.set_meta(node, DynCoerce { concrete, ..d });
+                let object = self.cx.finalize(&d.object, &mut || {});
+                self.ast.set_meta(
+                    node,
+                    DynCoerce {
+                        concrete,
+                        object,
+                        ..d
+                    },
+                );
             }
             if let Some(OpaqueTy(t)) = self.ast.meta::<OpaqueTy>(node) {
                 let t = self.cx.finalize(&t, &mut || {});
@@ -3672,30 +3687,21 @@ impl Inferer<'_> {
                 let mut params = None;
                 let mut ret = None;
                 for ob in self.cx.pending().to_vec() {
-                    match ob {
-                        Obligation::Trait {
-                            self_ty,
-                            trait_def,
-                            args,
-                            ..
-                        } if trait_def == func && self.cx.shallow(&self_ty) == v => {
-                            if let Some(a) = args.first() {
-                                params = Some(tuple_elems(&self.cx.shallow(a)));
-                            }
+                    if let Obligation::Projection {
+                        self_ty,
+                        trait_def,
+                        assoc,
+                        out,
+                        ..
+                    } = ob
+                        && trait_def == func
+                        && self.cx.shallow(&self_ty) == v
+                    {
+                        match assoc.as_str() {
+                            "Args" => params = Some(tuple_elems(&self.cx.shallow(&out))),
+                            "Output" => ret = Some(out),
+                            _ => {}
                         }
-                        Obligation::Projection {
-                            self_ty,
-                            trait_def,
-                            assoc,
-                            out,
-                            ..
-                        } if trait_def == func
-                            && assoc.as_str() == "Output"
-                            && self.cx.shallow(&self_ty) == v =>
-                        {
-                            ret = Some(out);
-                        }
-                        _ => {}
                     }
                 }
                 let params = params.filter(|p| p.len() == arity)?;
@@ -3746,21 +3752,16 @@ impl Inferer<'_> {
             return Some(Outcome::Solved);
         }
         let (params, ret) = self.func_value_sig(&s)?;
-        if let Some(want) = args.first() {
-            let have = args_tuple(&params);
-            let snapshot = self.cx.snapshot();
-            if self.cx.unify(&have, want).is_err() {
-                self.cx.rollback(snapshot);
-                self.report_no_impl(origin, self_ty, trait_def, args);
-                if let Some(out) = out {
-                    let _ = self.cx.unify(out, &Ty::Error);
-                }
-                return Some(Outcome::Failed);
-            }
+        // A projection answers `Args` or `Output` from the signature; a bare
+        // `Func` obligation is met by having one.
+        if let (Some(out), Obligation::Projection { assoc, .. }) = (out, ob) {
+            let have = match assoc.as_str() {
+                "Args" => args_tuple(&params),
+                _ => ret,
+            };
+            self.expect(origin, &have, out);
         }
-        if let Some(out) = out {
-            self.expect(origin, &ret, out);
-        }
+        let _ = args;
         Some(Outcome::Solved)
     }
 
@@ -3770,6 +3771,22 @@ impl Inferer<'_> {
     fn func_value_sig(&mut self, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
         match self.cx.shallow(ty) {
             Ty::Func { params, ret, .. } => Some((params, *ret)),
+            // A trait object's type says the call it takes.
+            Ty::Ptr { inner, .. } => match *inner {
+                Ty::Dyn { def, assoc }
+                    if Some(def) == self.lang.get("func").map(|d| self.defs.resolve_alias(d)) =>
+                {
+                    let pinned = |name: &str| {
+                        assoc
+                            .iter()
+                            .find(|(n, _)| n.as_str() == name)
+                            .map(|(_, t)| t.clone())
+                    };
+                    let params = pinned("Args").map(|a| tuple_elems(&a)).unwrap_or_default();
+                    Some((params, pinned("Output").unwrap_or(Ty::Void)))
+                }
+                _ => None,
+            },
             Ty::Nominal { def, args } if self.defs.get(def).kind == DefKind::Closure => {
                 let d = self.defs.get(def);
                 let (file, node) = (d.file?, d.node?);
@@ -3791,8 +3808,8 @@ impl Inferer<'_> {
                 if !self.param_bound_traits(def).contains(&func) {
                     return None;
                 }
-                let params = match self.bound_args(def, func).into_iter().next() {
-                    Some(a) => tuple_elems(&a),
+                let params = match self.defs.get(def).ns.members.get(&Symbol::new("Args")) {
+                    Some(&synth) => tuple_elems(&self.param_ty(synth)),
                     None => Vec::new(),
                 };
                 let ret = match self.defs.get(def).ns.members.get(&Symbol::new("Output")) {
@@ -4176,6 +4193,10 @@ impl Inferer<'_> {
             }
         }
         let cty = self.infer_expr(callee);
+        // What a value is called as is decided by its type, so a callee still
+        // waiting on an obligation — `fs[0]`, whose type is the `Index` impl's
+        // `Output` — is settled here, the way a method's receiver is.
+        let cty = self.settle(&cty);
         self.reject_named_args(
             args,
             "this call goes through a function value, which has parameter types but no parameter names",
@@ -4794,7 +4815,7 @@ impl Inferer<'_> {
             Ty::Tuple(elems) if !elems.is_empty() => Some("a tuple"),
             Ty::Void | Ty::Tuple(_) => Some("`void`"),
             Ty::Never => Some("`never`"),
-            Ty::Dyn(_) => Some("a trait object"),
+            Ty::Dyn { .. } => Some("a trait object"),
             Ty::Func { .. } => Some("a function"),
             _ => None,
         };
@@ -5512,9 +5533,9 @@ impl Inferer<'_> {
     fn dyn_method_def(&mut self, recv: &Ty, name: &str) -> Option<DefId> {
         let s = self.cx.shallow(recv);
         let trait_def = match &s {
-            Ty::Dyn(d) => *d,
+            Ty::Dyn { def: d, .. } => *d,
             Ty::Ptr { inner, .. } => match self.cx.shallow(inner) {
-                Ty::Dyn(d) => d,
+                Ty::Dyn { def: d, .. } => d,
                 _ => return None,
             },
             _ => return None,
@@ -7717,7 +7738,28 @@ impl Inferer<'_> {
                 ),
             },
             NodeKind::DynType { inner } => match self.type_head_def_in(file, inner) {
-                Some(def) => Ty::Dyn(def),
+                Some(def) => {
+                    let written = match self.asts[&file].node(inner).kind.clone() {
+                        NodeKind::TypePath { generic_args, .. } => generic_args,
+                        _ => Vec::new(),
+                    };
+                    let mut assoc = Vec::new();
+                    for a in written {
+                        match self.asts[&file].node(a).kind.clone() {
+                            NodeKind::AssocBinding { name, ty } => {
+                                assoc.push((name, self.ty_from_node_in(file, ty)));
+                            }
+                            _ => self.report_in(
+                                file,
+                                a,
+                                "a trait object pins associated types (`dyn T.<Item = i32>`) and \
+                                 takes no other arguments",
+                            ),
+                        }
+                    }
+                    assoc.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                    Ty::Dyn { def, assoc }
+                }
                 None => Ty::Error,
             },
             // An anonymous `struct { ... }` written inline (§3.8). It is not a
@@ -8852,12 +8894,51 @@ impl Inferer<'_> {
         if em && !mutable {
             return false;
         }
-        let Ty::Dyn(trait_def) = self.cx.shallow(&ei) else {
+        let object = self.cx.shallow(&ei);
+        let Ty::Dyn {
+            def: trait_def,
+            assoc: object_assoc,
+        } = object.clone()
+        else {
             return false;
         };
         let concrete = self.cx.shallow(&inner);
         if is_var(&concrete) || matches!(concrete, Ty::Error) {
             return false;
+        }
+        // `dyn Func(A) -> R` takes anything called with `A` that answers `R` —
+        // which no impl says, and the value's own signature does (§5.5).
+        if Some(trait_def) == self.lang.get("func").map(|d| self.defs.resolve_alias(d)) {
+            // A closure's own call is what fills the one slot; a function
+            // pointer has no data to point at.
+            if !matches!(&concrete, Ty::Nominal { def, .. }
+                if self.defs.get(*def).kind == DefKind::Closure)
+            {
+                return false;
+            }
+            let Some((params, ret)) = self.func_value_sig(&concrete) else {
+                return false;
+            };
+            let snapshot = self.cx.snapshot();
+            let fits = object_assoc.iter().all(|(n, t)| match n.as_str() {
+                "Args" => self.cx.unify(&args_tuple(&params), t).is_ok(),
+                "Output" => self.cx.unify(&ret, t).is_ok(),
+                _ => false,
+            });
+            if !fits {
+                self.cx.rollback(snapshot);
+                return false;
+            }
+            let object = self.cx.resolve(&object);
+            self.ast.set_meta(
+                node,
+                DynCoerce {
+                    trait_def,
+                    object,
+                    concrete,
+                },
+            );
+            return true;
         }
         // The coercion is only sound when the concrete type really implements
         // the trait; an unsatisfied bound stays a plain type mismatch.
@@ -8877,6 +8958,7 @@ impl Inferer<'_> {
             node,
             DynCoerce {
                 trait_def,
+                object,
                 concrete,
             },
         );
@@ -9223,6 +9305,10 @@ fn rebind_ty(ty: &Ty, from: &Ty, to: &Ty) -> Ty {
             inner: Box::new(rebind_ty(inner, from, to)),
         },
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| rebind_ty(e, from, to)).collect()),
+        Ty::Dyn { def, assoc } => Ty::Dyn {
+            def: *def,
+            assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| rebind_ty(e, from, to))(t))).collect(),
+        },
         Ty::Func { params, ret, c } => Ty::Func {
             c: *c,
             params: params.iter().map(|p| rebind_ty(p, from, to)).collect(),

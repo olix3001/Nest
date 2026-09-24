@@ -409,7 +409,7 @@ fn not_c(ty: &Ty, meta: &Meta, linked: &Linked, depth: u32) -> Option<&'static s
         Ty::Slice { .. } => Some("a slice, which is a pointer and a length"),
         Ty::Tuple(_) => Some("a tuple"),
         Ty::Struct(_) => Some("an anonymous struct"),
-        Ty::Dyn(_) => Some("a trait object"),
+        Ty::Dyn { .. } => Some("a trait object"),
         Ty::Array { inner, .. } => not_c(inner, meta, linked, depth + 1),
         // A `distinct` is its representation, down to the bytes (§2.4), so it is
         // C's type exactly when what it is distinct from is — which is how `str`

@@ -165,6 +165,10 @@ fn map(ty: &Ty, f: &mut impl FnMut(&Ty) -> Option<Ty>) -> Ty {
             args: args.iter().map(|a| map(a, f)).collect(),
         },
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| map(e, f)).collect()),
+        Ty::Dyn { def, assoc } => Ty::Dyn {
+            def: *def,
+            assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| map(e, f))(t))).collect(),
+        },
         Ty::Ptr { mutable, inner } => Ty::Ptr {
             mutable: *mutable,
             inner: Box::new(map(inner, f)),

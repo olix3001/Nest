@@ -10,9 +10,10 @@ File
         Bounds +
           TypePath
             Path `Func`
-            TupleType
-              TypePath
-                Path `i32`
+            AssocBinding Args =
+              TupleType
+                TypePath
+                  Path `i32`
             AssocBinding Output =
               TypePath
                 Path `i32`
@@ -30,7 +31,8 @@ File
           DynType dyn
             TypePath
               Path `Func`
-              TupleType
+              AssocBinding Args =
+                TupleType
               AssocBinding Output =
                 TupleType
       Param h:
@@ -44,11 +46,12 @@ File
         Bounds +
           TypePath
             Path `Func`
-            TupleType
-              TypePath
-                Path `i32`
-              TypePath
-                Path `i32`
+            AssocBinding Args =
+              TupleType
+                TypePath
+                  Path `i32`
+                TypePath
+                  Path `i32`
             AssocBinding Output =
               TypePath
                 Path `i32`
@@ -75,9 +78,10 @@ File
         Bounds +
           TypePath
             Path `Func`
-            TupleType
-              TypePath
-                Path `i32`
+            AssocBinding Args =
+              TupleType
+                TypePath
+                  Path `i32`
             AssocBinding Output =
               TypePath
                 Path `i32`

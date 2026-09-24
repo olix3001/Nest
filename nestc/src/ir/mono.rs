@@ -127,6 +127,10 @@ pub struct VtableSlots {
     pub concrete: Ty,
     /// One entry per trait method, in the trait's declaration order.
     pub slots: Vec<Option<DefId>>,
+    /// The object type, `dyn Trait.<args>`, when the coercion said. A `Func`
+    /// vtable's one slot has the signature its arguments state, so it is the
+    /// object type, not the trait, that says what the table looks like.
+    pub object: Option<Ty>,
 }
 
 /// Monomorphize `linked` in place: instantiate every generic function reached
@@ -696,6 +700,8 @@ impl Mono<'_> {
             // dispatch on a callee that is not a `Global` already is.
             Dispatch::Func { self_ty } => match self_ty.clone() {
                 Ty::Func { .. } => *dispatch = Dispatch::Static,
+                // Through a vtable, which the LIR lowering reads the slot of.
+                Ty::Ptr { inner, .. } if matches!(*inner, Ty::Dyn { .. }) => {}
                 // A closure's call is its own body, lifted into `call`, with the
                 // closure handed over first — by address, the way a method takes
                 // `self` (§5.5).
@@ -783,7 +789,7 @@ impl Mono<'_> {
                             _ => None,
                         })
                         .filter(|t| {
-                            !matches!(t, Ty::Dyn(_))
+                            !matches!(t, Ty::Dyn { .. })
                                 && !matches!(t, Ty::Nominal { def, .. } if *def == trait_def)
                         });
                     if let Some(self_ty) = receiver {
@@ -874,7 +880,11 @@ impl Mono<'_> {
         depth: u32,
         at: IrId,
     ) {
-        if let Some(slots) = self.vtable_slots(linked, trait_def, concrete, depth) {
+        if let Some(mut slots) = self.vtable_slots(linked, trait_def, concrete, depth) {
+            slots.object = match self.meta.ty(at) {
+                Some(Ty::Ptr { inner, .. }) => Some(*inner),
+                other => other,
+            };
             self.meta.set(at, slots);
         }
     }
@@ -887,6 +897,25 @@ impl Mono<'_> {
         concrete: &Ty,
         depth: u32,
     ) -> Option<VtableSlots> {
+        // `Func` has no impl to read slots off (§5.5). Its one slot is a
+        // closure's own `call`, at the closure type's arguments.
+        if self.defs.get(trait_def).lang.as_ref().is_some_and(|l| l.as_str() == "func") {
+            let Ty::Nominal { def, args } = concrete else {
+                return None;
+            };
+            if self.defs.get(*def).kind != DefKind::Closure {
+                return None;
+            }
+            let call = *self.defs.get(*def).ns.members.get(&Symbol::new("call"))?;
+            let targs = args.iter().cloned().map(GenericArg::Ty).collect();
+            let f = self.reach(linked, call, targs, depth);
+            return Some(VtableSlots {
+                trait_def,
+                concrete: concrete.clone(),
+                slots: vec![Some(f)],
+                object: None,
+            });
+        }
         // A vtable is built for a trait as a *type* (`*dyn Trait`), which has no
         // arguments to give — `dyn Add.<f64>` would carry them in the type
         // itself, and object safety is a separate question. Nothing to match.
@@ -924,6 +953,7 @@ impl Mono<'_> {
             trait_def,
             concrete: concrete.clone(),
             slots,
+            object: None,
         })
     }
 
@@ -1340,10 +1370,10 @@ fn strip_ptr(ty: &Ty) -> Ty {
 fn dyn_trait(meta: &Meta, id: IrId) -> Option<DefId> {
     match meta.ty(id)? {
         Ty::Ptr { inner, .. } => match *inner {
-            Ty::Dyn(d) => Some(d),
+            Ty::Dyn { def: d, .. } => Some(d),
             _ => None,
         },
-        Ty::Dyn(d) => Some(d),
+        Ty::Dyn { def: d, .. } => Some(d),
         _ => None,
     }
 }
@@ -1455,6 +1485,10 @@ pub(crate) fn subst_ty(subst: &Subst, ty: &Ty) -> Ty {
             inner: Box::new(subst_ty(subst, inner)),
         },
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_ty(subst, e)).collect()),
+        Ty::Dyn { def, assoc } => Ty::Dyn {
+            def: *def,
+            assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| subst_ty(subst, e))(t))).collect(),
+        },
         Ty::Func { params, ret, c } => Ty::Func {
             c: *c,
             params: params.iter().map(|p| subst_ty(subst, p)).collect(),
@@ -2035,7 +2069,7 @@ fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
             s.push('E');
             push_ty(s, defs, ret);
         }
-        Ty::Dyn(d) => {
+        Ty::Dyn { def: d, .. } => {
             s.push('D');
             for seg in &defs.get(*d).canonical {
                 push_len(s, seg.as_str());

@@ -171,10 +171,10 @@ impl Parser {
     }
 
     /// `Func(A, B) -> R` — a trait over a call's shape, written the way the call
-    /// is (§5.5). It is only spelling: it becomes `Func.<(A, B), Output = R>`,
-    /// the argument types as one tuple and the result as the `Output` the trait
-    /// declares, so everything after the parser sees an ordinary trait with an
-    /// ordinary argument. No arguments is `()`, and so is a missing `-> R`.
+    /// is (§5.5). It is only spelling: it becomes `Func.<Args = (A, B), Output =
+    /// R>`, the argument types as one tuple and the result, each pinning the
+    /// associated type the trait declares — so everything after the parser sees
+    /// an ordinary bound. No arguments is `()`, and so is a missing `-> R`.
     fn parse_call_sugar(&mut self, path: NodeId) -> NodeId {
         let start = self.node_span(path);
         let args_start = self.cur_span();
@@ -191,7 +191,14 @@ impl Parser {
         }
         let mut end = self.cur_span();
         self.expect(&TokenKind::RParen);
-        let args = self.alloc(args_start.to(end), NodeKind::TupleType { elems });
+        let tuple = self.alloc(args_start.to(end), NodeKind::TupleType { elems });
+        let args = self.alloc(
+            args_start.to(end),
+            NodeKind::AssocBinding {
+                name: Symbol::new("Args"),
+                ty: tuple,
+            },
+        );
         let output = if self.eat(&TokenKind::Arrow) {
             let ty = self.parse_type();
             end = self.node_span(ty);

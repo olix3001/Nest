@@ -674,7 +674,7 @@ impl Cx<'_> {
                     c: y,
                 },
             ) => x == y && all(a, b, map) && self.bind(r, q, map),
-            (Ty::Dyn(a), Ty::Dyn(b)) => a == b,
+            (Ty::Dyn { def: a, .. }, Ty::Dyn { def: b, .. }) => a == b,
             _ => false,
         }
     }

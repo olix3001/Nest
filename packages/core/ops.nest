@@ -51,13 +51,15 @@
 
 // What can be called with `Args` and answers an `Output` (§5.5): a closure, and
 // a function pointer. `Func(i32, i32) -> i32` is how it is written, and that is
-// `Func.<(i32, i32), Output = i32>` — the arguments as one tuple, `()` for none.
+// `Func.<Args = (i32, i32), Output = i32>` — the arguments as one tuple, `()`
+// for none.
 //
 // It has no method to implement, because a call is not one: `f(x)` on a value
 // whose type is `Func` is a call like any other, and the compiler is what knows
 // which code that reaches — the closure's own body, or the function a `*func`
 // points at. Nothing but the compiler implements it.
-@public Func :: #lang("func") trait <Args> {
+@public Func :: #lang("func") trait {
+  Args :: type
   Output :: type
 }
 

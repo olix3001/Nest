@@ -576,7 +576,7 @@ impl Cx<'_> {
             // A pointer to a trait object is the **fat** pointer, which is a
             // struct and not a pointer at all (§7b). `dyn Trait` on its own is
             // unsized and is only ever reached through one (§3.4).
-            Ty::Ptr { inner, .. } if matches!(**inner, Ty::Dyn(_)) => {
+            Ty::Ptr { inner, .. } if matches!(**inner, Ty::Dyn { .. }) => {
                 LirTy::Named(self.intern(ty, depth))
             }
             Ty::Ptr { inner, .. } => LirTy::ptr(self.lir_at(&self.strip(inner), depth + 1)),
@@ -619,7 +619,7 @@ impl Cx<'_> {
                 _ => LirTy::ptr(LirTy::Void),
             },
             // Unsized on its own, and never the type of a slot.
-            Ty::Dyn(_) => LirTy::ptr(LirTy::Void),
+            Ty::Dyn { .. } => LirTy::ptr(LirTy::Void),
             // `opaque` has no size, so there is nothing for LIR to describe and
             // nothing it would ever be asked to load. It reaches here only as
             // the pointee of a `*opaque`, which becomes `ptr(void)` — the same
@@ -687,11 +687,11 @@ impl Cx<'_> {
             // erased the concrete type, and one struct type per trait is what
             // makes a dispatch an ordinary member read at a known offset.
             Ty::Ptr { inner, .. } => {
-                let Ty::Dyn(trait_def) = &**inner else {
+                let Ty::Dyn { def: trait_def, .. } = &**inner else {
                     return def;
                 };
                 let w = self.layouts.pointer_size();
-                let vt = self.vtable_type(*trait_def);
+                let vt = self.object_vtable_type(inner);
                 def.members = vec![
                     TypeMember {
                         name: Symbol::new("data"),
@@ -957,6 +957,67 @@ impl Cx<'_> {
         id
     }
 
+    /// The vtable type a trait object of type `object` points at.
+    ///
+    /// Every trait's but one's is [`Cx::vtable_type`], one per trait. A `Func`
+    /// object's is one per **signature** (§5.5): the trait has no method to lay
+    /// a slot out from, and its one slot — the call — takes what the object's
+    /// `Args` pinned and answers its `Output`, erased the way a method's
+    /// receiver is.
+    fn object_vtable_type(&mut self, object: &Ty) -> TypeId {
+        let Ty::Dyn { def, assoc } = object else {
+            return self.vtable_type(DefId(u32::MAX));
+        };
+        let is_func = self.lang.get("func").map(|d| self.defs.resolve_alias(d)) == Some(*def);
+        if !is_func {
+            return self.vtable_type(*def);
+        }
+        let key = format!("$vtfunc{}", self.key(object));
+        if let Some(id) = self.type_index.get(&key) {
+            return *id;
+        }
+        let pinned = |name: &str| {
+            assoc
+                .iter()
+                .find(|(n, _)| n.as_str() == name)
+                .map(|(_, t)| t.clone())
+        };
+        let params: Vec<Ty> = match pinned("Args") {
+            Some(Ty::Tuple(elems)) => elems,
+            Some(Ty::Void) | None => Vec::new(),
+            Some(other) => vec![other],
+        };
+        let ret = self.lir(&self.strip(&pinned("Output").unwrap_or(Ty::Void)));
+        let mut ps = vec![LirTy::ptr(LirTy::Void)];
+        for p in &params {
+            let p = self.strip(p);
+            if !is_void(&p) {
+                ps.push(self.lir(&p));
+            }
+        }
+        let w = self.layouts.pointer_size();
+        let id = TypeId(self.types.len() as u32);
+        self.type_index.insert(key.clone(), id);
+        self.types.push(TypeDef {
+            id,
+            key,
+            name: format!("vtable.{}", object.display(self.defs)),
+            members: vec![TypeMember {
+                name: Symbol::new("call"),
+                ty: LirTy::Func {
+                    params: ps,
+                    ret: Box::new(ret),
+                },
+                offset: 0,
+            }],
+            layout: Layout { size: w, align: w },
+            origin: Origin::Vtable {
+                trait_name: self.defs.canonical_string(*def),
+            },
+        });
+        id
+    }
+
     /// The type of one vtable slot: the method's signature with the receiver
     /// erased, which is what a `dyn` call actually has in hand.
     fn slot_ty(&mut self, method: IrId) -> LirTy {
@@ -998,7 +1059,10 @@ impl Cx<'_> {
         if let Some(id) = self.vtable_index.get(&key) {
             return *id;
         }
-        let ty = self.vtable_type(slots.trait_def);
+        let ty = match &slots.object {
+            Some(object) => self.object_vtable_type(object),
+            None => self.vtable_type(slots.trait_def),
+        };
         let filled: Vec<Constant> = slots
             .slots
             .iter()
@@ -2855,6 +2919,46 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // A `Generic` call that survived monomorphization is a defect there,
             // already reported. Treating the callee as a value keeps the graph
             // well formed instead of losing the call.
+            // A call through a `*dyn Func` (§5.5): the vtable's one slot, given
+            // the data pointer where a method is given `self`.
+            Dispatch::Func {
+                self_ty: Ty::Ptr { inner, .. },
+            } if matches!(**inner, Ty::Dyn { .. }) => {
+                let object = (**inner).clone();
+                let fat = match self.eval(callee) {
+                    Operand::Copy(p) => p,
+                    other => {
+                        let ty = self.cx.ty_of(callee.id);
+                        match self.into_temp(Rvalue::Use(other), ty, span) {
+                            Operand::Copy(p) => p,
+                            _ => return None,
+                        }
+                    }
+                };
+                let vt = self.cx.object_vtable_type(&object);
+                let fty = self.cx.types[vt.0 as usize].members[0].ty.clone();
+                let slot = fat
+                    .clone()
+                    .then(Projection::Field {
+                        index: 1,
+                        name: Symbol::new("vtable"),
+                    })
+                    .then(Projection::Deref)
+                    .then(Projection::Field {
+                        index: 0,
+                        name: Symbol::new("call"),
+                    });
+                let f = self.temp_lir(fty, span);
+                self.assign(Place::local(f), Rvalue::Use(Operand::Copy(slot)), span);
+                vals.insert(
+                    0,
+                    Operand::Copy(fat.then(Projection::Field {
+                        index: 0,
+                        name: Symbol::new("data"),
+                    })),
+                );
+                Callee::Indirect(Operand::local(f))
+            }
             Dispatch::Static | Dispatch::Generic { .. } | Dispatch::Func { .. } => match &callee.kind {
                 ExprKind::Global(def) => self.static_callee(*def),
                 _ => {

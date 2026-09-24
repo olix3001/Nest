@@ -396,7 +396,7 @@ impl<'a> Layouts<'a> {
             // A pointer to a trait object is **fat**: the data pointer and the
             // vtable pointer (`design/lir.md` §7b). This is the one place a
             // pointer's size depends on what it points at.
-            Ty::Ptr { inner, .. } if matches!(**inner, Ty::Dyn(_)) => Ok(self.two_words()),
+            Ty::Ptr { inner, .. } if matches!(**inner, Ty::Dyn { .. }) => Ok(self.two_words()),
             Ty::Ptr { .. } => Ok(Layout::scalar(self.pointer_size())),
             // A slice is a pointer and a length, in that order.
             Ty::Slice { .. } => Ok(self.two_words()),
@@ -442,7 +442,7 @@ impl<'a> Layouts<'a> {
                 )?
                 .layout),
             Ty::Nominal { def, .. } => self.nominal(ty, *def, depth),
-            Ty::Dyn(_) => Err(LayoutError::Unsized(self.show(ty))),
+            Ty::Dyn { .. } => Err(LayoutError::Unsized(self.show(ty))),
             Ty::Opaque => Err(LayoutError::Opaque(self.show(ty))),
             Ty::ComptimeInt | Ty::ComptimeFloat | Ty::ComptimeStr => {
                 Err(LayoutError::Comptime(self.show(ty)))
@@ -840,6 +840,10 @@ pub(crate) fn subst_ty(map: &HashMap<DefId, Ty>, ty: &Ty) -> Ty {
             inner: Box::new(subst_ty(map, inner)),
         },
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_ty(map, e)).collect()),
+        Ty::Dyn { def, assoc } => Ty::Dyn {
+            def: *def,
+            assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| subst_ty(map, e))(t))).collect(),
+        },
         Ty::Func { params, ret, c } => Ty::Func {
             c: *c,
             params: params.iter().map(|p| subst_ty(map, p)).collect(),
