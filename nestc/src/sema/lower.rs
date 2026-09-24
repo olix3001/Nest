@@ -30,10 +30,12 @@
 //!   `Index.index(&a, i).*`, and `a < b`, which on a user type tests the
 //!   `Ordering` that `Ord.cmp` returns.
 //!
-//! Not lowered here: closures / nested-function values (they need a captured
-//! environment, which is a representation decision the IR does not make), and
-//! `match` decision trees — arms stay structured, patterns keep their full
-//! shape, and compiling them to tests is a later, CFG-level pass.
+//! - a **closure** becomes the struct of what it captured, built where it is
+//!   written, and a function of its own taking that struct first (§5.5).
+//!
+//! Not lowered here: `match` decision trees — arms stay structured, patterns
+//! keep their full shape, and compiling them to tests is a later, CFG-level
+//! pass.
 
 use std::collections::HashMap;
 

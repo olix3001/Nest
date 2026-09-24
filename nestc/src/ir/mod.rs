@@ -72,9 +72,9 @@
 //! stay structured, and [`Pattern`] keeps every form's full shape for the pass
 //! that builds them), vtable layout and object-safety checking for
 //! [`Dispatch::Virtual`], and the mutability check that reads the pointer
-//! permissions above. Closures are the one *expression* with no IR yet: they
-//! need a captured environment, which is a representation decision this layer
-//! does not make.
+//! permissions above. A closure has no node of its own: it is a
+//! [`ExprKind::Construct`] of the struct of what it captured, and its body is a
+//! [`Function`] like any other (see `sema::lower`).
 //!
 //! Traversal is via the [`Visitor`] / [`VisitorMut`] traits, whose default
 //! methods walk every child so an implementation overrides only the nodes it
