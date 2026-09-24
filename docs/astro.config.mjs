@@ -16,6 +16,8 @@ const carbonfox = ExpressiveCodeTheme.fromJSONString(
 
 // https://astro.build/config
 export default defineConfig({
+  site: 'https://olix3001.github.io',
+  base: '/nest',
 	integrations: [
 		starlight({
 			title: 'Nest',
