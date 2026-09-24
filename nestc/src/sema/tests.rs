@@ -10193,6 +10193,32 @@ fn an_impl_return_type_is_known_by_its_bounds() {
     assert!(msg.contains("type mismatch"), "{msg}");
 }
 
+/// A closure's type carries its function's **type** parameters only, so a
+/// `<const N>` in its signature is refused — once, however many functions the
+/// file has. Read as a value in its body, `N` is fine (a copy; see the run test
+/// in `codegen::llvm::tests`).
+#[test]
+fn a_closure_signature_naming_a_const_parameter_is_refused_once() {
+    let msgs = messages(
+        "zeros :: func <const N: usize> () -> usize {\n\
+             const f := { a: [N]u8 in a.len() }\n\
+             return 0\n\
+         }\n\
+         other :: func () -> usize { return 1 }\n",
+    );
+    let hits = msgs
+        .iter()
+        .filter(|m| m.contains("cannot name a `const` generic parameter"))
+        .count();
+    assert_eq!(hits, 1, "{msgs:#?}");
+    analyze_clean(
+        "scale :: func <const N: i32> (x: i32) -> i32 {\n\
+             const f := { v in v * N }\n\
+             return f(x)\n\
+         }\n",
+    );
+}
+
 /// The body is held to what its `impl` return type promised.
 #[test]
 fn an_impl_return_type_holds_the_body_to_its_bounds() {

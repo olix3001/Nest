@@ -3378,3 +3378,66 @@ main :: func () -> i32 {
         assert_eq!(code, 0, "each bit is one failed check");
     }
 }
+
+// ===< `<const N>` in closures, and `impl` returns in a generic `impl` >===
+
+/// A closure reads its function's `<const N>` as a copy made where it is
+/// written — per instantiation, through a nested closure, and after it escapes.
+/// It used to read nothing at all and compute with the wrong value.
+#[test]
+fn a_closure_reads_its_functions_const_parameter() {
+    let src = r#"
+scale :: func <const N: i32> (x: i32) -> i32 {
+    const f := { v in v * N }
+    return f(x)
+}
+nested :: func <const N: i32> () -> i32 {
+    const outer := { in
+        const inner := { v in v + N }
+        inner(1)
+    }
+    return outer()
+}
+maker :: func <const N: i32> () -> impl Func(i32) -> i32 {
+    return { v in v - N }
+}
+main :: func () -> i32 {
+    const m := maker.<2>()
+    return scale.<3>(4) + scale.<5>(2) + nested.<7>() + m(10)
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 12 + 10 + 8 + 8);
+    }
+}
+
+/// A method of a generic `impl` may return `impl Func` over the impl's
+/// parameters as well as its own; each instantiation is its own hidden type.
+#[test]
+fn an_impl_return_type_is_generic_over_the_enclosing_impl() {
+    let src = r#"
+Box :: struct <T> { v: T }
+impl <T> Box.<T> {
+    getter :: func (self: *Box.<T>) -> impl Func() -> T {
+        const v := self.v
+        return { in v }
+    }
+    pair :: func <U> (self: *Box.<T>, u: U) -> impl Func() -> (T, U) {
+        const v := self.v
+        return { in (v, u) }
+    }
+}
+main :: func () -> i32 {
+    const a := Box { v: 7 }
+    const b := Box { v: cast.<i64>(30) }
+    const ga := a.getter()
+    const gb := b.getter()
+    const p := a.pair(true)()
+    const q := if p.1 { 1 } else { 0 }
+    return ga() + cast.<i32>(gb()) + p.0 + q
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 7 + 30 + 7 + 1);
+    }
+}

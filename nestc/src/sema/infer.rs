@@ -1767,17 +1767,35 @@ impl Inferer<'_> {
                 self.ast.set_meta(node, OpaqueTy(t));
             }
             if let Some(sig) = self.ast.meta::<ClosureSig>(node) {
-                let params = sig
+                let params: Vec<Ty> = sig
                     .params
                     .iter()
                     .map(|t| self.cx.finalize(t, &mut || {}))
                     .collect();
                 let ret = self.cx.finalize(&sig.ret, &mut || {});
-                let shared = sig
+                let shared: Vec<Ty> = sig
                     .shared
                     .iter()
                     .map(|t| self.cx.finalize(t, &mut || {}))
                     .collect();
+                // A closure's type is generic over the function's **type**
+                // parameters only — a nominal type's arguments are types — so a
+                // `<const N>` can reach its body as a copied value (see
+                // `Lowerer::lower_closure`) but not its signature.
+                let sig_tys = || params.iter().chain(std::iter::once(&ret)).chain(&shared);
+                // This sweep runs once per function finished in the file, so
+                // the closure may have been judged already.
+                let msg = "a closure's parameters, result and shared locals cannot name a \
+                           `const` generic parameter yet; take the value as an argument, or \
+                           write a function";
+                let span = self.ast.node(node).span;
+                let said = self
+                    .diags
+                    .iter()
+                    .any(|d| d.message == msg && d.labels.iter().any(|l| l.span.file == self.file && l.span.span == span));
+                if !said && sig_tys().any(Ty::mentions_const_param) {
+                    self.report(node, msg);
+                }
                 self.ast.set_meta(
                     node,
                     ClosureSig {
@@ -3298,6 +3316,15 @@ impl Inferer<'_> {
         {
             consider(2, Choice::Builtin(row), &mut best, &mut ambiguous);
         }
+        // `Func(A) -> R` is only spelling for `Func.<Args = …, Output = …>`, but
+        // no impl stands behind it: the compiler implements `Func` for every
+        // closure and `*func` (§5.5), so the impl table has nothing to say. Being
+        // callable is the proof, as a bound is for a type parameter — and the
+        // signature is held to `Args`/`Output` by the projections, which the
+        // `Func` solver answers from it.
+        if self.is_func_trait(trait_def) && self.func_value_sig(&s).is_some() {
+            return Select::ByBound;
+        }
         let candidates: Vec<usize> = (0..self.impls.impls.len())
             .filter(|&i| self.impls.impls[i].trait_def == Some(trait_def))
             .collect();
@@ -3418,13 +3445,6 @@ impl Inferer<'_> {
                     continue;
                 }
                 for t in self.param_bound_traits(p) {
-                    // Nothing implements `Func` but the compiler (§5.5), so no
-                    // impl answers it: a closure or a `*func` meets the bound by
-                    // being callable. Its signature is checked against the
-                    // bound's `Args`/`Output` once the impl is committed.
-                    if self.is_func_trait(t) && self.func_value_sig(&bound_on).is_some() {
-                        continue;
-                    }
                     if !matches!(
                         self.select(&bound_on, t, &[]),
                         Select::Ok(_) | Select::ByBound | Select::Defer | Select::Error

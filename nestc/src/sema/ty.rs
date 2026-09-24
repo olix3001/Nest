@@ -245,6 +245,16 @@ impl Const {
         Const::Value(Box::new(ConstArg { ty, value }))
     }
 
+    /// Whether this is a `<const N>` parameter, or a value written at a type
+    /// that mentions one.
+    pub fn is_param(&self) -> bool {
+        match self {
+            Const::Param(_) => true,
+            Const::Value(arg) => arg.ty.mentions_const_param(),
+            _ => false,
+        }
+    }
+
     /// Whether an unsolved variable appears in this value or in the type it was
     /// written at — see [`Ty::mentions_var`].
     pub fn mentions_var(&self) -> bool {
@@ -529,6 +539,24 @@ impl Ty {
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_var),
             Ty::Func { params, ret, .. } => {
                 params.iter().any(Ty::mentions_var) || ret.mentions_var()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a `<const N>` parameter appears anywhere inside this type — an
+    /// array's length, an integer family's width, or an argument's.
+    pub fn mentions_const_param(&self) -> bool {
+        match self {
+            Ty::Int { width, .. } => width.is_param(),
+            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } => inner.mentions_const_param(),
+            Ty::Array { len, inner, .. } => len.is_param() || inner.mentions_const_param(),
+            Ty::Tuple(elems) => elems.iter().any(Ty::mentions_const_param),
+            Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| t.mentions_const_param()),
+            Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_const_param()),
+            Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_const_param),
+            Ty::Func { params, ret, .. } => {
+                params.iter().any(Ty::mentions_const_param) || ret.mentions_const_param()
             }
             _ => false,
         }

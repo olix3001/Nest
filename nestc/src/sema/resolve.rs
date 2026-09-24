@@ -53,6 +53,7 @@ pub fn resolve_file(
         decl_comptime: false,
         boundaries: Vec::new(),
         owners: Vec::new(),
+        impl_generics: Vec::new(),
     };
     if let Some(root) = ast.root() {
         r.resolve_node(root);
@@ -109,6 +110,10 @@ struct Resolver<'a> {
     /// closures it has had, so each closure gets a path of its own to be
     /// mangled from.
     owners: Vec<(Vec<Symbol>, u32)>,
+    /// The generic lists of the `impl` blocks being resolved, innermost last.
+    /// An `impl` return type inside one is generic over them as well as over
+    /// its function's own (see [`Resolver::bind_opaque`]).
+    impl_generics: Vec<Vec<NodeId>>,
 }
 
 /// One entry of [`Resolver::boundaries`].
@@ -235,9 +240,11 @@ impl Resolver<'_> {
                 });
                 self.self_ty.push(self_binding.unwrap_or(host));
                 self.ns_stack.push(host);
+                self.impl_generics.push(generics.clone());
                 for item in items {
                     self.resolve_node(item);
                 }
+                self.impl_generics.pop();
                 self.ns_stack.pop();
                 self.self_ty.pop();
                 self.pop_scope();
@@ -1229,7 +1236,7 @@ impl Resolver<'_> {
     /// `-> impl Bounds` (§5.4): a type parameter the parser put in the return
     /// slot, bound like one declared in the generic list and marked as the
     /// body's to decide. It is generic over the function's own type
-    /// parameters, which is what [`crate::sema::OpaqueArgs`] records: the type
+    /// parameters and an enclosing `impl`'s, which is what [`crate::sema::OpaqueArgs`] records: the type
     /// the body returns may mention them, and a caller's instantiation says
     /// what they are.
     fn bind_opaque(&mut self, ret: NodeId, generics: &[NodeId]) {
@@ -1238,8 +1245,14 @@ impl Resolver<'_> {
         self.introduce_bound_projections(&[ret]);
         let Some(def) = self.def_of(ret) else { return };
         self.defs.get_mut(def).opaque = true;
-        let args = generics
+        // The enclosing `impl`'s parameters first, then the function's own: a
+        // method of `impl <T> Box.<T>` may return `impl Func() -> T`, and the
+        // hidden type is then a different type for every `T`.
+        let args = self
+            .impl_generics
             .iter()
+            .flatten()
+            .chain(generics)
             .filter(|&&g| matches!(self.ast.node(g).kind, NodeKind::GenericTypeParam { .. }))
             .filter_map(|&g| self.def_of(g))
             .collect();

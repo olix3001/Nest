@@ -2337,6 +2337,17 @@ impl Lowerer<'_> {
             fields.insert(inner, (name.clone(), t.clone(), false));
             members.push((name, t));
         }
+        // A `<const N>` of a function around the closure, read in its body, is
+        // a copy made where the closure is: there `N` still stands for what
+        // monomorphization substitutes, and the closure's type — generic over
+        // the function's type parameters only — could not carry it.
+        for (n, d) in self.const_params_read(body) {
+            let t = self.ty(n);
+            let name = member_name(&self.defs.get(d).name);
+            values.push((name.clone(), self.use_of(n, d, &t)));
+            fields.insert(d, (name.clone(), t.clone(), false));
+            members.push((name, t));
+        }
         for (d, t) in shared.iter().zip(&sig.shared) {
             let mutable = self.defs.get(*d).mutable;
             let fty = Ty::Ptr {
@@ -2451,6 +2462,25 @@ impl Lowerer<'_> {
                 fields: values,
             },
         )
+    }
+
+    /// Each `<const N>` read anywhere under `node`, with the first node that
+    /// reads it, in the order they are first read.
+    fn const_params_read(&self, node: NodeId) -> Vec<(NodeId, DefId)> {
+        let mut out: Vec<(NodeId, DefId)> = Vec::new();
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if let Some(d) = self.resolved_def(n)
+                && self.defs.get(d).kind == DefKind::ConstParam
+                && !out.iter().any(|&(_, seen)| seen == d)
+            {
+                out.push((n, d));
+            }
+            let mut kids = self.ast.node(n).kind.children();
+            kids.reverse();
+            stack.extend(kids);
+        }
+        out
     }
 
     /// Every local a closure written anywhere under `node` shares — what the
