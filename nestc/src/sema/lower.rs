@@ -48,7 +48,7 @@ use crate::parser::ast::{
 
 use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
-use super::infer::OpResolution;
+use super::infer::{OpResolution, StaticTraitSelf};
 use super::infer::{
     ArgOrder, Coercion, DistinctRecv, DynCoerce, FuncCall, Generics, Instantiation, MethodDispatch,
     MethodRes, RangeReported, RecvAdjust, SliceCoerce, Upcast,
@@ -1279,11 +1279,21 @@ impl Lowerer<'_> {
         }
         // A call on a `Func` value: the callee is the value, and what it
         // reaches is decided by its type once monomorphization knows it (§5.5).
-        let dispatch = match self.ast.meta::<FuncCall>(head) {
-            Some(FuncCall) => Dispatch::Func {
-                self_ty: self.ty(head),
+        let dispatch = match (self.ast.meta::<StaticTraitSelf>(head), target) {
+            // `Trait.member(args)` whose `Self` is a type parameter: which impl
+            // it reaches is monomorphization's to say (see `StaticTraitSelf`).
+            (Some(st), Some(method)) => Dispatch::Generic {
+                trait_def: st.trait_def,
+                method,
+                self_ty: st.self_ty,
+                trait_args: st.trait_args,
             },
-            None => Dispatch::Static,
+            _ => match self.ast.meta::<FuncCall>(head) {
+                Some(FuncCall) => Dispatch::Func {
+                    self_ty: self.ty(head),
+                },
+                None => Dispatch::Static,
+            },
         };
         let callee = Box::new(self.lower_expr(callee));
         let args = self.lower_args(target, slots, node);

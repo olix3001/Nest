@@ -20,7 +20,7 @@ use crate::sema::def::Directive;
 use crate::sema::infer::{
     ArgOrder, ClosureSig, Coercion, ConstSlotReported, DistinctRecv, DynCoerce, FuncCall, Generics,
     IndexWrite, Instantiation, MethodRes, OpResolution, OpaqueTy, RangeReported, SliceCoerce,
-    TyPathReported, Upcast, VariantTag,
+    StaticTraitSelf, TyPathReported, Upcast, VariantTag,
 };
 use crate::sema::ty::Ty;
 use crate::sema::{
@@ -108,6 +108,7 @@ persisted! {
     Boxed(Boxed),
     OpaqueTy(OpaqueTy),
     OpaqueArgs(OpaqueArgs),
+    StaticTraitSelf(StaticTraitSelf),
 }
 
 /// Caches, and what monomorphization decides: rebuilt by whoever asks, so a

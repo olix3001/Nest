@@ -398,7 +398,7 @@ fn record(
             members.insert(name.clone(), def);
             // An associated-type binding in an impl is a `Name :: <type>`: the
             // RHS is a type expression, not a `func` / value.
-            if is_type_rhs(ast, rhs) {
+            if is_type_rhs(defs, ast, rhs) {
                 assoc.insert(name, rhs);
             }
         }
@@ -443,7 +443,17 @@ fn head_of(ast: &Ast, node: NodeId) -> NodeId {
 
 /// Whether a `::`-binding RHS forms a type (so the binding is an associated-type
 /// value, not a method or constant).
-fn is_type_rhs(ast: &Ast, rhs: NodeId) -> bool {
+fn is_type_rhs(defs: &DefTable, ast: &Ast, rhs: NodeId) -> bool {
+    match &ast.node(rhs).kind {
+        // `Item :: I.Item` — a member access is a type only when it resolved to
+        // one; `MAX :: u8.MAX` is a constant.
+        NodeKind::FieldAccess { .. } => return resolved_def(defs, ast, rhs).is_some(),
+        // `Item :: (usize, I.Item)` parses as a tuple value.
+        NodeKind::Tuple { elems } => {
+            return !elems.is_empty() && elems.iter().all(|&e| is_type_rhs(defs, ast, e));
+        }
+        _ => {}
+    }
     matches!(
         ast.node(rhs).kind,
         NodeKind::TypePath { .. }

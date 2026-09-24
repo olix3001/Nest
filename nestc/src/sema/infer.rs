@@ -80,6 +80,19 @@ struct LoopFrame {
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct VariantTag(pub i128);
 
+/// A static trait call (`Trait.member(args)`) whose `Self` a type parameter's
+/// bound answered: `FromIterator.from_iter(it)` inside `collect.<C>`, where
+/// `Self` is `C`. No impl can be chosen until an instantiation says what `C` is,
+/// so lowering makes it a [`crate::ir::Dispatch::Generic`] call and
+/// monomorphization selects the impl, as it does for a method called through a
+/// bound.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StaticTraitSelf {
+    pub trait_def: DefId,
+    pub self_ty: Ty,
+    pub trait_args: Vec<Ty>,
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct OpResolution {
     /// The trait method the operator dispatches to (the `#lang` trait's method
@@ -1721,6 +1734,22 @@ impl Inferer<'_> {
                     },
                 );
             }
+            if let Some(st) = self.ast.meta::<StaticTraitSelf>(node) {
+                let self_ty = self.cx.finalize(&st.self_ty, &mut || {});
+                let trait_args = st
+                    .trait_args
+                    .iter()
+                    .map(|a| self.cx.finalize(a, &mut || {}))
+                    .collect();
+                self.ast.set_meta(
+                    node,
+                    StaticTraitSelf {
+                        self_ty,
+                        trait_args,
+                        ..st
+                    },
+                );
+            }
             if let Some(d) = self.ast.meta::<DynCoerce>(node) {
                 let concrete = self.cx.finalize(&d.concrete, &mut || {});
                 let object = self.cx.finalize(&d.object, &mut || {});
@@ -1962,10 +1991,22 @@ impl Inferer<'_> {
                 // A tuple struct's positional members are real fields named
                 // `0`, `1`, … (see `collect_struct`), so `p.0` outside a tuple
                 // is the very lookup a named field access does (§3.3).
-                match self.field_ty_at(Some(node), &bty, &index.to_string()) {
-                    Some(ft) => ft,
-                    None => self.no_such_field(node, &bty, &index.to_string()),
+                if let Some(ft) = self.field_ty_at(Some(node), &bty, &index.to_string()) {
+                    return ft;
                 }
+                // Not known yet — a closure's `{ p in p.0 }` before anything
+                // says what `p` is — so wait for it, as a named field does.
+                if is_var(&self.cx.shallow(&bty)) {
+                    let out = self.cx.fresh();
+                    self.cx.register(Obligation::Field {
+                        recv: bty,
+                        name: Symbol::new(&index.to_string()),
+                        out: out.clone(),
+                        origin: node,
+                    });
+                    return out;
+                }
+                self.no_such_field(node, &bty, &index.to_string())
             }
             NodeKind::Call { callee, args } => self.infer_call(callee, &args),
             NodeKind::GenericApply { base, args } => {
@@ -2761,7 +2802,7 @@ impl Inferer<'_> {
                 stamp,
             } => match self.select(self_ty, *trait_def, args) {
                 Select::Ok(Choice::User(i)) => {
-                    self.commit_impl(i, self_ty, args);
+                    self.commit_impl(i, self_ty, args, *origin);
                     // Record which member the impl supplies, so lowering emits
                     // a call to it (a static trait call has no receiver for
                     // lowering to dispatch on).
@@ -2789,8 +2830,22 @@ impl Inferer<'_> {
                 // The bound itself is the answer; monomorphization picks the
                 // impl. There is no member to stamp, because there is no impl
                 // yet to take one from — a call through a bound is dispatched
-                // the way every other call through a bound is.
-                Select::ByBound => Outcome::Solved,
+                // the way every other call through a bound is. A **static**
+                // trait call says so, since nothing else about it does: its
+                // callee names the trait's declaration and it has no receiver.
+                Select::ByBound => {
+                    if stamp.is_some() {
+                        self.ast.set_meta(
+                            *origin,
+                            StaticTraitSelf {
+                                trait_def: *trait_def,
+                                self_ty: self_ty.clone(),
+                                trait_args: args.clone(),
+                            },
+                        );
+                    }
+                    Outcome::Solved
+                }
                 Select::Defer => Outcome::Deferred,
                 Select::NoImpl => {
                     self.report_no_impl(*origin, self_ty, *trait_def, args);
@@ -2814,7 +2869,7 @@ impl Inferer<'_> {
                     let assoc_ty = match choice {
                         Choice::Builtin(row) => self.builtin_output(row, self_ty),
                         Choice::User(i) => {
-                            let map = self.commit_impl(i, self_ty, args);
+                            let map = self.commit_impl(i, self_ty, args, *origin);
                             // The impl is chosen; now hold the operands to the
                             // signature it actually declares. Nothing before
                             // this point could: which `Rhs` / `Idx` applies is a
@@ -2839,7 +2894,29 @@ impl Inferer<'_> {
                 // A projection through a bound (`T.Item`) is answered from the
                 // parameter's declaration long before it reaches selection, so
                 // one arriving here is the ordinary missing impl it looks like.
-                Select::ByBound | Select::NoImpl => {
+                // A type parameter's bound is the proof, and what it projects is
+                // the associated-type parameter the bound minted for it: `<I as
+                // Iterator>.Item` for `<I: Iterator>` is `I.Item`.
+                Select::ByBound => {
+                    let head = self.cx.shallow(self_ty);
+                    let minted = match &head {
+                        Ty::Nominal { def, .. } => self.defs.get(*def).ns.members.get(assoc).copied(),
+                        _ => None,
+                    };
+                    match minted {
+                        Some(synth) => {
+                            let t = self.param_ty(synth);
+                            self.expect(*origin, &t, out);
+                            Outcome::Solved
+                        }
+                        None => {
+                            self.report_no_impl(*origin, self_ty, *trait_def, args);
+                            let _ = self.cx.unify(out, &Ty::Error);
+                            Outcome::Failed
+                        }
+                    }
+                }
+                Select::NoImpl => {
                     self.report_no_impl(*origin, self_ty, *trait_def, args);
                     let _ = self.cx.unify(out, &Ty::Error);
                     Outcome::Failed
@@ -2943,6 +3020,14 @@ impl Inferer<'_> {
                     return Outcome::Deferred;
                 }
                 let (name, out, origin) = (name.clone(), out.clone(), *origin);
+                // A deferred `p.0` whose base turned out to be a tuple.
+                if let (Ty::Tuple(elems), Ok(i)) = (self.autoderef(&target), name.as_str().parse::<usize>())
+                    && let Some(t) = elems.get(i)
+                {
+                    let t = t.clone();
+                    self.expect(origin, &t, &out);
+                    return Outcome::Solved;
+                }
                 match self.field_ty_at(Some(origin), &target, name.as_str()) {
                     Some(t) => self.expect(origin, &t, &out),
                     None => {
@@ -3323,6 +3408,13 @@ impl Inferer<'_> {
                     continue;
                 }
                 for t in self.param_bound_traits(p) {
+                    // Nothing implements `Func` but the compiler (§5.5), so no
+                    // impl answers it: a closure or a `*func` meets the bound by
+                    // being callable. Its signature is checked against the
+                    // bound's `Args`/`Output` once the impl is committed.
+                    if self.is_func_trait(t) && self.func_value_sig(&bound_on).is_some() {
+                        continue;
+                    }
                     if !matches!(
                         self.select(&bound_on, t, &[]),
                         Select::Ok(_) | Select::ByBound | Select::Defer | Select::Error
@@ -3340,12 +3432,23 @@ impl Inferer<'_> {
         ok
     }
 
+    /// Whether `t` is the `#lang("func")` trait.
+    fn is_func_trait(&self, t: DefId) -> bool {
+        Some(t) == self.lang.get("func").map(|d| self.defs.resolve_alias(d))
+    }
+
     /// Commit the chosen impl for real (no rollback), binding its generics; the
     /// returned map (impl generic → solved type) drives associated-type
     /// projection.
-    fn commit_impl(&mut self, i: usize, self_ty: &Ty, args: &[Ty]) -> Subst {
+    ///
+    /// The impl's own bounds are registered against what it was bound to. They
+    /// decide more than whether it applies: a parameter the self type does not
+    /// mention is solved **only** by them — `impl <I: Iterator, B, F: Func(I.Item)
+    /// -> B> Iterator for Map.<I, F>` learns its `B` from the closure's `Output`,
+    /// and its `I.Item` from `I`'s impl.
+    fn commit_impl(&mut self, i: usize, self_ty: &Ty, args: &[Ty], origin: NodeId) -> Subst {
         let imp = self.impls.impls[i].clone();
-        let map = self.fresh_impl_map(&imp.generics);
+        let mut map = self.fresh_impl_map(&imp.generics);
         let impl_self = self.impl_self_ty(&imp, &map);
         let _ = self.cx.unify(self_ty, &impl_self);
         let trait_args = self.impl_trait_args(&imp);
@@ -3355,7 +3458,37 @@ impl Inferer<'_> {
                 let _ = self.cx.unify(&t, a);
             }
         }
+        self.register_impl_bounds(origin, &imp.generics, &mut map);
         map
+    }
+
+    /// Register an impl's bounds against `map`, first giving each of its
+    /// associated-type parameters (`I.Item`) a variable and the projection that
+    /// solves it — the same two steps a generic call takes in
+    /// [`Inferer::instantiate_parts`].
+    fn register_impl_bounds(&mut self, origin: NodeId, generics: &[DefId], map: &mut Subst) {
+        let mut order = generics.to_vec();
+        self.close_over_projections(&mut order);
+        for &d in &order[generics.len()..] {
+            let out = self.cx.fresh();
+            map.tys.insert(d, out.clone());
+            let Some(p) = self.defs.get(d).projection.clone() else {
+                continue;
+            };
+            let Some(base) = map.tys.get(&p.base).cloned() else {
+                continue;
+            };
+            self.cx.register(Obligation::Projection {
+                self_ty: base,
+                trait_def: p.trait_def,
+                args: Vec::new(),
+                assoc: p.assoc,
+                out,
+                origin,
+                method: None,
+            });
+        }
+        self.register_bounds(origin, generics, map);
     }
 
     /// Build the impl's self [`Ty`] with its generics substituted by `map`.
@@ -4177,11 +4310,15 @@ impl Inferer<'_> {
             };
             if self.defs.get(def).kind == DefKind::Func {
                 let sig = self.func_def_ty(def);
-                let (inst, map) = self.instantiate_parts(callee, &sig, def, &targs);
                 // `Trait.member(args)` — a trait method named through the trait
                 // rather than called on a value. Nothing here says what `Self`
                 // is, so it becomes a variable the context solves.
-                let inst = self.open_trait_self(callee, def, &inst, &map);
+                let opened = self.open_trait_self(def);
+                let seed = opened.as_ref().map(|o| o.subst.clone()).unwrap_or_default();
+                let (inst, map) = self.instantiate_parts(callee, &sig, def, &targs, seed);
+                if let Some(opened) = opened {
+                    self.settle_trait_self(callee, def, opened, &map);
+                }
                 self.types.insert(callee, inst.clone());
                 // Named arguments are bound to their parameters here, so
                 // `apply_call` — and every stage after it — sees one positional
@@ -4324,7 +4461,7 @@ impl Inferer<'_> {
         for &c in fit {
             let snap = self.cx.snapshot();
             let sig = self.func_def_ty(c);
-            let (inst, map) = self.instantiate_parts(callee, &sig, c, &[]);
+            let (inst, map) = self.instantiate_parts(callee, &sig, c, &[], Subst::default());
             if let Ty::Func { params, .. } = self.cx.shallow(&inst) {
                 let fits = params.len() == arg_tys.len()
                     && params
@@ -5078,7 +5215,7 @@ impl Inferer<'_> {
             }
         };
         let s = matched;
-        let map = self.commit_impl(i, &s, &[]);
+        let map = self.commit_impl(i, &s, &[], node);
         self.ast.set_meta(node, Resolution::Def(m));
         // What this read bound the impl's parameters to, in the order
         // `stamp_assoc_const_generics` recorded them. A constant in a generic
@@ -5444,20 +5581,55 @@ impl Inferer<'_> {
     ///
     /// A call that already has a receiver never reaches here: those resolve in
     /// [`Inferer::infer_call`]'s method branch and keep their own `Self`.
-    fn open_trait_self(&mut self, callee: NodeId, method: DefId, sig: &Ty, map: &Subst) -> Ty {
-        let Some(trait_def) = self.defs.get(method).parent else {
-            return sig.clone();
-        };
+    ///
+    /// `Self.Item` is as unknown as `Self`, so each associated type gets a
+    /// variable too, solved by projecting through `Self` once it is known. The
+    /// answer seeds the call's instantiation, so the member's own bounds —
+    /// `from_iter :: func <I: Iterator.<Item = Self.Item>>` — see the variables
+    /// rather than the trait's abstract declarations; the obligations that
+    /// solve them are registered by [`Inferer::settle_trait_self`] once the
+    /// instantiation has said what the trait's own arguments are.
+    fn open_trait_self(&mut self, method: DefId) -> Option<OpenedSelf> {
+        let trait_def = self.defs.get(method).parent?;
         if self.defs.get(trait_def).kind != DefKind::Trait {
-            return sig.clone();
+            return None;
         }
-        // `Self` in the declaration is the trait's own nominal; swap it for a
-        // variable so each call site gets its own.
         let self_ty = self.cx.fresh();
-        let opened = self.subst_type_params(
-            sig,
-            &Subst::of_types(HashMap::from([(trait_def, self_ty.clone())])),
-        );
+        let mut tys = HashMap::from([(trait_def, self_ty.clone())]);
+        let mut assocs: Vec<(Symbol, DefId)> = self
+            .defs
+            .get(trait_def)
+            .ns
+            .members
+            .iter()
+            .filter(|&(_, &m)| self.defs.get(m).assoc_bounds.is_some())
+            .map(|(n, &m)| (n.clone(), m))
+            .collect();
+        assocs.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut outs = Vec::new();
+        for (name, adef) in assocs {
+            let out = self.cx.fresh();
+            tys.insert(adef, out.clone());
+            outs.push((name, out));
+        }
+        Some(OpenedSelf {
+            trait_def,
+            self_ty,
+            assocs: outs,
+            subst: Subst::of_types(tys),
+        })
+    }
+
+    /// The obligations that decide an opened `Self` (see
+    /// [`Inferer::open_trait_self`]): which impl it is, and what that impl's
+    /// associated types are.
+    fn settle_trait_self(&mut self, callee: NodeId, method: DefId, opened: OpenedSelf, map: &Subst) {
+        let OpenedSelf {
+            trait_def,
+            self_ty,
+            assocs,
+            ..
+        } = opened;
         // The trait's generic arguments, as this instantiation freshened them:
         // `FromResidual.<R>`'s `R` is what the residual argument will solve.
         let args: Vec<Ty> = self
@@ -5470,6 +5642,17 @@ impl Inferer<'_> {
                 })
             })
             .collect();
+        for (assoc, out) in assocs {
+            self.cx.register(Obligation::Projection {
+                self_ty: self_ty.clone(),
+                trait_def,
+                args: args.clone(),
+                assoc,
+                out,
+                origin: callee,
+                method: None,
+            });
+        }
         self.cx.register(Obligation::Trait {
             self_ty,
             trait_def,
@@ -5477,21 +5660,26 @@ impl Inferer<'_> {
             origin: callee,
             stamp: Some(self.defs.get(method).name.clone()),
         });
-        opened
     }
 
-    /// Rewrite a trait *declaration*'s `Self` to what the receiver actually is.
+    /// What a trait *declaration*'s `Self` is at a call: the receiver, and
+    /// each of the trait's associated types what the receiver binds it to.
+    /// `None` when `method` is not a trait's own declaration or the receiver is
+    /// not known yet.
     ///
     /// Only calls that land on a trait's own declaration need this — dispatch
-    /// through a trait object (`*dyn Summing`) or through a type parameter's
-    /// bound (`<I: Summing>`). A call that selected a concrete impl already has
-    /// the impl's signature and is left alone.
-    fn subst_trait_self(&mut self, sig: &Ty, method: DefId, recv: &Ty) -> Ty {
-        let Some(parent) = self.defs.get(method).parent else {
-            return sig.clone();
-        };
+    /// through a trait object (`*dyn Summing`), through a type parameter's bound
+    /// (`<I: Summing>`), or to a default body. A call that selected a concrete
+    /// impl's member already has the impl's signature and is left alone.
+    ///
+    /// It seeds the call's instantiation (see [`Inferer::instantiate_parts`]),
+    /// so it reaches the method's **own generic bounds** as well as its
+    /// signature — a default method `map :: func <F: Func(Self.Item) -> B> (…)`
+    /// holds `F` to the receiver's `Item`, not to the trait's abstract one.
+    fn trait_self_subst(&mut self, at: NodeId, method: DefId, recv: &Ty) -> Option<Subst> {
+        let parent = self.defs.get(method).parent?;
         if self.defs.get(parent).kind != DefKind::Trait {
-            return sig.clone();
+            return None;
         }
         // Look through the receiver's pointer: `*dyn T` and `*I` both stand for
         // a `Self` of `dyn T` / `I`.
@@ -5500,16 +5688,50 @@ impl Inferer<'_> {
             other => other,
         };
         if matches!(head, Ty::Error) || is_var(&head) {
-            return sig.clone();
+            return None;
         }
         // `Self` is only half of it. A signature may also name `Self.Item`, and
-        // what that *is* depends on the same receiver: for a type parameter it
-        // is the associated-type parameter its bound minted (`N.Inner`), and
-        // for a concrete type it is whatever the impl bound the name to. Both
-        // live in the receiver's own namespace, under the associated type's
-        // name, so one lookup answers both.
+        // what that *is* depends on the same receiver. For a type parameter it
+        // is the associated-type parameter its bound minted (`N.Inner`), found
+        // in the parameter's own namespace. For a concrete type it is whatever
+        // the impl bound the name to — and which impl, and what its generics
+        // are, is a selection: `Mapped.<I, F>`'s `Item :: B` is only a type once
+        // the impl's `F: Func(I.Item) -> B` has solved `B`. So that is asked as
+        // a projection, the way every other `<T as Trait>.Assoc` is.
         let mut tys = HashMap::from([(parent, head.clone())]);
-        if let Ty::Nominal { def: head_def, .. } = &head {
+        // A trait's own body calls through `Self`, which is the trait's nominal
+        // and answers from its own namespace like a parameter does.
+        let is_param = matches!(&head, Ty::Nominal { def, .. }
+            if matches!(self.defs.get(*def).kind, DefKind::TypeParam | DefKind::Trait));
+        if !is_param && matches!(head, Ty::Nominal { .. }) {
+            let assocs: Vec<(Symbol, DefId)> = self
+                .defs
+                .get(parent)
+                .ns
+                .members
+                .iter()
+                .filter(|&(_, &m)| self.defs.get(m).assoc_bounds.is_some())
+                .map(|(n, &m)| (n.clone(), m))
+                .collect();
+            let args: Vec<Ty> = self
+                .type_param_defs(parent)
+                .into_iter()
+                .map(|_| self.cx.fresh())
+                .collect();
+            for (assoc, adef) in assocs {
+                let out = self.cx.fresh();
+                self.cx.register(Obligation::Projection {
+                    self_ty: head.clone(),
+                    trait_def: parent,
+                    args: args.clone(),
+                    assoc,
+                    out: out.clone(),
+                    origin: at,
+                    method: None,
+                });
+                tys.insert(adef, out);
+            }
+        } else if let Ty::Nominal { def: head_def, .. } = &head {
             let assocs: Vec<(Symbol, DefId)> = self
                 .defs
                 .get(parent)
@@ -5527,8 +5749,7 @@ impl Inferer<'_> {
                 }
             }
         }
-        let map = Subst::of_types(tys);
-        self.subst_type_params(sig, &map)
+        Some(Subst::of_types(tys))
     }
 
     /// The trait's own declaration of `name`, but only when it carries a
@@ -5696,19 +5917,18 @@ impl Inferer<'_> {
         rebind: Option<(Ty, Ty)>,
     ) -> Ty {
         let sig = self.func_def_ty(method);
-        let inst = self.instantiate_with(callee, &sig, method, targs);
         // Dispatching through a trait object or a bound reaches the trait's
         // *declaration*, whose `Self` is the trait's own nominal. For this call
-        // `Self` is the receiver, so say so rather than leaving the signature
-        // claiming a bare `Trait`.
-        //
+        // `Self` is the receiver, so the instantiation says so rather than
+        // leaving the signature claiming a bare `Trait`.
+        let self_subst = self.trait_self_subst(callee, method, recv).unwrap_or_default();
+        let inst = self.instantiate_parts(callee, &sig, method, targs, self_subst).0;
         // Everything up to and including the `self` parameter below stays in the
         // **representation's** terms when rebinding. That is not a detail: the
         // representation may itself be generic — `str` inherits from
         // `impl <T> []T` — and unifying the `self` parameter against the
         // representation is what solves that `T`. Rebinding first would leave it
         // unsolved and the call would be "type annotations needed".
-        let inst = self.subst_trait_self(&inst, method, recv);
         self.types.insert(callee, inst.clone());
         let Ty::Func { params, ret, .. } = self.cx.shallow(&inst) else {
             return Ty::Error;
@@ -5799,14 +6019,10 @@ impl Inferer<'_> {
     /// A missing argument, a `_` hole, or an `<Assoc = T>` binding leaves that
     /// parameter to inference, so `id.<i32>(x)` and `id(x)` differ only in how
     /// much was pinned up front. Too many arguments is an error.
-    fn instantiate_with(&mut self, at: NodeId, sig: &Ty, def: DefId, targs: &[NodeId]) -> Ty {
-        self.instantiate_parts(at, sig, def, targs).0
-    }
-
-    /// [`Inferer::instantiate_with`], also returning the substitution it built,
-    /// for callers that need to talk about a parameter it freshened (a static
-    /// trait call needs the trait's own arguments — see
-    /// [`Inferer::open_trait_self`]).
+    ///
+    /// The substitution it built comes back too, for callers that need to talk
+    /// about a parameter it freshened (a static trait call needs the trait's own
+    /// arguments — see [`Inferer::open_trait_self`]).
     ///
     /// `at` is the node the instantiation is recorded on: the call's callee, so
     /// that monomorphization can read this call site's generic arguments back
@@ -5817,6 +6033,9 @@ impl Inferer<'_> {
         sig: &Ty,
         def: DefId,
         targs: &[NodeId],
+        // What a trait method's `Self` and `Self.Assoc` are at this call (see
+        // [`Inferer::trait_self_subst`]); empty everywhere else.
+        self_subst: Subst,
     ) -> (Ty, Subst) {
         // Type and const parameters share one positional list (§5): in
         // `func <const N: usize, T>`, `.<4, i32>` pins `N` then `T`.
@@ -5847,7 +6066,7 @@ impl Inferer<'_> {
         // site's arguments and the declaration's parameters line up by position
         // because they are produced here, together.
         let mut order: Vec<DefId> = params.clone();
-        let mut map = Subst::default();
+        let mut map = self_subst;
         for (i, &p) in params.iter().enumerate() {
             let arg = explicit
                 .get(i)
@@ -7787,6 +8006,11 @@ impl Inferer<'_> {
             // node, which is all `typepath_ty` reads, so the two spellings end
             // at the same type instead of one of them being a silent error.
             NodeKind::FieldAccess { .. } => self.typepath_ty(file, node, &[]),
+            // `(A, B)` on the right of a `::`, which parses as a tuple value.
+            NodeKind::Tuple { elems } if elems.is_empty() => Ty::Void,
+            NodeKind::Tuple { elems } => {
+                Ty::Tuple(elems.iter().map(|&e| self.ty_from_node_in(file, e)).collect())
+            }
             _ => Ty::Error,
         }
     }
@@ -7980,8 +8204,12 @@ impl Inferer<'_> {
             // a `Const`, a use of it in type position is a silent `Ty::Error`,
             // and the program type-checks against nothing at all.
             DefKind::Const => self.const_alias_ty(def).unwrap_or(Ty::Error),
-            // A generic type parameter is a rigid opaque type of its own def.
-            DefKind::TypeParam => Ty::Nominal { def, args: vec![] },
+            // A generic type parameter is a rigid opaque type of its own def —
+            // except a **pinned** associated-type parameter, which is the type
+            // its bound pinned it to: `T.Item` written in the signature of
+            // `<T: Holder.<Item = i32>>` is `i32`, the same answer `t.get()`
+            // gets through `param_ty`.
+            DefKind::TypeParam => self.param_ty(def),
             // `<const N: usize>` is a *value*; writing `N` where a type belongs
             // is the one confusion the two-kind generic list exists to prevent.
             DefKind::ConstParam => {
@@ -8146,9 +8374,22 @@ impl Inferer<'_> {
         let NodeKind::ConstBind { rhs, .. } = ast.node(node).kind.clone() else {
             return None;
         };
+        // A tuple of types is a type: `Item :: (usize, I.Item)`. Every element
+        // has to name one, or the binding is a tuple *value*.
+        if let NodeKind::Tuple { elems } = self.asts[&file].node(rhs).kind.clone() {
+            if elems.is_empty() || !elems.iter().all(|&e| self.names_type_in(file, e)) {
+                return None;
+            }
+            self.alias_stack.push(def);
+            let ty = self.ty_from_node_in(file, rhs);
+            self.alias_stack.pop();
+            return Some(ty);
+        }
         let (head, args) = match self.asts[&file].node(rhs).kind.clone() {
             NodeKind::GenericApply { base, args } => (base, args),
-            NodeKind::Path { .. } => (rhs, Vec::new()),
+            // `Item :: I.Item` — a parameter's associated type, reached through
+            // the parameter the way a namespace member is.
+            NodeKind::Path { .. } | NodeKind::FieldAccess { .. } => (rhs, Vec::new()),
             _ => return None,
         };
         let head_def = self.resolved_def_in(file, head)?;
@@ -8176,6 +8417,30 @@ impl Inferer<'_> {
         Some(ty)
     }
 
+    /// Whether `node`, read as an expression, names a type: a name or member
+    /// access resolved to one, an instantiation of one, or a tuple of them.
+    fn names_type_in(&self, file: FileId, node: NodeId) -> bool {
+        let head = match self.asts[&file].node(node).kind.clone() {
+            NodeKind::GenericApply { base, .. } => base,
+            NodeKind::Path { .. } | NodeKind::FieldAccess { .. } => node,
+            NodeKind::Tuple { elems } => {
+                return !elems.is_empty() && elems.iter().all(|&e| self.names_type_in(file, e));
+            }
+            _ => return false,
+        };
+        self.resolved_def_in(file, head).is_some_and(|d| {
+            matches!(
+                self.defs.get(self.defs.resolve_alias(d)).kind,
+                DefKind::Primitive
+                    | DefKind::Struct
+                    | DefKind::Enum
+                    | DefKind::Trait
+                    | DefKind::TypeAlias
+                    | DefKind::TypeParam
+            )
+        })
+    }
+
     /// `Self.Item` written **inside the trait that declares `Item`**, kept as
     /// the associated type itself rather than expanded to a fresh variable.
     ///
@@ -8186,7 +8451,7 @@ impl Inferer<'_> {
     /// result is `N.Inner` — a type the signature can *name*, because §5.4 says
     /// it can. A variable cannot be substituted into, so the link between the
     /// declaration's `Self.Inner` and the caller's `N.Inner` would be lost
-    /// before [`Inferer::subst_trait_self`] ever ran.
+    /// before [`Inferer::trait_self_subst`] ever ran.
     ///
     /// Keeping the associated def is what gives that substitution something to
     /// rewrite. It is narrow on purpose — only `Self.Assoc` where `Self` is the
@@ -9157,6 +9422,17 @@ impl Inferer<'_> {
         self.asts[&file].set_meta(node, ConstSlotReported);
         self.report_in(file, node, message);
     }
+}
+
+/// A static trait call's `Self`, opened up before its instantiation (see
+/// [`Inferer::open_trait_self`]).
+struct OpenedSelf {
+    trait_def: DefId,
+    self_ty: Ty,
+    /// A variable per associated type, by name.
+    assocs: Vec<(Symbol, Ty)>,
+    /// `Self` and each associated type to its variable.
+    subst: Subst,
 }
 
 /// One instantiation's answer for a set of generic parameters.

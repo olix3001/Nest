@@ -3093,3 +3093,221 @@ fn a_call_through_a_c_function_pointer_uses_the_c_convention() {
         assert_eq!(code, 12);
     }
 }
+
+// ===< Generic default methods and adapter impls (§5.4, §10.4) >===
+//
+// What an iterator adapter needs of the language, each on its own: a default
+// method with generics of its own whose bounds name `Self.Item`, an impl whose
+// parameter is fixed only by its bounds, and associated types written through
+// another parameter.
+
+/// `T.Item` and `F.Output` written in a signature are what the bound pinned
+/// them to, not opaque parameters of their own.
+#[test]
+fn a_pinned_projection_in_a_signature_is_its_pinned_type() {
+    let src = r#"
+H :: trait {
+    Item :: type
+    get :: func (self: *Self) -> Self.Item
+}
+S :: struct { v: i32 }
+impl H for S {
+    Item :: i32
+    get :: func (self: *S) -> i32 { return self.v }
+}
+item :: func <T: H.<Item = i32>> (t: T) -> T.Item { return t.get() + 1 }
+call :: func <F: Func(i32) -> i32> (f: F) -> F.Output { return f(1) }
+main :: func () -> i32 {
+    return item(S { v: 6 }) + call({ x in x + 2 })
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 7 + 3);
+    }
+}
+
+/// A default method's own bound names `Self.Item`, and at a call it is the
+/// receiver's `Item` — so the closure's parameter is an `i32`.
+#[test]
+fn a_default_methods_bound_sees_the_receivers_associated_type() {
+    let src = r#"
+T1 :: trait {
+    Item :: type
+    get :: func (self: *Self) -> Self.Item
+    twice :: func <F: Func(Self.Item) -> i32> (self: *Self, f: F) -> i32 { return f(self.get()) * 2 }
+}
+S :: struct { v: i32 }
+impl T1 for S {
+    Item :: i32
+    get :: func (self: *S) -> i32 { return self.v }
+}
+main :: func () -> i32 {
+    const s := S { v: 5 }
+    return s.twice({ x in x + 1 })
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 12);
+    }
+}
+
+/// An impl whose parameter only a bound fixes: `B` is the closure's result,
+/// through `F: Func(I.Item) -> B`, and a default method reached through the
+/// impl sees it — which is Rust's `Map`, written in Nest.
+#[test]
+fn an_impl_parameter_fixed_by_a_bound_reaches_a_default_method() {
+    let src = r#"
+It :: trait {
+    Item :: type
+    next :: func (self: *mut Self) -> Option.<Self.Item>
+    mapped :: func <B, F: Func(Self.Item) -> B> (self: Self, f: F) -> Mapped.<Self, F> {
+        return Mapped.<Self, F> { it: self, f: f }
+    }
+    total :: func (self: Self) -> i32 {
+        let mut it := self
+        let mut acc := 0
+        loop {
+            it.next().match {
+                .some(x) => { acc = acc + 1 },
+                .none => { break },
+            }
+        }
+        return acc
+    }
+}
+Mapped :: struct <I, F> { it: I, f: F }
+impl <I: It, B, F: Func(I.Item) -> B> It for Mapped.<I, F> {
+    Item :: B
+    next :: func (self: *mut Mapped.<I, F>) -> Option.<B> {
+        return self.it.next().match {
+            .some(x) => .some(self.f(x)),
+            .none => .none,
+        }
+    }
+}
+Count :: struct { n: i32, end: i32 }
+impl It for Count {
+    Item :: i32
+    next :: func (self: *mut Count) -> Option.<i32> {
+        if self.n >= self.end { return .none }
+        self.n = self.n + 1
+        return .some(self.n)
+    }
+}
+main :: func () -> i32 {
+    let mut m := Count { n: 0, end: 3 }.mapped({ x in x * 10 })
+    const first := m.next().match { .some(v) => v, .none => 0 }
+    return first + m.total()
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 10 + 2);
+    }
+}
+
+/// An impl's associated type written through one of its parameters, and a
+/// tuple of them: `Item :: I.Item`, `Item :: (usize, I.Item)`.
+#[test]
+fn an_impl_binds_its_associated_type_through_a_parameter() {
+    let src = r#"
+{ Iterator } :: import <core/iter>
+Pairs :: struct <I> { it: I, n: usize }
+impl <I: Iterator> Iterator for Pairs.<I> {
+    Item :: (usize, I.Item)
+    next :: func (self: *mut Pairs.<I>) -> Option.<(usize, I.Item)> {
+        return self.it.next().match {
+            .some(x) => {
+                self.n = self.n + 1
+                return .some((self.n, x))
+            },
+            .none => .none,
+        }
+    }
+}
+main :: func () -> i32 {
+    const xs: []i32 := [_]i32 { 7, 8 }
+    let mut p := Pairs { it: xs.into_iter(), n: 0 }
+    p.next()
+    return p.next().match { .some(v) => cast.<i32>(v.0) + v.1, .none => 0 }
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 2 + 8);
+    }
+}
+
+/// `p.0` on a closure parameter nothing has typed yet waits for the tuple, as
+/// a named field does.
+#[test]
+fn a_tuple_index_on_an_unknown_base_waits_for_it() {
+    let src = "main :: func () -> i32 {\n\
+                   const f := { p in p.0 + 1 }\n\
+                   return f((4, 5))\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 5);
+    }
+}
+
+/// Every adapter and consumer `core/iter` gives an iterator, run once each.
+#[test]
+fn the_iterator_adapters_and_consumers_run() {
+    let src = r#"
+{ Iterator } :: import <core/iter>
+
+main :: func () -> i32 {
+    const xs: []i32 := [_]i32 { 1, 2, 3, 4, 5, 6 }
+    let mut fails := 0
+    if xs.into_iter().map({ x in x * 10 }).fold(0, { a, x in a + x }) != 210 { fails = fails + 1 }
+    if xs.into_iter().filter({ x in x % 2 == 0 }).count() != 3 { fails = fails + 2 }
+    if xs.into_iter().enumerate().fold(0, { a, p in a + cast.<i32>(p.0) * p.1 }) != 70 { fails = fails + 4 }
+    if xs.into_iter().skip(2).take(2).fold(0, { a, x in a + x }) != 7 { fails = fails + 8 }
+    if (0..<10).step(3).fold(0, { a, x in a + x }) != 18 { fails = fails + 16 }
+    if xs.into_iter().chain(xs.into_iter()).count() != 12 { fails = fails + 32 }
+    if xs.into_iter().zip(xs.into_iter().skip(1)).fold(0, { a, p in a + p.0 * p.1 }) != 70 { fails = fails + 64 }
+    if not xs.into_iter().any({ x in x > 5 }) { fails = fails + 128 }
+    if xs.into_iter().all({ x in x > 1 }) { fails = fails + 256 }
+    const f := xs.into_iter().find({ x in x > 3 }).match { .some(v) => v, .none => 0 }
+    if f != 4 { fails = fails + 512 }
+    let mut total := 0
+    xs.into_iter().each() { x in total = total + x }
+    if total != 21 { fails = fails + 1024 }
+    return fails
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 0, "each bit is one failed check");
+    }
+}
+
+/// `Trait.member(args)` inside a generic function whose `Self` is one of its
+/// parameters: the impl is the instantiation's, chosen at monomorphization,
+/// and the member's own bound sees `Self.Item` as that impl's `Item`.
+#[test]
+fn a_static_trait_call_through_a_bound_reaches_the_instantiations_impl() {
+    let src = r#"
+{ Iterator } :: import <core/iter>
+FromIt :: trait {
+    Item :: type
+    from_it :: func <I: Iterator.<Item = Self.Item>> (it: I) -> Self
+}
+Sum :: struct { total: i32 }
+impl FromIt for Sum {
+    Item :: i32
+    from_it :: func <I: Iterator.<Item = i32>> (it: I) -> Sum {
+        return Sum { total: it.fold(0, { a, x in a + x }) }
+    }
+}
+gather :: func <I: Iterator, C: FromIt.<Item = I.Item>> (it: I) -> C {
+    return FromIt.from_it(it)
+}
+main :: func () -> i32 {
+    const xs: []i32 := [_]i32 { 1, 2, 3 }
+    const s: Sum := gather(xs.into_iter().map({ x in x * 2 }))
+    return s.total
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 12);
+    }
+}

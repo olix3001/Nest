@@ -193,14 +193,11 @@ impl Resolver<'_> {
             } => {
                 self.push_scope();
                 self.bind_generics(&generics);
-                for g in &generics {
-                    self.resolve_node(*g);
-                }
+                self.resolve_generics(&generics);
                 self.resolve_node(ty);
                 if let Some(t) = for_ty {
                     self.resolve_node(t);
                 }
-                self.record_param_bounds(&generics);
                 // The self type is the `for` target of a trait impl, else the
                 // head type of an inherent impl. `Self` and the member host
                 // namespace both follow it (never the implemented trait).
@@ -258,10 +255,7 @@ impl Resolver<'_> {
                 });
                 self.push_scope();
                 self.bind_generics(&generics);
-                for g in &generics {
-                    self.resolve_node(*g);
-                }
-                self.introduce_bound_projections(&generics);
+                self.resolve_generics(&generics);
                 for p in &params {
                     if self.self_ty.is_empty() && self.is_bare_self(*p) {
                         self.report(
@@ -678,6 +672,17 @@ impl Resolver<'_> {
         let Some(Resolution::Def(base_def)) = self.ast.meta::<Resolution>(base) else {
             return; // runtime field access on a value — left for the type checker
         };
+        // A type parameter's associated types were put in its namespace
+        // (`introduce_bound_projections`), and `Item :: I.Item` in an impl reads
+        // one in expression position — a `::` right-hand side is parsed as an
+        // expression. Anything else through a parameter is inference's to type.
+        let base_def = self.defs.resolve_alias(base_def);
+        if self.defs.get(base_def).kind == DefKind::TypeParam {
+            if let Some(&d) = self.defs.get(base_def).ns.members.get(name) {
+                self.ast.set_meta(id, Resolution::Def(d));
+            }
+            return;
+        }
         if !self
             .defs
             .get(self.defs.resolve_alias(base_def))
@@ -876,6 +881,16 @@ impl Resolver<'_> {
             .get(d)
             .vis
             .reaches(home.map(String::as_str), at.map(String::as_str))
+    }
+
+    /// Resolve a generic list's bounds, one parameter at a time, giving each
+    /// its associated types before the next is read — so a later bound may name
+    /// an earlier parameter's: `<I: Iterator, F: Func(I.Item) -> B>`.
+    fn resolve_generics(&mut self, generics: &[NodeId]) {
+        for &g in generics {
+            self.resolve_node(g);
+            self.introduce_bound_projections(&[g]);
+        }
     }
 
     /// Give each generic type parameter the associated types its bounds

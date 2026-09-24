@@ -5,9 +5,289 @@
 
 * :: import "option.nest"
 
+// An iterator writes `next`; everything else below comes with it (§10.4).
+//
+// The **adapters** are lazy: each wraps the iterator (and the closure it was
+// given) in a small struct that is an iterator itself, so a chain such as
+// `xs.iter().filter(p).map(f)` is one nested type, `Map.<Filter.<SliceIter.<T>,
+// P>, F>`, and nothing runs until something calls `next`. Being monomorphized,
+// the chain compiles to the loop it stands for. The **consumers** are the ones
+// that loop: they pull `next` until it answers `.none`.
 @public Iterator :: #lang("iterator") trait {
   Item :: type
   next :: func (self: *mut Self) -> Option.<Self.Item>
+
+  // ===< Adapters >===
+
+  // Each element passed through `f`.
+  map :: func <B, F: Func(Self.Item) -> B> (self: Self, f: F) -> Map.<Self, F> {
+    return Map.<Self, F> { iter: self, f: f }
+  }
+
+  // Only the elements `keep` answers `true` for.
+  filter :: func <P: Func(Self.Item) -> bool> (self: Self, keep: P) -> Filter.<Self, P> {
+    return Filter.<Self, P> { iter: self, keep: keep }
+  }
+
+  // Each element with its position, counting from 0: `(0, a), (1, b), …`.
+  enumerate :: func (self: Self) -> Enumerate.<Self> {
+    return Enumerate.<Self> { iter: self, count: 0 }
+  }
+
+  // Pairs of this iterator's elements and `other`'s, ending with the shorter.
+  zip :: func <J: Iterator> (self: Self, other: J) -> Zip.<Self, J> {
+    return Zip.<Self, J> { a: self, b: other }
+  }
+
+  // This iterator's elements, then `other`'s.
+  chain :: func <J: Iterator.<Item = Self.Item>> (self: Self, other: J) -> Chain.<Self, J> {
+    return Chain.<Self, J> { a: self, b: other, a_done: false }
+  }
+
+  // At most the first `n` elements.
+  take :: func (self: Self, n: usize) -> Take.<Self> {
+    return Take.<Self> { iter: self, left: n }
+  }
+
+  // Everything after the first `n` elements.
+  skip :: func (self: Self, n: usize) -> Skip.<Self> {
+    return Skip.<Self> { iter: self, left: n }
+  }
+
+  // The first element, then every `n`th after it: `(0..<10).step(3)` is 0, 3,
+  // 6, 9. A step of 0 would never move, so it panics.
+  step :: func (self: Self, n: usize) -> StepBy.<Self> {
+    if n == 0 { panic("`step` of 0") }
+    return StepBy.<Self> { iter: self, n: n, first: true }
+  }
+
+  // ===< Consumers >===
+
+  // Call `f` on every element.
+  each :: func <F: Func(Self.Item)> (self: Self, f: F) {
+    let mut it := self
+    loop {
+      it.next().match {
+        .some(x) => f(x),
+        .none => { break },
+      }
+    }
+  }
+
+  // Combine every element into one value, starting from `init`:
+  // `(1..=4).fold(0, { acc, x in acc + x })` is 10.
+  fold :: func <A, F: Func(A, Self.Item) -> A> (self: Self, init: A, f: F) -> A {
+    let mut it := self
+    let mut acc := init
+    loop {
+      it.next().match {
+        .some(x) => { acc = f(acc, x) },
+        .none => { break },
+      }
+    }
+    return acc
+  }
+
+  // How many elements there are.
+  //
+  // A loop rather than a `fold`: a closure written in a default body is not yet
+  // instantiated per `Self`, only per the body's own parameters.
+  count :: func (self: Self) -> usize {
+    let mut it := self
+    let mut n: usize := 0
+    loop {
+      it.next().match {
+        .some(x) => { n = n + 1 },
+        .none => { break },
+      }
+    }
+    return n
+  }
+
+  // Whether `pred` holds for some element. Stops at the first that does.
+  any :: func <P: Func(Self.Item) -> bool> (self: Self, pred: P) -> bool {
+    let mut it := self
+    loop {
+      it.next().match {
+        .some(x) => { if pred(x) { return true } },
+        .none => { return false },
+      }
+    }
+  }
+
+  // Whether `pred` holds for every element. Stops at the first that does not.
+  all :: func <P: Func(Self.Item) -> bool> (self: Self, pred: P) -> bool {
+    let mut it := self
+    loop {
+      it.next().match {
+        .some(x) => { if not pred(x) { return false } },
+        .none => { return true },
+      }
+    }
+  }
+
+  // The first element `pred` holds for.
+  find :: func <P: Func(Self.Item) -> bool> (self: Self, pred: P) -> Option.<Self.Item> {
+    let mut it := self
+    loop {
+      it.next().match {
+        .some(x) => { if pred(x) { return .some(x) } },
+        .none => { return .none },
+      }
+    }
+  }
+}
+
+// ===< The adapters' iterators >===
+//
+// Each impl names the element type it hands out through its bounds, the way
+// the adapter method did: `Map`'s `B` is fixed by `F: Func(I.Item) -> B`, which
+// is how the closure's result type becomes the iterator's `Item`.
+
+@public Map :: struct <I, F> {
+  iter: I,
+  f: F,
+}
+
+impl <I: Iterator, B, F: Func(I.Item) -> B> Iterator for Map.<I, F> {
+  Item :: B
+  next :: func (self: *mut Map.<I, F>) -> Option.<B> {
+    return self.iter.next().match {
+      .some(x) => .some(self.f(x)),
+      .none => .none,
+    }
+  }
+}
+
+@public Filter :: struct <I, P> {
+  iter: I,
+  keep: P,
+}
+
+impl <I: Iterator, P: Func(I.Item) -> bool> Iterator for Filter.<I, P> {
+  Item :: I.Item
+  next :: func (self: *mut Filter.<I, P>) -> Option.<I.Item> {
+    loop {
+      self.iter.next().match {
+        .some(x) => { if self.keep(x) { return .some(x) } },
+        .none => { return .none },
+      }
+    }
+  }
+}
+
+@public Enumerate :: struct <I> {
+  iter: I,
+  count: usize,
+}
+
+impl <I: Iterator> Iterator for Enumerate.<I> {
+  Item :: (usize, I.Item)
+  next :: func (self: *mut Enumerate.<I>) -> Option.<(usize, I.Item)> {
+    return self.iter.next().match {
+      .some(x) => {
+        const i := self.count
+        self.count = i + 1
+        return .some((i, x))
+      },
+      .none => .none,
+    }
+  }
+}
+
+@public Zip :: struct <A, B> {
+  a: A,
+  b: B,
+}
+
+impl <A: Iterator, B: Iterator> Iterator for Zip.<A, B> {
+  Item :: (A.Item, B.Item)
+  next :: func (self: *mut Zip.<A, B>) -> Option.<(A.Item, B.Item)> {
+    return self.a.next().match {
+      .some(x) => self.b.next().match {
+        .some(y) => .some((x, y)),
+        .none => .none,
+      },
+      .none => .none,
+    }
+  }
+}
+
+@public Chain :: struct <A, B> {
+  a: A,
+  b: B,
+  a_done: bool,
+}
+
+impl <A: Iterator, B: Iterator.<Item = A.Item>> Iterator for Chain.<A, B> {
+  Item :: A.Item
+  next :: func (self: *mut Chain.<A, B>) -> Option.<A.Item> {
+    if not self.a_done {
+      self.a.next().match {
+        .some(x) => { return .some(x) },
+        .none => { self.a_done = true },
+      }
+    }
+    return self.b.next()
+  }
+}
+
+@public Take :: struct <I> {
+  iter: I,
+  left: usize,
+}
+
+impl <I: Iterator> Iterator for Take.<I> {
+  Item :: I.Item
+  next :: func (self: *mut Take.<I>) -> Option.<I.Item> {
+    if self.left == 0 { return .none }
+    self.left = self.left - 1
+    return self.iter.next()
+  }
+}
+
+@public Skip :: struct <I> {
+  iter: I,
+  left: usize,
+}
+
+impl <I: Iterator> Iterator for Skip.<I> {
+  Item :: I.Item
+  next :: func (self: *mut Skip.<I>) -> Option.<I.Item> {
+    while self.left > 0 {
+      self.left = self.left - 1
+      self.iter.next().match {
+        .some(x) => {},
+        .none => { return .none },
+      }
+    }
+    return self.iter.next()
+  }
+}
+
+@public StepBy :: struct <I> {
+  iter: I,
+  n: usize,
+  first: bool,
+}
+
+impl <I: Iterator> Iterator for StepBy.<I> {
+  Item :: I.Item
+  next :: func (self: *mut StepBy.<I>) -> Option.<I.Item> {
+    if self.first {
+      self.first = false
+      return self.iter.next()
+    }
+    let mut skip := self.n - 1
+    while skip > 0 {
+      skip = skip - 1
+      self.iter.next().match {
+        .some(x) => {},
+        .none => { return .none },
+      }
+    }
+    return self.iter.next()
+  }
 }
 
 @public IntoIterator :: #lang("into_iterator") trait {

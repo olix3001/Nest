@@ -146,8 +146,10 @@ pub struct VtableSlots {
 /// type, and nothing in the source names it. They are reached alongside the
 /// roots, so their bodies are walked like any other, and the def each one was
 /// given comes back in the same order.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     defs: &mut DefTable,
+    decls: &crate::sema::decl::DeclTable,
     meta: &Meta,
     linked: &mut Linked,
     impls: &ImplTable,
@@ -157,6 +159,7 @@ pub fn run(
 ) -> (Vec<Diagnostic>, Vec<DefId>) {
     let mut mono = Mono {
         defs,
+        decls,
         meta,
         impls,
         targets,
@@ -320,6 +323,9 @@ const INSTANTIATION_DEPTH: u32 = 64;
 
 struct Mono<'a> {
     defs: &'a mut DefTable,
+    /// What inference recorded about each declaration — here, what a pinned
+    /// associated-type parameter stands for ([`Mono::complete_impl_bindings`]).
+    decls: &'a crate::sema::decl::DeclTable,
     meta: &'a Meta,
     impls: &'a ImplTable,
     targets: &'a [ImplTarget],
@@ -616,7 +622,7 @@ impl Mono<'_> {
             (self.default_body_of(original.def), args.get(params.len()))
         {
             subst.tys.insert(trait_def, t.clone());
-            self.bind_assoc_items(trait_def, t, &mut subst, &mut assoc);
+            self.bind_assoc_items(linked, trait_def, t, &mut subst, &mut assoc);
         }
         // The same question, asked of a **bounded generic parameter** rather
         // than of a default body's `Self`. `impl <T: Float> Display for T`
@@ -635,7 +641,7 @@ impl Mono<'_> {
                 continue;
             };
             for trait_def in bounds {
-                self.bind_assoc_items(trait_def, t, &mut subst, &mut assoc);
+                self.bind_assoc_items(linked, trait_def, t, &mut subst, &mut assoc);
             }
         }
 
@@ -944,7 +950,7 @@ impl Mono<'_> {
         // A vtable is built for a trait as a *type* (`*dyn Trait`), which has no
         // arguments to give — `dyn Add.<f64>` would carry them in the type
         // itself, and object safety is a separate question. Nothing to match.
-        let (i, bindings) = self.match_impl(trait_def, concrete, &[])?;
+        let (i, bindings) = self.match_impl(linked, trait_def, concrete, &[])?;
         let methods: Vec<(Symbol, DefId)> = match linked.ty(trait_def).map(|t| &t.kind) {
             Some(super::TypeDefKind::Trait { methods, .. }) => {
                 methods.iter().map(|m| (m.name.clone(), m.def)).collect()
@@ -1050,8 +1056,8 @@ impl Mono<'_> {
             _ => false,
         };
         let matched = match self_ty {
-            Ty::Ptr { inner, .. } if by_ptr => self.match_impl_exact(trait_def, inner, trait_args),
-            _ => self.match_impl(trait_def, self_ty, trait_args),
+            Ty::Ptr { inner, .. } if by_ptr => self.match_impl_exact(linked, trait_def, inner, trait_args),
+            _ => self.match_impl(linked, trait_def, self_ty, trait_args),
         };
         let (i, bindings) = matched?;
         let target = self.impls.impls[i]
@@ -1095,12 +1101,13 @@ impl Mono<'_> {
     /// body already refers to is then the trait's own default.
     fn bind_assoc_items(
         &mut self,
+        linked: &Linked,
         trait_def: DefId,
         self_ty: &Ty,
         subst: &mut Subst,
         assoc: &mut HashMap<DefId, DefId>,
     ) {
-        let Some((i, bindings)) = self.match_impl(trait_def, self_ty, &[]) else {
+        let Some((i, bindings)) = self.match_impl(linked, trait_def, self_ty, &[]) else {
             return;
         };
         let imp = self.impls.impls[i].clone();
@@ -1160,6 +1167,7 @@ impl Mono<'_> {
     /// making it again.
     fn match_impl(
         &self,
+        linked: &Linked,
         trait_def: DefId,
         self_ty: &Ty,
         trait_args: &[Ty],
@@ -1170,15 +1178,17 @@ impl Mono<'_> {
         // impl is written `impl Describe for Entity`. Try the type as written
         // first, so an impl really written for a pointer still wins, then
         // through it.
-        self.match_impl_exact(trait_def, self_ty, trait_args)
+        self.match_impl_exact(linked, trait_def, self_ty, trait_args)
             .or_else(|| {
                 let inner = strip_ptr(self_ty);
-                (inner != *self_ty).then(|| self.match_impl_exact(trait_def, &inner, trait_args))?
+                (inner != *self_ty)
+                    .then(|| self.match_impl_exact(linked, trait_def, &inner, trait_args))?
             })
     }
 
     fn match_impl_exact(
         &self,
+        linked: &Linked,
         trait_def: DefId,
         self_ty: &Ty,
         trait_args: &[Ty],
@@ -1220,7 +1230,115 @@ impl Mono<'_> {
                 best = Some((score, i, bindings));
             }
         }
-        best.map(|(_, i, b)| (i, b))
+        let (_, i, mut b) = best?;
+        self.complete_impl_bindings(linked, i, &mut b);
+        Some((i, b))
+    }
+
+    /// Bind what matching the target could not: the impl parameters its **bounds**
+    /// fix. `impl <I: Iterator, B, F: Func(I.Item) -> B> Iterator for Map.<I, F>`
+    /// matched against `Map.<Count, {closure}>` knows `I` and `F` and nothing
+    /// else; `I.Item` is `Count`'s impl's answer, `F.Output` the closure's, and
+    /// `B` is whatever the bound pinned `F.Output` to — so each associated-type
+    /// parameter is projected from its now-concrete base, and matched against
+    /// its pin, until nothing new is learned.
+    ///
+    /// Inference solved the same equations with variables (see
+    /// `Inferer::register_impl_bounds`); this re-derives the answer for the
+    /// concrete types, which is what an instantiation is named and laid out by.
+    fn complete_impl_bindings(&self, linked: &Linked, i: usize, bindings: &mut Subst) {
+        let generics = self.impls.impls[i].generics.clone();
+        let mut order = generics.clone();
+        let mut k = 0;
+        while k < order.len() {
+            let mut kids: Vec<(Symbol, DefId)> = self
+                .defs
+                .get(order[k])
+                .ns
+                .members
+                .iter()
+                .filter(|&(_, &m)| self.defs.get(m).projection.is_some())
+                .map(|(n, &m)| (n.clone(), m))
+                .collect();
+            kids.sort_by(|a, b| a.0.cmp(&b.0));
+            for (_, m) in kids {
+                if !order.contains(&m) {
+                    order.push(m);
+                }
+            }
+            k += 1;
+        }
+        if order.len() == generics.len() {
+            return;
+        }
+        let pins: Vec<Option<Ty>> = order
+            .iter()
+            .map(|&d| match self.decls.get(&d) {
+                Some(crate::sema::decl::Decl::Param(p)) => p.pinned.clone(),
+                _ => None,
+            })
+            .collect();
+        for _ in 0..order.len() {
+            let before = bindings.tys.len();
+            for (j, &d) in order.iter().enumerate().skip(generics.len()) {
+                let Some(p) = self.defs.get(d).projection.clone() else {
+                    continue;
+                };
+                if !bindings.tys.contains_key(&d)
+                    && let Some(base) = bindings.tys.get(&p.base).cloned()
+                    && let Some(t) = self.project(linked, &base, p.trait_def, &p.assoc)
+                {
+                    bindings.tys.insert(d, t);
+                }
+                if let (Some(t), Some(pin)) = (bindings.tys.get(&d).cloned(), &pins[j]) {
+                    match_ty(&order, pin, &t, bindings);
+                }
+            }
+            if bindings.tys.len() == before {
+                break;
+            }
+        }
+    }
+
+    /// `<base as trait_def>.assoc` for a concrete `base`: a callable's own
+    /// signature for `Func` (§5.5), and otherwise the matching impl's binding.
+    fn project(&self, linked: &Linked, base: &Ty, trait_def: DefId, assoc: &Symbol) -> Option<Ty> {
+        let is_func = self
+            .defs
+            .get(trait_def)
+            .lang
+            .as_ref()
+            .is_some_and(|l| l.as_str() == "func");
+        if is_func {
+            let (params, ret) = match base {
+                Ty::Func { params, ret, .. } => (params.clone(), (**ret).clone()),
+                Ty::Nominal { def, args } if self.defs.get(*def).kind == DefKind::Closure => {
+                    // A closure's call is lifted into its `call`, whose first
+                    // parameter is the closure itself and whose generics are
+                    // the closure type's arguments.
+                    let call = *self.defs.get(*def).ns.members.get(&Symbol::new("call"))?;
+                    let f = linked.get(call)?;
+                    let Some(Ty::Func { params, ret, .. }) = self.meta.ty(f.id) else {
+                        return None;
+                    };
+                    let mut map = Subst::default();
+                    for (p, a) in self.generics_of(linked, call).iter().zip(args) {
+                        map.tys.insert(*p, a.clone());
+                    }
+                    let params = params.iter().skip(1).map(|t| subst_ty(&map, t)).collect();
+                    (params, subst_ty(&map, &ret))
+                }
+                _ => return None,
+            };
+            return Some(match assoc.as_str() {
+                "Args" if params.is_empty() => Ty::Void,
+                "Args" => Ty::Tuple(params),
+                _ => ret,
+            });
+        }
+        let (j, b) = self.match_impl(linked, trait_def, base, &[])?;
+        let chosen = self.impls.impls[j].typed.as_ref()?.assoc.get(assoc)?;
+        Some(subst_ty(&b, chosen))
     }
 
     fn report_unresolved(&mut self, at: IrId, trait_def: DefId, self_ty: &Ty) {

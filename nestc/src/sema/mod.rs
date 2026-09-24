@@ -210,7 +210,14 @@ fn is_value_rhs_depth(
         | NodeKind::EnumType { .. }
         | NodeKind::TraitType { .. }
         | NodeKind::Import { .. } => false,
-        NodeKind::Path { .. } => match ast.meta::<Resolution>(rhs) {
+        // A tuple of types is a type — `Item :: (usize, I.Item)` — and a tuple
+        // with any value in it is a value.
+        NodeKind::Tuple { elems } if !elems.is_empty() => elems
+            .iter()
+            .any(|&e| is_value_rhs_depth(defs, asts, ast, e, depth + 1)),
+        // `I.Item`: a member reached through a name, which the resolver linked
+        // exactly as it links a path's last segment.
+        NodeKind::Path { .. } | NodeKind::FieldAccess { .. } => match ast.meta::<Resolution>(rhs) {
             Some(Resolution::Def(d)) => {
                 let d = defs.resolve_alias(d);
                 let target = defs.get(d);
@@ -551,6 +558,7 @@ fn monomorphize(session: &mut Session) {
     let target = session.options.target;
     let Session {
         defs,
+        decls,
         ir_meta,
         linked,
         impls,
@@ -559,8 +567,16 @@ fn monomorphize(session: &mut Session) {
         ..
     } = &mut *session;
     let foreign = |def: DefId| libraries.iter().any(|l| l.owns_def(def));
-    let (mut diags, instances) =
-        crate::ir::mono::run(defs, ir_meta, linked, impls, impl_targets, &foreign, &asked);
+    let (mut diags, instances) = crate::ir::mono::run(
+        defs,
+        decls,
+        ir_meta,
+        linked,
+        impls,
+        impl_targets,
+        &foreign,
+        &asked,
+    );
 
     // The `#const` check defers every call in a generic body: which function it
     // reaches is a question about the instantiation, and there were none. Now
