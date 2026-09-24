@@ -1,97 +1,167 @@
-/* Nest's accent palette — a nod to the language's name. Dark mode is the
-   default token set (Starlight convention); light mode overrides below. */
+/* Nest's palette is carbonfox's (EdenEast/nightfox.nvim), the theme the code
+   blocks use (src/nest/carbonfox.json): its neutral grays for surfaces and
+   text, its teal (#08bdba / #3ddbd9) as the accent, its blue for the second
+   gradient stop. Dark mode is the default token set (Starlight convention);
+   light mode takes the same hues from IBM Carbon's light grays and teal 60,
+   which carbonfox is built on. */
 :root {
-	--sl-color-accent-low: #143c31;
-	--sl-color-accent: #21bd8f;
-	--sl-color-accent-high: #b6f3dd;
-	--nest-accent-a: #21bd8f;
-	--nest-accent-b: #4fd3e8;
-	--nest-glow: rgba(33, 189, 143, 0.35);
+	--sl-color-accent-low: #022b30;
+	--sl-color-accent: #08bdba;
+	--sl-color-accent-high: #3ddbd9;
+
+	--sl-color-white: #f9fbff; /* fg0 */
+	--sl-color-gray-1: #f2f4f8; /* fg1 */
+	--sl-color-gray-2: #b6b8bb; /* fg2 */
+	--sl-color-gray-3: #7b7c7e; /* fg3 */
+	--sl-color-gray-4: #535353; /* bg4 */
+	--sl-color-gray-5: #353535; /* bg3 */
+	--sl-color-gray-6: #161616; /* bg1 — nav, and the code-block background */
+	--sl-color-black: #0c0c0c; /* bg0 */
+
+	--nest-accent-a: #3ddbd9;
+	--nest-accent-b: #78a9ff;
+	--nest-glow: rgba(8, 189, 186, 0.2);
 }
 
 :root[data-theme='light'] {
-	--sl-color-accent-low: #cdf2e5;
-	--sl-color-accent: #0f8a6b;
-	--sl-color-accent-high: #0b5b46;
-	--nest-accent-a: #0f8a6b;
-	--nest-accent-b: #0a8fa8;
-	--nest-glow: rgba(15, 138, 107, 0.18);
+	--sl-color-accent-low: #d9fbfb;
+	--sl-color-accent: #007d79;
+	--sl-color-accent-high: #005d5d;
+
+	--sl-color-white: #161616;
+	--sl-color-gray-1: #262626;
+	--sl-color-gray-2: #393939;
+	--sl-color-gray-3: #525252;
+	--sl-color-gray-4: #8d8d8d;
+	--sl-color-gray-5: #c6c6c6;
+	--sl-color-gray-6: #e8e8e8;
+	--sl-color-gray-7: #f4f4f4;
+	--sl-color-black: #ffffff;
+
+	--nest-accent-a: #007d79;
+	--nest-accent-b: #0f62fe;
+	--nest-glow: rgba(0, 125, 121, 0.12);
+}
+
+/* ===< Site-wide >=== */
+
+/* Every card uses the accent, not Starlight's rotating rainbow. */
+.card {
+	--sl-card-border: var(--sl-color-accent);
+	--sl-card-bg: var(--sl-color-accent-low);
+}
+
+.site-title {
+	color: var(--sl-color-text-accent);
 }
 
 /* ===< Hero >=== */
 
 .hero {
 	position: relative;
+	padding-block: clamp(2.5rem, calc(1rem + 8vmin), 6rem) clamp(1.5rem, 4vmin, 3rem);
 }
 
 .hero::before {
 	content: '';
 	position: absolute;
-	inset: -8rem -4rem auto -4rem;
-	height: 26rem;
-	background: radial-gradient(
-		60% 60% at 50% 0%,
-		var(--nest-glow) 0%,
-		transparent 70%
-	);
+	inset: 0;
+	background: radial-gradient(50% 70% at 20% 45%, var(--nest-glow) 0%, transparent 70%);
 	pointer-events: none;
 	z-index: -1;
 }
 
 .hero h1 {
-	background: linear-gradient(
-		120deg,
-		var(--nest-accent-a) 0%,
-		var(--nest-accent-b) 100%
-	);
+	font-size: clamp(3rem, calc(1rem + 8vw), 5.5rem);
+	letter-spacing: -0.03em;
+	background: linear-gradient(120deg, var(--nest-accent-a) 0%, var(--nest-accent-b) 100%);
 	background-clip: text;
 	-webkit-background-clip: text;
 	color: transparent;
 	-webkit-text-fill-color: transparent;
 }
 
-/* ===< Homepage-only extras (see index.mdx) >=== */
-
-.nest-quicklook {
-	margin: 3rem 0;
+.hero .tagline {
+	max-width: 38rem;
 }
 
-.nest-quicklook h2 {
-	font-size: var(--sl-text-h3);
+/* ===< Homepage-only sections (see index.mdx) >=== */
+
+.nest-section {
+	margin-top: 4rem;
+}
+
+.nest-section-head {
 	text-align: center;
-	margin-bottom: 1.5rem;
+	margin-bottom: 1.75rem;
+}
+
+.nest-eyebrow {
+	margin: 0;
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: var(--sl-text-xs);
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--sl-color-text-accent);
+}
+
+.nest-section-head h2 {
+	margin: 0.4rem 0 0 0;
+	font-size: var(--sl-text-h3);
+	line-height: 1.25;
+	color: var(--sl-color-white);
 }
 
 .nest-quicklook .expressive-code {
 	max-width: 46rem;
 	margin: 0 auto;
+	border-radius: 0.6rem;
+	box-shadow: 0 0 0 1px var(--sl-color-gray-5), 0 1.5rem 4rem -1.5rem var(--nest-glow);
 }
 
 .nest-strip {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+	grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
 	gap: 1px;
-	margin: 3rem 0;
-	background: var(--sl-color-hairline);
-	border: 1px solid var(--sl-color-hairline);
-	border-radius: 0.5rem;
+	margin: 0;
+	background: var(--sl-color-gray-5);
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.6rem;
 	overflow: hidden;
 }
 
 .nest-strip > div {
-	background: var(--sl-color-bg);
+	background: var(--sl-color-black);
 	padding: 1.25rem 1.5rem;
 }
 
 .nest-strip dt {
-	font-size: 1.6rem;
-	font-weight: 600;
-	color: var(--sl-color-accent-high);
 	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 1.4rem;
+	font-weight: 600;
+	color: var(--sl-color-text-accent);
 }
 
 .nest-strip dd {
-	margin: 0.25rem 0 0 0;
-	font-size: var(--sl-text-xs);
+	margin: 0.35rem 0 0 0;
+	font-size: var(--sl-text-sm);
+	line-height: 1.5;
 	color: var(--sl-color-gray-3);
+}
+
+.nest-strip code {
+	font-size: 0.9em;
+	white-space: nowrap;
+	color: var(--sl-color-gray-2);
+}
+
+.nest-cta {
+	margin: 4rem 0 1rem;
+	text-align: center;
+	color: var(--sl-color-gray-3);
+}
+
+.nest-cta a {
+	color: var(--sl-color-text-accent);
+	font-weight: 600;
 }

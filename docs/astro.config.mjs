@@ -3,9 +3,15 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { ExpressiveCodeTheme } from '@astrojs/starlight/expressive-code';
 
 const nestGrammar = JSON.parse(
 	readFileSync(fileURLToPath(new URL('./src/nest/nest.tmLanguage.json', import.meta.url)), 'utf-8'),
+);
+
+// Code blocks use carbonfox in both site themes; see src/nest/carbonfox.json.
+const carbonfox = ExpressiveCodeTheme.fromJSONString(
+	readFileSync(fileURLToPath(new URL('./src/nest/carbonfox.json', import.meta.url)), 'utf-8'),
 );
 
 // https://astro.build/config
@@ -16,6 +22,18 @@ export default defineConfig({
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/olix3001/Nest' }],
 			customCss: ['./src/styles/custom.css'],
 			expressiveCode: {
+				themes: [carbonfox],
+				useStarlightDarkModeSwitch: false,
+				// Keep carbonfox's own colors; don't let Expressive Code lighten its comments.
+				minSyntaxHighlightingColorContrast: 0,
+				styleOverrides: {
+					borderRadius: '0.5rem',
+					borderColor: '#353535',
+					frames: {
+						frameBoxShadowCssValue: 'none',
+						editorActiveTabIndicatorTopColor: '#08bdba',
+					},
+				},
 				shiki: {
 					langs: [nestGrammar],
 				},

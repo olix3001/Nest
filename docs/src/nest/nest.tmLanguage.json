@@ -1,19 +1,75 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-  "name": "Nest",
+  "name": "nest",
+  "displayName": "Nest",
   "scopeName": "source.nest",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#attributes" },
-    { "include": "#directives" },
-    { "include": "#strings" },
-    { "include": "#numbers" },
-    { "include": "#keywords" },
-    { "include": "#builtin-types" },
-    { "include": "#types" },
-    { "include": "#functions" },
-    { "include": "#operators" },
-    { "include": "#punctuation" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#directives"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#import-path"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#closure-header"
+    },
+    {
+      "include": "#func-parameters"
+    },
+    {
+      "include": "#struct-fields"
+    },
+    {
+      "include": "#binding-name"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#builtin-types"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#chain-call"
+    },
+    {
+      "include": "#members"
+    },
+    {
+      "include": "#enum-literal"
+    },
+    {
+      "include": "#labels"
+    },
+    {
+      "include": "#identifiers"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    }
   ],
   "repository": {
     "comments": {
@@ -22,14 +78,20 @@
           "name": "comment.line.double-slash.nest",
           "match": "//.*$"
         },
-        { "include": "#block-comment" }
+        {
+          "include": "#block-comment"
+        }
       ]
     },
     "block-comment": {
       "name": "comment.block.nest",
       "begin": "/\\*",
       "end": "\\*/",
-      "patterns": [{ "include": "#block-comment" }]
+      "patterns": [
+        {
+          "include": "#block-comment"
+        }
+      ]
     },
     "attributes": {
       "name": "entity.other.attribute-name.nest",
@@ -49,30 +111,52 @@
     },
     "strings": {
       "patterns": [
-        { "include": "#f-string" },
-        { "include": "#c-string" },
-        { "include": "#byte-string" },
-        { "include": "#plain-string" },
-        { "include": "#char-literal" }
+        {
+          "include": "#f-string"
+        },
+        {
+          "include": "#c-string"
+        },
+        {
+          "include": "#byte-string"
+        },
+        {
+          "include": "#plain-string"
+        },
+        {
+          "include": "#char-literal"
+        }
       ]
     },
     "plain-string": {
       "name": "string.quoted.double.nest",
       "begin": "\"",
       "end": "\"",
-      "patterns": [{ "include": "#escape-sequence" }]
+      "patterns": [
+        {
+          "include": "#escape-sequence"
+        }
+      ]
     },
     "byte-string": {
       "name": "string.quoted.double.byte.nest",
       "begin": "b\"",
       "end": "\"",
-      "patterns": [{ "include": "#escape-sequence" }]
+      "patterns": [
+        {
+          "include": "#escape-sequence"
+        }
+      ]
     },
     "c-string": {
       "name": "string.quoted.double.c.nest",
       "begin": "c\"",
       "end": "\"",
-      "patterns": [{ "include": "#escape-sequence" }]
+      "patterns": [
+        {
+          "include": "#escape-sequence"
+        }
+      ]
     },
     "f-string": {
       "name": "string.interpolated.nest",
@@ -88,11 +172,32 @@
           "begin": "\\{",
           "end": "\\}",
           "patterns": [
-            { "include": "#format-spec" },
-            { "include": "$self" }
-          ]
+            {
+              "comment": "`{name:spec}` — the name before a format spec is a value, not a label",
+              "match": "\\b[a-z_][A-Za-z0-9_]*\\b(?=:[^:=])",
+              "name": "variable.other.nest"
+            },
+            {
+              "include": "#format-spec"
+            },
+            {
+              "include": "$self"
+            }
+          ],
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.nest"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.nest"
+            }
+          }
         },
-        { "include": "#escape-sequence" }
+        {
+          "include": "#escape-sequence"
+        }
       ]
     },
     "format-spec": {
@@ -138,12 +243,24 @@
           "match": "\\b(true|false)\\b"
         },
         {
-          "name": "variable.language.nest",
-          "match": "\\b(self|Self)\\b"
+          "name": "variable.language.self.nest",
+          "match": "\\bself\\b"
         },
         {
-          "name": "keyword.control.nest",
-          "match": "\\b(if|else|match|while|loop|for|in|break|continue|return|defer)\\b"
+          "name": "keyword.control.conditional.nest",
+          "match": "\\b(if|else|match)\\b"
+        },
+        {
+          "name": "keyword.control.repeat.nest",
+          "match": "\\b(while|loop|for|in|break|continue)\\b"
+        },
+        {
+          "name": "keyword.control.return.nest",
+          "match": "\\b(return)\\b"
+        },
+        {
+          "name": "keyword.control.import.nest",
+          "match": "\\b(import)\\b"
         },
         {
           "name": "keyword.operator.word.nest",
@@ -151,7 +268,7 @@
         },
         {
           "name": "keyword.other.nest",
-          "match": "\\b(let|const|mut|func|impl|extern|namespace|distinct|struct|enum|trait|dyn|import|static)\\b"
+          "match": "\\b(let|const|mut|func|impl|extern|namespace|distinct|struct|enum|trait|dyn|static|defer)\\b"
         }
       ]
     },
@@ -162,6 +279,10 @@
     "types": {
       "patterns": [
         {
+          "name": "entity.name.type.self.nest",
+          "match": "\\bSelf\\b"
+        },
+        {
           "name": "entity.name.type.nest",
           "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
         }
@@ -171,12 +292,17 @@
       "patterns": [
         {
           "comment": "name :: func (…) — a function binding",
-          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*::\\s*(#[A-Za-z_][A-Za-z0-9_]*\\s*)*(extern\\s*\\([^)]*\\)\\s*)?func\\b)",
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\b(?=\\s*::\\s*(#[A-Za-z_][A-Za-z0-9_]*(\\([^)]*\\))?\\s*)*(extern\\s*\\([^)]*\\)\\s*)?func\\b)",
           "name": "entity.name.function.nest"
         },
         {
-          "comment": "a call expression's callee",
-          "match": "\\b([a-z_][A-Za-z0-9_]*)\\b(?=\\s*\\()",
+          "comment": "name :: import … / namespace { … } — a namespace binding",
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\b(?=\\s*::\\s*(import|namespace)\\b)",
+          "name": "entity.name.namespace.nest"
+        },
+        {
+          "comment": "a call's callee, generic or not: f(…), f.<T>(…)",
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\b(?=\\s*(\\.<[^()]*>)?\\s*\\()",
           "name": "entity.name.function.call.nest"
         }
       ]
@@ -200,6 +326,225 @@
           "match": "\\."
         }
       ]
+    },
+    "import-path": {
+      "comment": "import <core/mem> — the package path reads as a special string",
+      "match": "\\b(import)\\s*(<[A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*>)",
+      "captures": {
+        "1": {
+          "name": "keyword.control.import.nest"
+        },
+        "2": {
+          "name": "string.other.package-path.nest"
+        }
+      }
+    },
+    "constants": {
+      "comment": "SCREAMING_CASE names are constants by convention",
+      "name": "variable.other.constant.nest",
+      "match": "\\b[A-Z][A-Z0-9_]*[A-Z0-9]\\b(?![a-z])"
+    },
+    "chain-call": {
+      "comment": "a method chain continued on a new line: `    .collect.<T>()`",
+      "match": "^\\s*(\\.)([a-z_][A-Za-z0-9_]*)(?=\\s*(\\.<.*>)?\\s*\\()",
+      "captures": {
+        "1": {
+          "name": "punctuation.accessor.nest"
+        },
+        "2": {
+          "name": "entity.name.function.method.nest"
+        }
+      }
+    },
+    "members": {
+      "patterns": [
+        {
+          "match": "(?<=[\\w)\\]}>*?!])(\\.)([a-z_][A-Za-z0-9_]*)(?=\\s*(\\.<[^()]*>)?\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.nest"
+            },
+            "2": {
+              "name": "entity.name.function.method.nest"
+            }
+          }
+        },
+        {
+          "match": "(?<=[\\w)\\]}>*?!])(\\.)([a-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.nest"
+            },
+            "2": {
+              "name": "variable.other.member.nest"
+            }
+          }
+        }
+      ]
+    },
+    "enum-literal": {
+      "comment": ".some(x), .none — a variant named without its enum",
+      "match": "(?<![\\w)\\]}>.])(\\.)([A-Za-z_][A-Za-z0-9_]*)\\b",
+      "captures": {
+        "1": {
+          "name": "punctuation.accessor.nest"
+        },
+        "2": {
+          "name": "entity.name.constructor.nest"
+        }
+      }
+    },
+    "labels": {
+      "comment": "`name:` outside a parameter list — a named argument, field initializer, field pattern, or #when key",
+      "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=:(?![:=]))",
+      "name": "variable.other.member.nest"
+    },
+    "binding-name": {
+      "comment": "let/const introduce a local, even when a `: T` follows",
+      "match": "\\b(let|const)\\s+(mut\\s+)?([a-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.nest"
+        },
+        "2": {
+          "name": "keyword.other.nest"
+        },
+        "3": {
+          "name": "variable.other.nest"
+        }
+      }
+    },
+    "func-parameters": {
+      "comment": "a func's parameter list: `func (n: i32)`, `func <T> (self: *Self)`",
+      "begin": "(?<=\\bfunc|\\bfunc\\s|>|>\\s)(\\()(?=\\s*(\\)|self\\b|[a-z_][A-Za-z0-9_]*\\s*:(?!:)))",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.nest"
+        }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.nest"
+        }
+      },
+      "patterns": [
+        {
+          "match": "\\b(self)\\b",
+          "name": "variable.language.self.nest"
+        },
+        {
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=:(?!:))",
+          "name": "variable.parameter.nest"
+        },
+        {
+          "include": "#paren-group"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "paren-group": {
+      "begin": "\\(",
+      "end": "\\)",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.nest"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.nest"
+        }
+      },
+      "patterns": [
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "struct-fields": {
+      "comment": "struct { name: T, … } — field declarations",
+      "begin": "\\b(struct)\\b(\\s*<[^{]*>)?\\s*(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.other.nest"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "$self"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.nest"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.nest"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#attributes"
+        },
+        {
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=:(?!:))",
+          "name": "variable.other.member.nest"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "closure-header": {
+      "comment": "{ x in … }, { [n] x in … }, { a: i32, b: i32 -> i32 in … } — the header up to `in`",
+      "begin": "(\\{)(?=\\s*(\\[[^\\]]*\\]\\s*)?([a-z_][A-Za-z0-9_]*\\s*(:[^{}]*?)?,\\s*)*([a-z_][A-Za-z0-9_]*\\s*(:[^{}]*?)?)?\\s*(->[^{}]*?)?\\bin\\b)",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.nest"
+        }
+      },
+      "end": "\\bin\\b",
+      "endCaptures": {
+        "0": {
+          "name": "keyword.control.repeat.nest"
+        }
+      },
+      "patterns": [
+        {
+          "match": "(\\[)([^\\]]*)(\\])",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.nest"
+            },
+            "2": {
+              "name": "variable.other.capture.nest"
+            },
+            "3": {
+              "name": "punctuation.definition.nest"
+            }
+          }
+        },
+        {
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\b(?=\\s*(:|,|->|in\\b))",
+          "name": "variable.parameter.nest"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "identifiers": {
+      "name": "variable.other.nest",
+      "match": "\\b[a-z_][A-Za-z0-9_]*\\b"
     }
   }
 }

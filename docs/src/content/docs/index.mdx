@@ -16,11 +16,21 @@ hero:
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-<div class="nest-quicklook">
+<dl class="nest-strip not-content">
+	<div><dt>::</dt><dd>One binding form for every compile-time declaration.</dd></div>
+	<div><dt>never null</dt><dd>`*T` always points at a live value; absence is `Option.<*T>`.</dd></div>
+	<div><dt>LLVM</dt><dd>Native code on every target the backend supports.</dd></div>
+	<div><dt>GC</dt><dd>Memory is managed for you — no lifetimes, no manual free.</dd></div>
+</dl>
 
-## A quick look
+<section class="nest-section nest-quicklook">
 
-```nest
+<div class="nest-section-head not-content">
+	<p class="nest-eyebrow">A quick look</p>
+	<h2>Closures, traits and native code in a few lines</h2>
+</div>
+
+```nest title="adder.nest"
 { boxed } :: import <core/mem>
 
 // A closure returned as `impl Func`: the caller knows it only by its bound.
@@ -34,21 +44,21 @@ main :: func () -> i32 {
 }
 ```
 
+</section>
+
+<section class="nest-section">
+
+<div class="nest-section-head not-content">
+	<p class="nest-eyebrow">Why Nest</p>
+	<h2>Small ideas that compose</h2>
 </div>
 
-<dl class="nest-strip">
-	<div><dt>::</dt><dd>one binding form for every compile-time declaration — constants, types, functions, traits, namespaces</dd></div>
-	<div><dt>never null</dt><dd>*T pointers always point at a live value; absence is Option.&lt;*T&gt;</dd></div>
-	<div><dt>LLVM</dt><dd>compiles to native code on every target the backend supports</dd></div>
-	<div><dt>GC</dt><dd>memory is managed for you — no lifetimes, no manual free</dd></div>
-</dl>
-
-<CardGrid stagger>
+<CardGrid>
 	<Card title="Garbage collected, still compiled" icon="rocket">
 		Nest compiles to native code through LLVM, but memory is managed for you —
 		pointers are never null and are always live while reachable.
 	</Card>
-	<Card title="One binding form, `::`" icon="pencil">
+	<Card title="One binding form" icon="pencil">
 		Constants, types, functions, traits and namespaces are all bound with the
 		same `::` — there is no separate keyword per kind of declaration.
 	</Card>
@@ -56,9 +66,13 @@ main :: func () -> i32 {
 		`core/c` types are aliases for Nest's own — a C call has no marshalling
 		layer, and `extern("c")` declarations read like the header they came from.
 	</Card>
-	<Card title="Closures and trait objects, no new mechanism" icon="puzzle">
+	<Card title="No new mechanism for closures" icon="puzzle">
 		Closures are an ordinary type implementing `Func`; a `dyn` trait object is
 		a fat pointer. Nothing here is a feature the rest of the type system
 		couldn't already express.
 	</Card>
 </CardGrid>
+
+</section>
+
+<div class="nest-cta not-content">Ready to write some? <a href="/getting-started/">Install Nest and run your first program →</a></div>
