@@ -393,6 +393,15 @@ pub enum Dispatch {
         /// and are substituted with it.
         trait_args: Vec<Ty>,
     },
+    /// A call on a value whose type is only known to implement `Func` (§5.5):
+    /// `f(x)` where `f: F` and `F: Func(i32) -> i32`.
+    ///
+    /// The callee is the value itself, and `self_ty` is its type as inference
+    /// left it. Monomorphization substitutes it and turns the call into what it
+    /// is for that type — an indirect call through a `*func`, or a static call
+    /// to a closure's own function with the closure passed first — so nothing
+    /// after it sees this variant.
+    Func { self_ty: Ty },
 }
 
 /// A bound function parameter.

@@ -10077,3 +10077,45 @@ fn a_nest_function_is_not_a_c_function_pointer() {
     );
     assert!(msg.contains("type mismatch"), "{msg}");
 }
+
+// ===< Func and impl (§5.4, §5.5) >===
+
+/// A function pointer implements `Func`, and a parameter written `impl Func`
+/// is a generic one: both a named function and a `*func` value are passed.
+#[test]
+fn a_function_pointer_implements_func() {
+    analyze_clean(
+        "double :: func (x: i32) -> i32 { return x * 2 }\n\
+         apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }\n\
+         twice :: func <F: Func(i32) -> i32> (f: F, x: i32) -> i32 { return f(f(x)) }\n\
+         go :: func () -> i32 {\n\
+             const p: *func(i32) -> i32 := double\n\
+             return apply(double, 3) + twice(p, 1)\n\
+         }\n",
+    );
+}
+
+/// A `Func` bound states the result too, and a function that answers something
+/// else does not meet it.
+#[test]
+fn a_func_bound_checks_the_result() {
+    let msg = first_error(
+        "is_pos :: func (x: i32) -> bool { return x > 0 }\n\
+         apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }\n\
+         go :: func () -> i32 { return apply(is_pos, 3) }\n",
+    );
+    assert!(msg.contains("expected `i32`, found `bool`"), "{msg}");
+}
+
+/// A call site owes its callee's bounds: a type with no impl is reported where
+/// it is passed, not found missing at monomorphization.
+#[test]
+fn a_call_site_is_held_to_its_callees_bounds() {
+    let msg = first_error(
+        "Show :: trait { show :: func (self: *Self) -> i32 }\n\
+         S :: struct { n: i32 }\n\
+         use :: func <T: Show> (t: T) -> i32 { return t.show() }\n\
+         go :: func () -> i32 { return use(S { n: 1 }) }\n",
+    );
+    assert!(msg.contains("`S` does not implement `Show`"), "{msg}");
+}

@@ -697,7 +697,7 @@ impl<'a> ConstEval<'a> {
             // The impl is chosen by monomorphization, which has not run. This is
             // the same deferral `check::constness` makes for a generic `#const`
             // body, and for the same reason.
-            Dispatch::Generic { .. } => Err(ConstError::new(
+            Dispatch::Generic { .. } | Dispatch::Func { .. } => Err(ConstError::new(
                 e.id,
                 "the callee is chosen by monomorphization, which has not run yet",
             )),

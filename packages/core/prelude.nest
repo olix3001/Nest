@@ -36,6 +36,8 @@
 // written, `panic` wherever something must not happen, and `size_of` in enough
 // signatures and constants to earn its place; the rest of `core/mem` and all of
 // `core/gc` are an import away.
+@public { Func } :: import "ops.nest"
+
 @public { cast, size_of } :: import "mem.nest"
 //
 // `assert` joins them: a run-time assertion is written in the same places a

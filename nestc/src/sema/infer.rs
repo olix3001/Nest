@@ -277,6 +277,13 @@ pub struct Upcast {
 /// a reinterpretation and nothing more — but the method's `self` is typed `T`,
 /// not the distinct type, so the receiver has to be spelled as `T` before the
 /// usual `&` / `.*` adjustment happens. `repr` is that type.
+/// Marks the callee of a call on a value that is not a function pointer but
+/// implements `Func` (§5.5) — a closure, or a generic parameter bounded by
+/// `Func`. Lowering reads it to emit [`crate::ir::Dispatch::Func`], and the
+/// callee's own type is what that dispatch is on.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct FuncCall;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DistinctRecv {
     pub repr: Ty,
@@ -2616,6 +2623,9 @@ impl Inferer<'_> {
     /// was solved, is still blocked on an unsolved variable, or failed (a
     /// diagnostic was reported).
     fn try_solve(&mut self, ob: &Obligation) -> Outcome {
+        if let Some(outcome) = self.try_solve_func(ob) {
+            return outcome;
+        }
         match ob {
             Obligation::Trait {
                 self_ty,
@@ -3382,6 +3392,189 @@ impl Inferer<'_> {
             Some(TyVarKind::Int) => matches!(row.applies, Applies::Int | Applies::Numeric),
             Some(TyVarKind::Float) => matches!(row.applies, Applies::Float | Applies::Numeric),
             _ => false,
+        }
+    }
+
+    /// What a call site owes its callee's bounds: for each generic parameter,
+    /// that what it was instantiated with implements every trait bounding it —
+    /// with the arguments the bound wrote, and the associated types it pinned.
+    ///
+    /// Without this a bound was only a promise the callee's body relied on: a
+    /// call passing a type with no impl got through inference and was found at
+    /// monomorphization, as a defect in the compiler rather than a mistake in
+    /// the program. It is also what gives a closure argument its parameter
+    /// types, which a `Func(i32)` bound on the parameter it fills states.
+    fn register_bounds(&mut self, at: NodeId, params: &[DefId], map: &Subst) {
+        for &p in params {
+            if self.defs.get(p).kind != DefKind::TypeParam {
+                continue;
+            }
+            let Some(self_ty) = map.tys.get(&p).cloned() else {
+                continue;
+            };
+            for t in self.param_bound_traits(p) {
+                let args: Vec<Ty> = self
+                    .bound_args(p, t)
+                    .iter()
+                    .map(|a| self.subst_type_params(a, map))
+                    .collect();
+                self.cx.register(Obligation::Trait {
+                    self_ty: self_ty.clone(),
+                    trait_def: t,
+                    args: args.clone(),
+                    origin: at,
+                    stamp: None,
+                });
+                let pinned: Vec<(Symbol, DefId)> = self
+                    .defs
+                    .get(p)
+                    .ns
+                    .members
+                    .iter()
+                    .filter(|(_, m)| {
+                        let m = **m;
+                        self.defs.get(m).projection.as_ref().is_some_and(|pr| {
+                            pr.trait_def == t
+                                && (pr.pinned.is_some() || self.decls().param_pinned(m).is_some())
+                        })
+                    })
+                    .map(|(n, &m)| (n.clone(), m))
+                    .collect();
+                for (assoc, synth) in pinned {
+                    let out = self.param_ty(synth);
+                    let out = self.subst_type_params(&out, map);
+                    self.cx.register(Obligation::Projection {
+                        self_ty: self_ty.clone(),
+                        trait_def: t,
+                        args: args.clone(),
+                        assoc,
+                        out,
+                        origin: at,
+                        method: None,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Discharge an obligation on the `Func` trait (§5.5), which no impl is
+    /// written for: a function pointer and a closure implement it by being what
+    /// they are, and what their `Args` and `Output` are is their signature.
+    ///
+    /// `None` for an obligation on any other trait, and for a self type this
+    /// does not answer for — a generic parameter, which its bound answers
+    /// through ordinary selection, and anything that cannot be called, which
+    /// selection then reports as the missing impl it is.
+    fn try_solve_func(&mut self, ob: &Obligation) -> Option<Outcome> {
+        let (self_ty, trait_def, args, origin, out) = match ob {
+            Obligation::Trait {
+                self_ty,
+                trait_def,
+                args,
+                origin,
+                ..
+            } => (self_ty, *trait_def, args, *origin, None),
+            Obligation::Projection {
+                self_ty,
+                trait_def,
+                args,
+                origin,
+                out,
+                ..
+            } => (self_ty, *trait_def, args, *origin, Some(out)),
+            _ => return None,
+        };
+        if Some(trait_def) != self.lang.get("func").map(|d| self.defs.resolve_alias(d)) {
+            return None;
+        }
+        let s = self.cx.shallow(self_ty);
+        if is_var(&s) {
+            return Some(Outcome::Deferred);
+        }
+        if matches!(s, Ty::Error) {
+            if let Some(out) = out {
+                let _ = self.cx.unify(out, &Ty::Error);
+            }
+            return Some(Outcome::Solved);
+        }
+        let (params, ret) = self.func_value_sig(&s)?;
+        if let Some(want) = args.first() {
+            let have = args_tuple(&params);
+            let snapshot = self.cx.snapshot();
+            if self.cx.unify(&have, want).is_err() {
+                self.cx.rollback(snapshot);
+                self.report_no_impl(origin, self_ty, trait_def, args);
+                if let Some(out) = out {
+                    let _ = self.cx.unify(out, &Ty::Error);
+                }
+                return Some(Outcome::Failed);
+            }
+        }
+        if let Some(out) = out {
+            self.expect(origin, &ret, out);
+        }
+        Some(Outcome::Solved)
+    }
+
+    /// What a value of type `ty` takes and answers when it is called, if it can
+    /// be: a function pointer's signature, and a generic parameter's `Func`
+    /// bound — its arguments, and its `Output`.
+    fn func_value_sig(&mut self, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
+        match self.cx.shallow(ty) {
+            Ty::Func { params, ret, .. } => Some((params, *ret)),
+            Ty::Nominal { def, .. } if self.defs.get(def).kind == DefKind::TypeParam => {
+                let func = self.defs.resolve_alias(self.lang.get("func")?);
+                if !self.param_bound_traits(def).contains(&func) {
+                    return None;
+                }
+                let params = match self.bound_args(def, func).into_iter().next() {
+                    Some(a) => tuple_elems(&a),
+                    None => Vec::new(),
+                };
+                let ret = match self.defs.get(def).ns.members.get(&Symbol::new("Output")) {
+                    Some(&synth) => self.param_ty(synth),
+                    None => Ty::Void,
+                };
+                Some((params, ret))
+            }
+            _ => None,
+        }
+    }
+
+    /// The arguments `param`'s bound on `trait_def` was written with — the
+    /// `f64` of `<T: Add.<f64>>`, the `(i32)` of `<F: Func(i32)>`.
+    ///
+    /// The recorded answer first, as everywhere a bound is read: a parameter
+    /// that came out of a library has no tree here. For one declared in a file
+    /// still being inferred there is no record yet, and the tree is read.
+    fn bound_args(&mut self, param: DefId, trait_def: DefId) -> Vec<Ty> {
+        if let Some(args) = self.decls().param_bound_args(param, trait_def) {
+            return args;
+        }
+        let d = self.defs.get(param);
+        if d.projection.is_some() {
+            return Vec::new();
+        }
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            return Vec::new();
+        };
+        let Some(ast) = self.asts.get(&file) else {
+            return Vec::new();
+        };
+        let NodeKind::GenericTypeParam {
+            constraint: Some(c),
+            ..
+        } = ast.node(node).kind.clone()
+        else {
+            return Vec::new();
+        };
+        let bounds = self.bound_nodes(file, c);
+        match bounds
+            .into_iter()
+            .find(|&b| self.type_head_def_in(file, b) == Some(trait_def))
+        {
+            Some(b) => self.bound_trait_args_in(file, b),
+            None => Vec::new(),
         }
     }
 
@@ -4161,6 +4354,21 @@ impl Inferer<'_> {
         args: &[Option<NodeId>],
         variadic: bool,
     ) -> Ty {
+        // A value that implements `Func` without being a function pointer is
+        // called the way a function pointer with its signature would be, and
+        // marked so lowering dispatches on its type instead (§5.5).
+        let shallow = self.cx.shallow(callee_ty);
+        if !matches!(shallow, Ty::Func { .. })
+            && let Some((params, ret)) = self.func_value_sig(&shallow)
+        {
+            self.ast.set_meta(callee, FuncCall);
+            let sig = Ty::Func {
+                params,
+                ret: Box::new(ret),
+                c: false,
+            };
+            return self.apply_call_with(callee, &sig, args, variadic);
+        }
         let arg_tys: Vec<Option<Ty>> = args.iter().map(|a| a.map(|n| self.infer_expr(n))).collect();
         match self.cx.shallow(callee_ty) {
             Ty::Func { params, ret, .. } => {
@@ -5379,6 +5587,7 @@ impl Inferer<'_> {
                 method: None,
             });
         }
+        self.register_bounds(at, &params, &map);
         let inst = self.subst_type_params(sig, &map);
         (inst, map)
     }
@@ -8692,4 +8901,24 @@ fn rebind_ty(ty: &Ty, from: &Ty, to: &Ty) -> Ty {
 /// wrote reads better as what it wrote, `func(S) -> i32`.
 fn signature_text(ty: &str) -> &str {
     ty.strip_prefix('*').filter(|t| t.starts_with("func(")).unwrap_or(ty)
+}
+
+/// A call's arguments as the one type `Func` takes them as (§5.5): `()` for
+/// none, and a tuple of them otherwise — a tuple of one included, which the
+/// language has no spelling for and `Func(A)` is the only way to write.
+fn args_tuple(params: &[Ty]) -> Ty {
+    if params.is_empty() {
+        Ty::Void
+    } else {
+        Ty::Tuple(params.to_vec())
+    }
+}
+
+/// The inverse of [`args_tuple`]: the arguments a `Func` bound's tuple lists.
+fn tuple_elems(args: &Ty) -> Vec<Ty> {
+    match args {
+        Ty::Void => Vec::new(),
+        Ty::Tuple(elems) => elems.clone(),
+        other => vec![other.clone()],
+    }
 }

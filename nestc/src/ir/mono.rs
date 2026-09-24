@@ -690,6 +690,16 @@ impl Mono<'_> {
             // not of the call: it stays as it is, and the impls that fill the
             // slots are reached through the `*dyn` coercion that built them.
             Dispatch::Virtual { .. } => {}
+            // A call on a `Func` value, now that its type is known (§5.5). A
+            // function pointer is called through, which is what a static
+            // dispatch on a callee that is not a `Global` already is.
+            Dispatch::Func { self_ty } => match self_ty {
+                Ty::Func { .. } => *dispatch = Dispatch::Static,
+                _ => {
+                    let self_ty = self_ty.clone();
+                    self.report_unresolved_func(e.id, &self_ty);
+                }
+            },
             Dispatch::Generic {
                 trait_def,
                 method,
@@ -1131,6 +1141,21 @@ impl Mono<'_> {
         }
         self.out.push(d.with_note(
             "the bound was satisfied during inference, so this is a compiler defect".to_string(),
+        ));
+    }
+
+    /// The `Func` counterpart of [`Mono::report_unresolved`]: a call on a value
+    /// whose type turned out to be nothing that can be called.
+    fn report_unresolved_func(&mut self, at: IrId, self_ty: &Ty) {
+        let mut d = Diagnostic::error(format!(
+            "internal: `{}` is not callable at monomorphization",
+            self_ty.display(self.defs)
+        ));
+        if let Some(span) = self.meta.span(at) {
+            d = d.with_primary(span, "this call has no callee");
+        }
+        self.out.push(d.with_note(
+            "inference proved it implements `Func`, so this is a compiler defect".to_string(),
         ));
     }
 }
@@ -1651,6 +1676,12 @@ impl VisitorMut for Cloner<'_> {
                 for a in trait_args.iter_mut() {
                     *a = subst_ty(self.subst, a);
                 }
+            }
+            ExprKind::Call {
+                dispatch: Dispatch::Func { self_ty },
+                ..
+            } => {
+                *self_ty = subst_ty(self.subst, self_ty);
             }
             _ => {}
         }

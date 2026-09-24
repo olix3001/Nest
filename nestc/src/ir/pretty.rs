@@ -393,6 +393,9 @@ impl Printer<'_> {
                             self_ty.display(self.defs)
                         );
                     }
+                    Dispatch::Func { self_ty } => {
+                        let _ = write!(prefix, "#func({}) ", self_ty.display(self.defs));
+                    }
                 }
                 format!("{prefix}({c})({a}): {ty}")
             }

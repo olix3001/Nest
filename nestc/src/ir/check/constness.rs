@@ -145,7 +145,7 @@ impl Cx<'_> {
                 // every generic `#const` function, and accepting silently would
                 // be a claim. Monomorphization re-checks once the callee is
                 // concrete.
-                Dispatch::Generic { .. } => {}
+                Dispatch::Generic { .. } | Dispatch::Func { .. } => {}
                 Dispatch::Static => {
                     let Some(target) = self.callee_def(callee) else {
                         return;

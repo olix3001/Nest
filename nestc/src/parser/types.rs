@@ -348,6 +348,65 @@ impl Parser {
         self.alloc(span, NodeKind::GenericTypeParam { name, constraint })
     }
 
+    /// Turn each parameter written `impl Bounds` into an anonymous generic
+    /// parameter with those bounds (§5.4): `func (f: impl Func(i32))` is
+    /// `func <F: Func(i32)> (f: F)`, with a name nothing can write.
+    ///
+    /// Only a parameter's own type is lifted. An `impl` anywhere else in a
+    /// parameter's type is left for sema to refuse, and one in the return type
+    /// means something else — the one type the body returns.
+    fn lift_impl_params(&mut self, mut generics: Vec<NodeId>, params: &[NodeId]) -> Vec<NodeId> {
+        let mut lifted = 0;
+        for &p in params {
+            let (name, ty, default) = match self.clone_kind(p) {
+                NodeKind::Param {
+                    name,
+                    ty: Some(ty),
+                    default,
+                } => (name, ty, default),
+                _ => continue,
+            };
+            let NodeKind::ImplType { bounds } = self.clone_kind(ty) else {
+                continue;
+            };
+            let span = self.node_span(ty);
+            let generic = Symbol::new(&format!("impl#{lifted}"));
+            lifted += 1;
+            let bounds = self.alloc(span, NodeKind::Bounds { bounds });
+            generics.push(self.alloc(
+                span,
+                NodeKind::GenericTypeParam {
+                    name: generic.clone(),
+                    constraint: Some(bounds),
+                },
+            ));
+            let path = self.alloc(
+                span,
+                NodeKind::Path {
+                    segments: vec![generic],
+                },
+            );
+            let named = self.alloc(
+                span,
+                NodeKind::TypePath {
+                    path,
+                    generic_args: Vec::new(),
+                },
+            );
+            let param_span = self.node_span(p);
+            self.set_node(
+                p,
+                param_span,
+                NodeKind::Param {
+                    name,
+                    ty: Some(named),
+                    default,
+                },
+            );
+        }
+        generics
+    }
+
     /// `type { '+' type }` — a `+`-separated bound list, wrapped in
     /// [`NodeKind::Bounds`].
     pub(crate) fn parse_bounds(&mut self) -> NodeId {
@@ -818,6 +877,7 @@ impl Parser {
         }
         let generics = self.parse_generics();
         let params = self.parse_params();
+        let generics = self.lift_impl_params(generics, &params);
         let mut end = self.cur_span();
         let ret = if self.eat(&TokenKind::Arrow) {
             let ty = self.parse_type();

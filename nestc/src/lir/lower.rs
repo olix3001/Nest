@@ -2800,7 +2800,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // A `Generic` call that survived monomorphization is a defect there,
             // already reported. Treating the callee as a value keeps the graph
             // well formed instead of losing the call.
-            Dispatch::Static | Dispatch::Generic { .. } => match &callee.kind {
+            Dispatch::Static | Dispatch::Generic { .. } | Dispatch::Func { .. } => match &callee.kind {
                 ExprKind::Global(def) => self.static_callee(*def),
                 _ => {
                     let f = self.eval(callee);

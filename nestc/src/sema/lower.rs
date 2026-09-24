@@ -48,7 +48,7 @@ use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::OpResolution;
 use super::infer::{
-    ArgOrder, Coercion, DistinctRecv, DynCoerce, Generics, Instantiation, MethodDispatch,
+    ArgOrder, Coercion, DistinctRecv, DynCoerce, FuncCall, Generics, Instantiation, MethodDispatch,
     MethodRes, RangeReported, RecvAdjust, SliceCoerce, Upcast,
 };
 use super::ty::Ty;
@@ -1247,6 +1247,14 @@ impl Lowerer<'_> {
             self.carry_instantiation(head, &e);
             return e;
         }
+        // A call on a `Func` value: the callee is the value, and what it
+        // reaches is decided by its type once monomorphization knows it (§5.5).
+        let dispatch = match self.ast.meta::<FuncCall>(head) {
+            Some(FuncCall) => Dispatch::Func {
+                self_ty: self.ty(head),
+            },
+            None => Dispatch::Static,
+        };
         let callee = Box::new(self.lower_expr(callee));
         let args = self.lower_args(target, slots, node);
         let call = self.expr(
@@ -1256,7 +1264,7 @@ impl Lowerer<'_> {
                 callee,
                 args,
                 builtin: None,
-                dispatch: Dispatch::Static,
+                dispatch,
             },
         );
         self.carry_instantiation(head, &call);
