@@ -167,7 +167,7 @@ function's variadic tail: each argument past the fixed parameters is
 widened to C's own default argument promotion (narrower-than-`int` to
 `int`, `float` to `double`) — the shape `va_arg` will read on the C side,
 not a convenience for the caller. See
-[Directives and attributes](/language/directives/) for `#c_vararg`.
+[Directives and attributes](../directives/) for `#c_vararg`.
 
 ## Exporting to C
 

@@ -18,7 +18,7 @@ render :: #inline func (self: *CatImage) -> str {
 
 The return type follows `->`; omitted, it's `void`. The body's last
 expression is **not** implicitly returned — use `return` (see
-[Errors](/language/errors/) for how it interacts with `defer`).
+[Errors](../errors/) for how it interacts with `defer`).
 
 ## Parameters
 

@@ -36,7 +36,7 @@ guards the call so a failing test is reported and the next one still runs.
 
 Tests are compiled like any other function — `@test` says what a function
 is *for*, not whether it's built. Keeping them out of a release binary is
-[`#when(test)`](/language/directives/#conditional-compilation---when)'s
+[`#when(test)`](../directives/#conditional-compilation---when)'s
 job, applied to the namespace they live in. The recommended arrangement is
 a `tests` namespace beside the code it tests, which sees the file's private
 names and is the unit `#when` applies to:

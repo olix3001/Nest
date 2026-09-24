@@ -21,7 +21,7 @@ let   xs  := Vector.<i32>.new()        // std, wraps make internally
 ```
 
 Memory is zero-initialized unless the element type is `#raw` (see
-[Directives and attributes](/language/directives/)), in which case it's
+[Directives and attributes](../directives/)), in which case it's
 left uninitialized and reads are only permitted in `#unsafe` scopes.
 
 ## `drop`
@@ -105,7 +105,7 @@ by request.
 `core/mem`'s `boxed(value)` puts a value whose type has no name onto the
 heap, returning a `*dyn Trait` — the way to store several closures (or
 other values known only by a bound) behind one uniform pointer type. See
-[Closures and Func](/language/closures/) for the full picture.
+[Closures and Func](../closures/) for the full picture.
 
 ```nest
 { boxed } :: import <core/mem>

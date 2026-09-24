@@ -50,7 +50,7 @@ implements `Trait` for `T` (the compiler checks every required method is
 present with a matching signature, `Self` resolved to `T`). Because the
 target is written in the header rather than bound to a name, you can
 implement traits for types declared elsewhere — see
-[Traits and impls](/language/traits/) for coherence rules. A function whose
+[Traits and impls](../traits/) for coherence rules. A function whose
 first parameter is `self` is a **method**; one without is an **associated
 function** (`CatImage.new(...)`).
 

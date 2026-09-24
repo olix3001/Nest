@@ -82,7 +82,7 @@ CatImage :: struct {
 A private field is still reachable from the namespace the struct is
 declared in and from namespaces nested inside it — which is where its impls
 and neighboring functions live. See
-[Namespaces and packages](/language/namespaces/) for the full visibility
+[Namespaces and packages](../namespaces/) for the full visibility
 picture.
 
 ## Named vs. anonymous
@@ -120,7 +120,7 @@ sub-object, `&e.t`, at zero cost.
 ## Layout
 
 `#packed`, `#align(N)`, and `#raw` affect struct layout — see
-[Directives and attributes](/language/directives/). A record body may also
+[Directives and attributes](../directives/). A record body may also
 contain compile-time items, most usefully `comptime_assert(...)`:
 
 ```nest

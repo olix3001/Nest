@@ -94,10 +94,10 @@ pointer arithmetic**. They're immutable by default; write access is opt-in.
 - **Never null.** A `*T`/`*mut T` always points at a live value; there's no
   null pointer and no null literal. Absence is `Option.<*T>` (`.none`). A
   genuinely nullable raw pointer only exists for C interop, as `c.ptr.<T>`
-  (see [C FFI](/language/c-ffi/)).
+  (see [C FFI](../c-ffi/)).
 - **GC-managed.** Taking `&x` is always safe; the collector keeps the
   pointee alive while the pointer is reachable. No lifetime annotations, no
-  manual free (though see [Memory](/language/memory/) for `drop`).
+  manual free (though see [Memory](../memory/) for `drop`).
 - **No arithmetic.** `p + 1` is a type error — iterate slices for sequential
   access.
 
@@ -157,7 +157,7 @@ Option :: enum <T> {
 `Option.<*CatImage>` is an optional pointer; a bare `T` coerces to
 `.some(value)` in an `Option` context. It's consumed by `match`, by methods
 like `unwrap_or(default)`, or by the `Try` operators `.?`/`.!` (see
-[Errors](/language/errors/)).
+[Errors](../errors/)).
 
 ## Generic type application — `.<...>`
 

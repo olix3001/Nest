@@ -1,8 +1,12 @@
-name: Deploy to GitHub Pages
+name: Deploy docs to GitHub Pages
 
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,14 +20,30 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
     steps:
-      - name: Checkout your repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Install, build, and upload docs site
-        uses: withastro/action@v3
+      # The pnpm version comes from `packageManager` in docs/package.json —
+      # there is no package.json at the repo root for it to find.
+      - uses: pnpm/action-setup@v4
         with:
-          path: ./docs
+          package_json_file: docs/package.json
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: docs/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/dist
 
   deploy:
     needs: build

@@ -14,7 +14,7 @@ Three annotation-like mechanisms exist, and they don't overlap:
   safety). Directives never produce a value.
 - **Intrinsics** — ordinary functions declared in `core` with no body,
   marked `#intrinsic`; the compiler supplies the operation (see
-  [Memory](/language/memory/) and [Operators](/language/operators/)).
+  [Memory](../memory/) and [Operators](../operators/)).
 
 Rule of thumb: `@` annotates, `#` modifies the construct it precedes, and a
 **value comes from a function**, never from a directive.
@@ -40,12 +40,12 @@ backtrack to pick up an attribute after a `#` one.
 
 ## `@public`, `@public(...)`, `@private`
 
-See [Namespaces and packages](/language/namespaces/) for the full table and
-[Structs](/language/structs/) for field visibility.
+See [Namespaces and packages](../namespaces/) for the full table and
+[Structs](../structs/) for field visibility.
 
 ## `@test`
 
-`@test` marks a function as a test — see [Testing](/language/testing/).
+`@test` marks a function as a test — see [Testing](../testing/).
 
 ## Conditional compilation — `#when`
 
@@ -109,12 +109,12 @@ particles: #soa []Particle          // stored column-wise
 - **`#inline`** — hint that a function be inlined at call sites. Codegen
   only; the backend may ignore it.
 - **`#const`** — restrict a function to the compile-time-evaluable subset
-  (see [Functions](/language/functions/)).
+  (see [Functions](../functions/)).
 
 ## Storage
 
 - **`#static`** — a program-lifetime memory region rather than a constant
-  (see [Bindings](/language/bindings/)).
+  (see [Bindings](../bindings/)).
 - **`#section("name")`** — on a function or constant, place its symbol in
   the named object-file section.
 - **`#offset(N)`** — on a function or constant, fix the symbol at position
@@ -184,7 +184,7 @@ diagnostic. This is what lets a program replace the panic handler:
 my_handler :: func (msg: str, loc: Location) -> never { ... }
 ```
 
-See [Operators](/language/operators/) for the full `#lang` registry.
+See [Operators](../operators/) for the full `#lang` registry.
 
 ## `#intrinsic` — compiler-supplied bodies
 
@@ -213,21 +213,21 @@ ships with.
 
 An expression, not a decoration — evaluates to a `Location` describing the
 call site, legal only as a default argument. See
-[Functions](/language/functions/#default-values).
+[Functions](../functions/#default-values).
 
 ## `#callconv` and `extern("c")`
 
 `#callconv("name")` sets the calling convention (register/stack protocol);
 `extern("abi")` marks an external symbol and selects its ABI's types. See
-[C FFI](/language/c-ffi/).
+[C FFI](../c-ffi/).
 
 ## `#c_vararg`
 
 Marks an `extern("c")` declaration as a C variadic function. See
-[C FFI](/language/c-ffi/).
+[C FFI](../c-ffi/).
 
 ## Not a directive
 
 `impl T { ... }` / `impl Trait for T { ... }` were once the `#impl(...)`
 directive; they're now the `impl` keyword — see
-[Traits and impls](/language/traits/).
+[Traits and impls](../traits/).

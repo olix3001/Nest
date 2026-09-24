@@ -80,7 +80,7 @@ render_all :: func (xs: []*dyn ToJson) { ... }
 A trait object's type carries only the erased trait's **associated
 bindings**, not the full set of trait arguments a static bound would have.
 A trait with associated types, like `Func`'s `Args`/`Output` (see
-[Closures and Func](/language/closures/)), is written `dyn T.<Name = Type,
+[Closures and Func](../closures/)), is written `dyn T.<Name = Type,
 ...>` — the same `.<...>` associated-type-equality syntax a bound uses:
 
 ```nest

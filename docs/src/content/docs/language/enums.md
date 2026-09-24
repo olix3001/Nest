@@ -29,9 +29,9 @@ return .redirect(cat.url)           // inferred, in a Response context
 return .rect { w: 3.0, h: 4.0 }     // record-payload variant
 ```
 
-Enums are consumed by `.match` — see [Control flow](/language/control-flow/).
+Enums are consumed by `.match` — see [Control flow](../control-flow/).
 `Result` and `Option` are ordinary enums provided by the prelude (see
-[Errors](/language/errors/) and [Types](/language/types/)).
+[Errors](../errors/) and [Types](../types/)).
 
 ## Explicit discriminants
 
@@ -74,4 +74,4 @@ Bits :: enum {
 The tag's type follows from the discriminants: the narrowest integer that
 holds every one of them, signed exactly when some variant's is negative. To
 fix the tag at the type a C enumeration has instead, write `#repr("C")` (see
-[Directives and attributes](/language/directives/)).
+[Directives and attributes](../directives/)).

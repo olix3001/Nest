@@ -89,7 +89,7 @@ whatever `Add` the type has.
 
 Assignment, `&&`/`||` (short-circuiting needs to *not* evaluate the right
 operand), the `.?`/`.!` `Try` operators (their own trait, see
-[Errors](/language/errors/)), and `.match` stay built into the compiler and
+[Errors](../errors/)), and `.match` stay built into the compiler and
 dispatch on nothing in this table.
 
 ## `cast`
@@ -109,7 +109,7 @@ const raw_id: str := cast(self.id)   // CatId       -> str (target from annotati
 
 It covers numeric widening/narrowing, `distinct` ↔ underlying, `*mut T` →
 `*T`, pointer → `*dyn Trait`, and `*T` → `c.ptr.<T>` (see
-[C FFI](/language/c-ffi/)). An illegal conversion is a compile error, never
+[C FFI](../c-ffi/)). An illegal conversion is a compile error, never
 a run-time coercion.
 
 A `cast` **the program writes** may lose precision — narrowing keeps the low

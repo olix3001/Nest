@@ -5,7 +5,7 @@ description: Compiler flags, twig subcommands, and the nest.toml manifest.
 
 Two tools: `nestc`, the compiler, which takes a single entry file; and
 `twig`, the package/build tool, which drives `nestc` from a `nest.toml`
-manifest. See [Getting started](/getting-started/) for the install and the
+manifest. See [Getting started](../getting-started/) for the install and the
 quick tour — this page is the flag/format reference.
 
 ## `nestc`

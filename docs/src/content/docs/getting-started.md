@@ -95,6 +95,6 @@ path = "src/package.nest"
 - `twig build --bin <name>` builds (or runs) only that binary, when a package
   declares more than one.
 
-See [Testing](/language/testing/) for `@test`, and
-[Directives and attributes](/language/directives/) for `#when(test)`, which is
+See [Testing](../language/testing/) for `@test`, and
+[Directives and attributes](../language/directives/) for `#when(test)`, which is
 how test code stays out of a release binary.

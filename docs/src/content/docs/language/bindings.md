@@ -36,7 +36,7 @@ local type or local constant), and at namespace scope they're
 ### A constant's type
 
 `SERVER_PORT :: 8080` has no single runtime type: a numeric literal is a
-`comptime_int` (see [Types](/language/types/)), and a constant bound to one
+`comptime_int` (see [Types](../types/)), and a constant bound to one
 stays untyped — each use site settles it for itself, which is what lets one
 `MAX` be an `i8` in one place and an `i64` in another.
 
