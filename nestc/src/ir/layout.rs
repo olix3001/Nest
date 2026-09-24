@@ -842,7 +842,10 @@ pub(crate) fn subst_ty(map: &HashMap<DefId, Ty>, ty: &Ty) -> Ty {
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_ty(map, e)).collect()),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
-            assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| subst_ty(map, e))(t))).collect(),
+            assoc: assoc
+                .iter()
+                .map(|(n, t)| (n.clone(), (|e| subst_ty(map, e))(t)))
+                .collect(),
         },
         Ty::Func { params, ret, c } => Ty::Func {
             c: *c,

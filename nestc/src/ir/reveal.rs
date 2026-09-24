@@ -167,7 +167,10 @@ fn map(ty: &Ty, f: &mut impl FnMut(&Ty) -> Option<Ty>) -> Ty {
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| map(e, f)).collect()),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
-            assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| map(e, f))(t))).collect(),
+            assoc: assoc
+                .iter()
+                .map(|(n, t)| (n.clone(), (|e| map(e, f))(t)))
+                .collect(),
         },
         Ty::Ptr { mutable, inner } => Ty::Ptr {
             mutable: *mutable,
@@ -186,12 +189,9 @@ fn map(ty: &Ty, f: &mut impl FnMut(&Ty) -> Option<Ty>) -> Ty {
             mutable: *mutable,
             inner: Box::new(map(inner, f)),
         },
-        Ty::Struct(fields) => Ty::Struct(
-            fields
-                .iter()
-                .map(|(n, t)| (n.clone(), map(t, f)))
-                .collect(),
-        ),
+        Ty::Struct(fields) => {
+            Ty::Struct(fields.iter().map(|(n, t)| (n.clone(), map(t, f))).collect())
+        }
         Ty::Func { params, ret, c } => Ty::Func {
             params: params.iter().map(|p| map(p, f)).collect(),
             ret: Box::new(map(ret, f)),

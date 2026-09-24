@@ -880,7 +880,12 @@ impl Mono<'_> {
         depth: u32,
         at: IrId,
     ) {
-        let is_func = self.defs.get(trait_def).lang.as_ref().is_some_and(|l| l.as_str() == "func");
+        let is_func = self
+            .defs
+            .get(trait_def)
+            .lang
+            .as_ref()
+            .is_some_and(|l| l.as_str() == "func");
         if is_func && !matches!(concrete, Ty::Nominal { .. }) {
             let mut d = Diagnostic::error(format!(
                 "`{}` cannot be a `*dyn Func`: a function pointer has no closure behind it",
@@ -913,7 +918,13 @@ impl Mono<'_> {
     ) -> Option<VtableSlots> {
         // `Func` has no impl to read slots off (§5.5). Its one slot is a
         // closure's own `call`, at the closure type's arguments.
-        if self.defs.get(trait_def).lang.as_ref().is_some_and(|l| l.as_str() == "func") {
+        if self
+            .defs
+            .get(trait_def)
+            .lang
+            .as_ref()
+            .is_some_and(|l| l.as_str() == "func")
+        {
             let Ty::Nominal { def, args } = concrete else {
                 return None;
             };
@@ -1501,7 +1512,10 @@ pub(crate) fn subst_ty(subst: &Subst, ty: &Ty) -> Ty {
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_ty(subst, e)).collect()),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
-            assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| subst_ty(subst, e))(t))).collect(),
+            assoc: assoc
+                .iter()
+                .map(|(n, t)| (n.clone(), (|e| subst_ty(subst, e))(t)))
+                .collect(),
         },
         Ty::Func { params, ret, c } => Ty::Func {
             c: *c,

@@ -2395,7 +2395,10 @@ impl Lowerer<'_> {
             name: Symbol::new("self"),
         }];
         fparams.extend(params.iter().filter_map(|&p| self.lower_param(p)));
-        let param_tys: Vec<Ty> = fparams.iter().map(|p| self.meta.ty_or_error(p.id)).collect();
+        let param_tys: Vec<Ty> = fparams
+            .iter()
+            .map(|p| self.meta.ty_or_error(p.id))
+            .collect();
         self.closures.push(ClosureCx {
             this: defs.this,
             this_ty,

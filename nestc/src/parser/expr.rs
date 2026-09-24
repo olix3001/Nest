@@ -887,7 +887,8 @@ impl Parser {
             }
         };
         skip_newlines(&mut i);
-        let is_in = |t: Option<&TokenKind>| matches!(t, Some(TokenKind::Ident(s)) if s.as_str() == "in");
+        let is_in =
+            |t: Option<&TokenKind>| matches!(t, Some(TokenKind::Ident(s)) if s.as_str() == "in");
         if matches!(self.peek_nth(i), Some(TokenKind::LBracket)) {
             i += 1;
             loop {

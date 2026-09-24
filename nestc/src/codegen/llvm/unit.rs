@@ -49,7 +49,6 @@
 //! the swap the runtime shim exists to make cheap — and on that day this is
 //! where `llvm.gcroot` or a statepoint lowering goes.
 
-
 use inkwell::AddressSpace;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
@@ -64,8 +63,8 @@ use inkwell::values::{
 
 use crate::codegen::CodegenError;
 use crate::lir::{
-    Aggregate, Base, Callee, CastKind, Constant, Function, Intrinsic, Linkage, Op,
-    Operand, Place, Projection, Rvalue, StmtKind, TermKind, Ty, TypeId, Unit,
+    Aggregate, Base, Callee, CastKind, Constant, Function, Intrinsic, Linkage, Op, Operand, Place,
+    Projection, Rvalue, StmtKind, TermKind, Ty, TypeId, Unit,
 };
 use crate::sema::ty::CallConv;
 
@@ -2740,7 +2739,10 @@ impl<'ctx> Cx<'ctx, '_> {
         }
         for (i, a) in args.iter().enumerate() {
             let (Some(want), Some(class)) = (params.get(i), crossing.args.get(i)) else {
-                return Err(failed(format!("{}: the callee takes no argument {i}", f.name)));
+                return Err(failed(format!(
+                    "{}: the callee takes no argument {i}",
+                    f.name
+                )));
             };
             for v in self.abi_arg(fx, f, a, want, class, crossing.abi)? {
                 built.push(v.into());

@@ -1132,7 +1132,10 @@ fn subst(ty: &Ty, params: &[crate::sema::def::DefId], args: &[Ty]) -> Ty {
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| subst(t, params, args)).collect()),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
-            assoc: assoc.iter().map(|(n, t)| (n.clone(), (|t| subst(t, params, args))(t))).collect(),
+            assoc: assoc
+                .iter()
+                .map(|(n, t)| (n.clone(), (|t| subst(t, params, args))(t)))
+                .collect(),
         },
         Ty::Func { params: p, ret, c } => Ty::Func {
             c: *c,

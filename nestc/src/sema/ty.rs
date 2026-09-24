@@ -499,9 +499,7 @@ impl Ty {
                 inner.mentions_error()
             }
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_error),
-            Ty::Dyn { assoc, .. } => {
-                assoc.iter().any(|(_, t)| (Ty::mentions_error)(t))
-            }
+            Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| (Ty::mentions_error)(t)),
             Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_error()),
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_error),
             Ty::Func { params, ret, .. } => {
@@ -526,12 +524,12 @@ impl Ty {
             Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } => inner.mentions_var(),
             Ty::Array { len, inner, .. } => len.mentions_var() || inner.mentions_var(),
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_var),
-            Ty::Dyn { assoc, .. } => {
-                assoc.iter().any(|(_, t)| (Ty::mentions_var)(t))
-            }
+            Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| (Ty::mentions_var)(t)),
             Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_var()),
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_var),
-            Ty::Func { params, ret, .. } => params.iter().any(Ty::mentions_var) || ret.mentions_var(),
+            Ty::Func { params, ret, .. } => {
+                params.iter().any(Ty::mentions_var) || ret.mentions_var()
+            }
             _ => false,
         }
     }
@@ -953,7 +951,10 @@ impl InferCtxt {
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.name_literals(e)).collect()),
             Ty::Dyn { def, assoc } => Ty::Dyn {
                 def,
-                assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| self.name_literals(e))(t))).collect(),
+                assoc: assoc
+                    .iter()
+                    .map(|(n, t)| (n.clone(), (|e| self.name_literals(e))(t)))
+                    .collect(),
             },
             Ty::Struct(fields) => Ty::Struct(
                 fields
@@ -1212,7 +1213,10 @@ impl InferCtxt {
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.resolve(e)).collect()),
             Ty::Dyn { def, assoc } => Ty::Dyn {
                 def,
-                assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| self.resolve(e))(t))).collect(),
+                assoc: assoc
+                    .iter()
+                    .map(|(n, t)| (n.clone(), (|e| self.resolve(e))(t)))
+                    .collect(),
             },
             // Already sorted — resolving a field's type cannot change its name,
             // so this rebuilds the variant directly rather than through
@@ -1396,16 +1400,9 @@ impl InferCtxt {
                 }
                 Ok(())
             }
-            (
-                Ty::Dyn {
-                    def: d1,
-                    assoc: s1,
-                },
-                Ty::Dyn {
-                    def: d2,
-                    assoc: s2,
-                },
-            ) if d1 == d2 && s1.len() == s2.len() => {
+            (Ty::Dyn { def: d1, assoc: s1 }, Ty::Dyn { def: d2, assoc: s2 })
+                if d1 == d2 && s1.len() == s2.len() =>
+            {
                 for ((n1, x), (n2, y)) in s1.iter().zip(s2) {
                     if n1 != n2 {
                         return Err((a.clone(), b.clone()));
@@ -1487,9 +1484,7 @@ impl InferCtxt {
                 self.occurs(v, &inner)
             }
             Ty::Tuple(elems) => elems.iter().any(|e| self.occurs(v, e)),
-            Ty::Dyn { assoc, .. } => {
-                assoc.iter().any(|(_, t)| (|e| self.occurs(v, e))(t))
-            }
+            Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| (|e| self.occurs(v, e))(t)),
             Ty::Struct(fields) => fields.iter().any(|(_, t)| self.occurs(v, t)),
             Ty::Func { params, ret, .. } => {
                 params.iter().any(|p| self.occurs(v, p)) || self.occurs(v, &ret)

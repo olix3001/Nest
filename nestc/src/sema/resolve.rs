@@ -1141,7 +1141,9 @@ impl Resolver<'_> {
                 }
                 _ => self.report(
                     c,
-                    format!("`{name}` is not a local, so there is nothing to copy into the closure"),
+                    format!(
+                        "`{name}` is not a local, so there is nothing to copy into the closure"
+                    ),
                 ),
             }
         }
@@ -1271,11 +1273,7 @@ impl Resolver<'_> {
         if !matches!(self.defs.get(def).kind, DefKind::Local | DefKind::Param) {
             return;
         }
-        let Some(frame) = self
-            .scopes
-            .iter()
-            .rposition(|f| f.get(name) == Some(&def))
-        else {
+        let Some(frame) = self.scopes.iter().rposition(|f| f.get(name) == Some(&def)) else {
             return;
         };
         let mut crossed_item = false;

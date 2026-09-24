@@ -520,7 +520,7 @@ pub fn resolve_impl_targets(
             types: HashMap::new(),
             ret: Ty::Void,
             breaks: Vec::new(),
-        func: None,
+            func: None,
             alias_stack: Vec::new(),
             const_stack: Vec::new(),
             int_values: HashMap::new(),
@@ -657,7 +657,10 @@ pub fn resolve_param_decls(
         };
         let revealed = d.node.and_then(|n| {
             let OpaqueTy(t) = ast.meta::<OpaqueTy>(n)?;
-            let args = ast.meta::<super::OpaqueArgs>(n).map(|a| a.0).unwrap_or_default();
+            let args = ast
+                .meta::<super::OpaqueArgs>(n)
+                .map(|a| a.0)
+                .unwrap_or_default();
             Some((args, t))
         });
         if bounds.is_empty() && pinned.is_none() && revealed.is_none() {
@@ -900,7 +903,7 @@ pub fn infer_file(
                 types: HashMap::new(),
                 ret: Ty::Void,
                 breaks: Vec::new(),
-        func: None,
+                func: None,
                 alias_stack: Vec::new(),
                 const_stack: Vec::new(),
                 int_values: HashMap::new(),
@@ -1480,9 +1483,8 @@ impl Inferer<'_> {
         let declared = ret.map(|t| self.ty_from_node(t)).unwrap_or(Ty::Void);
         // An `impl` return type is the body's to decide (§5.4): inside, it is
         // whatever the body returns, and only the signature says `impl`.
-        let opaque = ret.filter(|&r| {
-            matches!(self.ast.node(r).kind, NodeKind::GenericTypeParam { .. })
-        });
+        let opaque =
+            ret.filter(|&r| matches!(self.ast.node(r).kind, NodeKind::GenericTypeParam { .. }));
         self.ret = match opaque {
             Some(_) => self.cx.fresh(),
             None => declared.clone(),
@@ -3678,10 +3680,7 @@ impl Inferer<'_> {
                 shared,
             },
         );
-        Ty::Nominal {
-            def: defs.ty,
-            args,
-        }
+        Ty::Nominal { def: defs.ty, args }
     }
 
     /// What `expected` says a closure of `arity` parameters takes and answers.
@@ -9312,7 +9311,10 @@ fn rebind_ty(ty: &Ty, from: &Ty, to: &Ty) -> Ty {
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| rebind_ty(e, from, to)).collect()),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
-            assoc: assoc.iter().map(|(n, t)| (n.clone(), (|e| rebind_ty(e, from, to))(t))).collect(),
+            assoc: assoc
+                .iter()
+                .map(|(n, t)| (n.clone(), (|e| rebind_ty(e, from, to))(t)))
+                .collect(),
         },
         Ty::Func { params, ret, c } => Ty::Func {
             c: *c,
@@ -9331,7 +9333,9 @@ fn rebind_ty(ty: &Ty, from: &Ty, to: &Ty) -> Ty {
 /// a function pointer's (`*func(S) -> i32`), and a message about what the impl
 /// wrote reads better as what it wrote, `func(S) -> i32`.
 fn signature_text(ty: &str) -> &str {
-    ty.strip_prefix('*').filter(|t| t.starts_with("func(")).unwrap_or(ty)
+    ty.strip_prefix('*')
+        .filter(|t| t.starts_with("func("))
+        .unwrap_or(ty)
 }
 
 /// A call's arguments as the one type `Func` takes them as (§5.5): `()` for

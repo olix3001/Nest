@@ -2963,13 +2963,15 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 );
                 Callee::Indirect(Operand::local(f))
             }
-            Dispatch::Static | Dispatch::Generic { .. } | Dispatch::Func { .. } => match &callee.kind {
-                ExprKind::Global(def) => self.static_callee(*def),
-                _ => {
-                    let f = self.eval(callee);
-                    Callee::Indirect(f)
+            Dispatch::Static | Dispatch::Generic { .. } | Dispatch::Func { .. } => {
+                match &callee.kind {
+                    ExprKind::Global(def) => self.static_callee(*def),
+                    _ => {
+                        let f = self.eval(callee);
+                        Callee::Indirect(f)
+                    }
                 }
-            },
+            }
         };
         self.spill_variadic_tail(&callee, &mut vals, args, span);
         self.emit_call(callee, vals, ty, span)

@@ -160,9 +160,7 @@ fn is_generic(defs: &DefTable, ty: &Ty) -> bool {
             is_generic(defs, inner)
         }
         Ty::Tuple(elems) => elems.iter().any(|e| is_generic(defs, e)),
-        Ty::Dyn { assoc, .. } => {
-            assoc.iter().any(|(_, t)| (|e| is_generic(defs, e))(t))
-        }
+        Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| (|e| is_generic(defs, e))(t)),
         Ty::Func { params, ret, .. } => {
             params.iter().any(|p| is_generic(defs, p)) || is_generic(defs, ret)
         }
