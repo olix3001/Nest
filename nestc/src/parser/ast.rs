@@ -472,8 +472,12 @@ pub enum NodeKind {
         directives: Vec<NodeId>,
         inner: NodeId,
     },
-    /// `func [<g>] (param_types) [-> ret]` — a function *type*.
+    /// `[extern(abi)] func [<g>] (param_types) [-> ret]` — a function *type*.
+    ///
+    /// A value of it is only ever reached through a pointer — `*func(...)`,
+    /// or `*extern("c") func(...)` for a C callback (§3.5).
     FuncType {
+        extern_abi: Option<Symbol>,
         generics: Vec<NodeId>,
         params: Vec<NodeId>,
         ret: Option<NodeId>,
@@ -810,6 +814,7 @@ impl NodeKind {
                 generics,
                 params,
                 ret,
+                ..
             } => {
                 out.extend_from_slice(generics);
                 out.extend_from_slice(params);

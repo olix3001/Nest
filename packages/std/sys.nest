@@ -258,7 +258,7 @@ impl Res {
 // `argv` arrives as a `usize`, not a pointer: it addresses memory the C startup
 // owns and the collector has never heard of, so a traced pointer would put a
 // root in a stack frame no collector can walk (`nestc/src/lir/entry.rs`).
-@public start :: #lang("start") func (main: func () -> i32, argc: c.int, argv: usize) -> c.int {
+@public start :: #lang("start") func (main: *func () -> i32, argc: c.int, argv: usize) -> c.int {
   started_argc = cast.<usize>(argc)
   started_argv = c.ptr.<c.cstr> { addr: argv }
   return main()

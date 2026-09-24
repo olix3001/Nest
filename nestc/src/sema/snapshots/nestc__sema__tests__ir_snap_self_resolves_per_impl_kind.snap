@@ -3,23 +3,23 @@ source: src/sema/tests.rs
 expression: ir_text(src)
 ---
 trait Step {
-  [0] step: func(*Step) -> i32 #self(*)
-  [1] twice: func(*Step) -> i32 #self(*)
+  [0] step: *func(*Step) -> i32 #self(*)
+  [1] twice: *func(*Step) -> i32 #self(*)
 }
 struct Counter {
   n: i32
 }  // size 4, align 4
 func inherent(c: *Counter) -> i32 {
-  return (Counter.bump: func(*Counter) -> i32)(c: *Counter): i32
+  return (Counter.bump: *func(*Counter) -> i32)(c: *Counter): i32
 }
 func concrete(c: *Counter) -> i32 {
-  return (Counter.step: func(*Counter) -> i32)(c: *Counter): i32
+  return (Counter.step: *func(*Counter) -> i32)(c: *Counter): i32
 }
 func bounded(t: *T) -> i32 {
-  return #generic(Step, *T) (Step.step: func(*T) -> i32)(t: *T): i32
+  return #generic(Step, *T) (Step.step: *func(*T) -> i32)(t: *T): i32
 }
 func erased(d: *dyn Step) -> i32 {
-  return #virtual(Step) (Step.step: func(*dyn Step) -> i32)(d: *dyn Step): i32
+  return #virtual(Step) (Step.step: *func(*dyn Step) -> i32)(d: *dyn Step): i32
 }
 func bump(self: *Counter) -> i32 #self(*) {
   return ((self: *Counter.*): Counter.n): i32

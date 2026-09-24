@@ -5,8 +5,8 @@ expression: "ir_text(\"cleanup :: func () {}\\ndm :: func (c: bool) -> i32 {\\n 
 func cleanup() -> void {
 }
 func dm(c: bool) -> i32 {
-  defer (cleanup: func() -> void)(): void
-  defer (cleanup: func() -> void)(): void
+  defer (cleanup: *func() -> void)(): void
+  defer (cleanup: *func() -> void)(): void
   if c: bool {
     return $cast(1: comptime_int): i32
   }

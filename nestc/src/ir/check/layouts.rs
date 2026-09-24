@@ -160,7 +160,7 @@ fn is_generic(defs: &DefTable, ty: &Ty) -> bool {
             is_generic(defs, inner)
         }
         Ty::Tuple(elems) => elems.iter().any(|e| is_generic(defs, e)),
-        Ty::Func { params, ret } => {
+        Ty::Func { params, ret, .. } => {
             params.iter().any(|p| is_generic(defs, p)) || is_generic(defs, ret)
         }
         // `int.<N>` inside a family impl: the width is a parameter, so the type

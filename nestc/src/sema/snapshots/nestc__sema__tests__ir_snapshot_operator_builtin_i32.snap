@@ -3,5 +3,5 @@ source: src/sema/tests.rs
 expression: "ir_text(\"f :: func (a: i32, b: i32) -> i32 { return a + b }\")"
 ---
 func f(a: i32, b: i32) -> i32 {
-  return #builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(a: i32, b: i32): i32
+  return #builtin(Add) (core.ops.Add.add: *func(i32, i32) -> i32)(a: i32, b: i32): i32
 }

@@ -590,7 +590,7 @@ impl Cx<'_> {
             // A function *pointer*'s type is the signature the call will have,
             // which is the erased one: a `void` parameter is not passed (§9), so
             // it is not in the type either.
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 let stripped: Vec<Ty> = params
                     .iter()
                     .map(|p| self.strip(p))
@@ -960,7 +960,7 @@ impl Cx<'_> {
     /// The type of one vtable slot: the method's signature with the receiver
     /// erased, which is what a `dyn` call actually has in hand.
     fn slot_ty(&mut self, method: IrId) -> LirTy {
-        let Some(Ty::Func { params, ret }) = self.meta.ty(method) else {
+        let Some(Ty::Func { params, ret, .. }) = self.meta.ty(method) else {
             return LirTy::ptr(LirTy::Void);
         };
         let ret = self.lir(&ret);

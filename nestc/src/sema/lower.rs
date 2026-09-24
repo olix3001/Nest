@@ -652,6 +652,7 @@ impl Lowerer<'_> {
             Ty::Func {
                 params: param_tys,
                 ret: Box::new(ret),
+                c: extern_abi.is_some(),
             },
         );
         self.meta
@@ -1584,6 +1585,7 @@ impl Lowerer<'_> {
             _ => Ty::Func {
                 params: call_args.iter().map(|a| self.ty_of(a)).collect(),
                 ret: Box::new(ty.clone()),
+                c: false,
             },
         };
         let dispatch = match &res.dispatch {
@@ -1678,6 +1680,7 @@ impl Lowerer<'_> {
         let callee_ty = Ty::Func {
             params: args.iter().map(|a| self.ty_of(a)).collect(),
             ret: Box::new(ty.clone()),
+            c: false,
         };
         let callee = self.expr(node, callee_ty, ExprKind::Global(res.method));
         self.expr(

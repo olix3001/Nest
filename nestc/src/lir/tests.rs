@@ -1796,7 +1796,7 @@ fn walk_ty(ty: &Ty, f: &mut impl FnMut(u32)) {
         Ty::Named(id) => f(id.0),
         Ty::Ptr(inner) => walk_ty(inner, f),
         Ty::Array { elem, .. } => walk_ty(elem, f),
-        Ty::Func { params, ret } => {
+        Ty::Func { params, ret, .. } => {
             params.iter().for_each(|p| walk_ty(p, f));
             walk_ty(ret, f);
         }

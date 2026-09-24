@@ -1057,7 +1057,7 @@ fn a_functions_type_is_its_whole_signature() {
         .iter()
         .find(|f| f.name.as_str() == "f")
         .expect("func f");
-    let Some(Ty::Func { params, ret }) = session.ir_meta.ty(func.id) else {
+    let Some(Ty::Func { params, ret, .. }) = session.ir_meta.ty(func.id) else {
         panic!("a function is not typed with its signature");
     };
     assert_eq!(params, vec![i32_ty.clone(), Ty::Bool]);
@@ -4667,7 +4667,7 @@ f :: func (a: Foo) -> i32 { return a.tag() }
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     let concrete = ir.lines().any(|l| l.contains("func tag(self: Foo)"));
     assert!(concrete, "{ir}");
-    assert!(ir.contains("(Foo.tag: func(Foo) -> i32)"), "{ir}");
+    assert!(ir.contains("(Foo.tag: *func(Foo) -> i32)"), "{ir}");
 }
 
 #[test]
@@ -6479,7 +6479,7 @@ fn an_array_length_travels_with_the_const_parameter() {
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
     assert!(ir.contains("$len(a: [N]T): usize"), "{ir}");
-    assert!(ir.contains("(count: func([4]i32) -> usize)"), "{ir}");
+    assert!(ir.contains("(count: *func([4]i32) -> usize)"), "{ir}");
 }
 
 // ===< static trait calls >===
@@ -10035,4 +10035,45 @@ fn a_cycle_between_packages_is_refused() {
         .any(|d| d.message.contains("cycle between packages"));
     assert!(found, "{:#?}", session.diagnostics);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ===< Function pointers (§3.5) >===
+
+/// A function is reached through a pointer: `*func(...)` holds one, and a named
+/// function used as a value is one.
+#[test]
+fn a_function_pointer_is_written_star_func() {
+    analyze_clean(
+        "double :: func (x: i32) -> i32 { return x * 2 }\n\
+         apply :: func (f: *func(i32) -> i32, x: i32) -> i32 { return f(x) }\n\
+         go :: func () -> i32 {\n\
+             const f: *func(i32) -> i32 := double\n\
+             return apply(f, 3)\n\
+         }\n",
+    );
+}
+
+/// A bare `func(...)` type names nothing a slot can hold, and the message says
+/// what to write instead.
+#[test]
+fn a_bare_function_type_is_refused() {
+    let msg = first_error("apply :: func (f: func(i32) -> i32) -> i32 { return f(1) }\n");
+    assert!(msg.contains("`*func(...)`"), "{msg}");
+}
+
+/// A C callback is `*extern("c") func(...)`, and a Nest function is not one:
+/// the two pass an aggregate differently, so neither converts to the other.
+#[test]
+fn a_nest_function_is_not_a_c_function_pointer() {
+    analyze_clean(
+        "cb :: extern(\"c\") func (x: i32) -> i32 { return x }\n\
+         take :: func (f: *extern(\"c\") func(i32) -> i32) -> i32 { return f(1) }\n\
+         go :: func () -> i32 { return take(cb) }\n",
+    );
+    let msg = first_error(
+        "nest :: func (x: i32) -> i32 { return x }\n\
+         take :: func (f: *extern(\"c\") func(i32) -> i32) -> i32 { return f(1) }\n\
+         go :: func () -> i32 { return take(nest) }\n",
+    );
+    assert!(msg.contains("type mismatch"), "{msg}");
 }

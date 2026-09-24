@@ -6,17 +6,17 @@ struct Bits {
   w: i32
 }  // size 4, align 4
 func ops(a: Bits, b: Bits, g: *mut Bits) -> bool #mutating {
-  let n: Bits = (Bits.neg: func(Bits) -> Bits)(a: Bits): Bits
-  let c: Bits = (Bits.bitnot: func(Bits) -> Bits)(a: Bits): Bits
-  let s: Bits = (Bits.shl: func(Bits, i32) -> Bits)(a: Bits, $cast(2: comptime_int): i32): Bits
-  let ne: bool = (Not (Bits.eq: func(Bits, Bits) -> bool)(a: Bits, b: Bits): bool): bool
-  match (Bits.cmp: func(Bits, Bits) -> core.cmp.Ordering)(a: Bits, b: Bits): core.cmp.Ordering {
+  let n: Bits = (Bits.neg: *func(Bits) -> Bits)(a: Bits): Bits
+  let c: Bits = (Bits.bitnot: *func(Bits) -> Bits)(a: Bits): Bits
+  let s: Bits = (Bits.shl: *func(Bits, i32) -> Bits)(a: Bits, $cast(2: comptime_int): i32): Bits
+  let ne: bool = (Not (Bits.eq: *func(Bits, Bits) -> bool)(a: Bits, b: Bits): bool): bool
+  match (Bits.cmp: *func(Bits, Bits) -> core.cmp.Ordering)(a: Bits, b: Bits): core.cmp.Ordering {
     .less => true: bool
     _ => false: bool
   }
   let lt: bool = <match: bool>
-  let r: i32 = ((Bits.index: func(*mut Bits, i32) -> *i32)(g: *mut Bits, $cast(1: comptime_int): i32): *i32.*): i32
-  ((Bits.index_mut: func(*mut Bits, i32) -> *mut i32)(g: *mut Bits, $cast(2: comptime_int): i32): *mut i32.*): i32 = $cast(9: comptime_int): i32
+  let r: i32 = ((Bits.index: *func(*mut Bits, i32) -> *i32)(g: *mut Bits, $cast(1: comptime_int): i32): *i32.*): i32
+  ((Bits.index_mut: *func(*mut Bits, i32) -> *mut i32)(g: *mut Bits, $cast(2: comptime_int): i32): *mut i32.*): i32 = $cast(9: comptime_int): i32
   return (ne: bool And lt: bool): bool
 }
 func neg(self: Bits) -> Bits #self {

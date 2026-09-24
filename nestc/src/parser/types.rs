@@ -29,15 +29,29 @@ impl Parser {
                 let span = start.to(self.node_span(inner));
                 self.alloc(span, NodeKind::DynType { inner })
             }
-            Some(TokenKind::FuncKw) => {
+            // A function is only ever reached through a pointer (§3.5): a bare
+            // `func(...)` names nothing a slot can hold, and a closure is not a
+            // function pointer at all but a value whose type implements `Func`.
+            Some(TokenKind::FuncKw | TokenKind::ExternKw) => {
                 self.reject_directives(&directives, "function type");
-                self.parse_func_type()
+                let ty = self.parse_func_type();
+                let span = self.node_span(ty);
+                self.error(
+                    span,
+                    "a function type is written behind a pointer: `*func(...)`, or \
+                     `impl Func(...)` for anything callable, closures included",
+                );
+                ty
             }
             Some(TokenKind::Star) => {
                 self.reject_directives(&directives, "pointer type");
                 self.bump();
                 let mutable = self.eat(&TokenKind::MutKw);
-                let inner = self.parse_type();
+                let inner = if self.at(&TokenKind::FuncKw) || self.at(&TokenKind::ExternKw) {
+                    self.parse_func_type()
+                } else {
+                    self.parse_type()
+                };
                 let span = start.to(self.node_span(inner));
                 self.alloc(span, NodeKind::PtrType { mutable, inner })
             }
@@ -789,6 +803,7 @@ impl Parser {
     /// parameters, never a body).
     fn parse_func_type(&mut self) -> NodeId {
         let start = self.cur_span();
+        let extern_abi = self.parse_extern_spec();
         self.expect(&TokenKind::FuncKw);
         let generics = self.parse_generics();
         self.expect(&TokenKind::LParen);
@@ -814,6 +829,7 @@ impl Parser {
         self.alloc(
             start.to(end),
             NodeKind::FuncType {
+                extern_abi,
                 generics,
                 params,
                 ret,

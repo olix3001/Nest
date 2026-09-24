@@ -7,5 +7,5 @@ func fac(n: isize) -> isize {
     return $cast(1: comptime_int): isize
   }
   <if: void>
-  return #builtin(Mul) (core.ops.Mul.mul: func(isize, isize) -> isize)(n: isize, (fac: func(isize) -> isize)(#builtin(Sub) (core.ops.Sub.sub: func(isize, isize) -> isize)(n: isize, $cast(1: comptime_int): isize): isize): isize): isize
+  return #builtin(Mul) (core.ops.Mul.mul: *func(isize, isize) -> isize)(n: isize, (fac: *func(isize) -> isize)(#builtin(Sub) (core.ops.Sub.sub: *func(isize, isize) -> isize)(n: isize, $cast(1: comptime_int): isize): isize): isize): isize
 }

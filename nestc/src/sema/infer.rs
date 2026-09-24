@@ -1205,7 +1205,8 @@ fn rigid_self_in(ty: &Ty, trait_def: DefId, params: &[Ty]) -> Ty {
         },
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(go).collect()),
         Ty::Struct(fields) => Ty::Struct(fields.iter().map(|(n, t)| (n.clone(), go(t))).collect()),
-        Ty::Func { params: ps, ret } => Ty::Func {
+        Ty::Func { params: ps, ret, c } => Ty::Func {
+            c: *c,
             params: ps.iter().map(go).collect(),
             ret: Box::new(go(ret)),
         },
@@ -4158,7 +4159,7 @@ impl Inferer<'_> {
     ) -> Ty {
         let arg_tys: Vec<Option<Ty>> = args.iter().map(|a| a.map(|n| self.infer_expr(n))).collect();
         match self.cx.shallow(callee_ty) {
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 let fits = if variadic {
                     arg_tys.len() >= params.len()
                 } else {
@@ -5154,7 +5155,7 @@ impl Inferer<'_> {
         // unsolved and the call would be "type annotations needed".
         let inst = self.subst_trait_self(&inst, method, recv);
         self.types.insert(callee, inst.clone());
-        let Ty::Func { params, ret } = self.cx.shallow(&inst) else {
+        let Ty::Func { params, ret, .. } = self.cx.shallow(&inst) else {
             return Ty::Error;
         };
         // Bind the `self` parameter to the receiver, and record what the call
@@ -5516,7 +5517,7 @@ impl Inferer<'_> {
                     self.collect_generic_params(e, out, consts);
                 }
             }
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 for p in params {
                     self.collect_generic_params(p, out, consts);
                 }
@@ -5575,7 +5576,8 @@ impl Inferer<'_> {
                     .map(|e| self.subst_type_params(e, map))
                     .collect(),
             ),
-            Ty::Func { params, ret } => Ty::Func {
+            Ty::Func { params, ret, c } => Ty::Func {
+                c: *c,
                 params: params
                     .iter()
                     .map(|p| self.subst_type_params(p, map))
@@ -6105,6 +6107,18 @@ impl Inferer<'_> {
         self.func_sig_ty_in(self.file, func)
     }
 
+    /// Whether the `FuncExpr` at `func`, in this file, has a C ABI — which makes
+    /// its value a C function pointer rather than a Nest function value (§3.5).
+    fn is_extern_func(&self, func: NodeId) -> bool {
+        matches!(
+            &self.ast.node(func).kind,
+            NodeKind::FuncExpr {
+                extern_abi: Some(_),
+                ..
+            }
+        )
+    }
+
     /// The signature of a function **this pass has just inferred**, read back
     /// from what it recorded rather than resolved a second time.
     ///
@@ -6135,13 +6149,20 @@ impl Inferer<'_> {
         Ty::Func {
             params,
             ret: Box::new(ret),
+            c: self.is_extern_func(func),
         }
     }
 
     /// The signature type of a `FuncExpr` living in `file`.
     fn func_sig_ty_in(&mut self, file: FileId, func: NodeId) -> Ty {
         let ast = &self.asts[&file];
-        let NodeKind::FuncExpr { params, ret, .. } = ast.node(func).kind.clone() else {
+        let NodeKind::FuncExpr {
+            params,
+            ret,
+            extern_abi,
+            ..
+        } = ast.node(func).kind.clone()
+        else {
             return self.cx.fresh();
         };
         let params = params
@@ -6157,6 +6178,7 @@ impl Inferer<'_> {
         Ty::Func {
             params,
             ret: Box::new(ret),
+            c: extern_abi.is_some(),
         }
     }
 
@@ -6394,8 +6416,8 @@ impl Inferer<'_> {
                 "`{}` does not match the declaration in `{}`: expected `{}`, found `{}`",
                 name,
                 self.defs.canonical_string(trait_def),
-                self.cx.resolve(&want).display(self.defs),
-                self.cx.resolve(&got).display(self.defs),
+                signature_text(&self.cx.resolve(&want).display(self.defs)),
+                signature_text(&self.cx.resolve(&got).display(self.defs)),
             );
             // The member's own node, or the impl's target as a fallback.
             // Conformance is checked where the impl is *written*, so there is
@@ -7080,6 +7102,14 @@ impl Inferer<'_> {
         let ast = &self.asts[&file];
         match ast.node(node).kind.clone() {
             NodeKind::TypeHole => self.cx.fresh(),
+            // `*func(...)` is the function pointer, which is one type rather
+            // than a pointer to something: there is no function value to point
+            // at on its own (§3.5).
+            NodeKind::PtrType { inner, .. }
+                if matches!(ast.node(inner).kind, NodeKind::FuncType { .. }) =>
+            {
+                self.ty_from_node_in(file, inner)
+            }
             NodeKind::PtrType { mutable, inner } => Ty::Ptr {
                 mutable,
                 inner: Box::new(self.ty_from_node_in(file, inner)),
@@ -7113,7 +7143,13 @@ impl Inferer<'_> {
                     )
                 }
             }
-            NodeKind::FuncType { params, ret, .. } => Ty::Func {
+            NodeKind::FuncType {
+                params,
+                ret,
+                extern_abi,
+                ..
+            } => Ty::Func {
+                c: extern_abi.is_some(),
                 params: params
                     .iter()
                     .map(|p| self.ty_from_node_in(file, *p))
@@ -8630,7 +8666,8 @@ fn rebind_ty(ty: &Ty, from: &Ty, to: &Ty) -> Ty {
             inner: Box::new(rebind_ty(inner, from, to)),
         },
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| rebind_ty(e, from, to)).collect()),
-        Ty::Func { params, ret } => Ty::Func {
+        Ty::Func { params, ret, c } => Ty::Func {
+            c: *c,
             params: params.iter().map(|p| rebind_ty(p, from, to)).collect(),
             ret: Box::new(rebind_ty(ret, from, to)),
         },
@@ -8640,4 +8677,11 @@ fn rebind_ty(ty: &Ty, from: &Ty, to: &Ty) -> Ty {
         },
         other => other.clone(),
     }
+}
+
+/// A member's type as a **signature** rather than a value: a method's type is
+/// a function pointer's (`*func(S) -> i32`), and a message about what the impl
+/// wrote reads better as what it wrote, `func(S) -> i32`.
+fn signature_text(ty: &str) -> &str {
+    ty.strip_prefix('*').filter(|t| t.starts_with("func(")).unwrap_or(ty)
 }

@@ -29,7 +29,7 @@
 // what the compiler knows it by and what a filter would match against.
 Case :: struct {
     name: str,
-    run: func () -> void,
+    run: *func () -> void,
 }
 
 // Call `run`, coming back with `1` if it panicked and `0` if it returned.
@@ -38,7 +38,7 @@ Case :: struct {
 // unwind, so there is no landing pad to arrive at, and `setjmp` only works in
 // the frame that called it — a wrapper written here would return before the
 // jump could be taken. See `runtime/nest_runtime.c`.
-nest_guard_run :: extern("c") func (run: func () -> void) -> i32
+nest_guard_run :: extern("c") func (run: *func () -> void) -> i32
 
 // A test that returns a `Result`, run — and what its `.err` said, if it said
 // one.
@@ -61,7 +61,7 @@ nest_guard_run :: extern("c") func (run: func () -> void) -> i32
 // to whoever is fixing the test, not to a user — and every type has a `Debug`,
 // so the bound rules nothing out (`core/fmt.nest`).
 run_result :: #lang("test_result") func <E: Debug> (
-    test: func () -> Result.<void, E>,
+    test: *func () -> Result.<void, E>,
     loc: Location,
 ) -> void {
     test().match {

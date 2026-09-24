@@ -988,9 +988,18 @@ fn same_ty(defs: &DefTable, a: &Ty, b: &Ty, map: &mut HashMap<DefId, DefId>) -> 
                     .zip(y)
                     .all(|((n, p), (m, q))| n == m && same_ty(defs, p, q, map))
         }
-        (Ty::Func { params: x, ret: p }, Ty::Func { params: y, ret: q }) => {
-            all(x, y, map) && same_ty(defs, p, q, map)
-        }
+        (
+            Ty::Func {
+                params: x,
+                ret: p,
+                c: a,
+            },
+            Ty::Func {
+                params: y,
+                ret: q,
+                c: b,
+            },
+        ) => a == b && all(x, y, map) && same_ty(defs, p, q, map),
         _ => a == b,
     }
 }

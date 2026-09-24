@@ -13,5 +13,5 @@ func f() -> usize {
   let written: [3]i32 = inferred: [3]i32
   let folded: usize = 3: usize
   let method: usize = 3: usize
-  return #builtin(Add) (core.ops.Add.add: func(usize, usize) -> usize)(#builtin(Add) (core.ops.Add.add: func(usize, usize) -> usize)(#builtin(Add) (core.ops.Add.add: func(usize, usize) -> usize)((count: func([3]i32) -> usize)(inferred: [3]i32): usize, folded: usize): usize, method: usize): usize, (take: func([]i32) -> usize)($slice(written: [3]i32, 0: usize, 3: usize): []i32): usize): usize
+  return #builtin(Add) (core.ops.Add.add: *func(usize, usize) -> usize)(#builtin(Add) (core.ops.Add.add: *func(usize, usize) -> usize)(#builtin(Add) (core.ops.Add.add: *func(usize, usize) -> usize)((count: *func([3]i32) -> usize)(inferred: [3]i32): usize, folded: usize): usize, method: usize): usize, (take: *func([]i32) -> usize)($slice(written: [3]i32, 0: usize, 3: usize): []i32): usize): usize
 }

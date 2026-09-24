@@ -406,10 +406,17 @@ pub enum Ty {
     /// be one type — sorting is what makes the derived `PartialEq` say so, and
     /// it fixes a layout order for the two spellings at the same time.
     Struct(Vec<(Symbol, Ty)>),
-    /// `func(params) -> ret`.
+    /// `*func(params) -> ret` — a pointer to a function, one word (§3.5).
+    ///
+    /// A closure is never one of these: it has a type of its own and is reached
+    /// through `Fn`. `c` says which convention the code behind the pointer has —
+    /// `*extern("c") func(...)` is what a C callback is, and it is a different
+    /// type from a Nest function pointer because the two pass an aggregate
+    /// differently, so neither converts to the other.
     Func {
         params: Vec<Ty>,
         ret: Box<Ty>,
+        c: bool,
     },
     /// `dyn Trait` — a trait object (the trait's [`DefId`]).
     Dyn(DefId),
@@ -484,7 +491,7 @@ impl Ty {
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_error),
             Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_error()),
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_error),
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 params.iter().any(Ty::mentions_error) || ret.mentions_error()
             }
             _ => false,
@@ -508,7 +515,7 @@ impl Ty {
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_var),
             Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_var()),
             Ty::Nominal { args, .. } => args.iter().any(Ty::mentions_var),
-            Ty::Func { params, ret } => params.iter().any(Ty::mentions_var) || ret.mentions_var(),
+            Ty::Func { params, ret, .. } => params.iter().any(Ty::mentions_var) || ret.mentions_var(),
             _ => false,
         }
     }
@@ -650,13 +657,14 @@ impl Ty {
                     .join(", ");
                 format!("struct {{ {inner} }}")
             }
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, c } => {
                 let ps = params
                     .iter()
                     .map(|p| p.display(defs))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("func({ps}) -> {}", ret.display(defs))
+                let abi = if *c { "extern(\"c\") " } else { "" };
+                format!("*{abi}func({ps}) -> {}", ret.display(defs))
             }
             Ty::Dyn(def) => format!("dyn {}", defs.canonical_string(*def)),
             Ty::Error => "<error>".into(),
@@ -924,7 +932,8 @@ impl InferCtxt {
                     .map(|(n, t)| (n.clone(), self.name_literals(t)))
                     .collect(),
             ),
-            Ty::Func { params, ret } => Ty::Func {
+            Ty::Func { params, ret, c } => Ty::Func {
+                c,
                 params: params.iter().map(|p| self.name_literals(p)).collect(),
                 ret: Box::new(self.name_literals(&ret)),
             },
@@ -1176,7 +1185,8 @@ impl InferCtxt {
                     .map(|(n, t)| (n.clone(), self.resolve(t)))
                     .collect(),
             ),
-            Ty::Func { params, ret } => Ty::Func {
+            Ty::Func { params, ret, c } => Ty::Func {
+                c,
                 params: params.iter().map(|p| self.resolve(p)).collect(),
                 ret: Box::new(self.resolve(&ret)),
             },
@@ -1327,12 +1337,14 @@ impl InferCtxt {
                 Ty::Func {
                     params: p1,
                     ret: r1,
+                    c: c1,
                 },
                 Ty::Func {
                     params: p2,
                     ret: r2,
+                    c: c2,
                 },
-            ) if p1.len() == p2.len() => {
+            ) if p1.len() == p2.len() && c1 == c2 => {
                 for (x, y) in p1.iter().zip(p2) {
                     self.unify(x, y)?;
                 }
@@ -1421,7 +1433,7 @@ impl InferCtxt {
             }
             Ty::Tuple(elems) => elems.iter().any(|e| self.occurs(v, e)),
             Ty::Struct(fields) => fields.iter().any(|(_, t)| self.occurs(v, t)),
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 params.iter().any(|p| self.occurs(v, p)) || self.occurs(v, &ret)
             }
             Ty::Nominal { args, .. } => args.iter().any(|a| self.occurs(v, a)),
@@ -1510,7 +1522,8 @@ impl InferCtxt {
                     .map(|(n, t)| (n.clone(), self.finalize(t, on_ambiguous)))
                     .collect(),
             ),
-            Ty::Func { params, ret } => Ty::Func {
+            Ty::Func { params, ret, c } => Ty::Func {
+                c,
                 params: params
                     .iter()
                     .map(|p| self.finalize(p, on_ambiguous))

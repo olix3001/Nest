@@ -662,9 +662,18 @@ impl Cx<'_> {
             | (Ty::Array { inner: a, .. }, Ty::Array { inner: b, .. })
             | (Ty::Ptr { inner: a, .. }, Ty::Ptr { inner: b, .. }) => self.bind(a, b, map),
             (Ty::Tuple(a), Ty::Tuple(b)) => all(a, b, map),
-            (Ty::Func { params: a, ret: r }, Ty::Func { params: b, ret: q }) => {
-                all(a, b, map) && self.bind(r, q, map)
-            }
+            (
+                Ty::Func {
+                    params: a,
+                    ret: r,
+                    c: x,
+                },
+                Ty::Func {
+                    params: b,
+                    ret: q,
+                    c: y,
+                },
+            ) => x == y && all(a, b, map) && self.bind(r, q, map),
             (Ty::Dyn(a), Ty::Dyn(b)) => a == b,
             _ => false,
         }

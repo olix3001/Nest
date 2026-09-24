@@ -6,11 +6,11 @@ func consume(x: i32) -> void {
 }
 func fr(xs: []i32) -> void {
   block: void {
-    let __it1: core.iter.SliceIter.<i32> = (core.iter.<impl []T>.into_iter: func([]i32) -> core.iter.SliceIter.<i32>)(xs: []i32): core.iter.SliceIter.<i32>
+    let __it1: core.iter.SliceIter.<i32> = (core.iter.<impl []T>.into_iter: *func([]i32) -> core.iter.SliceIter.<i32>)(xs: []i32): core.iter.SliceIter.<i32>
     loop {
-      match (core.iter.SliceIter.next: func(*mut core.iter.SliceIter.<i32>) -> core.option.Option.<i32>)((&mut __it1: core.iter.SliceIter.<i32>): *mut core.iter.SliceIter.<i32>): core.option.Option.<i32> {
+      match (core.iter.SliceIter.next: *func(*mut core.iter.SliceIter.<i32>) -> core.option.Option.<i32>)((&mut __it1: core.iter.SliceIter.<i32>): *mut core.iter.SliceIter.<i32>): core.option.Option.<i32> {
         block: void {
-          tail (consume: func(i32) -> void)(x: i32): void
+          tail (consume: *func(i32) -> void)(x: i32): void
         }
         .some(x) => <block: void>
         block: void {

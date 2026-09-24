@@ -135,7 +135,7 @@ impl Cx<'_> {
             });
         }
         let sig = self.meta.ty_or_error(m.id);
-        let Ty::Func { params, ret } = &sig else {
+        let Ty::Func { params, ret, .. } = &sig else {
             return None;
         };
         // The receiver itself is allowed to be `Self` by value in the signature

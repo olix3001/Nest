@@ -662,21 +662,38 @@ whatever it points at. That is the whole rule — erasing the type erases the
 
 `dyn` is the **only** place a vtable appears; everything else is static.
 
-## 3.5 Function types
+## 3.5 Function pointers
 
 ```
-func_type = 'func' [ generics ] '(' [ param_types ] ')' [ '->' type ]
+fn_ptr_type = '*' [ extern_spec ] 'func' [ generics ] '(' [ param_types ] ')' [ '->' type ]
 ```
 
-Used for higher-order parameters:
+A function is reached through a **pointer**, one word wide. A named function
+used as a value is one:
 
 ```
-handler: func() -> Response
+double :: func (x: i32) -> i32 { return x * 2 }
+
+table: [2]*func(i32) -> i32 := .{ double, triple }
+table[0](3)                        // 6
 ```
 
-Function values (including closures) inhabit function types; see
-[05-functions-and-generics.md](05-functions-and-generics.md) and
-[06-expressions-and-operators.md](06-expressions-and-operators.md).
+A bare `func(...)` in a type position is an error: there is no function value to
+hold on its own, only the address of one.
+
+A **C callback** is `*extern("c") func(...)`. It is a different type from a Nest
+function pointer of the same signature, because the two conventions pass an
+aggregate differently (§11), so neither converts to the other: only an
+`extern("c")` function is a `*extern("c") func`.
+
+```
+cmp :: extern("c") func (a: *c.anyopaque, b: *c.anyopaque) -> c.int { ... }
+qsort(base, n, size, cmp)          // qsort's parameter: *extern("c") func(...) -> c.int
+```
+
+A **closure** is not a function pointer. It has a type of its own, and what it
+and a function pointer have in common is the `Func` trait; see
+[05-functions-and-generics.md](05-functions-and-generics.md).
 
 ## 3.6 The `Option` enum
 

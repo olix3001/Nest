@@ -6,7 +6,7 @@ struct Vec3 {
   x: i32
 }  // size 4, align 4
 func combine(a: Vec3, b: Vec3) -> Vec3 {
-  return (Vec3.add: func(Vec3, Vec3) -> Vec3)(a: Vec3, b: Vec3): Vec3
+  return (Vec3.add: *func(Vec3, Vec3) -> Vec3)(a: Vec3, b: Vec3): Vec3
 }
 func add(self: Vec3, rhs: Vec3) -> Vec3 #self {
   return self: Vec3

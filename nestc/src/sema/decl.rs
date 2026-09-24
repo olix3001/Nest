@@ -1394,7 +1394,10 @@ fn signature(ast: &Ast, node: NodeId) -> Option<Ty> {
         NodeKind::ConstBind { rhs, .. } => *rhs,
         _ => node,
     };
-    let NodeKind::FuncExpr { params, .. } = ast.node(func).kind.clone() else {
+    let NodeKind::FuncExpr {
+        params, extern_abi, ..
+    } = ast.node(func).kind.clone()
+    else {
         return None;
     };
     if let Some(Signature(t)) = ast.meta::<Signature>(func) {
@@ -1406,6 +1409,7 @@ fn signature(ast: &Ast, node: NodeId) -> Option<Ty> {
             .map(|&p| ast.meta::<Ty>(p))
             .collect::<Option<Vec<Ty>>>()?,
         ret: Box::new(ast.meta::<Ty>(func)?),
+        c: extern_abi.is_some(),
     })
 }
 

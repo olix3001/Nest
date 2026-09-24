@@ -5,7 +5,7 @@ expression: "ir_text(\"nb :: func () -> i32 {\\n  let x := {\\n    let y := 1\\n
 func nb() -> i32 {
   block: i32 {
     let y: i32 = $cast(1: comptime_int): i32
-    tail #builtin(Add) (core.ops.Add.add: func(i32, i32) -> i32)(y: i32, $cast(2: comptime_int): i32): i32
+    tail #builtin(Add) (core.ops.Add.add: *func(i32, i32) -> i32)(y: i32, $cast(2: comptime_int): i32): i32
   }
   let x: i32 = <block: i32>
   return x: i32

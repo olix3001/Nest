@@ -106,7 +106,7 @@ type_core   = qualified_name [ generic_args ]
             | '[' expr ']' [ 'mut' ] type               // array
             | '(' [ type { ',' type } ] ')'             // tuple / void
             | 'dyn' type                                // trait object
-            | func_type
+            | '*' func_type                             // function pointer (§3.5); never bare
 generic_args = '.<' generic_arg { ',' generic_arg } '>'   // always dotted; bare `<...>` never valid here
 generic_arg  = type_or_hole | assoc_binding
 type_or_hole = type | '_'                               // '_' = infer this argument
@@ -154,7 +154,8 @@ impl is selected, and incomparable overlap is an error. See
 func_expr = { directive } [ extern_spec ] 'func' [ generics ] '(' [ params ] ')' [ '->' type ] [ block ]
                                           // block omitted => external declaration (extern, no body)
 overload_set = 'func' '{' [ path { ',' path } [ ',' ] ] '}'   // one name for several functions (§4.3)
-func_type = 'func' [ generics ] '(' [ param_types ] ')' [ '->' type ]
+func_type = [ extern_spec ] 'func' [ generics ] '(' [ param_types ] ')' [ '->' type ]
+                                          // only behind '*': `*func(...)`, `*extern("c") func(...)`
 extern_spec = 'extern' '(' string ')'      // ABI selector, next to `func`; string is e.g. "c"
 
 generics      = '<' generic_param { ',' generic_param } '>'

@@ -840,7 +840,8 @@ pub(crate) fn subst_ty(map: &HashMap<DefId, Ty>, ty: &Ty) -> Ty {
             inner: Box::new(subst_ty(map, inner)),
         },
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_ty(map, e)).collect()),
-        Ty::Func { params, ret } => Ty::Func {
+        Ty::Func { params, ret, c } => Ty::Func {
+            c: *c,
             params: params.iter().map(|p| subst_ty(map, p)).collect(),
             ret: Box::new(subst_ty(map, ret)),
         },

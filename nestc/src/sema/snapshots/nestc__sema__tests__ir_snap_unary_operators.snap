@@ -3,8 +3,8 @@ source: src/sema/tests.rs
 expression: "ir_text(\"un :: func (a: i32, b: bool) -> i32 {\\n  let n := -a\\n  let bn := ~a\\n  let no := !b\\n  return n\\n}\\n\")"
 ---
 func un(a: i32, b: bool) -> i32 {
-  let n: i32 = #builtin(Neg) (core.ops.Neg.neg: func(i32) -> i32)(a: i32): i32
-  let bn: i32 = #builtin(BitNot) (core.ops.BitNot.bitnot: func(i32) -> i32)(a: i32): i32
+  let n: i32 = #builtin(Neg) (core.ops.Neg.neg: *func(i32) -> i32)(a: i32): i32
+  let bn: i32 = #builtin(BitNot) (core.ops.BitNot.bitnot: *func(i32) -> i32)(a: i32): i32
   let no: bool = (Not b: bool): bool
   return n: i32
 }

@@ -6,17 +6,17 @@ struct Vector {
   len: usize
 }
 func build_ints() -> usize {
-  let xs: Vector.<isize> = (Vector.new: func() -> Vector.<isize>)(): Vector.<isize>
-  (Vector.push: func(*mut Vector.<isize>, isize) -> void)((&mut xs: Vector.<isize>): *mut Vector.<isize>, $cast(1: comptime_int): isize): void
+  let xs: Vector.<isize> = (Vector.new: *func() -> Vector.<isize>)(): Vector.<isize>
+  (Vector.push: *func(*mut Vector.<isize>, isize) -> void)((&mut xs: Vector.<isize>): *mut Vector.<isize>, $cast(1: comptime_int): isize): void
   return (xs: Vector.<isize>.len): usize
 }
 func build_strings() -> void {
-  let ws: Vector.<core.str.str> = (Vector.new: func() -> Vector.<core.str.str>)(): Vector.<core.str.str>
-  tail (Vector.push: func(*mut Vector.<core.str.str>, core.str.str) -> void)((&mut ws: Vector.<core.str.str>): *mut Vector.<core.str.str>, $cast("hi": comptime_str): core.str.str): void
+  let ws: Vector.<core.str.str> = (Vector.new: *func() -> Vector.<core.str.str>)(): Vector.<core.str.str>
+  tail (Vector.push: *func(*mut Vector.<core.str.str>, core.str.str) -> void)((&mut ws: Vector.<core.str.str>): *mut Vector.<core.str.str>, $cast("hi": comptime_str): core.str.str): void
 }
 func new() -> Vector.<T> {
   return Vector { len: $cast(0: comptime_int): usize }: Vector.<T>
 }
 func push(self: *mut Vector.<T>, value: T) -> void #self(*mut) #mutating {
-  ((self: *mut Vector.<T>.*): Vector.<T>.len): usize = #builtin(Add) (core.ops.Add.add: func(usize, usize) -> usize)(((self: *mut Vector.<T>.*): Vector.<T>.len): usize, $cast(1: comptime_int): usize): usize
+  ((self: *mut Vector.<T>.*): Vector.<T>.len): usize = #builtin(Add) (core.ops.Add.add: *func(usize, usize) -> usize)(((self: *mut Vector.<T>.*): Vector.<T>.len): usize, $cast(1: comptime_int): usize): usize
 }

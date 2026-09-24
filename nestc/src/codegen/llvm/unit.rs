@@ -2648,9 +2648,9 @@ impl<'ctx> Cx<'ctx, '_> {
                     failed(format!("{}: an indirect call through a constant", f.name))
                 })?;
                 let (params, ret) = match &ty {
-                    Ty::Func { params, ret } => (params.clone(), (**ret).clone()),
+                    Ty::Func { params, ret, .. } => (params.clone(), (**ret).clone()),
                     Ty::Ptr(inner) => match &**inner {
-                        Ty::Func { params, ret } => (params.clone(), (**ret).clone()),
+                        Ty::Func { params, ret, .. } => (params.clone(), (**ret).clone()),
                         other => return Err(failed(format!("{}: calling a {other:?}", f.name))),
                     },
                     other => return Err(failed(format!("{}: calling a {other:?}", f.name))),

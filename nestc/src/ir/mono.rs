@@ -1382,7 +1382,8 @@ pub(crate) fn subst_ty(subst: &Subst, ty: &Ty) -> Ty {
             inner: Box::new(subst_ty(subst, inner)),
         },
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_ty(subst, e)).collect()),
-        Ty::Func { params, ret } => Ty::Func {
+        Ty::Func { params, ret, c } => Ty::Func {
+            c: *c,
             params: params.iter().map(|p| subst_ty(subst, p)).collect(),
             ret: Box::new(subst_ty(subst, ret)),
         },
@@ -1473,13 +1474,16 @@ fn match_ty(holes: &[DefId], pattern: &Ty, ty: &Ty, out: &mut Subst) -> bool {
             Ty::Func {
                 params: xs,
                 ret: rx,
+                c: cx,
             },
             Ty::Func {
                 params: ys,
                 ret: ry,
+                c: cy,
             },
         ) => {
-            xs.len() == ys.len()
+            cx == cy
+                && xs.len() == ys.len()
                 && xs.iter().zip(ys).all(|(x, y)| match_ty(holes, x, y, out))
                 && match_ty(holes, rx, ry, out)
         }
@@ -1939,7 +1943,7 @@ fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
             }
             s.push('E');
         }
-        Ty::Func { params, ret } => {
+        Ty::Func { params, ret, .. } => {
             s.push('F');
             for p in params {
                 push_ty(s, defs, p);
