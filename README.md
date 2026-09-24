@@ -19,7 +19,7 @@ There are no docs nor any installer at the moment, so this section will be writt
 
 # Compiling From Source
 Compiling from source requires the following dependencies to be available on your system:
-- LLVM 21.1 with `LLVM_SYS_211_PREFIX` environment variable set,
+- LLVM 21 with `LLVM_SYS_211_PREFIX` environment variable set,
 - Boehm GC with `BDW_GC_PREFIX` environment variable set (temporary),
 - Rust nightly with cargo available on your system (deref_patterns feature is used),
 - C++ compiler available under `cc` command,

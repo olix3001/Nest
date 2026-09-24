@@ -48,13 +48,23 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install llvm@21 bdw-gc
 
-      - name: Install LLVM 21 and bdw-gc (Windows)
+      - name: Setup vcpkg and Cache (Windows)
         if: runner.os == 'Windows'
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: "dc1232a6e05dcc49703091e83743e3b4df9b9b7c"
+
+      - name: Install LLVM and bdw-gc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          choco install llvm --version=21.0.0 --allow-downgrade -y
-          vcpkg install bdwgc:x64-windows
-          echo "LLVM_SYS_211_PREFIX=C:\Program Files\LLVM" >> $env:GITHUB_ENV
-          echo "BDW_GC_PREFIX=C:\vcpkg\packages\bdwgc_x64-windows" >> $env:GITHUB_ENV
+          # This will take a very long time on the first run, but will be cached for future runs
+          vcpkg install llvm:x64-windows bdwgc:x64-windows
+
+          $VcpkgInstalled = "C:\vcpkg\installed\x64-windows"
+          # vcpkg places llvm-config.exe in the tools/llvm directory
+          echo "LLVM_SYS_211_PREFIX=$VcpkgInstalled\tools\llvm" >> $env:GITHUB_ENV
+          echo "BDW_GC_PREFIX=$VcpkgInstalled" >> $env:GITHUB_ENV
 
       - name: Install just
         uses: extractions/setup-just@v2
