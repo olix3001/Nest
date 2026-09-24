@@ -1789,10 +1789,12 @@ impl Inferer<'_> {
                            `const` generic parameter yet; take the value as an argument, or \
                            write a function";
                 let span = self.ast.node(node).span;
-                let said = self
-                    .diags
-                    .iter()
-                    .any(|d| d.message == msg && d.labels.iter().any(|l| l.span.file == self.file && l.span.span == span));
+                let said = self.diags.iter().any(|d| {
+                    d.message == msg
+                        && d.labels
+                            .iter()
+                            .any(|l| l.span.file == self.file && l.span.span == span)
+                });
                 if !said && sig_tys().any(Ty::mentions_const_param) {
                     self.report(node, msg);
                 }
