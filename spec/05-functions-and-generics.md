@@ -472,6 +472,15 @@ and is passed as it is.
 
 ## 5.6 Entry point
 
-`main :: func ()` in the root namespace is the program entry point. It may return
-`void` or a `Result.<void, E>`; returning `.err` sets a non-zero process exit
-status.
+`main :: func ()` at file scope, outside `core`, is the program entry point.
+It takes no parameters — the runtime has nothing to pass; read the command
+line through `core` instead. Its return type must be `void`, an integer
+status, or `never`; the runtime turns whatever it returns into a process
+exit status. A `Result` is not among them — there is no implicit conversion
+from `.err` to a status code, so a fallible `main` reports its own error and
+returns a status directly rather than propagating a `Result`.
+
+A compilation may define at most one `main` at file scope; two is reported as
+an error, at the second definition. A compilation with no `main` at all is not
+reported by this rule — that is a property of the output being built (a
+library has no entry point), and the driver decides.

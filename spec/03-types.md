@@ -45,6 +45,33 @@ ever generic over signedness, so an argument for it would buy an inference
 variable no program could solve, and would let a signed type and an unsigned one
 unify through it.
 
+#### `MIN` and `MAX`
+
+Every width has extremes, `Self.MIN` and `Self.MAX`, declared as ordinary
+associated constants on the family impls — not compiler-known values:
+
+```nest
+impl <const N: u16> int.<N> {
+  MAX :: cast.<Self>(~cast.<uint.<N>>(0) / 2)
+  MIN :: cast.<Self>(~cast.<uint.<N>>(0) / 2 + 1)
+}
+
+impl <const N: u16> uint.<N> {
+  MIN :: cast.<Self>(0)
+  MAX :: cast.<Self>(~cast.<Self>(0))
+}
+```
+
+Both are computed in the **unsigned** family of the same width, the only place
+every intermediate value fits: `~cast.<uint.<N>>(0)` is every bit of the width
+set, half of that is the signed ceiling, and one past it — wrapping — is the
+signed floor. The final `cast` is explicit and reduces modulo `2^N`, which is
+what lands `MIN` on the sign bit. They are **not** written as `2^(N-1)`: a
+shift's operands are linked to one width (§6.6), so `1 << N` has no type wide
+enough to hold it without overflowing on the way. Because `N` is in scope in
+the impl, `i8.MAX` and `i32.MAX` are the same declaration evaluated at
+different widths.
+
 The families exist so that the operations on integers can be **written once**.
 `wrapping_add` is not compiler syntax; it is an inherent method in `core`, on an
 `impl` over a whole family, exactly as `.len()` is an inherent method on
@@ -615,7 +642,9 @@ impl Bounded for Volume {
   An associated **type** keeps the other shape, because it *is* the other thing:
   `Output :: type` declares one and `Output :: Vec3` binds it, both of which are
   `name :: <a type>`, which is what that shape means everywhere (§2.5).
-  A trait that declares one is **not object-safe** (see below).
+  A trait with an associated type can still be made into a trait object — a
+  `dyn` type pins the binding at the coercion (see below) — but an
+  **associated constant** cannot (see Object safety).
 - A type implements a trait through an anonymous impl namespace introduced by the
   `impl` keyword: `impl ToJson for CatImage { ... }`. The target is written in the
   header, so a trait may be implemented for a type not in the current namespace,
@@ -641,6 +670,27 @@ io.println(j.render())              // virtual call
 
 render_all :: func (xs: []*dyn ToJson) { ... }
 ```
+
+#### Pinning associated types
+
+A trait object's type carries only the erased trait's **associated
+bindings** — what the coercion pinned its associated types to — not the full
+set of trait arguments the static bound would have. A trait with no
+associated types, like `ToJson`, pins nothing and `dyn ToJson` is the whole
+type. A trait with associated types, like `Func` (§5.5)'s `Args`/`Output`, is
+written `dyn T.<Name = Type, ...>`, the same `.<...>` associated-type-equality
+syntax a bound uses (§3.7):
+
+```
+dyn Iterator.<Item = i32>          // pins Iterator's Item
+```
+
+`Func` additionally has its own call-shaped sugar (§5.5), which applies here
+too: `dyn Func(i32) -> i32` is exactly `dyn Func.<Args = (i32), Output = i32>`,
+just as the unerased bound is. `*dyn Func(A) -> R` is how a closure is stored
+behind a pointer (§5.5); it is a different type from `*func(A) -> R` — a raw
+function pointer has no data half for the vtable's `self` to point at, so a
+`*func` does not coerce to `*dyn Func` (wrap it in a closure first).
 
 ### Object safety
 

@@ -27,7 +27,7 @@ extern_block = 'extern' '(' string ')' '{' { declaration } '}'
 
 declaration = { attribute } [ directive ] ( const_bind | local_decl )
 
-attribute   = '@' identifier [ '(' [ attr_arg { ',' attr_arg } ] ')' ]
+attribute   = '@' identifier [ '(' [ arg { ',' arg } ] ')' ]   // 'arg' as in §13.7; e.g. `@public(package)`, `@public(fields: private)`, `@link_name("x")`
 directive   = '#' ( identifier | 'const' ) [ '(' [ arg { ',' arg } ] ')' ] { directive }
 comptime_item = call                               // e.g. comptime_assert(...)  (returns void)
 
@@ -43,7 +43,8 @@ const_rhs   = expr
 ```
 
 A `directive` name is drawn from the compiler's fixed set (`packed`, `align`,
-`soa`, `inline`, `const`, `static`, `raw`, `unsafe`, `lang`, `intrinsic`, …); `#lang(str)`
+`soa`, `inline`, `const`, `static`, `unsafe`, `lang`, `intrinsic`, `when`,
+`comptime`, `repr`, `callconv`, `no_mangle`, `caller_location`, …); `#lang(str)`
 tags a core-library item as a language item (see
 [09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3 and
 [06-expressions-and-operators.md](06-expressions-and-operators.md) §6.13).
@@ -156,7 +157,7 @@ impl is selected, and incomparable overlap is an error. See
 ```
 func_expr = { directive } [ extern_spec ] 'func' [ generics ] '(' [ params ] ')' [ '->' type ] [ block ]
                                           // block omitted => external declaration (extern, no body)
-overload_set = 'func' '{' [ path { ',' path } [ ',' ] ] '}'   // one name for several functions (§4.3)
+overload_set = 'func' '{' [ expr { ',' expr } [ ',' ] ] '}'   // one name for several functions (§4.3); each member names an existing function — a path, typically
 func_type = [ extern_spec ] 'func' [ generics ] '(' [ param_types ] ')' [ '->' type ]
                                           // only behind '*': `*func(...)`, `*extern("c") func(...)`
 extern_spec = 'extern' '(' string ')'      // ABI selector, next to `func`; string is e.g. "c"
@@ -167,8 +168,11 @@ generic_param = identifier [ ':' constraint ]     // type param; bare `T` is unc
 constraint    = type { '+' type }                 // trait bounds; a bare param is already a type
 
 params    = param { ',' param }
-param     = 'self' [ ':' type ]
-          | identifier ':' type
+param     = 'self' [ ':' type ] [ ':=' expr ]
+          | identifier ':' type [ ':=' expr ]
+                                          // ':=' is a default value (§5.2), making the
+                                          // parameter optional at the call site; a
+                                          // closure parameter (§13.7) takes no default
 param_types = type { ',' type }
 ```
 

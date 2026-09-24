@@ -262,6 +262,16 @@ The `.nest` extension and `./` prefix are permitted (and conventional) in the
 quoted file form; a bare relative path such as `"models"` also resolves as a file.
 `import` has no run-time effect; it is resolved during compilation.
 
+### Package dependency order
+
+A **cycle between packages** — package `alpha` importing `<beta>` while `beta`
+imports `<alpha>` — is refused: two packages that depend on each other have no
+build order, since each is compiled, published, and read as a whole, and
+neither can be built first. Files **within** one package are a different
+question and are left alone; a package's own files may import each other
+freely, cyclically or not, the way any files of one program can (§4.5, `import
+"path"`).
+
 ## 4.6 Name resolution
 
 To resolve an unqualified name, the compiler searches in order:

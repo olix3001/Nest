@@ -43,7 +43,10 @@ a directive.
   [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md).
 
 Multiple annotations may stack; order among same-kind annotations is not
-significant. Attributes and their arguments are recorded on the declaration for
+significant. Where both appear, **attributes come before directives** —
+`@public #when(os = .Windows) Handle :: ...`, not the reverse; the parser reads
+the `@` run first and does not backtrack to pick up an attribute after a `#`
+one. Attributes and their arguments are recorded on the declaration for
 reflection.
 
 ## 9.2 Attributes
@@ -164,9 +167,6 @@ tests :: #when(test) namespace {
     adds :: func () { assert(add(2, 3) == 5) }
 }
 ```
-
-See [`design/toolchain.md`](../design/toolchain.md) for how a test binary is
-built and what it prints.
 
 ### User-defined attributes
 
@@ -472,6 +472,15 @@ hot :: func () {
 }
 ```
 
+**Not yet implemented:** `#unsafe { ... }` and `#when(...)` written directly on
+a statement or a bare block, as in the `hot` example above, are specified here
+but not yet accepted by the parser — `parse_stmt` only special-cases
+`#comptime` on a `for` loop; any other decorated statement is parsed as if it
+were a `::` binding and a directive with no `::` after it is a parse error.
+Today `#unsafe` parses only on a `func` or on a `::`-bound item (a directive on
+the item, not the statement holding it). The lowerer already understands an
+unsafe/`#when` scope; only the surface grammar is missing.
+
 By default, reading a location before it is written is a compile error where
 statically provable, otherwise a run-time trap; `#raw` / `#unsafe` remove that
 guarantee.
@@ -489,7 +498,7 @@ guarantee.
   // A Win32 entry point: a C function, C types, called __stdcall.
   @link_name("MessageBoxW")
   message_box :: #callconv("stdcall") extern("c") func (
-    owner: c.ptr.<c.void>, text: c.ptr.<u16>, caption: c.ptr.<u16>, flags: c.uint
+    owner: *c.anyopaque, text: c.ptr.<u16>, caption: c.ptr.<u16>, flags: c.uint
   ) -> c.int
   ```
 
@@ -517,7 +526,22 @@ guarantee.
   and which ABI's types are in play; the convention is the register and stack
   protocol, and the two come apart on exactly the platform that needs them to.
   Where both are written the directive decides the convention.
+- **`#c_vararg`** — the declaration is a C variadic function: its written
+  parameters are the **fixed** ones, and a call may pass a tail of further
+  arguments past them, each crossing uncoerced except for C's own default
+  argument promotions (§11.4). Only an `extern("c")` **declaration** may carry
+  it (reading a variadic tail needs `va_start`, which nothing here can generate
+  a body for), it needs at least one fixed parameter, and it may not be generic
+  or carry a default argument on any fixed parameter. A `#c_vararg` name is not
+  a value — it can only be called, never passed around as a `*extern("c")
+  func(...)` — and a call to one may not name an argument, because the
+  variadic tail has no parameter names to name.
 
+  ```
+  printf :: #c_vararg extern("c") func (fmt: c.cstr) -> c.int
+
+  printf(c"%d and %s\n", 3, c"three")
+  ```
 
 > The layout/codegen/safety directives above are the "basic" set. Deliberately
 > out of scope for now: vectorization/SIMD directives and other
