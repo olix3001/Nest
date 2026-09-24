@@ -340,6 +340,15 @@ pub struct Def {
     /// Whether a write *through* something is allowed comes from the `*mut` /
     /// `[]mut` in its type, never from here.
     pub mutable: bool,
+    /// For a [`DefKind::TypeParam`]: whether it is the type an `impl Bounds`
+    /// **return** type stands for (§5.4) — one type the function's body
+    /// decides, not one a call site chooses.
+    ///
+    /// Callers see it only through its bounds, the way a generic body sees a
+    /// parameter; what it is is recorded once the body is typed
+    /// ([`super::decl::ParamDecl::revealed`]) and put in its place before
+    /// monomorphization.
+    pub opaque: bool,
 }
 
 impl Def {
@@ -450,6 +459,7 @@ impl DefTable {
             attribute: false,
             attrs: Vec::new(),
             mutable: false,
+            opaque: false,
         });
         id
     }

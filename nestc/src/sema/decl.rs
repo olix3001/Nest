@@ -97,6 +97,10 @@ pub struct ParamDecl {
     /// i32>>` says `T.Item` is `i32` inside the generic body, before any call
     /// site exists. `None` for every parameter nothing pinned.
     pub pinned: Option<Ty>,
+    /// For an `impl` return type (§5.4): the type parameters it is generic
+    /// over, and the type the body returned in terms of them. What
+    /// [`crate::ir::reveal`] puts in its place.
+    pub revealed: Option<(Vec<DefId>, Ty)>,
 }
 
 /// What a call site needs to know about a function it is calling.
@@ -497,6 +501,15 @@ impl<'a> Decls<'a> {
             .iter()
             .find(|(t, _)| *t == trait_def)
             .map(|(_, args)| args.clone())
+    }
+
+    /// The type parameters an `impl` return type is generic over — see
+    /// [`ParamDecl::revealed`].
+    pub fn opaque_params(&self, def: DefId) -> Option<Vec<DefId>> {
+        match self.table.get(&def)? {
+            Decl::Param(p) => p.revealed.as_ref().map(|(params, _)| params.clone()),
+            _ => None,
+        }
     }
 
     /// What a pinned associated-type parameter stands for — see

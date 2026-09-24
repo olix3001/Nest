@@ -19,13 +19,13 @@ use crate::ir::{Boxed, DefaultValue, ImplicitCast};
 use crate::sema::def::Directive;
 use crate::sema::infer::{
     ArgOrder, ClosureSig, Coercion, ConstSlotReported, DistinctRecv, DynCoerce, FuncCall,
-    Generics, IndexWrite,
+    Generics, IndexWrite, OpaqueTy,
     Instantiation, MethodRes, OpResolution, RangeReported, SliceCoerce, TyPathReported, Upcast,
     VariantTag,
 };
 use crate::sema::ty::Ty;
 use crate::sema::{
-    Captures, ClosureDefs, DefMeta, PathRes, Resolution, Signature, SpreadBase,
+    Captures, ClosureDefs, DefMeta, OpaqueArgs, PathRes, Resolution, Signature, SpreadBase,
 };
 
 macro_rules! persisted {
@@ -107,6 +107,8 @@ persisted! {
     ClosureDefs(ClosureDefs),
     Captures(Captures),
     Boxed(Boxed),
+    OpaqueTy(OpaqueTy),
+    OpaqueArgs(OpaqueArgs),
 }
 
 /// Caches, and what monomorphization decides: rebuilt by whoever asks, so a

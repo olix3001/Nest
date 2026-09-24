@@ -95,6 +95,7 @@ pub mod link;
 pub mod meta;
 pub mod mono;
 pub mod pretty;
+pub mod reveal;
 
 pub use const_eval::ConstValue;
 pub use link::{Linked, link};

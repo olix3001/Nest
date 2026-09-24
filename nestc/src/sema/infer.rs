@@ -294,6 +294,11 @@ pub struct ClosureSig {
     pub shared: Vec<Ty>,
 }
 
+/// What an `impl` return type is (§5.4), stamped on the return slot once the
+/// body is typed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OpaqueTy(pub Ty);
+
 /// Marks the callee of a call on a value that is not a function pointer but
 /// implements `Func` (§5.5) — a closure, or a generic parameter bounded by
 /// `Func`. Lowering reads it to emit [`crate::ir::Dispatch::Func`], and the
@@ -647,10 +652,22 @@ pub fn resolve_param_decls(
             },
             None => Vec::new(),
         };
-        if bounds.is_empty() && pinned.is_none() {
+        let revealed = d.node.and_then(|n| {
+            let OpaqueTy(t) = ast.meta::<OpaqueTy>(n)?;
+            let args = ast.meta::<super::OpaqueArgs>(n).map(|a| a.0).unwrap_or_default();
+            Some((args, t))
+        });
+        if bounds.is_empty() && pinned.is_none() && revealed.is_none() {
             continue;
         }
-        out.push((d.id, super::decl::ParamDecl { bounds, pinned }));
+        out.push((
+            d.id,
+            super::decl::ParamDecl {
+                bounds,
+                pinned,
+                revealed,
+            },
+        ));
     }
     out
 }
@@ -1453,20 +1470,43 @@ impl Inferer<'_> {
                 self.types.insert(*p, pty);
             }
         }
-        self.ret = ret.map(|t| self.ty_from_node(t)).unwrap_or(Ty::Void);
-        let ret = self.ret.clone();
+        let declared = ret.map(|t| self.ty_from_node(t)).unwrap_or(Ty::Void);
+        // An `impl` return type is the body's to decide (§5.4): inside, it is
+        // whatever the body returns, and only the signature says `impl`.
+        let opaque = ret.filter(|&r| {
+            matches!(self.ast.node(r).kind, NodeKind::GenericTypeParam { .. })
+        });
+        self.ret = match opaque {
+            Some(_) => self.cx.fresh(),
+            None => declared.clone(),
+        };
+        let ret_ty = self.ret.clone();
         // Stash the function's return type on the `FuncExpr` node for lowering.
-        self.types.insert(func, ret.clone());
+        self.types.insert(func, declared);
         if let Some(b) = body {
             let bty = self.infer_expr(b);
             // The body's tail value is the function's result.
-            self.expect_return(b, &bty, &ret);
+            self.expect_return(b, &bty, &ret_ty);
+        }
+        if let Some(r) = opaque {
+            self.reveal_opaque(r, &ret_ty);
         }
         self.stamp_generics(func);
         // A closure's body is inferred inside the body that wrote it, so the
         // place a name is written in is restored rather than dropped.
         self.ctx = outer;
         self.func = outer_func;
+    }
+
+    /// What an `impl` return type turned out to be (§5.4): hold it to the bounds
+    /// the signature promised, and record it on the return slot for the
+    /// declaration table to carry.
+    fn reveal_opaque(&mut self, ret: NodeId, concrete: &Ty) {
+        let Some(def) = self.def_of(ret) else { return };
+        let mut map = Subst::default();
+        map.tys.insert(def, concrete.clone());
+        self.register_bounds(ret, &[def], &map);
+        self.ast.set_meta(ret, OpaqueTy(concrete.clone()));
     }
 
     /// Record what this function is generic over, in the order every
@@ -1675,6 +1715,10 @@ impl Inferer<'_> {
             if let Some(d) = self.ast.meta::<DynCoerce>(node) {
                 let concrete = self.cx.finalize(&d.concrete, &mut || {});
                 self.ast.set_meta(node, DynCoerce { concrete, ..d });
+            }
+            if let Some(OpaqueTy(t)) = self.ast.meta::<OpaqueTy>(node) {
+                let t = self.cx.finalize(&t, &mut || {});
+                self.ast.set_meta(node, OpaqueTy(t));
             }
             if let Some(sig) = self.ast.meta::<ClosureSig>(node) {
                 let params = sig
@@ -3742,7 +3786,7 @@ impl Inferer<'_> {
                 let ret = self.subst_type_params(&sig.ret, &map);
                 Some((params, ret))
             }
-            Ty::Nominal { def, .. } if self.defs.get(def).kind == DefKind::TypeParam => {
+            Ty::Nominal { def, args } if self.defs.get(def).kind == DefKind::TypeParam => {
                 let func = self.defs.resolve_alias(self.lang.get("func")?);
                 if !self.param_bound_traits(def).contains(&func) {
                     return None;
@@ -3755,9 +3799,38 @@ impl Inferer<'_> {
                     Some(&synth) => self.param_ty(synth),
                     None => Ty::Void,
                 };
+                // An `impl` return type's bound is written in its function's
+                // parameters, and `args` are what this use instantiated them at.
+                let mut map = Subst::default();
+                for (p, a) in self.opaque_params(def).into_iter().zip(args) {
+                    map.tys.insert(p, a);
+                }
+                let params = params
+                    .iter()
+                    .map(|t| self.subst_type_params(t, &map))
+                    .collect();
+                let ret = self.subst_type_params(&ret, &map);
                 Some((params, ret))
             }
             _ => None,
+        }
+    }
+
+    /// The type parameters an `impl` return type is generic over, in the
+    /// order its type's arguments list them — recorded, or read off the tree.
+    fn opaque_params(&self, def: DefId) -> Vec<DefId> {
+        if let Some(params) = self.decls().opaque_params(def) {
+            return params;
+        }
+        let d = self.defs.get(def);
+        match (d.file, d.node) {
+            (Some(file), Some(node)) => self
+                .asts
+                .get(&file)
+                .and_then(|a| a.meta::<super::OpaqueArgs>(node))
+                .map(|a| a.0)
+                .unwrap_or_default(),
+            _ => Vec::new(),
         }
     }
 
@@ -5936,7 +6009,10 @@ impl Inferer<'_> {
     ) {
         match ty {
             Ty::Nominal { def, args } => {
-                if args.is_empty() && self.defs.get(*def).kind == DefKind::TypeParam {
+                if args.is_empty()
+                    && self.defs.get(*def).kind == DefKind::TypeParam
+                    && !self.defs.get(*def).opaque
+                {
                     if !out.contains(def) {
                         out.push(*def);
                     }
@@ -7555,8 +7631,33 @@ impl Inferer<'_> {
         match ast.node(node).kind.clone() {
             NodeKind::TypeHole => self.cx.fresh(),
             NodeKind::ImplType { .. } => {
-                self.report_in(file, node, "`impl` types are not implemented yet");
+                self.report_in(
+                    file,
+                    node,
+                    "`impl` is written as a parameter's type or as the return type (§5.4)",
+                );
                 Ty::Error
+            }
+            // An `impl` return type (§5.4): the type parameter resolution bound
+            // in the return slot, over the function's own parameters.
+            NodeKind::GenericTypeParam { .. } => {
+                let ast = &self.asts[&file];
+                match ast.meta::<DefMeta>(node) {
+                    Some(DefMeta(def)) => Ty::Nominal {
+                        def,
+                        args: ast
+                            .meta::<super::OpaqueArgs>(node)
+                            .map(|a| a.0)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|p| Ty::Nominal {
+                                def: p,
+                                args: Vec::new(),
+                            })
+                            .collect(),
+                    },
+                    None => Ty::Error,
+                }
             }
             // `*func(...)` is the function pointer, which is one type rather
             // than a pointer to something: there is no function value to point

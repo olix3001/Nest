@@ -276,7 +276,11 @@ impl Resolver<'_> {
                     self.bind_param(*p);
                 }
                 if let Some(r) = ret {
-                    self.resolve_node(r);
+                    if matches!(self.ast.node(r).kind, NodeKind::GenericTypeParam { .. }) {
+                        self.bind_opaque(r, &generics);
+                    } else {
+                        self.resolve_node(r);
+                    }
                 }
                 if let Some(b) = body {
                     self.resolve_node(b);
@@ -1173,6 +1177,26 @@ impl Resolver<'_> {
             .unwrap_or_default();
         self.owners.pop();
         self.ast.set_meta(id, crate::sema::Captures(shared));
+    }
+
+    /// `-> impl Bounds` (§5.4): a type parameter the parser put in the return
+    /// slot, bound like one declared in the generic list and marked as the
+    /// body's to decide. It is generic over the function's own type
+    /// parameters, which is what [`crate::sema::OpaqueArgs`] records: the type
+    /// the body returns may mention them, and a caller's instantiation says
+    /// what they are.
+    fn bind_opaque(&mut self, ret: NodeId, generics: &[NodeId]) {
+        self.bind_generics(&[ret]);
+        self.resolve_node(ret);
+        self.introduce_bound_projections(&[ret]);
+        let Some(def) = self.def_of(ret) else { return };
+        self.defs.get_mut(def).opaque = true;
+        let args = generics
+            .iter()
+            .filter(|&&g| matches!(self.ast.node(g).kind, NodeKind::GenericTypeParam { .. }))
+            .filter_map(|&g| self.def_of(g))
+            .collect();
+        self.ast.set_meta(ret, crate::sema::OpaqueArgs(args));
     }
 
     /// Allocate a closure's three defs: its type, named after its place in the

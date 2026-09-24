@@ -71,15 +71,16 @@ File
       Param n:
         TypePath
           Path `i32`
-      ImplType
-        TypePath
-          Path `Func`
-          TupleType
-            TypePath
-              Path `i32`
-          AssocBinding Output =
-            TypePath
-              Path `i32`
+      GenericTypeParam impl#return
+        Bounds +
+          TypePath
+            Path `Func`
+            TupleType
+              TypePath
+                Path `i32`
+            AssocBinding Output =
+              TypePath
+                Path `i32`
       Block
         Return
           Closure

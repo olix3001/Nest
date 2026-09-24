@@ -106,6 +106,13 @@ pub struct ClosureDefs {
     pub this: DefId,
 }
 
+/// The type parameters an `impl` return type is generic over (§5.4): the
+/// function's own, in the order it declares them. Stamped on the return slot's
+/// node, and recorded with what the body returned
+/// ([`decl::ParamDecl::revealed`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OpaqueArgs(pub Vec<DefId>);
+
 /// The locals a closure shares with the code around it, in the order it first
 /// names them (§5.5): every local or parameter from outside that its body — or
 /// a closure inside it — names, and that its capture list does not copy.
@@ -464,6 +471,14 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // monomorphization collects instantiations across files. Merge the per-file
     // programs into the one view those passes read (see [`crate::ir::link`]).
     session.linked = crate::ir::link(&session.ir);
+    // What each `impl` return type is, in its place, before anything reads a
+    // type off the program (see [`crate::ir::reveal`]).
+    crate::ir::reveal::run(
+        &session.defs,
+        &session.decls,
+        &session.ir_meta,
+        &mut session.linked,
+    );
 
     // The validation passes deliberately deferred out of inference. They run on
     // the linked IR, where all surface sugar is already resolved, and they only

@@ -261,6 +261,25 @@ apply :: func <F: Func(i32) -> i32> (f: F, x: i32) -> i32 { return f(x) }
 A call is held to its callee's bounds where it is written: passing a type that
 does not implement one is an error at the call.
 
+As a **return type**, `impl Bound` is the other way round: the body decides
+what the type is, and a caller knows it only by its bounds. The body is held to
+them; a caller may do with the value what the bounds allow and nothing more —
+it cannot, for instance, store it where the type the body happens to return is
+wanted.
+
+```
+make_adder :: func (n: i32) -> impl Func(i32) -> i32 {
+  return { x in x + n }
+}
+const add5 := make_adder(5)
+add5(1)                                // 6
+```
+
+It is the function's own type parameters that the returned type may mention,
+and a caller's instantiation says what they are. The type is known once the
+body is typed, and the compiler uses it as it is: the value is returned
+directly, with no indirection behind it.
+
 `Item` must be an associated type declared by the named trait; the constraint
 requires the implementor's choice for that associated type to equal the given
 type. Positional type arguments and `name = type` bindings may be mixed in one

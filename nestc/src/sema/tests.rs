@@ -10173,3 +10173,28 @@ fn a_closure_is_held_to_the_bound_it_meets() {
     );
     assert!(msg.contains("type mismatch"), "{msg}");
 }
+
+/// A caller knows an `impl` return type only by its bounds: it may call it,
+/// and may not treat it as the type the body happens to return.
+#[test]
+fn an_impl_return_type_is_known_by_its_bounds() {
+    analyze_clean(
+        "make :: func (n: i32) -> impl Func(i32) -> i32 { return { x in x + n } }\n\
+         go :: func () -> i32 { return make(1)(2) }\n",
+    );
+    let msg = first_error(
+        "make :: func () -> impl Func() -> i32 { return { in 1 } }\n\
+         go :: func () -> i32 {\n\
+             const f: *func() -> i32 := make()\n\
+             return f()\n\
+         }\n",
+    );
+    assert!(msg.contains("type mismatch"), "{msg}");
+}
+
+/// The body is held to what its `impl` return type promised.
+#[test]
+fn an_impl_return_type_holds_the_body_to_its_bounds() {
+    let msg = first_error("make :: func () -> impl Func() -> i32 { return { in true } }\n");
+    assert!(msg.contains("type mismatch"), "{msg}");
+}

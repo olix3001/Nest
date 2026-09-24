@@ -407,6 +407,25 @@ impl Parser {
         generics
     }
 
+    /// `-> impl Bounds`: the one type the body returns, which callers know only
+    /// by its bounds (§5.4). It becomes a type parameter standing in the return
+    /// slot rather than in the generic list — resolution binds it the way it
+    /// binds one, and marks it as the body's to decide.
+    fn lift_impl_return(&mut self, ty: NodeId) -> NodeId {
+        let NodeKind::ImplType { bounds } = self.clone_kind(ty) else {
+            return ty;
+        };
+        let span = self.node_span(ty);
+        let bounds = self.alloc(span, NodeKind::Bounds { bounds });
+        self.alloc(
+            span,
+            NodeKind::GenericTypeParam {
+                name: Symbol::new("impl#return"),
+                constraint: Some(bounds),
+            },
+        )
+    }
+
     /// `type { '+' type }` — a `+`-separated bound list, wrapped in
     /// [`NodeKind::Bounds`].
     pub(crate) fn parse_bounds(&mut self) -> NodeId {
@@ -882,7 +901,7 @@ impl Parser {
         let ret = if self.eat(&TokenKind::Arrow) {
             let ty = self.parse_type();
             end = self.node_span(ty);
-            Some(ty)
+            Some(self.lift_impl_return(ty))
         } else {
             None
         };

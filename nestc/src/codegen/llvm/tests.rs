@@ -3014,3 +3014,30 @@ fn a_closure_is_generic_with_its_function_and_nests() {
         assert_eq!(code, 5 + 21);
     }
 }
+
+/// An `impl Func` return type is the closure the body returns, a generic one's
+/// is instantiated with its caller's arguments, and a closure returned that way
+/// keeps the local it shares alive after the function that bound it returned.
+#[test]
+fn a_function_returns_a_closure_as_impl_func() {
+    let src = "make_adder :: func (n: i32) -> impl Func(i32) -> i32 { return { x in x + n } }\n\
+               constant :: func <T> (v: T) -> impl Func() -> T { return { in v } }\n\
+               counter :: func () -> impl Func() -> i32 {\n\
+                   let mut c := 0\n\
+                   return { in\n\
+                       c = c + 1\n\
+                       c\n\
+                   }\n\
+               }\n\
+               apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }\n\
+               main :: func () -> i32 {\n\
+                   const add5 := make_adder(5)\n\
+                   const tick := counter()\n\
+                   tick()\n\
+                   tick()\n\
+                   return add5(1) + apply(make_adder(10), 1) + constant(7)() + tick()\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 6 + 11 + 7 + 3);
+    }
+}
