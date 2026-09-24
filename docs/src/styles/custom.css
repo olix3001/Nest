@@ -1,0 +1,97 @@
+/* Nest's accent palette — a nod to the language's name. Dark mode is the
+   default token set (Starlight convention); light mode overrides below. */
+:root {
+	--sl-color-accent-low: #143c31;
+	--sl-color-accent: #21bd8f;
+	--sl-color-accent-high: #b6f3dd;
+	--nest-accent-a: #21bd8f;
+	--nest-accent-b: #4fd3e8;
+	--nest-glow: rgba(33, 189, 143, 0.35);
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #cdf2e5;
+	--sl-color-accent: #0f8a6b;
+	--sl-color-accent-high: #0b5b46;
+	--nest-accent-a: #0f8a6b;
+	--nest-accent-b: #0a8fa8;
+	--nest-glow: rgba(15, 138, 107, 0.18);
+}
+
+/* ===< Hero >=== */
+
+.hero {
+	position: relative;
+}
+
+.hero::before {
+	content: '';
+	position: absolute;
+	inset: -8rem -4rem auto -4rem;
+	height: 26rem;
+	background: radial-gradient(
+		60% 60% at 50% 0%,
+		var(--nest-glow) 0%,
+		transparent 70%
+	);
+	pointer-events: none;
+	z-index: -1;
+}
+
+.hero h1 {
+	background: linear-gradient(
+		120deg,
+		var(--nest-accent-a) 0%,
+		var(--nest-accent-b) 100%
+	);
+	background-clip: text;
+	-webkit-background-clip: text;
+	color: transparent;
+	-webkit-text-fill-color: transparent;
+}
+
+/* ===< Homepage-only extras (see index.mdx) >=== */
+
+.nest-quicklook {
+	margin: 3rem 0;
+}
+
+.nest-quicklook h2 {
+	font-size: var(--sl-text-h3);
+	text-align: center;
+	margin-bottom: 1.5rem;
+}
+
+.nest-quicklook .expressive-code {
+	max-width: 46rem;
+	margin: 0 auto;
+}
+
+.nest-strip {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+	gap: 1px;
+	margin: 3rem 0;
+	background: var(--sl-color-hairline);
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: 0.5rem;
+	overflow: hidden;
+}
+
+.nest-strip > div {
+	background: var(--sl-color-bg);
+	padding: 1.25rem 1.5rem;
+}
+
+.nest-strip dt {
+	font-size: 1.6rem;
+	font-weight: 600;
+	color: var(--sl-color-accent-high);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+}
+
+.nest-strip dd {
+	margin: 0.25rem 0 0 0;
+	font-size: var(--sl-text-xs);
+	color: var(--sl-color-gray-3);
+}

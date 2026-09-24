@@ -14,6 +14,7 @@ export default defineConfig({
 		starlight({
 			title: 'Nest',
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/olix3001/Nest' }],
+			customCss: ['./src/styles/custom.css'],
 			expressiveCode: {
 				shiki: {
 					langs: [nestGrammar],

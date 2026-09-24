@@ -16,6 +16,33 @@ hero:
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
+<div class="nest-quicklook">
+
+## A quick look
+
+```nest
+{ boxed } :: import <core/mem>
+
+// A closure returned as `impl Func`: the caller knows it only by its bound.
+make_adder :: func (n: i32) -> impl Func(i32) -> i32 {
+    return { x in x + n }
+}
+
+main :: func () -> i32 {
+    const add5 := make_adder(5)
+    return add5(1)   // 6
+}
+```
+
+</div>
+
+<dl class="nest-strip">
+	<div><dt>::</dt><dd>one binding form for every compile-time declaration — constants, types, functions, traits, namespaces</dd></div>
+	<div><dt>never null</dt><dd>*T pointers always point at a live value; absence is Option.&lt;*T&gt;</dd></div>
+	<div><dt>LLVM</dt><dd>compiles to native code on every target the backend supports</dd></div>
+	<div><dt>GC</dt><dd>memory is managed for you — no lifetimes, no manual free</dd></div>
+</dl>
+
 <CardGrid stagger>
 	<Card title="Garbage collected, still compiled" icon="rocket">
 		Nest compiles to native code through LLVM, but memory is managed for you —
