@@ -176,7 +176,8 @@ main :: func () -> i32 {
 
 ## Known limitations
 
-- A closure in a function with a `<const N>` parameter can't use `N` yet —
-  a nominal type's arguments carry only types.
+- A closure may **read** its function's `<const N>` (it gets a copy), but
+  its parameter and result types can't mention `N` — a closure's type is
+  generic over type parameters only.
 - No `FnMut`/`FnOnce` split — shared captures are already GC cells, so
   `*Self` suffices for every call.

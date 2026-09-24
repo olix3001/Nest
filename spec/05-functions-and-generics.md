@@ -275,8 +275,9 @@ const add5 := make_adder(5)
 add5(1)                                // 6
 ```
 
-It is the function's own type parameters that the returned type may mention,
-and a caller's instantiation says what they are. The type is known once the
+The returned type may mention the function's own type parameters and those of
+an `impl` it is declared in, and a caller's instantiation says what they are:
+`impl <T> Box.<T> { getter :: func (self: *Box.<T>) -> impl Func() -> T }`. The type is known once the
 body is typed, and the compiler uses it as it is: the value is returned
 directly, with no indirection behind it.
 
@@ -408,6 +409,12 @@ list.iter().each() { x in count += x }        // count is the sum afterwards
 A shared local lives as long as the closure does, whatever frame bound it, so
 each binding is its own: a closure made on one pass of a loop keeps that pass's
 `let`, not the next one's.
+
+A `<const N>` parameter of the function around a closure is read in its body
+as a **copy** made when the closure is, as if it were in the capture list: the
+closure's type is generic over the function's *type* parameters only, so `N`
+cannot reach the closure's parameter or result types — `{ a: [N]u8 in … }` is
+an error.
 
 A name in the **capture list** is copied instead, when the closure is made. The
 copy is read-only.
