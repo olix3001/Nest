@@ -80,20 +80,22 @@ Because the loop variable comes from a **pattern**, destructuring in `for` works
 directly:
 
 ```
-for (i, cat) in cats.enumerate() { ... }        // tuple pattern
+for (i, cat) in cats.iter().enumerate() { ... } // tuple pattern
 for .rect { w, h } in shapes { ... }            // (refutable patterns need a filter/guard)
 ```
 
-An `IntoIterator`-style convenience trait lets containers hand out an iterator:
+`IntoIterator` lets a container hand out an iterator:
 
 ```
 IntoIterator :: #lang("into_iterator") trait {
   Iter :: type                                  // must implement Iterator
-  iter :: func (self: *Self) -> Self.Iter
+  into_iter :: func (self: Self) -> Self.Iter
 }
 ```
 
-Slices, arrays, `Vector`, `HashMap`, and ranges implement these in std. Iterating
+Slices, `Vec`, and ranges implement it, and so does every iterator — it is its
+own `into_iter` (`impl <I: Iterator> IntoIterator for I`), which is what lets
+`for` walk an adapter chain directly. Iterating
 a `[]mut T` can yield `*mut T` items for in-place mutation; iterating `[]T`
 yields read-only elements.
 
@@ -105,7 +107,7 @@ The range expressions from pattern syntax are also values that implement
 ```
 for i in 0..<n     { ... }        // 0, 1, ..., n-1   (half-open)
 for i in 0..=n     { ... }        // 0, 1, ..., n     (inclusive)
-for i in (0..<n).step(2) { ... }  // std adapter
+for i in (0..<n).step(2) { ... }  // every other one (§10.4)
 ```
 
 There is **one** such impl, over a `core` trait called `Step` that says what
@@ -136,18 +138,49 @@ iterating one **panics** rather than running zero times.
 
 ## 10.4 Iterator adapters
 
-Because iteration is a trait, ordinary methods compose lazily over any iterator —
-`map`, `filter`, `take`, `enumerate`, `zip`, `step`, terminating in a consumer
-like `collect`, `sum`, or a `for` loop:
+An iterator writes only `next`. Everything else is a **default method** on
+`Iterator` (`core/iter`), so every iterator has it:
+
+- **Adapters**, lazy: `map(f)`, `filter(keep)`, `enumerate()`, `zip(other)`,
+  `chain(other)`, `take(n)`, `skip(n)`, `step(n)`.
+- **Consumers**, which run the loop: `each(f)`, `fold(init, f)`, `count()`,
+  `any(p)`, `all(p)`, `find(p)`, `collect()`.
 
 ```
-const names := cats
+const urls := cats
   .iter()
-  .filter(func (c: *CatImage) -> bool { return c.width > 0 })
-  .map(func (c: *CatImage) -> str { return c.url })
-  .collect.<Vector.<str>>()
+  .filter({ c in c.width > 0 })
+  .map({ c in c.url })
+  .collect.<Vec.<str>>()
 ```
 
-Adapters are lazy: no work happens until a consumer (`for`, `collect`, `sum`, …)
-pulls elements through `next`. Being monomorphized, an adapter chain compiles to
-the same code a hand-written loop would.
+Each adapter is a small generic struct that is an iterator itself — `map`
+returns `Map.<Self, F>`, whose impl is
+
+```
+impl <I: Iterator, B, F: Func(I.Item) -> B> Iterator for Map.<I, F> {
+  Item :: B
+  ...
+}
+```
+
+— so a chain is one nested type, no work happens until a consumer pulls
+elements through `next`, and, being monomorphized, the chain compiles to the
+loop it stands for. The impl's `B` appears only in a bound: selecting the impl
+solves it from the closure's `Output` (§5.4).
+
+`collect` builds any collection that implements `FromIterator`:
+
+```
+FromIterator :: trait {
+  Item :: type
+  from_iter :: func <I: Iterator.<Item = Self.Item>> (it: I) -> Self
+}
+```
+
+The collection is named by a turbofish (`.collect.<Vec.<i32>>()`) or by the
+context (`const v: Vec.<i32> := xs.iter().collect()`). `core` declares the
+trait and `std` implements it, so `core` knows nothing about `std`'s types.
+
+Because the adapters are generic methods and take `self` by value, `Iterator`
+is **not object-safe** (§3.4): there is no `*dyn Iterator`.

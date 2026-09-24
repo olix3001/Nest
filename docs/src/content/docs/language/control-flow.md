@@ -175,17 +175,16 @@ desugars to roughly:
 ```
 
 Because the loop variable comes from a pattern, destructuring works
-directly: `for (i, cat) in cats.enumerate() { ... }`. A container hands out
-an iterator through the `IntoIterator`-style convenience trait
-(`#lang("into_iterator")`); slices, arrays, `Vector`, `HashMap`, and ranges
-all implement it in std.
+directly: `for (i, cat) in cats.iter().enumerate() { ... }`. A container hands
+out an iterator through `IntoIterator` (`#lang("into_iterator")`); slices,
+`Vec`, ranges, and every iterator implement it.
 
 Ranges are themselves iterators, over a `core` trait `Step`:
 
 ```nest
 for i in 0..<n          { ... }   // 0, 1, ..., n-1  (half-open)
 for i in 0..=n          { ... }   // 0, 1, ..., n    (inclusive)
-for i in (0..<n).step(2) { ... }  // std adapter
+for i in (0..<n).step(2) { ... }  // every other one — an adapter, below
 ```
 
 A range with no start (`..`, `..<b`, `..=b`) has no first element, so
@@ -194,16 +193,30 @@ iterating one **panics** rather than running zero times.
 ### Adapters
 
 Because iteration is a trait, ordinary methods compose lazily over any
-iterator:
+iterator. An iterator writes only `next`; the rest are default methods on
+`Iterator` in `core/iter`:
+
+| Adapters (lazy) | Consumers (run the loop) |
+|---|---|
+| `map(f)`, `filter(keep)`, `enumerate()`, `zip(other)`, `chain(other)`, `take(n)`, `skip(n)`, `step(n)` | `each(f)`, `fold(init, f)`, `count()`, `any(p)`, `all(p)`, `find(p)`, `collect()` |
 
 ```nest
-const names := cats
+{ Vec } :: import <std/collections>
+
+const urls := cats
     .iter()
-    .filter(func (c: *CatImage) -> bool { return c.width > 0 })
-    .map(func (c: *CatImage) -> str { return c.url })
-    .collect.<Vector.<str>>()
+    .filter({ c in c.width > 0 })
+    .map({ c in c.url })
+    .collect.<Vec.<str>>()
 ```
 
-Adapters are lazy — no work happens until a consumer (`for`, `collect`,
-`sum`, …) pulls elements through `next` — and, being monomorphized, an
-adapter chain compiles to the same code a hand-written loop would.
+Each adapter wraps the iterator (and the closure it was given) in a small
+struct that is an iterator itself, so the chain above is one nested type and
+no work happens until a consumer — `for`, `collect`, `fold`, … — pulls
+elements through `next`. Being monomorphized, the chain compiles to the loop
+it stands for.
+
+`collect` builds whatever collection the turbofish or the context names, as
+long as it implements `FromIterator` (`Vec` does, in `std`). An iterator is
+also its own `IntoIterator`, so `for` walks a chain directly:
+`for x in xs.iter().map(f) { ... }`.

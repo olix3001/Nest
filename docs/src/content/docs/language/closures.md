@@ -31,7 +31,7 @@ local holds when called, and a write through either side is seen by both.
 
 ```nest
 let mut count := 0
-list.each() { x in count += x }   // count is the sum afterwards
+list.iter().each() { x in count += x }   // count is the sum afterwards
 ```
 
 A shared local lives as long as the closure does, not as long as the frame
