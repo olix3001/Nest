@@ -49,7 +49,6 @@
 //! the swap the runtime shim exists to make cheap — and on that day this is
 //! where `llvm.gcroot` or a statepoint lowering goes.
 
-use std::collections::HashMap;
 
 use inkwell::AddressSpace;
 use inkwell::basic_block::BasicBlock;
@@ -65,7 +64,7 @@ use inkwell::values::{
 
 use crate::codegen::CodegenError;
 use crate::lir::{
-    Aggregate, Base, Callee, CastKind, Constant, Function, Global, Intrinsic, Linkage, Local, Op,
+    Aggregate, Base, Callee, CastKind, Constant, Function, Intrinsic, Linkage, Op,
     Operand, Place, Projection, Rvalue, StmtKind, TermKind, Ty, TypeId, Unit,
 };
 use crate::sema::ty::CallConv;

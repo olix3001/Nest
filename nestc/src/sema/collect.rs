@@ -187,10 +187,6 @@ impl Collector<'_> {
         );
     }
 
-    fn is_directive(&self, node: NodeId, want: &str) -> bool {
-        matches!(&self.ast.node(node).kind, NodeKind::Directive { name, .. } if name.as_str() == want)
-    }
-
     /// Collect a bare binding node (a `ConstBind`, `LocalDecl`, comptime item).
     fn collect_binding(&mut self, node: NodeId, vis: Vis, scope: DefId) {
         match self.ast.node(node).kind.clone() {

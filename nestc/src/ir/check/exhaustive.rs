@@ -254,10 +254,6 @@ enum Ctor {
     /// A value with no enumerable structure — a float, a string. Each distinct
     /// literal is its own constructor and the set is never complete.
     Opaque(String),
-    /// Stands for "everything the rows did not mention". Never appears in a
-    /// pattern; it is what a wildcard specializes to when the set is incomplete,
-    /// and what a witness prints as.
-    Missing,
 }
 
 impl Ctor {
@@ -269,7 +265,7 @@ impl Ctor {
             Ctor::Single => cx.single_members(ty).len(),
             Ctor::Slice(n) => *n,
             Ctor::SliceMin(n) => *n,
-            Ctor::Range(..) | Ctor::Opaque(_) | Ctor::Missing => 0,
+            Ctor::Range(..) | Ctor::Opaque(_) => 0,
         }
     }
 
@@ -288,7 +284,7 @@ impl Ctor {
                 let elem = cx.element_ty(ty);
                 vec![elem; *n]
             }
-            Ctor::Range(..) | Ctor::Opaque(_) | Ctor::Missing => Vec::new(),
+            Ctor::Range(..) | Ctor::Opaque(_) => Vec::new(),
         }
     }
 
@@ -567,7 +563,7 @@ impl Cx<'_> {
             Ctor::Variant(name) => Witness::Variant(name.clone(), args),
             Ctor::Single => self.single_witness(ty, args),
             Ctor::Range(lo, _) => self.scalar_witness(ty, lo.clone()),
-            Ctor::Opaque(_) | Ctor::Missing => Witness::Wild,
+            Ctor::Opaque(_) => Witness::Wild,
             Ctor::Slice(_) | Ctor::SliceMin(_) => Witness::Slice(args),
         };
         let mut out = vec![head];
@@ -584,7 +580,7 @@ impl Cx<'_> {
             Ctor::Single => self.single_witness(ty, args),
             Ctor::Range(lo, _) => self.scalar_witness(ty, lo.clone()),
             Ctor::Slice(_) | Ctor::SliceMin(_) => Witness::Slice(args),
-            Ctor::Opaque(_) | Ctor::Missing => Witness::Wild,
+            Ctor::Opaque(_) => Witness::Wild,
         }
     }
 

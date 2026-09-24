@@ -6016,10 +6016,6 @@ impl Inferer<'_> {
         self.decls().func_generic_param_defs(def)
     }
 
-    fn collect_type_params(&self, ty: &Ty, out: &mut Vec<super::def::DefId>) {
-        self.collect_generic_params(ty, out, &mut Vec::new());
-    }
-
     /// Every generic parameter `ty` mentions, split by kind and in first-seen
     /// order.
     fn collect_generic_params(
@@ -8688,16 +8684,6 @@ impl Inferer<'_> {
     }
 
     // ===< literals / helpers >===
-
-    /// The type of a string literal: the `#lang("str")` item in `core`.
-    ///
-    /// `str` is not a compiler primitive — it is `distinct []u8` declared in
-    /// core, so that all the slice machinery (interior pointers, bounds, GC
-    /// tracing) is inherited rather than reimplemented. Found by tag, never by
-    /// name or path, like every other language item.
-    fn str_ty(&self) -> Ty {
-        str_lang_ty(self.defs, self.lang).unwrap_or(Ty::Error)
-    }
 
     fn lit_ty(&mut self, lit: &Lit) -> Ty {
         match lit {

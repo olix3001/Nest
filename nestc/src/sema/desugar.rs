@@ -32,8 +32,7 @@ use crate::common::source::{FileId, FileSpan};
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{
-    AssignOp, Ast, BinOp, CompositeBody, Lit, NodeId, NodeKind, TryKind, UnOp, VariantArgs,
-    VariantPatArgs,
+    AssignOp, Ast, BinOp, CompositeBody, Lit, NodeId, NodeKind, TryKind, UnOp, VariantPatArgs,
 };
 use crate::parser::fmt::{FormatCall, FormatSpec, SpecKind};
 
@@ -764,17 +763,6 @@ impl Desugar<'_> {
             NodeKind::VariantPat {
                 name: Symbol::new(name),
                 args: VariantPatArgs::Tuple(elems),
-            },
-        )
-    }
-
-    fn variant_lit(&mut self, span: Span, name: &str, value: NodeId) -> NodeId {
-        let arg = self.alloc(span, NodeKind::Arg { name: None, value });
-        self.alloc(
-            span,
-            NodeKind::VariantLit {
-                name: Symbol::new(name),
-                args: VariantArgs::Tuple(vec![arg]),
             },
         )
     }
