@@ -10199,3 +10199,13 @@ fn an_impl_return_type_holds_the_body_to_its_bounds() {
     let msg = first_error("make :: func () -> impl Func() -> i32 { return { in true } }\n");
     assert!(msg.contains("type mismatch"), "{msg}");
 }
+
+/// A binding that names itself is reported where it is written, rather than
+/// giving each of its uses an error type nothing explains.
+#[test]
+fn a_binding_that_names_itself_is_reported() {
+    let msg = first_error("ns :: namespace {\n    @public void :: void\n}\n");
+    assert!(msg.contains("`void` names itself"), "{msg}");
+    let msg = first_error("A :: B\nB :: A\nf :: func (a: A) {}\n");
+    assert!(msg.contains("names itself through"), "{msg}");
+}

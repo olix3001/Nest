@@ -413,6 +413,10 @@ pub fn analyze(session: &mut Session, entry: FileId) {
     // `core`'s `MAX`, whose type only `core`'s own inference worked out, and a
     // table still empty there would leave every read of it needing an
     // annotation.
+    // A binding that names itself, directly or around a cycle, has nothing to
+    // stand for; saying so here is what keeps the type it would have given its
+    // uses from being an error nobody reported.
+    report_alias_cycles(session, &files);
     for &file in &files {
         infer_one(session, &impls, file);
         {
@@ -864,6 +868,84 @@ fn dependency_order(session: &Session, files: &[FileId]) -> Vec<FileId> {
 /// a member that is not a function, a set that reaches itself, and two members
 /// a call could never choose between are all mistakes in the declaration, and
 /// reporting them at call sites would report one mistake as many.
+/// Report every `::` binding whose right-hand side is a name that leads back
+/// to it — `A :: B` with `B :: A`, or `void :: void` inside a namespace, where
+/// the name on the right is the binding itself.
+///
+/// Such a binding stands for nothing, and before this every use of it was an
+/// error type with no diagnostic behind it. Each binding in a cycle is reported
+/// once, where it is written.
+fn report_alias_cycles(session: &mut Session, files: &[FileId]) {
+    // What each binding's right-hand side names, when it is only a name.
+    let mut next: HashMap<DefId, DefId> = HashMap::new();
+    for d in session.defs.iter() {
+        if !matches!(d.kind, DefKind::Const | DefKind::TypeAlias)
+            || !d.file.is_some_and(|f| files.contains(&f))
+        {
+            continue;
+        }
+        let (Some(file), Some(node)) = (d.file, d.node) else {
+            continue;
+        };
+        let Some(ast) = session.asts.get(&file) else {
+            continue;
+        };
+        let NodeKind::ConstBind { rhs, .. } = &ast.node(node).kind else {
+            continue;
+        };
+        let head = match &ast.node(*rhs).kind {
+            NodeKind::Path { .. } => *rhs,
+            NodeKind::GenericApply { base, .. } => *base,
+            NodeKind::TypePath { path, .. } => *path,
+            _ => continue,
+        };
+        if let Some(Resolution::Def(to)) = ast.meta::<Resolution>(head) {
+            next.insert(d.id, session.defs.resolve_alias(to));
+        }
+    }
+    let mut reported: std::collections::HashSet<DefId> = std::collections::HashSet::new();
+    let mut starts: Vec<DefId> = next.keys().copied().collect();
+    starts.sort();
+    for start in starts {
+        let mut path = vec![start];
+        let mut at = start;
+        while let Some(&to) = next.get(&at) {
+            if let Some(i) = path.iter().position(|&p| p == to) {
+                let cycle = path[i..].to_vec();
+                for &d in &cycle {
+                    if !reported.insert(d) {
+                        continue;
+                    }
+                    let def = session.defs.get(d);
+                    let (Some(file), Some(span)) = (def.file, def.span) else {
+                        continue;
+                    };
+                    let name = def.name.clone();
+                    let message = if cycle.len() == 1 {
+                        format!("`{name}` names itself, so it stands for nothing")
+                    } else {
+                        let around: Vec<String> = cycle
+                            .iter()
+                            .map(|&c| format!("`{}`", session.defs.get(c).name))
+                            .collect();
+                        format!(
+                            "`{name}` names itself through {}, so it stands for nothing",
+                            around.join(" → ")
+                        )
+                    };
+                    session.diagnostics.push(
+                        crate::common::diagnostic::Diagnostic::error(message)
+                            .with_primary(FileSpan::new(file, span), ""),
+                    );
+                }
+                break;
+            }
+            path.push(to);
+            at = to;
+        }
+    }
+}
+
 fn report_overload_conflicts(session: &mut Session, files: &[FileId]) {
     let sets: Vec<DefId> = session
         .defs
