@@ -2900,7 +2900,9 @@ impl Inferer<'_> {
                 Select::ByBound => {
                     let head = self.cx.shallow(self_ty);
                     let minted = match &head {
-                        Ty::Nominal { def, .. } => self.defs.get(*def).ns.members.get(assoc).copied(),
+                        Ty::Nominal { def, .. } => {
+                            self.defs.get(*def).ns.members.get(assoc).copied()
+                        }
                         _ => None,
                     };
                     match minted {
@@ -3021,7 +3023,8 @@ impl Inferer<'_> {
                 }
                 let (name, out, origin) = (name.clone(), out.clone(), *origin);
                 // A deferred `p.0` whose base turned out to be a tuple.
-                if let (Ty::Tuple(elems), Ok(i)) = (self.autoderef(&target), name.as_str().parse::<usize>())
+                if let (Ty::Tuple(elems), Ok(i)) =
+                    (self.autoderef(&target), name.as_str().parse::<usize>())
                     && let Some(t) = elems.get(i)
                 {
                     let t = t.clone();
@@ -5630,7 +5633,13 @@ impl Inferer<'_> {
     /// The obligations that decide an opened `Self` (see
     /// [`Inferer::open_trait_self`]): which impl it is, and what that impl's
     /// associated types are.
-    fn settle_trait_self(&mut self, callee: NodeId, method: DefId, opened: OpenedSelf, map: &Subst) {
+    fn settle_trait_self(
+        &mut self,
+        callee: NodeId,
+        method: DefId,
+        opened: OpenedSelf,
+        map: &Subst,
+    ) {
         let OpenedSelf {
             trait_def,
             self_ty,
@@ -5928,8 +5937,12 @@ impl Inferer<'_> {
         // *declaration*, whose `Self` is the trait's own nominal. For this call
         // `Self` is the receiver, so the instantiation says so rather than
         // leaving the signature claiming a bare `Trait`.
-        let self_subst = self.trait_self_subst(callee, method, recv).unwrap_or_default();
-        let inst = self.instantiate_parts(callee, &sig, method, targs, self_subst).0;
+        let self_subst = self
+            .trait_self_subst(callee, method, recv)
+            .unwrap_or_default();
+        let inst = self
+            .instantiate_parts(callee, &sig, method, targs, self_subst)
+            .0;
         // Everything up to and including the `self` parameter below stays in the
         // **representation's** terms when rebinding. That is not a detail: the
         // representation may itself be generic — `str` inherits from
@@ -8015,9 +8028,12 @@ impl Inferer<'_> {
             NodeKind::FieldAccess { .. } => self.typepath_ty(file, node, &[]),
             // `(A, B)` on the right of a `::`, which parses as a tuple value.
             NodeKind::Tuple { elems } if elems.is_empty() => Ty::Void,
-            NodeKind::Tuple { elems } => {
-                Ty::Tuple(elems.iter().map(|&e| self.ty_from_node_in(file, e)).collect())
-            }
+            NodeKind::Tuple { elems } => Ty::Tuple(
+                elems
+                    .iter()
+                    .map(|&e| self.ty_from_node_in(file, e))
+                    .collect(),
+            ),
             _ => Ty::Error,
         }
     }

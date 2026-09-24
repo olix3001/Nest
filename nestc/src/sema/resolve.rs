@@ -1073,7 +1073,12 @@ impl Resolver<'_> {
         let NodeKind::AssocType { bounds } = self.ast.node(rhs).kind.clone() else {
             return None;
         };
-        Some(bounds.iter().filter_map(|&b| self.bound_trait_def(b)).collect())
+        Some(
+            bounds
+                .iter()
+                .filter_map(|&b| self.bound_trait_def(b))
+                .collect(),
+        )
     }
 
     /// The type node a bound pinned an associated type to: the `i32` of

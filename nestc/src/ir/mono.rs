@@ -1056,7 +1056,9 @@ impl Mono<'_> {
             _ => false,
         };
         let matched = match self_ty {
-            Ty::Ptr { inner, .. } if by_ptr => self.match_impl_exact(linked, trait_def, inner, trait_args),
+            Ty::Ptr { inner, .. } if by_ptr => {
+                self.match_impl_exact(linked, trait_def, inner, trait_args)
+            }
             _ => self.match_impl(linked, trait_def, self_ty, trait_args),
         };
         let (i, bindings) = matched?;

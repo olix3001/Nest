@@ -48,11 +48,11 @@ use crate::parser::ast::{
 
 use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
-use super::infer::{OpResolution, StaticTraitSelf};
 use super::infer::{
     ArgOrder, Coercion, DistinctRecv, DynCoerce, FuncCall, Generics, Instantiation, MethodDispatch,
     MethodRes, RangeReported, RecvAdjust, SliceCoerce, Upcast,
 };
+use super::infer::{OpResolution, StaticTraitSelf};
 use super::ty::Ty;
 use super::{DefMeta, Resolution};
 use crate::ir::{
