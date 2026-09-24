@@ -31,6 +31,7 @@ const PREC = {
 };
 
 const commaSep = (rule) => optional(commaSep1(rule));
+const sep1 = (rule, sep) => seq(rule, repeat(seq(sep, rule)));
 const commaSep1 = (rule) => seq(rule, repeat(seq(',', rule)), optional(','));
 
 module.exports = grammar({
@@ -84,6 +85,8 @@ module.exports = grammar({
     [$._type, $._expression],
     [$.tuple_type, $.tuple_expression],
     [$.func_type, $.func_expression],
+    [$.capture_list, $._expression, $._pattern],
+    [$.capture_list, $._pattern],
   ],
 
   rules: {
@@ -215,6 +218,8 @@ module.exports = grammar({
       $.tuple_type,
       $.dyn_type,
       $.func_type,
+      $.impl_type,
+      $.callable_type,
     ),
 
     type_path: $ => prec.right(seq(
@@ -252,7 +257,23 @@ module.exports = grammar({
 
     dyn_type: $ => prec.right(seq('dyn', $._type)),
 
+    // `impl Display + Debug` — a type the program leaves unnamed (spec §5.4).
+    impl_type: $ => prec.right(seq('impl', sep1($._type, '+'))),
+
+    // `Func(i32, i32) -> i32` — a trait over a call's shape, spelled the way the
+    // call is (spec §5.5).
+    callable_type: $ => prec.right(1, seq(
+      field('trait', $.type_path),
+      '(',
+      commaSep($._type),
+      ')',
+      optional(seq('->', field('return_type', $._type))),
+    )),
+
+    // Only ever behind a `*` (spec §3.5): `*func(i32) -> i32`, or
+    // `*extern("c") func(...)` for a C callback.
     func_type: $ => prec.right(seq(
+      optional($.extern_specifier),
       'func',
       optional($.generic_parameters),
       $.parameters,
@@ -351,10 +372,23 @@ module.exports = grammar({
 
     block: $ => seq(
       '{',
-      optional(seq(commaSep1($.closure_parameter), '=>')),
       optional($._statements),
       '}',
     ),
+
+    // `{ [n] x, y -> i32 in body }` — a closure (spec §5.5). The header is what
+    // tells it from a block: `in` ends it, and `{ in body }` takes nothing.
+    closure_expression: $ => seq(
+      '{',
+      optional(field('captures', $.capture_list)),
+      commaSep($.closure_parameter),
+      optional(seq('->', field('return_type', $._type))),
+      'in',
+      optional($._statements),
+      '}',
+    ),
+
+    capture_list: $ => seq('[', commaSep1($.identifier), ']'),
 
     closure_parameter: $ => seq(
       field('name', $.identifier),
@@ -448,6 +482,7 @@ module.exports = grammar({
       $.method_match_expression,
       $.composite_literal,
       $.trailing_closure,
+      $.closure_expression,
     ),
 
     parenthesized_expression: $ => seq('(', $._expression, ')'),
@@ -493,9 +528,11 @@ module.exports = grammar({
       '}',
     )),
 
+    // A trailing block always follows a call's `)` (spec §5.3): after a bare
+    // name, `{` opens a composite literal.
     trailing_closure: $ => prec.dynamic(-1, seq(
-      field('function', choice($.call_expression, $.field_expression, $.identifier)),
-      field('closure', $.block),
+      field('function', $.call_expression),
+      field('closure', choice($.closure_expression, $.block)),
     )),
 
     enum_literal: $ => seq('.', field('name', $.identifier)),

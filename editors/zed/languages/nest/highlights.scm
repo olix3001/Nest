@@ -127,12 +127,11 @@
   function: (enum_literal
     name: (identifier) @constructor))
 
-(trailing_closure
-  function: (identifier) @function)
+(capture_list
+  (identifier) @variable)
 
-(trailing_closure
-  function: (field_expression
-    field: (field_identifier) @function.method))
+(callable_type
+  trait: (type_path) @type)
 
 (named_argument
   name: (identifier) @property)

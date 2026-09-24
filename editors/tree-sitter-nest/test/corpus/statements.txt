@@ -86,7 +86,7 @@ Match, try and trailing closures
 
 f :: func () -> i32 {
   let s := x.match { .some(v) => v, .none => 0 }
-  items.each { v => g(v) }
+  items.each() { v in g(v) }
   let r := cast.<[]u8>(y).?
   return loop { break 1 }
 }
@@ -119,10 +119,12 @@ f :: func () -> i32 {
                     (integer))))))
           (expression_statement
             (trailing_closure
-              (field_expression
-                (identifier)
-                (field_identifier))
-              (block
+              (call_expression
+                (field_expression
+                  (identifier)
+                  (field_identifier))
+                (arguments))
+              (closure_expression
                 (closure_parameter
                   (identifier))
                 (expression_statement
@@ -233,3 +235,118 @@ f :: func () {
                           (field_identifier)
                           (integer)))
                       (field_identifier))))))))))))
+
+================================================================================
+Closures, capture lists and callable types
+================================================================================
+
+apply :: func (f: impl Func(i32) -> i32, g: *func(i32) -> i32, h: *extern("c") func()) -> i32 {
+  const double := { x in x * 2 }
+  const add := { a: i32, b: i32 -> i32 in a + b }
+  const now := { in clock() }
+  const scaled := { [n] x in x * n }
+  spawn() { work() }
+  return f(1)
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (func_expression
+        (parameters
+          (parameter
+            (identifier)
+            (impl_type
+              (callable_type
+                (type_path
+                  (type_identifier))
+                (type_path
+                  (type_identifier))
+                (type_path
+                  (type_identifier)))))
+          (parameter
+            (identifier)
+            (pointer_type
+              (func_type
+                (parameters
+                  (type_path
+                    (type_identifier)))
+                (type_path
+                  (type_identifier)))))
+          (parameter
+            (identifier)
+            (pointer_type
+              (func_type
+                (extern_specifier
+                  (string
+                    (string_content)))
+                (parameters)))))
+        (type_path
+          (type_identifier))
+        (block
+          (declaration
+            (let_declaration
+              (identifier)
+              (closure_expression
+                (closure_parameter
+                  (identifier))
+                (expression_statement
+                  (binary_expression
+                    (identifier)
+                    (integer))))))
+          (declaration
+            (let_declaration
+              (identifier)
+              (closure_expression
+                (closure_parameter
+                  (identifier)
+                  (type_path
+                    (type_identifier)))
+                (closure_parameter
+                  (identifier)
+                  (type_path
+                    (type_identifier)))
+                (type_path
+                  (type_identifier))
+                (expression_statement
+                  (binary_expression
+                    (identifier)
+                    (identifier))))))
+          (declaration
+            (let_declaration
+              (identifier)
+              (closure_expression
+                (expression_statement
+                  (call_expression
+                    (identifier)
+                    (arguments))))))
+          (declaration
+            (let_declaration
+              (identifier)
+              (closure_expression
+                (capture_list
+                  (identifier))
+                (closure_parameter
+                  (identifier))
+                (expression_statement
+                  (binary_expression
+                    (identifier)
+                    (identifier))))))
+          (expression_statement
+            (trailing_closure
+              (call_expression
+                (identifier)
+                (arguments))
+              (block
+                (expression_statement
+                  (call_expression
+                    (identifier)
+                    (arguments))))))
+          (return_statement
+            (call_expression
+              (identifier)
+              (arguments
+                (integer)))))))))

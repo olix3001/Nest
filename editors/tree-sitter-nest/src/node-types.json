@@ -40,6 +40,10 @@
         "named": true
       },
       {
+        "type": "closure_expression",
+        "named": true
+      },
+      {
         "type": "composite_literal",
         "named": true
       },
@@ -208,11 +212,19 @@
         "named": true
       },
       {
+        "type": "callable_type",
+        "named": true
+      },
+      {
         "type": "dyn_type",
         "named": true
       },
       {
         "type": "func_type",
+        "named": true
+      },
+      {
+        "type": "impl_type",
         "named": true
       },
       {
@@ -568,10 +580,6 @@
           "named": true
         },
         {
-          "type": "closure_parameter",
-          "named": true
-        },
-        {
           "type": "continue_statement",
           "named": true
         },
@@ -699,6 +707,129 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "callable_type",
+    "named": true,
+    "fields": {
+      "return_type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "_type",
+            "named": true
+          }
+        ]
+      },
+      "trait": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type_path",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "capture_list",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "closure_expression",
+    "named": true,
+    "fields": {
+      "captures": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "capture_list",
+            "named": true
+          }
+        ]
+      },
+      "return_type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "assignment",
+          "named": true
+        },
+        {
+          "type": "break_statement",
+          "named": true
+        },
+        {
+          "type": "closure_parameter",
+          "named": true
+        },
+        {
+          "type": "continue_statement",
+          "named": true
+        },
+        {
+          "type": "declaration",
+          "named": true
+        },
+        {
+          "type": "defer_statement",
+          "named": true
+        },
+        {
+          "type": "expression_statement",
+          "named": true
+        },
+        {
+          "type": "for_statement",
+          "named": true
+        },
+        {
+          "type": "return_statement",
+          "named": true
+        },
+        {
+          "type": "while_statement",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -1342,6 +1473,10 @@
       "required": true,
       "types": [
         {
+          "type": "extern_specifier",
+          "named": true
+        },
+        {
           "type": "generic_parameters",
           "named": true
         },
@@ -1603,6 +1738,21 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "impl_type",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "_type",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -2297,6 +2447,10 @@
           {
             "type": "block",
             "named": true
+          },
+          {
+            "type": "closure_expression",
+            "named": true
           }
         ]
       },
@@ -2306,14 +2460,6 @@
         "types": [
           {
             "type": "call_expression",
-            "named": true
-          },
-          {
-            "type": "field_expression",
-            "named": true
-          },
-          {
-            "type": "identifier",
             "named": true
           }
         ]
