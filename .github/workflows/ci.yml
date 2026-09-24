@@ -85,7 +85,7 @@ jobs:
         run: just fmt-check
 
       - name: Build
-        run: just profile=debug build
+        run: just build
 
       - name: Test
-        run: just profile=debug test
+        run: just test

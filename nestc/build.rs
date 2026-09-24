@@ -26,7 +26,7 @@ use std::process::Command;
 
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source = root.join("../runtime/nest_runtime.c");
+    let source = root.join("./runtime/nest_runtime.c");
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=BDW_GC_PREFIX");

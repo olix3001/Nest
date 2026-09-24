@@ -21,7 +21,7 @@ profile := "release"
 cargo_profile := if profile == "release" { "--release" } else { "" }
 twig_profile := if profile == "release" { "--release" } else { "" }
 
-root := justfile_directory()
+root := replace(justfile_directory(), '\', '/') # Weird windows stuff...
 bin := root / "nestc/target" / profile
 nestc := bin / "nestc"
 twig := root / "twig/build" / profile / "twig"
