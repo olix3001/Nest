@@ -1,0 +1,58 @@
+// Closures (§5.5): written where a value goes, sharing the locals they name.
+
+{ boxed } :: import <core/mem>
+
+// A parameter written `impl Func(...)` takes a closure or a function pointer,
+// and each closure passed makes its own instantiation.
+apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 {
+    return f(x)
+}
+
+// A trailing block is the last argument.
+repeat :: func (n: i32, body: impl Func(i32)) {
+    let mut i := 0
+    while i < n {
+        body(i)
+        i = i + 1
+    }
+}
+
+// A closure returned as `impl Func`: the caller knows it by its bound.
+make_adder :: func (n: i32) -> impl Func(i32) -> i32 {
+    return { x in x + n }
+}
+
+// A shared local outlives the call that bound it when the closure does.
+counter :: func () -> impl Func() -> i32 {
+    let mut count := 0
+    return { in
+        count = count + 1
+        count
+    }
+}
+
+double :: func (x: i32) -> i32 { return x * 2 }
+
+main :: func () -> i32 {
+    const square := { x in x * x }
+    let a := apply(square, 4)                 // 16
+    let b := apply(double, 4)                 // 8
+
+    let mut total := 0
+    repeat(5) { i in total = total + i }      // total is 10
+
+    let mut n := 1
+    const copied := { [n] x in x + n }        // copies n as it is now
+    n = 100
+    let c := copied(1)                        // 2
+
+    const tick := counter()
+    tick()
+    let d := tick()                           // 2
+
+    // Closures of different types, held as one trait object.
+    const fs: [2]*dyn Func(i32) -> i32 := .{ boxed(make_adder(3)), boxed({ x in x - 1 }) }
+    let e := fs[0](1) + fs[1](1)              // 4 + 0
+
+    return a + b + total + c + d + e - 42     // 0
+}

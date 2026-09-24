@@ -880,6 +880,20 @@ impl Mono<'_> {
         depth: u32,
         at: IrId,
     ) {
+        let is_func = self.defs.get(trait_def).lang.as_ref().is_some_and(|l| l.as_str() == "func");
+        if is_func && !matches!(concrete, Ty::Nominal { .. }) {
+            let mut d = Diagnostic::error(format!(
+                "`{}` cannot be a `*dyn Func`: a function pointer has no closure behind it",
+                concrete.display(self.defs)
+            ));
+            if let Some(span) = self.meta.span(at) {
+                d = d.with_primary(span, "");
+            }
+            self.out.push(d.with_note(
+                "wrap it in a closure, `{ x in f(x) }`, to store it as a trait object".to_string(),
+            ));
+            return;
+        }
         if let Some(mut slots) = self.vtable_slots(linked, trait_def, concrete, depth) {
             slots.object = match self.meta.ty(at) {
                 Some(Ty::Ptr { inner, .. }) => Some(*inner),

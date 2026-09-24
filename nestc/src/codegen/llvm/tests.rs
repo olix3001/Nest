@@ -3060,3 +3060,18 @@ fn a_closure_is_stored_as_a_dyn_func() {
         assert_eq!(code, 11 + 6 + 15);
     }
 }
+
+/// What an `impl Func` return type turned out to be is stored as a `*dyn Func`
+/// like any closure is.
+#[test]
+fn an_impl_func_return_is_stored_as_a_dyn_func() {
+    let src = "{ boxed } :: import <core/mem>\n\
+               make_adder :: func (n: i32) -> impl Func(i32) -> i32 { return { x in x + n } }\n\
+               main :: func () -> i32 {\n\
+                   const f: *dyn Func(i32) -> i32 := boxed(make_adder(3))\n\
+                   return f(4)\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 7);
+    }
+}

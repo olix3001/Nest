@@ -8909,10 +8909,11 @@ impl Inferer<'_> {
         // `dyn Func(A) -> R` takes anything called with `A` that answers `R` —
         // which no impl says, and the value's own signature does (§5.5).
         if Some(trait_def) == self.lang.get("func").map(|d| self.defs.resolve_alias(d)) {
-            // A closure's own call is what fills the one slot; a function
+            // A closure's own call is what fills the one slot, and an `impl
+            // Func` return type is the closure its body returned; a function
             // pointer has no data to point at.
             if !matches!(&concrete, Ty::Nominal { def, .. }
-                if self.defs.get(*def).kind == DefKind::Closure)
+                if self.defs.get(*def).kind == DefKind::Closure || self.defs.get(*def).opaque)
             {
                 return false;
             }

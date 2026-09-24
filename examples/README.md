@@ -16,6 +16,7 @@ depends on them: the compiler's tests have a corpus of their own
 | `errors.nest` | `.?` propagation on `Result` **and** `Option`, `.!` abort, `for` over a slice |
 | `arrays.nest` | `[N]T` lengths, `<const N: usize>` value generics, `.len` / `len`, array→slice |
 | `dispatch.nest` | `@using` upcasts, `dyn` trait objects, bound-directed calls |
+| `closures.nest` | closures, captures and `[n]` copies, trailing blocks, `impl Func`, `*dyn Func` |
 
 `gc/` holds three programs about the collector. They import `core`, and their
 exit status is the answer: `collects.nest` (memory nothing reaches is collected),
