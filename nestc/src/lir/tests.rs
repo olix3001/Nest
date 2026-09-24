@@ -2507,18 +2507,18 @@ fn a_split_is_deterministic() {
     }
 }
 
-/// **Every shipped example lowers to well-formed units, at every split.**
+/// **Every corpus program lowers to well-formed units, at every split.**
 ///
 /// The invariants above each state one rule over one program. This runs all of
-/// them over every example the repository ships, at four settings of
+/// them over every program in `src/testdata/programs`, at four settings of
 /// `-C codegen-units`, because the failures worth catching are the ones a
 /// hand-written test program does not contain: a type only `core`'s `Result`
 /// reaches, a global only one unit defines, an intrinsic only one example uses.
 #[test]
 fn every_example_lowers_to_well_formed_units() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/programs");
     let mut checked = 0;
-    for entry in std::fs::read_dir(dir).expect("examples dir") {
+    for entry in std::fs::read_dir(dir).expect("the test corpus") {
         let path = entry.unwrap().path();
         if path.extension().and_then(|e| e.to_str()) != Some("nest") {
             continue;

@@ -116,7 +116,7 @@ build-twig: build-nestc
 test: test-nestc test-lsp test-grammar test-std test-twig
     @just _step "All suites passed"
 
-# The compiler: inference, lowering, codegen, and the programs in examples/.
+# The compiler: inference, lowering, codegen, and its test corpus (src/testdata).
 test-nestc:
     @just _step "Testing nestc"
     cd {{ root }}/nestc && cargo test {{ cargo_profile }} -p nestc

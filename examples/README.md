@@ -1,9 +1,8 @@
 # Example programs
 
-Small, single-file Nest programs used as parser/compiler test fixtures. They use
-only basic language features and **no** libraries (no `import <std/...>`), so they
-exercise the front end without depending on a standard library that does not yet
-exist.
+Small Nest programs that show the language. They are a showcase and nothing
+depends on them: the compiler's tests have a corpus of their own
+(`nestc/src/testdata`), so these can change freely.
 
 | File | Exercises |
 |------|-----------|
@@ -18,9 +17,8 @@ exist.
 | `arrays.nest` | `[N]T` lengths, `<const N: usize>` value generics, `.len` / `len`, array→slice |
 | `dispatch.nest` | `@using` upcasts, `dyn` trait objects, bound-directed calls |
 
-`gc/` holds three programs about the collector, each run by a test in
-`nestc/src/codegen/llvm/tests.rs`. They import `core`, and their exit status is
-the answer: `collects.nest` (memory nothing reaches is collected),
+`gc/` holds three programs about the collector. They import `core`, and their
+exit status is the answer: `collects.nest` (memory nothing reaches is collected),
 `escapes.nest` (escape analysis frees nothing still reachable; run it with
 `NEST_GC_POISON=1`) and `leak.nest` (`gc_leak` keeps an object alive until
 `drop`).

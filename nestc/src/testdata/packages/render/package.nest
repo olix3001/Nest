@@ -1,0 +1,20 @@
+// package.nest — the root of package `render`, imported as `import <render>`.
+//
+// This package owns a *trait*. It is the other half of the two-package coherence
+// example; see `shapes/package.nest`.
+
+@public
+Describe :: trait {
+  // An associated constant: every impl supplies one, unless the trait does.
+  SIDES: i32 :: 0
+  describe :: func (self: *Self) -> i32
+}
+
+// A trait impl needs *something of its own* in it: either the trait or the self
+// type must belong to the impl's package. Here the trait is `render`'s, so
+// implementing it for a foreign type — `i32`, the language's — is this package's
+// business and is allowed.
+impl Describe for i32 {
+  SIDES :: 1
+  describe :: func (self: *i32) -> i32 { return self.* }
+}

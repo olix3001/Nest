@@ -1,0 +1,62 @@
+// dispatch.nest — the three ways a method call finds its body: an `@using`
+// upcast, a trait object, and a generic bound. No imports.
+
+Transform :: struct { x: i32, y: i32 }
+
+impl Transform {
+  @public
+  magnitude :: func (self: *Transform) -> i32 {
+    return self.x * self.x + self.y * self.y
+  }
+}
+
+// `@using` gives `Entity` an implicit upcast to `Transform`: it coerces where a
+// `Transform` is expected, and `e.magnitude()` resolves through the embedded
+// field (§3.10). Nothing else is promoted — `e.x` stays invalid, `e.t.x` works.
+Entity :: struct {
+  @using t: Transform,
+  hp: i32,
+}
+
+@public
+translate :: func (t: *mut Transform, dx: i32, dy: i32) {
+  t.x += dx
+  t.y += dy
+}
+
+// `dyn Describe` behind a pointer is a trait object: `*T` coerces to it when
+// `T: Describe`, and the call is a vtable lookup rather than a direct call.
+Describe :: trait {
+  weight :: func (self: *Self) -> i32
+}
+
+impl Describe for Entity {
+  weight :: func (self: *Entity) -> i32 { return self.hp }
+}
+
+@public
+total_weight :: func (xs: []*dyn Describe) -> i32 {
+  let total := 0
+  for d in xs {
+    total += d.weight()
+  }
+  return total
+}
+
+// A bound resolves the method statically: `D: Describe` makes `d.weight()` mean
+// `Describe.weight`, with the impl picked once `D` is known.
+@public
+heavier_than :: func <D: Describe> (d: *D, limit: i32) -> bool {
+  return d.weight() > limit
+}
+
+@public
+main :: func () {
+  let mut e := Entity { t: Transform { x: 3, y: 4 }, hp: 12 }
+  // `&mut e` upcasts to `*mut Transform` — the address of `e.t`.
+  translate(&mut e, 1, 1)
+  const m := e.magnitude()
+  const heavy := heavier_than(&e, 10)
+  const obj: *dyn Describe := &e
+  const w := obj.weight()
+}

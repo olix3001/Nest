@@ -405,22 +405,22 @@ fn a_triple_with_no_name_here_is_refused() {
     assert!(matches!(err, CodegenError::Unsupported(_)), "{err:?}");
 }
 
-/// **Every example emits an object file.**
+/// **Every corpus program emits an object file** (`src/testdata/programs`).
 ///
 /// The failures worth catching are the ones a hand-written test does not
-/// contain — a type only `core`'s `Result` reaches, an intrinsic one example
+/// contain — a type only `core`'s `Result` reaches, an intrinsic one program
 /// uses, a `void` member of a `ControlFlow.<void, T>`. Every one of the four
 /// bugs this backend has found so far came from here rather than from the tests
 /// above it.
 #[test]
-fn every_example_emits_an_object() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
-    let out_dir = std::env::temp_dir().join("nestc-llvm-examples");
+fn every_corpus_program_emits_an_object() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/programs");
+    let out_dir = std::env::temp_dir().join("nestc-llvm-corpus");
     std::fs::create_dir_all(&out_dir).unwrap();
     let mut emitted = 0;
     let mut pending: Vec<String> = Vec::new();
 
-    for entry in std::fs::read_dir(dir).expect("examples dir") {
+    for entry in std::fs::read_dir(dir).expect("the test corpus") {
         let path = entry.unwrap().path();
         if path.extension().and_then(|e| e.to_str()) != Some("nest") {
             continue;
@@ -470,12 +470,12 @@ fn every_example_emits_an_object() {
         }
     }
 
-    assert!(emitted > 0, "no example emitted an object");
-    // **Empty.** Every example compiles, and an intrinsic that grows a hole
+    assert!(emitted > 0, "no program emitted an object");
+    // **Empty.** Every program compiles, and an intrinsic that grows a hole
     // again is a test failure rather than a quiet entry on a list.
     assert!(
         pending.is_empty(),
-        "some examples no longer emit:\n{}",
+        "some programs no longer emit:\n{}",
         pending.join("\n")
     );
 }
@@ -1576,8 +1576,8 @@ fn with_stack(exe: &Path, bytes: u64) -> std::process::Command {
 
 // ===< The collector >===
 //
-// The programs are the ones in `examples/gc`, where each says what it checks and
-// what its exit status means.
+// The programs are the ones in `src/testdata/gc`, where each says what it checks
+// and what its exit status means.
 
 /// Allocating far more than fits in memory, with a little of it kept, leaves the
 /// collector's heap small.
@@ -1586,7 +1586,7 @@ fn memory_nothing_reaches_is_collected() {
     let Some(_) = crate::codegen::link::built_runtime() else {
         return;
     };
-    let out = run_on_host(include_str!("../../../../examples/gc/collects.nest"));
+    let out = run_on_host(include_str!("../../testdata/gc/collects.nest"));
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -1602,7 +1602,7 @@ fn nothing_is_freed_while_something_still_reaches_it() {
         return;
     };
     let out = run_on_host_in(
-        include_str!("../../../../examples/gc/escapes.nest"),
+        include_str!("../../testdata/gc/escapes.nest"),
         &[],
         &[("NEST_GC_POISON", "1")],
     );
@@ -1620,7 +1620,7 @@ fn a_leaked_object_lives_until_it_is_dropped() {
     let Some(_) = crate::codegen::link::built_runtime() else {
         return;
     };
-    let out = run_on_host(include_str!("../../../../examples/gc/leak.nest"));
+    let out = run_on_host(include_str!("../../testdata/gc/leak.nest"));
     assert_eq!(
         out.status.code(),
         Some(0),

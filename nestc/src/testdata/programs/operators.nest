@@ -1,0 +1,45 @@
+// operators.nest — operator overloading through the `Add` trait, plus the
+// associated-type projection that types the result.
+//
+// `a + b` on a primitive and `a + b` on `Vec3` are the *same* construct: both
+// desugar to a call of the operator trait's method, selected against the impl
+// in scope. For `i32` that impl is a builtin; for `Vec3` it is the user impl
+// below, whose `Output :: Vec3` binding is what the projection resolves the
+// `+` expression's type to.
+//
+// The *name* `Add` needs an import: only `core.prelude` is globbed into every
+// file (§4.6), and the operator traits are deliberately not in it. Writing
+// `a + b` does not need the import — that finds `Add` by its `#lang` tag —
+// but writing the impl does.
+
+{ Add } :: import <core/ops>
+
+Vec3 :: struct {
+  x: i32,
+  y: i32,
+  z: i32,
+}
+
+impl Add for Vec3 {
+  Output :: Vec3
+  add :: func (self: Vec3, rhs: Vec3) -> Vec3 {
+    // The field additions are the primitive builtin `Add` on `i32`; the outer
+    // `combine` uses this very impl. Same construct, two implementations.
+    return Vec3 {
+      x: self.x + rhs.x,
+      y: self.y + rhs.y,
+      z: self.z + rhs.z,
+    }
+  }
+}
+
+@public
+combine :: func (a: Vec3, b: Vec3) -> Vec3 {
+  return a + b
+}
+
+@public
+scale_sum :: func (n: i32) -> i32 {
+  // Chained primitive operators: each `+`/`*` projects `Output = Self = i32`.
+  return n + n * n
+}

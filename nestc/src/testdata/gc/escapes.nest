@@ -1,0 +1,149 @@
+// escapes.nest — nothing is freed while something still reaches it.
+//
+// Every function below allocates a `Node`, lets it (or an address inside it)
+// leave the scope in a different way, and the caller reads it back. Escape
+// analysis (`design/lir.md` §5) frees an allocation it believes does not leave;
+// if it believes wrongly, the read sees freed memory. Run with
+// `NEST_GC_POISON=1`, which fills freed memory with 0xDB, so a wrong answer is
+// seen every time rather than only when the memory was handed out again.
+//
+// Exits 0 when every case reads 7, or the number of the first case that did not.
+
+{ new } :: import <core/mem>
+
+Node :: struct { x: i64, arr: [4]i64, next: *mut Node }
+
+impl Node {
+  address :: func (self: *Node) -> *i64 { return &self.x }
+}
+
+Get :: trait { value :: func (self: *Self) -> i64 }
+impl Get for Node { value :: func (self: *Node) -> i64 { return self.x } }
+
+#static G: Option.<*mut Node> := .none
+#static H: Option.<*i64> := .none
+
+keep :: func (r: *i64) -> *i64 { return r }
+
+// 1. The address of a member, returned.
+member_address :: func () -> *i64 {
+  let p := new.<Node>()
+  p.*.x = 7
+  return &p.*.x
+}
+
+// 2. A sub-slice of an array member, returned.
+member_slice :: func () -> []i64 {
+  let p := new.<Node>()
+  p.*.arr[1] = 7
+  return p.*.arr[0..]
+}
+
+// 3. The address of an element of an array member, returned.
+element_address :: func () -> *mut i64 {
+  let p := new.<Node>()
+  p.*.arr[2] = 7
+  return &mut p.*.arr[2]
+}
+
+// 4. The address of a member, stored in a global.
+member_address_stored :: func () {
+  let p := new.<Node>()
+  p.*.x = 7
+  H = .some(&p.*.x)
+}
+
+// 5. The address of a member, passed through a call.
+member_address_passed :: func () -> *i64 {
+  let p := new.<Node>()
+  p.*.x = 7
+  return keep(&p.*.x)
+}
+
+// 6. Stored in another allocation's field, then in a global.
+through_a_field :: func () {
+  let p := new.<Node>()
+  p.*.x = 7
+  let q := new.<Node>()
+  q.*.next = p
+  G = .some(q.*.next)
+}
+
+// 7. Stored by a `defer`.
+by_defer :: func () {
+  let p := new.<Node>()
+  p.*.x = 7
+  defer { G = .some(p) }
+}
+
+// 8. Stored into a field of what the caller passed.
+into_the_callers :: func (out: *mut Node) {
+  let p := new.<Node>()
+  p.*.x = 7
+  out.next = p
+}
+
+// 9. The receiver of a method returning an address inside it.
+by_method :: func () -> *i64 {
+  let p := new.<Node>()
+  p.*.x = 7
+  return p.address()
+}
+
+// 10. As a trait object.
+as_dyn :: func () -> *dyn Get {
+  let p := new.<Node>()
+  p.*.x = 7
+  let d: *dyn Get := p
+  return d
+}
+
+// 11. In a tuple.
+in_a_tuple :: func () -> (*mut Node, i64) {
+  let p := new.<Node>()
+  p.*.x = 7
+  return (p, 1)
+}
+
+// 12. Copied into another local first.
+through_a_local :: func () -> *mut Node {
+  let p := new.<Node>()
+  p.*.x = 7
+  let mut q := new.<Node>()
+  q = p
+  return q
+}
+
+// 13. Out of an `if`.
+out_of_an_if :: func (c: bool) -> *mut Node {
+  let p := new.<Node>()
+  p.*.x = 7
+  return if c { p } else { p }
+}
+
+global :: func () -> i64 {
+  match G { .some(n) => { return n.*.x }, .none => { return 0 } }
+}
+
+main :: func () -> i32 {
+  if member_address().* != 7 { return 1 }
+  if member_slice()[1] != 7 { return 2 }
+  if element_address().* != 7 { return 3 }
+  member_address_stored()
+  match H { .some(r) => { if r.* != 7 { return 4 } }, .none => { return 4 } }
+  if member_address_passed().* != 7 { return 5 }
+  through_a_field()
+  if global() != 7 { return 6 }
+  G = .none
+  by_defer()
+  if global() != 7 { return 7 }
+  let o := new.<Node>()
+  into_the_callers(o)
+  if o.*.next.*.x != 7 { return 8 }
+  if by_method().* != 7 { return 9 }
+  if as_dyn().value() != 7 { return 10 }
+  if in_a_tuple().0.*.x != 7 { return 11 }
+  if through_a_local().*.x != 7 { return 12 }
+  if out_of_an_if(true).*.x != 7 { return 13 }
+  return 0
+}

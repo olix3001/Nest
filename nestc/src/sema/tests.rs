@@ -2822,10 +2822,10 @@ fn a_layout_directive_on_a_function_is_rejected() {
 
 // ===< Two packages, and coherence between them >===
 
-/// Analyze `examples/packages/use_packages.nest` with both example packages
+/// Analyze `src/testdata/packages/use_packages.nest` with both of its packages
 /// registered, the way a build system would.
 fn analyze_example_packages() -> Session {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/packages");
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/packages");
     let mut session = Session::new();
     session.register_package("shapes", &format!("{dir}/shapes/package.nest"));
     session.register_package("render", &format!("{dir}/render/package.nest"));
@@ -2843,8 +2843,8 @@ fn analyze_example_packages() -> Session {
 
 #[test]
 fn the_two_package_example_analyzes_cleanly() {
-    // The shipped example is the readable statement of these rules, so it has to
-    // keep working: a program importing two packages, using the inherent methods
+    // The program is the readable statement of these rules, so it has to keep
+    // working: a program importing two packages, using the inherent methods
     // of one and the trait of the other, plus its own impl joining them.
     let session = analyze_example_packages();
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
@@ -4446,7 +4446,7 @@ fn a_trait_impl_needs_the_trait_or_the_type_to_be_its_own() {
     );
 }
 
-// ===< examples smoke test >===
+// ===< corpus smoke test >===
 
 // ===< trait system: selection, projection, operators >===
 
@@ -4964,13 +4964,14 @@ fn ir_snapshot_operator_user_vec3() {
 }
 
 #[test]
-fn examples_analyze_without_errors() {
-    // Every shipped example must pass the whole pipeline (parse -> resolve ->
-    // desugar -> infer -> lower) with no diagnostics, guarding against
-    // regressions from type-name or inference changes.
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
+fn corpus_programs_analyze_without_errors() {
+    // Every corpus program (`src/testdata/programs`) must pass the whole
+    // pipeline (parse -> resolve -> desugar -> infer -> lower) with no
+    // diagnostics, guarding against regressions from type-name or inference
+    // changes.
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/programs");
     let mut checked = 0;
-    for entry in std::fs::read_dir(dir).expect("examples dir") {
+    for entry in std::fs::read_dir(dir).expect("the test corpus") {
         let path = entry.unwrap().path();
         if path.extension().and_then(|e| e.to_str()) != Some("nest") {
             continue;

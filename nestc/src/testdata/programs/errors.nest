@@ -1,0 +1,66 @@
+// errors.nest — `.?` propagation, `.!` abort, and `for` over a slice. No imports.
+
+Parsed :: struct { count: i32, total: i32 }
+
+@public
+check :: func (n: i32) -> Result.<i32, i32> {
+  if n < 0 {
+    return .err(n)
+  }
+  return .ok(n)
+}
+
+// `.?` desugars to `Try.branch` plus a `match`: the `.ok` payload becomes the
+// expression's value, and an `.err` returns it from the enclosing function.
+@public
+add_checked :: func (a: i32, b: i32) -> Result.<i32, i32> {
+  const x := check(a).?
+  const y := check(b).?
+  return .ok(x + y)
+}
+
+// `.!` takes the same branch but aborts instead of returning, for the cases a
+// caller has no way to handle.
+@public
+must_check :: func (n: i32) -> i32 {
+  return check(n).!
+}
+
+// `for` desugars to `IntoIterator.into_iter` plus a `loop` over `Iterator.next`;
+// over a slice that is a `SliceIter` cursor.
+@public
+summarize :: func (xs: []i32) -> Parsed {
+  let count := 0
+  let total := 0
+  for x in xs {
+    count += 1
+    total += x
+  }
+  return .{ count: count, total: total }
+}
+
+@public
+main :: func () {
+  const r := add_checked(2, 3)
+  const n := must_check(7)
+  const s := summarize(.{ 1, 2, 3 })
+}
+
+// `.?` is not tied to `Result`: `Option` implements `Try` too, short-circuiting
+// with a residual that carries nothing. `Option.from_residual` rebuilds `.none`.
+@public
+first_positive :: func (xs: []i32) -> Option.<i32> {
+  const head := head_of(xs).?
+  if head <= 0 {
+    return .none
+  }
+  return .some(head)
+}
+
+@public
+head_of :: func (xs: []i32) -> Option.<i32> {
+  if xs.len() == 0 {
+    return .none
+  }
+  return .some(xs[0])
+}

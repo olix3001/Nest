@@ -1,0 +1,27 @@
+// recursion.nest — functions, conditionals, and recursion. No imports.
+
+@public
+fib :: func (n: isize) -> isize {
+  if n < 2 {
+    return n
+  }
+  return fib(n - 1) + fib(n - 2)
+}
+
+@public
+gcd :: func (a: isize, b: isize) -> isize {
+  let x := a
+  let y := b
+  while y != 0 {
+    const t := y
+    y = x % y
+    x = t
+  }
+  return x
+}
+
+@public
+main :: func () {
+  const f := fib(10)
+  const g := gcd(48, 36)
+}
