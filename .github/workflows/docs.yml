@@ -20,8 +20,12 @@ jobs:
       - name: Checkout your repository
         uses: actions/checkout@v4
 
-      - name: Install, build, and upload your site
+      - name: Install, build, and upload docs site
         uses: withastro/action@v3
+        with:
+          path: ./docs
+          package-manager: pnpm
+          install-args: --no-verify-store-integrity
 
   deploy:
     needs: build
