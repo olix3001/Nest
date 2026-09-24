@@ -2646,14 +2646,17 @@ impl<'ctx> Cx<'ctx, '_> {
                 let ty = self.operand_ty(fx, f, operand).ok_or_else(|| {
                     failed(format!("{}: an indirect call through a constant", f.name))
                 })?;
-                let (params, ret) = match &ty {
-                    Ty::Func { params, ret, .. } => (params.clone(), (**ret).clone()),
+                let (params, ret, c) = match &ty {
+                    Ty::Func { params, ret, c } => (params.clone(), (**ret).clone(), *c),
                     Ty::Ptr(inner) => match &**inner {
-                        Ty::Func { params, ret, .. } => (params.clone(), (**ret).clone()),
+                        Ty::Func { params, ret, c } => (params.clone(), (**ret).clone(), *c),
                         other => return Err(failed(format!("{}: calling a {other:?}", f.name))),
                     },
                     other => return Err(failed(format!("{}: calling a {other:?}", f.name))),
                 };
+                if c {
+                    return self.call_c_pointer(fx, f, dest, operand, &ty, params, ret, args);
+                }
                 let pointer = self.operand(fx, f, operand, &ty)?.into_pointer_value();
                 let mut metadata: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
                 for p in &params {
@@ -2678,6 +2681,80 @@ impl<'ctx> Cx<'ctx, '_> {
             }
             Callee::Intrinsic(i) => self.intrinsic(fx, f, dest, i, args),
         }
+    }
+
+    /// A call through a C function pointer (`*extern("c") func`, §3.5).
+    ///
+    /// It crosses exactly as a direct call to an `extern("c")` function of the
+    /// same signature does, so it is lowered as one: a bodyless declaration of
+    /// that signature is what [`Cx::signature`], [`Cx::crossing`] and the ABI
+    /// attributes are asked about, and only the callee is the pointer rather
+    /// than a symbol. One classification, shared, is the point — a second one
+    /// for pointers would be free to disagree with the first.
+    #[allow(clippy::too_many_arguments)]
+    fn call_c_pointer(
+        &self,
+        fx: &FnCx<'ctx>,
+        f: &Function,
+        dest: Option<&Place>,
+        operand: &Operand,
+        ty: &Ty,
+        params: Vec<Ty>,
+        ret: Ty,
+        args: &[Operand],
+    ) -> Result<()> {
+        let shape = Function {
+            name: format!("{} (a call through a C function pointer)", f.name),
+            symbol: crate::common::symbol::Symbol::new(""),
+            locals: params
+                .iter()
+                .enumerate()
+                .map(|(i, t)| crate::lir::Local {
+                    id: crate::lir::LocalId(i as u32),
+                    name: None,
+                    ty: t.clone(),
+                    span: None,
+                })
+                .collect(),
+            params: params.len(),
+            ret,
+            blocks: Vec::new(),
+            extern_abi: Some(crate::common::symbol::Symbol::new("c")),
+            span: None,
+            attrs: Default::default(),
+        };
+        let sig = self.signature(&shape)?;
+        let crossing = self.crossing(&shape)?;
+        let pointer = self.operand(fx, f, operand, ty)?.into_pointer_value();
+        let mut built: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        let ret_indirect = matches!(crossing.ret, Class::Indirect);
+        if ret_indirect {
+            let ptr = match dest {
+                Some(place) => self.place(fx, f, place)?.0,
+                None => self
+                    .builder
+                    .build_alloca(self.llty(&shape.ret)?, "")
+                    .map_err(failed)?,
+            };
+            built.push(ptr.into());
+        }
+        for (i, a) in args.iter().enumerate() {
+            let (Some(want), Some(class)) = (params.get(i), crossing.args.get(i)) else {
+                return Err(failed(format!("{}: the callee takes no argument {i}", f.name)));
+            };
+            for v in self.abi_arg(fx, f, a, want, class, crossing.abi)? {
+                built.push(v.into());
+            }
+        }
+        let site = self
+            .builder
+            .build_indirect_call(sig, pointer, &built, "")
+            .map_err(failed)?;
+        self.apply_c_abi_attrs(&shape, |loc, attr| site.add_attribute(loc, attr))?;
+        if ret_indirect {
+            return Ok(());
+        }
+        self.take(fx, f, dest, basic(site))
     }
 
     /// Put a call's result where it goes, if it has one and anybody wanted it.

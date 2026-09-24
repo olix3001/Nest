@@ -525,7 +525,7 @@ fn collect_ty(whole: &Unit, ty: &Ty, refs: &mut Refs) {
         }
         Ty::Ptr(inner) => collect_ty(whole, inner, refs),
         Ty::Array { elem, .. } => collect_ty(whole, elem, refs),
-        Ty::Func { params, ret } => {
+        Ty::Func { params, ret, .. } => {
             for p in params {
                 collect_ty(whole, p, refs);
             }
@@ -712,7 +712,8 @@ fn remap_ty(ty: &Ty, m: &Maps) -> Ty {
             len: *len,
             elem: Box::new(remap_ty(elem, m)),
         },
-        Ty::Func { params, ret } => Ty::Func {
+        Ty::Func { params, ret, c } => Ty::Func {
+            c: *c,
             params: params.iter().map(|p| remap_ty(p, m)).collect(),
             ret: Box::new(remap_ty(ret, m)),
         },

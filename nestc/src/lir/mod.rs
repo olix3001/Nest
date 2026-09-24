@@ -196,7 +196,15 @@ pub enum Ty {
     Array { len: u64, elem: Box<Ty> },
     /// The type of a function *pointer*: what a vtable slot holds and what an
     /// indirect call goes through. There is no way to have a `func` by value.
-    Func { params: Vec<Ty>, ret: Box<Ty> },
+    ///
+    /// `c` is a C function pointer's (`*extern("c") func`, §3.5): a call
+    /// through one crosses at the C convention, aggregates classified the way a
+    /// direct call to an `extern("c")` function classifies them.
+    Func {
+        params: Vec<Ty>,
+        ret: Box<Ty>,
+        c: bool,
+    },
     /// A struct in this unit's type table — which after §7b's flattening is
     /// every aggregate the program has: a struct, a tuple, an enum, a slice, a
     /// trait object's fat pointer, a vtable.

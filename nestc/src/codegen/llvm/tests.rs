@@ -3075,3 +3075,21 @@ fn an_impl_func_return_is_stored_as_a_dyn_func() {
         assert_eq!(code, 7);
     }
 }
+
+/// A call through a `*extern("c") func` crosses at the C convention: a 24-byte
+/// aggregate goes through memory both ways, as the definition expects. Passed
+/// the way a Nest aggregate is, it crashed.
+#[test]
+fn a_call_through_a_c_function_pointer_uses_the_c_convention() {
+    let src = "Big :: #repr(\"C\") struct { a: i64, b: i64, c: i64 }\n\
+               make :: extern(\"c\") func (x: i64) -> Big { return Big { a: x, b: x * 2, c: x * 3 } }\n\
+               total :: extern(\"c\") func (b: Big) -> i64 { return b.a + b.b + b.c }\n\
+               main :: func () -> i32 {\n\
+                   const mk: *extern(\"c\") func(i64) -> Big := make\n\
+                   const sum: *extern(\"c\") func(Big) -> i64 := total\n\
+                   return cast.<i32>(sum(mk(2)))\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 12);
+    }
+}

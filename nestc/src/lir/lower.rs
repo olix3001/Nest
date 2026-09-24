@@ -590,7 +590,8 @@ impl Cx<'_> {
             // A function *pointer*'s type is the signature the call will have,
             // which is the erased one: a `void` parameter is not passed (§9), so
             // it is not in the type either.
-            Ty::Func { params, ret, .. } => {
+            Ty::Func { params, ret, c } => {
+                let c = *c;
                 let stripped: Vec<Ty> = params
                     .iter()
                     .map(|p| self.strip(p))
@@ -604,6 +605,7 @@ impl Cx<'_> {
                 LirTy::Func {
                     params,
                     ret: Box::new(ret),
+                    c,
                 }
             }
             Ty::Slice { .. } | Ty::Tuple(_) | Ty::Struct(_) => LirTy::Named(self.intern(ty, depth)),
@@ -1007,6 +1009,7 @@ impl Cx<'_> {
                 ty: LirTy::Func {
                     params: ps,
                     ret: Box::new(ret),
+                    c: false,
                 },
                 offset: 0,
             }],
@@ -1042,6 +1045,7 @@ impl Cx<'_> {
         LirTy::Func {
             params: ps,
             ret: Box::new(ret),
+            c: false,
         }
     }
 

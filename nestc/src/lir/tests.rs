@@ -2258,6 +2258,7 @@ fn a_conversion_is_named_by_the_pair_it_runs_between() {
     let func = Ty::Func {
         params: Vec::new(),
         ret: Box::new(Ty::Void),
+        c: false,
     };
     assert_eq!(K::of(&func, &ptr), K::PtrCast);
 

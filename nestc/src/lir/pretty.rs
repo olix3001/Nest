@@ -140,7 +140,7 @@ impl Printer<'_> {
             Ty::Bool => "bool".to_string(),
             Ty::Ptr(inner) => format!("*{}", self.ty(inner)),
             Ty::Array { len, elem } => format!("[{len}]{}", self.ty(elem)),
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 let ps: Vec<String> = params.iter().map(|p| self.ty(p)).collect();
                 format!("func({}) -> {}", ps.join(", "), self.ty(ret))
             }
