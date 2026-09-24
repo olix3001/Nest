@@ -909,7 +909,11 @@ impl<'a> Decls<'a> {
             let (cfile, rhs) = self.const_binding(def)?;
             match self.asts[&cfile].node(rhs).kind.clone() {
                 NodeKind::Lit(l @ (Lit::Int(_) | Lit::Float(_))) => return Some(l),
-                NodeKind::Path { .. } => def = self.resolved_def(cfile, rhs)?,
+                // `m.SIZE` is a constant as much as `SIZE` is, when the
+                // resolver linked it to one.
+                NodeKind::Path { .. } | NodeKind::FieldAccess { .. } => {
+                    def = self.resolved_def(cfile, rhs)?
+                }
                 _ => return None,
             }
         }

@@ -10209,3 +10209,21 @@ fn a_binding_that_names_itself_is_reported() {
     let msg = first_error("A :: B\nB :: A\nf :: func (a: A) {}\n");
     assert!(msg.contains("names itself through"), "{msg}");
 }
+
+/// A constant named through its namespace is a constant: an array length, and
+/// range-checked where it is read.
+#[test]
+fn a_qualified_constant_is_a_constant() {
+    analyze_clean(
+        "m :: namespace {\n    @public SIZE :: 4\n}\n\
+         go :: func () -> i32 {\n\
+             let a: [m.SIZE]i32 := [_]i32 { 1, 2, 3, 4 }\n\
+             return a[3]\n\
+         }\n",
+    );
+    let msg = first_error(
+        "m :: namespace {\n    @public BIG :: 300\n}\n\
+         go :: func () -> u8 { return m.BIG }\n",
+    );
+    assert!(msg.contains("does not fit in `u8`"), "{msg}");
+}

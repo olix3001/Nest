@@ -1882,6 +1882,17 @@ impl Inferer<'_> {
                 // (a function, type, or const) is typed from that def; a value
                 // `place.field` is typed from the base's struct type.
                 if let Some(def) = self.resolved_def(node) {
+                    // A constant named through its namespace is range-checked
+                    // at its use exactly as one named bare is (see `Path`).
+                    match self.const_lit_value(node) {
+                        Some(Lit::Int(v)) => {
+                            self.int_values.insert(node, v);
+                        }
+                        Some(Lit::Float(v)) => {
+                            self.float_values.insert(node, v);
+                        }
+                        _ => {}
+                    }
                     return self.def_ty(node, def);
                 }
                 if self.failed_resolution(node) {
@@ -8329,6 +8340,11 @@ impl Inferer<'_> {
                     None => Const::Error,
                 }
             }
+            // `[m.SIZE]T` — a constant named through its namespace.
+            NodeKind::FieldAccess { .. } if self.resolved_def_in(file, node).is_some() => {
+                let def = self.resolved_def_in(file, node).expect("checked");
+                self.const_of_def(file, node, def, want, what, depth)
+            }
             // `[SIZE * 2]T`, `-3` — an expression built out of compile-time
             // values with operators. It is **folded** here, by the same
             // arithmetic the const evaluator runs on the IR (see
@@ -8413,7 +8429,9 @@ impl Inferer<'_> {
                     }
                 }
             }
-            NodeKind::Path { .. } | NodeKind::TypePath { .. } => {
+            NodeKind::Path { .. } | NodeKind::TypePath { .. } | NodeKind::FieldAccess { .. }
+                if self.resolved_def_in(file, node).is_some() =>
+            {
                 let def = self.resolved_def_in(file, node)?;
                 let def = self.defs.resolve_alias(def);
                 let d = self.defs.get(def);
