@@ -41,6 +41,7 @@ toolchain :: import "toolchain.nest"
 term :: import "term.nest"
 string :: import <std/string>
 { String } :: import <std/string>
+{ OS } :: import <core/target>
 
 // The settings one build is made with.
 @public(fields: package) Profile :: struct {
@@ -174,9 +175,16 @@ library :: func (m: *Member) -> Target {
 
 // The file `t` produces.
 @public output :: func (ws: *Workspace, p: Profile, t: Target) -> str {
-  if t.test { return path.join(out_dir(ws, p), f"{t.name}-test") }
+  if t.test { return path.join(out_dir(ws, p), f"{t.name}-test{EXE}") }
   if t.lib { return library_file(ws, p, t.name) }
-  return path.join(out_dir(ws, p), t.name)
+  return path.join(out_dir(ws, p), f"{t.name}{EXE}")
+}
+
+// What an executable's file name ends in on the host, which is the target:
+// Windows finds a program by its `.exe`, and nothing else wants a suffix.
+EXE: str :: OS.match {
+  .Windows => ".exe",
+  _        => "",
 }
 
 // The dumps `--emit` accepts, for a message.
@@ -543,7 +551,7 @@ tests :: #when(test) namespace {
         let mut p: Profile := profile()
         p.build_dir = .some("/out")
         assert(out_dir(&ws, p) == "/out/debug")
-        assert(output(&ws, p, binary(&ws)) == "/out/debug/app")
+        assert(output(&ws, p, binary(&ws)) == f"/out/debug/app{EXE}")
         assert(library_file(&ws, p, "util") == "/out/debug/deps/util.nlib")
         assert(objects(&ws, p, binary(&ws)) == "/out/debug/obj/bin/app")
         // Including what the command line says the dependency is read from.
