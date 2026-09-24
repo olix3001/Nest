@@ -19,7 +19,7 @@ export default defineConfig({
 	site: 'https://olix3001.github.io',
 	// Served from a subpath on GitHub Pages, so links in content are relative
 	// (`../closures/`), never root-absolute — those would skip this base.
-	base: '/nest',
+	base: '/Nest',
 	integrations: [
 		starlight({
 			title: 'Nest',
