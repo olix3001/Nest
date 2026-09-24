@@ -12,7 +12,7 @@ Even though Nest is a compiled programming language, it has a garbage collector,
 This language uses LLVM, which fortunately makes most targets supported by default. In theory, every target that LLVM supports, and that has libc and Boehm GC support should work. In the future, when no-std support is introduced and custom GC is fully implemented, all LLVM targets should be supported.
 
 The official (tested) support stays limited to the following targets:
-`x86_64 Windows`, `x86_64 Windows`, `arm64 MacOS`.
+`x86_64 Linux`, `arm64 MacOS`. (Windows should work too, but first I need to find good prebuilt LLVM for it or CI runs for )
 
 # Getting Started
 There are no docs nor any installer at the moment, so this section will be written in the future.
