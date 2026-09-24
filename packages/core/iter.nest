@@ -126,6 +126,13 @@
     }
   }
 
+  // Every element, gathered into a collection that says how to build itself
+  // from them (`FromIterator`): `.collect.<Vec.<i32>>()`, or a plain
+  // `.collect()` where the context names the collection.
+  collect :: func <C: FromIterator.<Item = Self.Item>> (self: Self) -> C {
+    return FromIterator.from_iter(self)
+  }
+
   // The first element `pred` holds for.
   find :: func <P: Func(Self.Item) -> bool> (self: Self, pred: P) -> Option.<Self.Item> {
     let mut it := self
@@ -295,10 +302,32 @@ impl <I: Iterator> Iterator for StepBy.<I> {
   into_iter :: func (self: Self) -> Self.Iter
 }
 
+// An iterator is its own `into_iter`, so `for x in xs.iter().map(f)` walks the
+// chain directly.
+impl <I: Iterator> IntoIterator for I {
+  Iter :: I
+  into_iter :: func (self: I) -> I { return self }
+}
+
+// A collection that can be built from an iterator's elements — what
+// `Iterator.collect` hands the work to. The collection says how it is built,
+// so `core` needs to know nothing about the collections `std` declares.
+@public FromIterator :: trait {
+  Item :: type
+  from_iter :: func <I: Iterator.<Item = Self.Item>> (it: I) -> Self
+}
+
 // Iterating a slice hands out a cursor `SliceIter` over its elements.
 @public(all) SliceIter :: struct <T> {
   data: []T,
   pos: usize,
+}
+
+// `xs.iter()` — a cursor over a slice's elements, to start a chain from.
+impl <T> []T {
+  @public iter :: func (self: []T) -> SliceIter.<T> {
+    return SliceIter.<T> { data: self, pos: 0 }
+  }
 }
 
 impl <T> IntoIterator for []T {

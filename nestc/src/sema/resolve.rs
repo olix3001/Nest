@@ -1014,7 +1014,7 @@ impl Resolver<'_> {
                 // Only an **abstract** associated type is a parameter: a trait
                 // may also declare ordinary aliases, and those already have an
                 // answer that needs none.
-                let Some(inner) = self.defs.get(member).assoc_bounds.clone() else {
+                let Some(inner) = self.abstract_assoc_bounds(member) else {
                     continue;
                 };
                 // A name two bounds both declare is bound by the first; the
@@ -1049,6 +1049,31 @@ impl Resolver<'_> {
                 self.project_bounds(synth, &name, &inner, at, depth + 1);
             }
         }
+    }
+
+    /// What bounds an abstract associated type, or `None` when `member` is not
+    /// one.
+    ///
+    /// Recorded on the def when its trait is resolved; a trait declared
+    /// **later in this file** has not been yet, so its declaration is read
+    /// directly instead — `<C: FromIterator>` written above `FromIterator` must
+    /// still give `C` its `Item`. Its own bounds' names may not be resolved at
+    /// that point, and whatever they do not yet name is left out.
+    fn abstract_assoc_bounds(&self, member: DefId) -> Option<Vec<DefId>> {
+        if let Some(b) = self.defs.get(member).assoc_bounds.clone() {
+            return Some(b);
+        }
+        let d = self.defs.get(member);
+        if d.file != Some(self.file) {
+            return None;
+        }
+        let NodeKind::ConstBind { rhs, .. } = self.ast.node(d.node?).kind.clone() else {
+            return None;
+        };
+        let NodeKind::AssocType { bounds } = self.ast.node(rhs).kind.clone() else {
+            return None;
+        };
+        Some(bounds.iter().filter_map(|&b| self.bound_trait_def(b)).collect())
     }
 
     /// The type node a bound pinned an associated type to: the `i32` of

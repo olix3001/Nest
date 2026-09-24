@@ -3358,6 +3358,13 @@ impl Inferer<'_> {
         if best.is_none() && self.param_has_bound(&s, trait_def) {
             return Select::ByBound;
         }
+        // Inside a trait's own default body `Self` is the trait's nominal, and
+        // it implements that trait by being it — `collect` handing `self` to
+        // something that wants an `Iterator` is the body's whole promise.
+        // Monomorphization substitutes the implementing type, as for a bound.
+        if best.is_none() && matches!(&s, Ty::Nominal { def, .. } if *def == trait_def) {
+            return Select::ByBound;
+        }
 
         match best {
             // Several impls fit only because the self type is still unknown:

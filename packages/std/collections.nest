@@ -22,7 +22,7 @@
 
 { make, copy_nonoverlapping, set_bytes } :: import <core/mem>
 { Eq } :: import <core/cmp>
-{ Iterator, IntoIterator, SliceIter } :: import <core/iter>
+{ Iterator, IntoIterator, FromIterator, SliceIter } :: import <core/iter>
 
 // ===< Vec >===
 
@@ -164,6 +164,23 @@ impl <T> Vec.<T> {
     self.count = self.count - 1
     self.data[i] = self.data[self.count]
     return .some(held)
+  }
+}
+
+// `v.iter()` — a cursor over the elements it holds now, to start a chain from.
+impl <T> Vec.<T> {
+  @public iter :: func (self: *Self) -> SliceIter.<T> {
+    return SliceIter.<T> { data: self.as_slice(), pos: 0 }
+  }
+}
+
+// `xs.iter().map(f).collect.<Vec.<U>>()`.
+impl <T> FromIterator for Vec.<T> {
+  Item :: T
+  from_iter :: func <I: Iterator.<Item = T>> (it: I) -> Vec.<T> {
+    let mut v := new.<T>()
+    for x in it { v.push(x) }
+    return v
   }
 }
 

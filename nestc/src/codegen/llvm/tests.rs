@@ -3311,3 +3311,70 @@ main :: func () -> i32 {
         assert_eq!(code, 12);
     }
 }
+
+/// A bound naming a trait declared **further down** the file still gives the
+/// parameter that trait's associated types, and a default method's static call
+/// through it reaches the instantiation's impl.
+#[test]
+fn a_bound_on_a_trait_declared_later_projects_its_associated_types() {
+    let src = r#"
+Src :: trait {
+    Item :: type
+    get :: func (self: *Self) -> Self.Item
+    into :: func <C: Mk.<Item = Self.Item>> (self: *Self) -> C {
+        return Mk.mk(self.get())
+    }
+}
+Mk :: trait {
+    Item :: type
+    mk :: func (x: Self.Item) -> Self
+}
+W :: struct { v: i32 }
+impl Mk for W {
+    Item :: i32
+    mk :: func (x: i32) -> W { return W { v: x } }
+}
+S :: struct { v: i32 }
+impl Src for S {
+    Item :: i32
+    get :: func (self: *S) -> i32 { return self.v }
+}
+main :: func () -> i32 {
+    const s := S { v: 9 }
+    const w: W := s.into()
+    return w.v
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 9);
+    }
+}
+
+/// `collect` into a `Vec`, named by a turbofish or by the context; `iter()` on
+/// a slice and on a `Vec`; and `for` straight over an adapter chain.
+#[test]
+fn an_iterator_collects_into_a_vec_and_a_for_walks_a_chain() {
+    let src = r#"
+{ Iterator } :: import <core/iter>
+{ Vec } :: import <std/collections>
+
+main :: func () -> i32 {
+    const xs: []i32 := [_]i32 { 1, 2, 3, 4 }
+    let mut fails := 0
+    const v := xs.iter().filter({ x in x % 2 == 0 }).map({ x in x * 10 }).collect.<Vec.<i32>>()
+    if v.len() != 2 { fails = fails + 1 }
+    const w: Vec.<i32> := xs.iter().collect()
+    if w.len() != 4 { fails = fails + 2 }
+    let mut s := 0
+    for x in v.iter().map({ x in x + 1 }) { s = s + x }
+    if s != 62 { fails = fails + 4 }
+    for x in xs { s = s + x }
+    for i in 0..<3 { s = s + i }
+    if s != 75 { fails = fails + 8 }
+    return fails
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 0, "each bit is one failed check");
+    }
+}
