@@ -392,8 +392,8 @@ pub struct FunctionAttrs {
     /// nothing reads, or rewrite a parameter passed by pointer into one passed
     /// by value — each of them rewriting the call sites in the same step, which
     /// is the part this compiler must not do by hand (§9). A function C can
-    /// reach, one another compilation can name (`@public`), and an
-    /// instantiation several objects may define are each excluded.
+    /// reach is excluded, and in a library build so is everything: a library's
+    /// callers are compiled later.
     pub internal: bool,
     /// `#c_vararg` — a C declaration whose parameters are the **fixed** ones and
     /// which accepts a variadic tail beyond them (§9).

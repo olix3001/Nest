@@ -32,7 +32,7 @@ unit mem:main {
       }
     return _5
 
-  func Dog.<as Speak>.say(self_0: *Dog) -> i32  // _NC3DogXN5SpeakIE3say
+  internal func Dog.<as Speak>.say(self_0: *Dog) -> i32  // _NC3DogXN5SpeakIE3say
   bb0:                    // entry
     return self_0.*.n
 }

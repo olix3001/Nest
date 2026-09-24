@@ -112,7 +112,7 @@ fn unique() -> u64 {
 fn a_function_is_emitted_under_its_symbol() {
     let text = ir("@public add :: func (a: i32, b: i32) -> i32 { return a + b }\n");
     assert!(
-        text.contains("define i32 @_NC3add(i32 %0, i32 %1)"),
+        text.contains("define internal i32 @_NC3add(i32 %0, i32 %1)"),
         "{text}"
     );
 }
@@ -257,7 +257,7 @@ P :: struct { a: u8, b: i32 }
 fn a_bool_is_a_byte_and_a_comparison_is_widened_into_one() {
     let text = ir("@public less :: func (a: i32, b: i32) -> bool { return a < b }\n");
     assert!(
-        text.contains("define i8 @_NC4less"),
+        text.contains("define internal i8 @_NC4less"),
         "a bool is not a byte:\n{text}"
     );
     assert!(
@@ -278,7 +278,7 @@ fn a_bool_is_a_byte_and_a_comparison_is_widened_into_one() {
 #[test]
 fn a_void_function_returns_void() {
     let text = ir("@public nothing :: func (a: i32) -> void { let b := a + 1 }\n");
-    assert!(text.contains("define void @_NC7nothing"), "{text}");
+    assert!(text.contains("define internal void @_NC7nothing"), "{text}");
     assert!(text.contains("ret void"), "{text}");
 }
 
@@ -2066,32 +2066,42 @@ main :: func () -> i32 {
 /// every use is a direct call to `fastcc` and rewrites the sites in the same
 /// step, which is the part a front end must not do by hand.
 ///
-/// Everything a name can reach from outside stays external: an `@public`
-/// function, which another compilation may call, and a function whose address
-/// a **vtable** carries, since that data is private to each unit that needs it
-/// and so turns up in units this compilation cannot enumerate.
+/// In an executable that is every Nest function but the ones C can reach: an
+/// `@public` function has no caller outside the program, and a method a
+/// **vtable** carries is referred to only from the units that carry the
+/// vtable. An instantiation is internal too, where only its own unit calls it.
 #[test]
 fn a_function_only_its_own_unit_calls_is_internal() {
     let text = ir("helper :: func (a: i32) -> i32 { return a + 1 }\n\
          @public exported :: func (a: i32) -> i32 { return a + 2 }\n\
+         id :: func <T> (x: T) -> T { return x }\n\
          Weigh :: trait { weight :: func (self: *Self) -> i32 }\n\
          Thing :: struct { hp: i32 }\n\
          impl Weigh for Thing { weight :: func (self: *Thing) -> i32 { return self.hp } }\n\
          @public go :: func (t: *Thing) -> i32 {\n\
              const seen: *dyn Weigh := t\n\
-             return helper(1) + exported(2) + seen.weight()\n\
-         }\n");
+             return helper(1) + exported(2) + seen.weight() + id(3)\n\
+         }\n\
+         @public callback :: extern(\"c\") func (a: i32) -> i32 { return a }\n");
     assert!(
         text.contains("define internal i32 @_NC6helper"),
         "a private function only its own unit calls is not internal:\n{text}"
     );
     assert!(
-        text.contains("define i32 @_NC8exported"),
-        "an `@public` function is not external:\n{text}"
+        text.contains("define internal i32 @_NC8exported"),
+        "an `@public` function of an executable is not internal:\n{text}"
     );
     assert!(
-        text.contains("define i32 @_NC5ThingXN5WeighIE6weight"),
-        "a method a vtable carries is not external:\n{text}"
+        text.contains("define internal i32 @_NC5ThingXN5WeighIE6weight"),
+        "a method only its own unit's vtable carries is not internal:\n{text}"
+    );
+    assert!(
+        !text.contains("weak_odr"),
+        "an instantiation only its own unit calls is not internal:\n{text}"
+    );
+    assert!(
+        text.contains("define i32 @callback"),
+        "a function C can reach is not external:\n{text}"
     );
 }
 
@@ -2131,7 +2141,7 @@ fn a_library_internalizes_nothing() {
 fn llvm_gives_an_internal_function_the_fast_convention() {
     let text = ir_at(
         "helper :: #inline(never) func (a: i32) -> i32 { return a * a + 1 }\n\
-         @public go :: func (a: i32) -> i32 { return helper(a) + helper(a + 1) }\n",
+         @public go :: extern(\"c\") func (a: i32) -> i32 { return helper(a) + helper(a + 1) }\n",
         OptLevel::O2,
     );
     assert!(

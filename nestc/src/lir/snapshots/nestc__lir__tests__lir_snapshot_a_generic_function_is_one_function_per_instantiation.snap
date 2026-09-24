@@ -26,11 +26,11 @@ unit mem:main {
   bb3:                    // join
     return 0
 
-  func id.<i32>(x_0: i32) -> i32  // _NC2idIi32E
+  internal func id.<i32>(x_0: i32) -> i32  // _NC2idIi32E
   bb0:                    // entry
     return x_0
 
-  func id.<bool>(x_0: bool) -> bool  // _NC2idIbE
+  internal func id.<bool>(x_0: bool) -> bool  // _NC2idIbE
   bb0:                    // entry
     return x_0
 }

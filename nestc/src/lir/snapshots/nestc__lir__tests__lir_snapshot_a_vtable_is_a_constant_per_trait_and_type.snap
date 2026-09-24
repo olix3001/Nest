@@ -153,7 +153,7 @@ unit mem:main {
   bb6:
     return _31.0
 
-  func Square.<as Draw>.area(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE4area
+  internal func Square.<as Draw>.area(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE4area
     let _1: (i32, bool)
     let _2: []u8
     let _3: []u8
@@ -174,7 +174,7 @@ unit mem:main {
   bb2:
     return _1.0
 
-  func Square.<as Draw>.perimeter(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE9perimeter
+  internal func Square.<as Draw>.perimeter(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE9perimeter
     let _1: (i32, bool)
     let _2: []u8
     let _3: []u8
@@ -195,11 +195,11 @@ unit mem:main {
   bb2:
     return _1.0
 
-  func Square.<as Draw>.sides(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE5sides
+  internal func Square.<as Draw>.sides(self_0: *Square) -> i32  // _NC6SquareXN4DrawIE5sides
   bb0:                    // entry
     return 4
 
-  func Circle.<as Draw>.area(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE4area
+  internal func Circle.<as Draw>.area(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE4area
     let _1: (i32, bool)
     let _2: []u8
     let _3: []u8
@@ -237,7 +237,7 @@ unit mem:main {
   bb4:
     return _5.0
 
-  func Circle.<as Draw>.perimeter(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE9perimeter
+  internal func Circle.<as Draw>.perimeter(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE9perimeter
     let _1: (i32, bool)
     let _2: []u8
     let _3: []u8
@@ -258,19 +258,19 @@ unit mem:main {
   bb2:
     return _1.0
 
-  func Circle.<as Draw>.sides(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE5sides
+  internal func Circle.<as Draw>.sides(self_0: *Circle) -> i32  // _NC6CircleXN4DrawIE5sides
   bb0:                    // entry
     return 0
 
-  func Box.<as Draw>.area(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE4area
+  internal func Box.<as Draw>.area(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE4area
   bb0:                    // entry
     return self_0.*.v
 
-  func Box.<as Draw>.perimeter(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE9perimeter
+  internal func Box.<as Draw>.perimeter(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE9perimeter
   bb0:                    // entry
     return self_0.*.v
 
-  func Box.<as Draw>.sides(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE5sides
+  internal func Box.<as Draw>.sides(self_0: *Box.<i32>) -> i32  // _NC3BoxXN4DrawIE5sides
   bb0:                    // entry
     return 1
 

@@ -20,7 +20,7 @@ unit mem:main {
   bb0:                    // entry
     return self_0.*.n
 
-  func heard.<Dog>(t_0: *Dog) -> i32  // _NC5heardIN3DogIEE
+  internal func heard.<Dog>(t_0: *Dog) -> i32  // _NC5heardIN3DogIEE
     let _1: i32
   bb0:                    // entry
     _1 := call Dog.<as Speak>.say(t_0)

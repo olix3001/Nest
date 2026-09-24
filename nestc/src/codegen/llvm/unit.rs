@@ -1232,13 +1232,13 @@ impl<'ctx> Cx<'ctx, '_> {
             // nothing in its own module uses is one LLVM is free to drop.
             let linkage = if f.blocks.is_empty() {
                 LlvmLinkage::External
-            } else if f.attrs.shared {
-                LlvmLinkage::WeakODR
             } else if f.attrs.internal {
                 // `internal`, not `private`: the symbol stays in the object's
                 // local table, which is what a debugger and a profiler read a
                 // frame's name out of.
                 LlvmLinkage::Internal
+            } else if f.attrs.shared {
+                LlvmLinkage::WeakODR
             } else {
                 LlvmLinkage::External
             };

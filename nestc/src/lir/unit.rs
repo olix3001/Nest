@@ -166,22 +166,26 @@ fn partition(whole: &Unit, n: usize, sources: &SourceMap) -> Vec<Group> {
 ///
 /// A function stays external when:
 ///
-/// - it is `@public` — another compilation may name it;
 /// - it has an `extern` ABI, or `#offset(N)` — a linker or a C caller names it;
-/// - it is [`FunctionAttrs::shared`], an instantiation several objects may each
-///   define and the linker folds;
-/// - its address appears in a **global's initializer** — a vtable, say, which is
-///   private data every unit that needs it gets a copy of, so the reference can
-///   turn up in a unit this cannot name;
-/// - or any function outside its own unit refers to it.
+/// - or any unit other than its own refers to it — by a call, by taking its
+///   address, or through a **global** that unit carries. A vtable is private
+///   data every unit that needs it gets a copy of, so a method a vtable names
+///   is referred to from each unit that has the vtable, and is internal when
+///   that is only its own.
 ///
-/// None of those five reasons can see a **downstream package**, which is why
-/// this runs only for a whole-program build. The packages compiled against a
-/// library are not here, and `@public` does not name everything they can reach:
-/// a trait impl's method carries no visibility of its own and is reachable
-/// wherever the trait and the type are. Internalizing one is not a missed
-/// optimization but a link error — the backend deletes an `internal` function
-/// nothing in *this* compilation calls, and the caller arrives later.
+/// `@public` does **not** keep a function external here, and neither does
+/// being an instantiation ([`FunctionAttrs::shared`]). This runs only for an
+/// executable, and an executable has no callers but the ones in front of it:
+/// the libraries it links were compiled before it and cannot name its symbols,
+/// and a library that defines the same instantiation defines its own copy.
+///
+/// None of this can see a **downstream package**, which is why it runs only for
+/// a whole-program build. The packages compiled against a library are not here,
+/// and `@public` does not name everything they can reach: a trait impl's method
+/// carries no visibility of its own and is reachable wherever the trait and the
+/// type are. Internalizing one is not a missed optimization but a link error —
+/// the backend deletes an `internal` function nothing in *this* compilation
+/// calls, and the caller arrives later.
 fn internalize(whole: &mut Unit, groups: &[Group]) {
     // Which unit each defined function landed in.
     let mut home: HashMap<u32, usize> = HashMap::new();
@@ -190,37 +194,19 @@ fn internalize(whole: &mut Unit, groups: &[Group]) {
             home.insert(f.0, i);
         }
     }
-    // Which units refer to each function, and which functions a global's
-    // initializer names.
+    // Which units refer to each function: what each unit will declare or
+    // define, globals' initializers included.
     let mut from: HashMap<u32, BTreeSet<usize>> = HashMap::new();
     for (i, g) in groups.iter().enumerate() {
-        let mut refs = Refs::default();
-        for f in &g.funcs {
-            collect_func(whole, &whole.funcs[f.0 as usize], &mut refs);
-        }
-        for f in refs.funcs {
+        for f in unit_refs(whole, g, i).funcs {
             from.entry(f).or_default().insert(i);
-        }
-    }
-    let mut in_data = Refs::default();
-    for g in &whole.globals {
-        if let Some(init) = &g.init {
-            collect_const(&mut in_data, init);
         }
     }
     for (i, f) in whole.funcs.iter_mut().enumerate() {
         let i = i as u32;
         // A declaration names a definition in another object, which is exactly
         // what internal linkage would hide.
-        if f.blocks.is_empty() {
-            continue;
-        }
-        if f.attrs.public
-            || f.attrs.shared
-            || f.extern_abi.is_some()
-            || f.attrs.offset.is_some()
-            || in_data.funcs.contains(&i)
-        {
+        if f.blocks.is_empty() || f.extern_abi.is_some() || f.attrs.offset.is_some() {
             continue;
         }
         let Some(&mine) = home.get(&i) else { continue };
@@ -249,9 +235,10 @@ struct Refs {
     types: BTreeSet<u32>,
 }
 
-/// Build one unit: the functions it defines, a declaration for everything else
-/// it names, and the types and globals under those.
-fn build(whole: &Unit, group: &Group, index: usize, only: bool) -> Unit {
+/// Everything the unit built from `group` refers to: the functions it defines,
+/// and the closure of the types, globals and functions those name — the same
+/// set [`build`] gives a definition or a declaration.
+fn unit_refs(whole: &Unit, group: &Group, index: usize) -> Refs {
     let mut refs = Refs::default();
     for f in &group.funcs {
         refs.funcs.insert(f.0);
@@ -272,7 +259,13 @@ fn build(whole: &Unit, group: &Group, index: usize, only: bool) -> Unit {
     // The closure: a type's members name types, a global's initializer names
     // functions and globals, and each of those brings its own.
     close(whole, &mut refs);
+    refs
+}
 
+/// Build one unit: the functions it defines, a declaration for everything else
+/// it names, and the types and globals under those.
+fn build(whole: &Unit, group: &Group, index: usize, only: bool) -> Unit {
+    let refs = unit_refs(whole, group, index);
     // Renumbering. The order is the whole program's, so a unit's tables read in
     // the same order the program's do.
     let type_map: HashMap<u32, TypeId> = refs

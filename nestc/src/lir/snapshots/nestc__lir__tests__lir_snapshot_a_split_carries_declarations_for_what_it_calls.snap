@@ -8,7 +8,7 @@ unit mem:main {
     y: i32                    // +4
   }
 
-  func main() -> void @public  // _NC4main
+  internal func main() -> void @public  // _NC4main
     let _0: shapes.Point
     let _1: shapes.Point
     let _2: shapes.Point
