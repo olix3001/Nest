@@ -184,6 +184,10 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
             }
             tag
         }
+        Closure { captures, .. } if captures.is_empty() => "Closure".into(),
+        Closure { captures, .. } => format!("Closure [{}]", captures.len()),
+        Capture { name } => format!("Capture {name}"),
+        ImplType { .. } => "ImplType".into(),
         GenericTypeParam { name, .. } => format!("GenericTypeParam {name}"),
         GenericConstParam { name, .. } => format!("GenericConstParam const {name}"),
         Bounds { .. } => "Bounds +".into(),

@@ -446,9 +446,10 @@ impl Parser {
             Some(TokenKind::Dot) if matches!(self.peek_nth(1), Some(TokenKind::Ident(_))) => {
                 self.parse_variant_literal()
             }
-            Some(TokenKind::FuncKw | TokenKind::ExternKw) => self.parse_func_expr(Vec::new()),
+            Some(TokenKind::FuncKw | TokenKind::ExternKw) => self.parse_func_literal(),
             Some(TokenKind::IfKw) => self.parse_if(),
             Some(TokenKind::MatchKw) => self.parse_match(),
+            Some(TokenKind::LBrace) if self.closure_header_ahead() => self.parse_closure(),
             Some(TokenKind::LBrace) => self.parse_block(),
             Some(TokenKind::LoopKw) => self.parse_loop(),
             Some(TokenKind::WhileKw) => self.parse_while(),
@@ -721,43 +722,123 @@ impl Parser {
         call
     }
 
-    /// `{ [ param { ',' param } '=>' ] statements [ tail ] }` — a trailing
-    /// closure block, represented as a bodyless-less [`NodeKind::FuncExpr`].
+    /// A trailing block: a closure whether or not it has a header, since a
+    /// block after a call's `)` can only be its last argument (§5.3).
     fn parse_trailing_closure(&mut self) -> NodeId {
+        if self.closure_header_ahead() {
+            return self.parse_closure();
+        }
         let start = self.cur_span();
-        // Detect a header by scanning for a top-level `=>` before the block ends.
-        let params = if self.closure_header_ahead() {
-            let mut params = Vec::new();
-            self.bump(); // '{'
+        let body = self.parse_block();
+        let span = start.to(self.node_span(body));
+        self.alloc(
+            span,
+            NodeKind::Closure {
+                captures: Vec::new(),
+                params: Vec::new(),
+                ret: None,
+                body,
+            },
+        )
+    }
+
+    /// `{ [ '[' name { ',' name } ']' ] [ param { ',' param } ] [ '->' type ] 'in'
+    /// statements [ tail ] }` — a closure (§5.5), with the cursor on its `{`.
+    ///
+    /// [`Parser::closure_header_ahead`] has already said this is one, so the
+    /// header is parsed without backtracking.
+    fn parse_closure(&mut self) -> NodeId {
+        let start = self.cur_span();
+        self.expect(&TokenKind::LBrace);
+        self.skip_newlines();
+        let mut captures = Vec::new();
+        if self.eat(&TokenKind::LBracket) {
             loop {
                 self.skip_newlines();
-                params.push(self.parse_closure_param());
+                if self.at(&TokenKind::RBracket) {
+                    break;
+                }
+                let span = self.cur_span();
+                let name = self.expect_ident();
+                captures.push(self.alloc(span, NodeKind::Capture { name }));
                 self.skip_newlines();
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
             }
-            self.expect(&TokenKind::FatArrow);
-            Some(params)
+            self.expect(&TokenKind::RBracket);
+        }
+        let mut params = Vec::new();
+        while !self.at_contextual("in") && !self.at(&TokenKind::Arrow) && !self.at_eof() {
+            self.skip_newlines();
+            params.push(self.parse_closure_param());
+            self.skip_newlines();
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        let ret = if self.eat(&TokenKind::Arrow) {
+            Some(self.parse_type())
         } else {
             None
         };
-        let body = if params.is_some() {
-            // Brace already consumed; parse the remaining statements as a block.
-            self.parse_block_rest(start)
-        } else {
-            self.parse_block()
-        };
+        if !self.eat_contextual("in") {
+            let span = self.cur_span();
+            self.error(span, "expected `in` to end the closure's parameters");
+        }
+        let body = self.parse_block_rest(start);
         let span = start.to(self.node_span(body));
         self.alloc(
             span,
-            NodeKind::FuncExpr {
-                directives: Vec::new(),
-                extern_abi: None,
-                generics: Vec::new(),
-                params: params.unwrap_or_default(),
-                ret: None,
-                body: Some(body),
+            NodeKind::Closure {
+                captures,
+                params,
+                ret,
+                body,
+            },
+        )
+    }
+
+    /// A `func (params) -> ret { body }` literal written where a value goes: a
+    /// closure spelled with its types, which is what it is (§5.5). Only a `::`
+    /// binding makes a `func` literal a definition.
+    fn parse_func_literal(&mut self) -> NodeId {
+        let func = self.parse_func_expr(Vec::new());
+        let NodeKind::FuncExpr {
+            extern_abi,
+            generics,
+            params,
+            ret,
+            body,
+            ..
+        } = self.clone_kind(func)
+        else {
+            // An overload set: a set is not a value, which sema says.
+            return func;
+        };
+        let span = self.node_span(func);
+        if extern_abi.is_some() {
+            self.error(
+                span,
+                "an `extern` function is a definition: bind it with `::` to give it a name C can call",
+            );
+        }
+        if !generics.is_empty() {
+            self.error(
+                span,
+                "a closure cannot be generic; bind a generic function with `::`",
+            );
+        }
+        let Some(body) = body else {
+            return self.error_node(span, "a function literal used as a value needs a body");
+        };
+        self.alloc(
+            span,
+            NodeKind::Closure {
+                captures: Vec::new(),
+                params,
+                ret,
+                body,
             },
         )
     }
@@ -786,27 +867,65 @@ impl Parser {
         )
     }
 
-    /// Whether the `{` at the cursor opens a closure header — i.e. a top-level
-    /// `=>` appears before the block's first statement terminator or its close.
+    /// Whether the `{` at the cursor opens a closure **header**, which is what
+    /// tells a closure from a block (§5.5).
+    ///
+    /// Two tokens decide it, after an optional `[captures]`: `in` on its own, or
+    /// a name followed by `,`, `:`, `->` or `in`. No statement starts that way —
+    /// a local is `let x` or `const x`, and a name is never followed by any of
+    /// the four — so there is no reading of a block this takes away. The
+    /// capture list is skipped only when it is a list of names; `[N]u8 { … }` is
+    /// an array literal, and the `u8 {` after it is not a header.
     fn closure_header_ahead(&self) -> bool {
-        let mut depth = 0i32;
-        let mut i = 0;
-        while let Some(kind) = self.peek_nth(i) {
-            match kind {
-                TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket => depth += 1,
-                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket => {
-                    depth -= 1;
-                    if depth <= 0 {
-                        return false;
-                    }
-                }
-                TokenKind::FatArrow if depth == 1 => return true,
-                TokenKind::Semicolon | TokenKind::Newline if depth == 1 => return false,
-                _ => {}
-            }
-            i += 1;
+        if !matches!(self.peek(), Some(TokenKind::LBrace)) {
+            return false;
         }
-        false
+        let mut i = 1;
+        let skip_newlines = |i: &mut usize| {
+            while matches!(self.peek_nth(*i), Some(TokenKind::Newline)) {
+                *i += 1;
+            }
+        };
+        skip_newlines(&mut i);
+        let is_in = |t: Option<&TokenKind>| matches!(t, Some(TokenKind::Ident(s)) if s.as_str() == "in");
+        if matches!(self.peek_nth(i), Some(TokenKind::LBracket)) {
+            i += 1;
+            loop {
+                skip_newlines(&mut i);
+                match self.peek_nth(i) {
+                    Some(TokenKind::RBracket) => {
+                        i += 1;
+                        break;
+                    }
+                    Some(TokenKind::Ident(_)) => {
+                        i += 1;
+                        skip_newlines(&mut i);
+                        match self.peek_nth(i) {
+                            Some(TokenKind::Comma) => i += 1,
+                            Some(TokenKind::RBracket) => {}
+                            _ => return false,
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            skip_newlines(&mut i);
+        }
+        if is_in(self.peek_nth(i)) {
+            return true;
+        }
+        if matches!(self.peek_nth(i), Some(TokenKind::Arrow)) {
+            return true;
+        }
+        if !matches!(self.peek_nth(i), Some(TokenKind::Ident(_))) {
+            return false;
+        }
+        let next = self.peek_nth(i + 1);
+        is_in(next)
+            || matches!(
+                next,
+                Some(TokenKind::Comma | TokenKind::Colon | TokenKind::Arrow)
+            )
     }
 
     // ===< if / if match >===

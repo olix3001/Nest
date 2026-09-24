@@ -6263,7 +6263,7 @@ fn named_argument_rules_are_enforced() {
     let s = analyze_mem(
         &[(
             "main",
-            "f :: func (g: func (i32) -> i32) -> i32 { return g(x: 1) }\n",
+            "f :: func (g: *func (i32) -> i32) -> i32 { return g(x: 1) }\n",
         )],
         "main",
     );

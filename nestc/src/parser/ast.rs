@@ -472,6 +472,10 @@ pub enum NodeKind {
         directives: Vec<NodeId>,
         inner: NodeId,
     },
+    /// `impl Bound [+ Bound]` — some type that meets the bounds, which the
+    /// program does not name (§5.4). In a parameter's type it is an anonymous
+    /// generic parameter; as a return type it is the one type the body returns.
+    ImplType { bounds: Vec<NodeId> },
     /// `[extern(abi)] func [<g>] (param_types) [-> ret]` — a function *type*.
     ///
     /// A value of it is only ever reached through a pointer — `*func(...)`,
@@ -552,6 +556,25 @@ pub enum NodeKind {
         ret: Option<NodeId>,
         body: Option<NodeId>,
     },
+    /// `{ [captures] params [-> ret] in body }` — a **closure** (§5.5), and the
+    /// `func (params) -> ret { body }` literal written where a value goes.
+    ///
+    /// A closure is its own node rather than a `FuncExpr` because it is not a
+    /// definition: nothing names it, it is typed inside the body that writes it,
+    /// and its value has a type of its own that implements `Func`. `body` is
+    /// always a `Block`. A parameter's type may be left out, and so may `ret`;
+    /// both are inferred.
+    Closure {
+        /// [`NodeKind::Capture`]s: the names copied into the closure when it is
+        /// made. Everything else it names from outside is shared.
+        captures: Vec<NodeId>,
+        params: Vec<NodeId>,
+        ret: Option<NodeId>,
+        body: NodeId,
+    },
+    /// One name in a closure's capture list, `[n]`: a binding inside the closure
+    /// holding a copy of the outer `n`, taken when the closure is made.
+    Capture { name: Symbol },
     /// `func { a, b, c }` — an **overload set**, named by its binding (§4.3).
     ///
     /// The members are written as ordinary name expressions — a local name, an
@@ -882,6 +905,19 @@ impl NodeKind {
                 push_opt(out, ret);
                 push_opt(out, body);
             }
+            Closure {
+                captures,
+                params,
+                ret,
+                body,
+            } => {
+                out.extend_from_slice(captures);
+                out.extend_from_slice(params);
+                push_opt(out, ret);
+                out.push(*body);
+            }
+            Capture { .. } => {}
+            ImplType { bounds } => out.extend_from_slice(bounds),
             GenericTypeParam { constraint, .. } => push_opt(out, constraint),
             GenericConstParam { ty, .. } => out.push(*ty),
             Param { ty, default, .. } => {

@@ -647,7 +647,7 @@ total :: func (a: V, b: V) -> V { return a + b }
 #[test]
 fn lir_snapshot_a_start_lang_item_takes_over_the_entry_point() {
     let src = "\
-start :: #lang(\"start\") func (m: func () -> i32, argc: i32, argv: usize) -> i32 {
+start :: #lang(\"start\") func (m: *func () -> i32, argc: i32, argv: usize) -> i32 {
   return m()
 }
 main :: func () { }

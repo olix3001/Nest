@@ -129,7 +129,7 @@ impl Parser {
                     );
                 }
                 if self.tuple_struct_ahead() {
-                    let path = self.parse_type_path();
+                    let path = self.parse_plain_type_path();
                     return self.parse_tuple_struct_pat(path, start);
                 }
                 let name = self.expect_ident();

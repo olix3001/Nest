@@ -60,6 +60,17 @@ impl Parser {
                 self.reject_directives(&directives, "tuple type");
                 self.parse_tuple_type(start)
             }
+            // `impl Bound + Bound` — a type the program leaves unnamed (§5.4).
+            Some(TokenKind::ImplKw) => {
+                self.reject_directives(&directives, "`impl` type");
+                self.bump();
+                let mut bounds = vec![self.parse_type_path()];
+                while self.eat(&TokenKind::Plus) {
+                    bounds.push(self.parse_type_path());
+                }
+                let span = start.to(self.node_span(*bounds.last().unwrap()));
+                self.alloc(span, NodeKind::ImplType { bounds })
+            }
             // `Self`, an identifier, or either as the root of a `.`-qualified,
             // optionally `.<…>`-instantiated path.
             _ => {
@@ -134,8 +145,21 @@ impl Parser {
 
     /// `qualified_name [ generic_args ]` — a named (possibly instantiated) type.
     pub(crate) fn parse_type_path(&mut self) -> NodeId {
+        self.parse_type_path_with(true)
+    }
+
+    /// A type path where a `(` after it is the caller's — a tuple-struct
+    /// pattern's fields — rather than `Func(A) -> R` sugar.
+    pub(crate) fn parse_plain_type_path(&mut self) -> NodeId {
+        self.parse_type_path_with(false)
+    }
+
+    fn parse_type_path_with(&mut self, call_sugar: bool) -> NodeId {
         let path = self.parse_qualified_name();
         let mut span = self.node_span(path);
+        if call_sugar && self.at(&TokenKind::LParen) {
+            return self.parse_call_sugar(path);
+        }
         let generic_args = if self.at(&TokenKind::DotLt) {
             let (args, end) = self.parse_generic_args();
             span = span.to(end);
@@ -144,6 +168,51 @@ impl Parser {
             Vec::new()
         };
         self.alloc(span, NodeKind::TypePath { path, generic_args })
+    }
+
+    /// `Func(A, B) -> R` — a trait over a call's shape, written the way the call
+    /// is (§5.5). It is only spelling: it becomes `Func.<(A, B), Output = R>`,
+    /// the argument types as one tuple and the result as the `Output` the trait
+    /// declares, so everything after the parser sees an ordinary trait with an
+    /// ordinary argument. No arguments is `()`, and so is a missing `-> R`.
+    fn parse_call_sugar(&mut self, path: NodeId) -> NodeId {
+        let start = self.node_span(path);
+        let args_start = self.cur_span();
+        self.expect(&TokenKind::LParen);
+        let mut elems = Vec::new();
+        self.skip_newlines();
+        while !self.at(&TokenKind::RParen) && !self.at_eof() {
+            elems.push(self.parse_type());
+            self.skip_newlines();
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        let mut end = self.cur_span();
+        self.expect(&TokenKind::RParen);
+        let args = self.alloc(args_start.to(end), NodeKind::TupleType { elems });
+        let output = if self.eat(&TokenKind::Arrow) {
+            let ty = self.parse_type();
+            end = self.node_span(ty);
+            ty
+        } else {
+            self.alloc(end, NodeKind::TupleType { elems: Vec::new() })
+        };
+        let binding = self.alloc(
+            self.node_span(output),
+            NodeKind::AssocBinding {
+                name: Symbol::new("Output"),
+                ty: output,
+            },
+        );
+        self.alloc(
+            start.to(end),
+            NodeKind::TypePath {
+                path,
+                generic_args: vec![args, binding],
+            },
+        )
     }
 
     /// `ident { '.' ident }` collected into a single multi-segment

@@ -1,0 +1,84 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"apply :: func (f: impl Func(i32) -> i32, g: *dyn Func(), h: impl Display + Debug) {}\nsum :: func <F: Func(i32, i32) -> i32> (f: F) -> i32 { return f(1, 2) }\nmake :: func (n: i32) -> impl Func(i32) -> i32 { return { x in x + n } }\n\")"
+---
+File
+  ConstBind ::
+    BindingPat apply
+    FuncExpr
+      Param f:
+        ImplType
+          TypePath
+            Path `Func`
+            TupleType
+              TypePath
+                Path `i32`
+            AssocBinding Output =
+              TypePath
+                Path `i32`
+      Param g:
+        PtrType *
+          DynType dyn
+            TypePath
+              Path `Func`
+              TupleType
+              AssocBinding Output =
+                TupleType
+      Param h:
+        ImplType
+          TypePath
+            Path `Display`
+          TypePath
+            Path `Debug`
+      Block
+  ConstBind ::
+    BindingPat sum
+    FuncExpr
+      GenericTypeParam F
+        Bounds +
+          TypePath
+            Path `Func`
+            TupleType
+              TypePath
+                Path `i32`
+              TypePath
+                Path `i32`
+            AssocBinding Output =
+              TypePath
+                Path `i32`
+      Param f:
+        TypePath
+          Path `F`
+      TypePath
+        Path `i32`
+      Block
+        Return
+          Call
+            Path `f`
+            Arg
+              Lit Int(1)
+            Arg
+              Lit Int(2)
+  ConstBind ::
+    BindingPat make
+    FuncExpr
+      Param n:
+        TypePath
+          Path `i32`
+      ImplType
+        TypePath
+          Path `Func`
+          TupleType
+            TypePath
+              Path `i32`
+          AssocBinding Output =
+            TypePath
+              Path `i32`
+      Block
+        Return
+          Closure
+            Param x (inferred)
+            Block (has tail)
+              Binary Add
+                Path `x`
+                Path `n`

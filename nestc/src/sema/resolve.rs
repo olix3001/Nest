@@ -259,6 +259,20 @@ impl Resolver<'_> {
                 }
                 self.pop_scope();
             }
+            NodeKind::Closure {
+                params, ret, body, ..
+            } => {
+                self.push_scope();
+                for p in &params {
+                    self.resolve_node(*p);
+                    self.bind_param(*p);
+                }
+                if let Some(r) = ret {
+                    self.resolve_node(r);
+                }
+                self.resolve_node(body);
+                self.pop_scope();
+            }
             NodeKind::Block { stmts, tail } => {
                 self.push_scope();
                 for s in stmts {

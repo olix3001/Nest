@@ -2077,6 +2077,10 @@ impl Inferer<'_> {
             // A closure / nested function used as a value: its type is its
             // signature; its body is inferred independently by the file walker.
             NodeKind::FuncExpr { .. } => self.func_sig_ty(node),
+            NodeKind::Closure { .. } => {
+                self.report(node, "closures are not implemented yet");
+                Ty::Error
+            }
             // Type-forming and declaration nodes are not value expressions.
             _ => Ty::Error,
         }
@@ -7102,6 +7106,10 @@ impl Inferer<'_> {
         let ast = &self.asts[&file];
         match ast.node(node).kind.clone() {
             NodeKind::TypeHole => self.cx.fresh(),
+            NodeKind::ImplType { .. } => {
+                self.report_in(file, node, "`impl` types are not implemented yet");
+                Ty::Error
+            }
             // `*func(...)` is the function pointer, which is one type rather
             // than a pointer to something: there is no function value to point
             // at on its own (§3.5).

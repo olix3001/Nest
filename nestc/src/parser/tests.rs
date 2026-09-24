@@ -488,3 +488,50 @@ fn a_separator_is_a_semicolon_a_newline_or_a_continuation() {
         assert!(errors.is_empty(), "for {src:?}: {errors:#?}");
     }
 }
+
+// ===< Closures (§5.5) >===
+
+#[test]
+fn closure_literals() {
+    assert_snapshot!(tree(
+        "f :: func () {
+    const double := { x in x * 2 }
+    const add := { a: i32, b: i32 -> i32 in a + b }
+    const now := { in clock() }
+    const scaled := { [n, m] x in x * n + m }
+    const typed := func (x: i32) -> i32 { return x }
+    list.reduce(0) { acc, x in acc + x }
+    spawn() { work() }
+}
+"
+    ));
+}
+
+/// A `{` whose first tokens are not a closure header is a block, whatever it
+/// holds: an array literal led by a length, a statement, a bare name.
+#[test]
+fn a_block_is_not_mistaken_for_a_closure() {
+    let (ast, errors) = Parser::parse_file(
+        "f :: func () {
+    const a := { [N]u8 { 1, 2 } }
+    const b := { x }
+    const c := { for i in xs { g(i) } }
+    const d := { let y := 1\n y }
+}
+",
+        FileId(0),
+    );
+    assert!(errors.is_empty(), "{errors:#?}");
+    let text = tree_to_string(&ast);
+    assert!(!text.contains("Closure"), "{text}");
+}
+
+#[test]
+fn func_call_sugar_and_impl_types() {
+    assert_snapshot!(tree(
+        "apply :: func (f: impl Func(i32) -> i32, g: *dyn Func(), h: impl Display + Debug) {}
+sum :: func <F: Func(i32, i32) -> i32> (f: F) -> i32 { return f(1, 2) }
+make :: func (n: i32) -> impl Func(i32) -> i32 { return { x in x + n } }
+"
+    ));
+}

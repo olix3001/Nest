@@ -1,0 +1,81 @@
+---
+source: src/parser/tests.rs
+expression: "tree(\"f :: func () {\n    const double := { x in x * 2 }\n    const add := { a: i32, b: i32 -> i32 in a + b }\n    const now := { in clock() }\n    const scaled := { [n, m] x in x * n + m }\n    const typed := func (x: i32) -> i32 { return x }\n    list.reduce(0) { acc, x in acc + x }\n    spawn() { work() }\n}\n\")"
+---
+File
+  ConstBind ::
+    BindingPat f
+    FuncExpr
+      Block (has tail)
+        LocalDecl const
+          BindingPat double
+          Closure
+            Param x (inferred)
+            Block (has tail)
+              Binary Mul
+                Path `x`
+                Lit Int(2)
+        LocalDecl const
+          BindingPat add
+          Closure
+            Param a:
+              TypePath
+                Path `i32`
+            Param b:
+              TypePath
+                Path `i32`
+            TypePath
+              Path `i32`
+            Block (has tail)
+              Binary Add
+                Path `a`
+                Path `b`
+        LocalDecl const
+          BindingPat now
+          Closure
+            Block (has tail)
+              Call
+                Path `clock`
+        LocalDecl const
+          BindingPat scaled
+          Closure [2]
+            Capture n
+            Capture m
+            Param x (inferred)
+            Block (has tail)
+              Binary Add
+                Binary Mul
+                  Path `x`
+                  Path `n`
+                Path `m`
+        LocalDecl const
+          BindingPat typed
+          Closure
+            Param x:
+              TypePath
+                Path `i32`
+            TypePath
+              Path `i32`
+            Block
+              Return
+                Path `x`
+        Call
+          FieldAccess .reduce
+            Path `list`
+          Arg
+            Lit Int(0)
+          Arg
+            Closure
+              Param acc (inferred)
+              Param x (inferred)
+              Block (has tail)
+                Binary Add
+                  Path `acc`
+                  Path `x`
+        Call
+          Path `spawn`
+          Arg
+            Closure
+              Block (has tail)
+                Call
+                  Path `work`
