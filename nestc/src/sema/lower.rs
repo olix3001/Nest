@@ -91,6 +91,9 @@ pub fn lower_file(
         meta,
         defaults: HashMap::new(),
         recorded: Vec::new(),
+        closures: Vec::new(),
+        lifted: Vec::new(),
+        lifted_types: Vec::new(),
     };
     // Iterate the `Func` defs of this file: each carries the name/DefId and its
     // node is the `ConstBind` whose RHS is the `FuncExpr`. A **bodyless** one is
@@ -119,7 +122,9 @@ pub fn lower_file(
             }
         }
     }
-    let types = lo.lower_types(file);
+    funcs.append(&mut lo.lifted);
+    let mut types = lo.lower_types(file);
+    types.append(&mut lo.lifted_types);
     let globals = lo.lower_globals(file);
     Lowered {
         program: Program {
@@ -164,6 +169,24 @@ struct Lowerer<'a> {
     /// Where each of those lowered defaults went, per function — what
     /// [`Lowered::defaults`] carries out of here.
     recorded: Vec<(DefId, Vec<Option<super::decl::ParamDefault>>)>,
+    /// The closures whose bodies are being lowered, innermost last (§5.5).
+    closures: Vec<ClosureCx>,
+    /// Each closure's body, lifted into a function of its own.
+    lifted: Vec<Function>,
+    /// Each closure's type: a struct of what it captured.
+    lifted_types: Vec<TypeDef>,
+}
+
+/// A closure being lowered: how its body reaches what it captured.
+struct ClosureCx {
+    /// Its body's first parameter — the closure itself.
+    this: DefId,
+    /// That parameter's type, `*Closure`.
+    this_ty: Ty,
+    /// Every captured def the body may name: the member it is in, the member's
+    /// type, and whether the member points at a shared local rather than being
+    /// a copy.
+    fields: HashMap<DefId, (Symbol, Ty, bool)>,
 }
 
 impl Lowerer<'_> {
@@ -642,6 +665,7 @@ impl Lowerer<'_> {
             });
         }
         self.recorded.push((def, recorded));
+        let body_node = body;
         let body = body.map(|b| self.lower_block(b));
         // A function's own type is its whole signature. Keeping only the return
         // type here would have made `meta.ty` mean something different for a
@@ -664,6 +688,9 @@ impl Lowerer<'_> {
         // one lets a later pass emit the function as it stands.
         if let Some(g) = self.ast.meta::<Generics>(func) {
             self.meta.set(id, g);
+        }
+        if let Some(b) = body_node {
+            self.meta.set(id, self.boxed_in(b));
         }
         Some(Function {
             id,
@@ -895,6 +922,7 @@ impl Lowerer<'_> {
             }
             NodeKind::Lit(lit) => self.expr(node, ty, ExprKind::Lit(lit)),
             NodeKind::Path { .. } => self.lower_name(node, ty),
+            NodeKind::Closure { .. } => self.lower_closure(node, ty),
             NodeKind::FieldAccess { base, name } => {
                 // A resolved namespace member is a global reference; a resolved
                 // *field* is a projection out of the base value, and carries the
@@ -2184,6 +2212,11 @@ impl Lowerer<'_> {
     // ===< names / helpers >===
 
     fn lower_name(&mut self, node: NodeId, ty: Ty) -> Expr {
+        if let Some(def) = self.resolved_def(node)
+            && let Some(e) = self.captured(node, def, &ty)
+        {
+            return e;
+        }
         // A static trait call (`Trait.member(args)`) resolves by name to the
         // trait's bodyless *declaration*; the solver stamped which impl won, so
         // point at that impl's member instead (see `infer::open_trait_self`).
@@ -2192,6 +2225,235 @@ impl Lowerer<'_> {
             (None, Some(def)) => self.global_or_local(node, def, ty),
             (None, None) => self.expr(node, ty, ExprKind::Error),
         }
+    }
+
+    /// A use of `def` inside a closure that captured it: the closure's member,
+    /// read through the closure — and, for a shared local, through the pointer
+    /// the member holds (§5.5).
+    fn captured(&self, node: NodeId, def: DefId, ty: &Ty) -> Option<Expr> {
+        let cx = self.closures.last()?;
+        let (name, fty, shared) = cx.fields.get(&def)?.clone();
+        let this = self.expr(node, cx.this_ty.clone(), ExprKind::Local(cx.this));
+        let closure_ty = match &cx.this_ty {
+            Ty::Ptr { inner, .. } => (**inner).clone(),
+            other => other.clone(),
+        };
+        let base = self.expr(
+            node,
+            closure_ty,
+            ExprKind::Deref {
+                base: Box::new(this),
+            },
+        );
+        let member = self.expr(
+            node,
+            fty,
+            ExprKind::Field {
+                base: Box::new(base),
+                name,
+                def: None,
+            },
+        );
+        if !shared {
+            return Some(member);
+        }
+        Some(self.expr(
+            node,
+            ty.clone(),
+            ExprKind::Deref {
+                base: Box::new(member),
+            },
+        ))
+    }
+
+    /// A read of `def` where a closure is being made: what the enclosing code
+    /// sees it as, which inside another closure is that closure's member.
+    fn use_of(&self, node: NodeId, def: DefId, ty: &Ty) -> Expr {
+        self.captured(node, def, ty)
+            .unwrap_or_else(|| self.global_or_local(node, def, ty.clone()))
+    }
+
+    /// Lower a closure (§5.5): lift its body into its own function, give it a
+    /// struct of what it captured, and answer the value that fills that struct.
+    ///
+    /// A copy is its value where the closure is made. A shared local is its
+    /// address — the local lives in a cell (see [`crate::ir::Boxed`]), and the
+    /// address *is* the cell, so the closure and the code around it read and
+    /// write the one place.
+    fn lower_closure(&mut self, node: NodeId, ty: Ty) -> Expr {
+        let NodeKind::Closure {
+            captures,
+            params,
+            body,
+            ..
+        } = self.ast.node(node).kind.clone()
+        else {
+            return self.expr(node, ty, ExprKind::Error);
+        };
+        let (Some(defs), Some(sig)) = (
+            self.ast.meta::<super::ClosureDefs>(node),
+            self.ast.meta::<super::infer::ClosureSig>(node),
+        ) else {
+            return self.expr(node, ty, ExprKind::Error);
+        };
+        let shared = self
+            .ast
+            .meta::<super::Captures>(node)
+            .map(|c| c.0)
+            .unwrap_or_default();
+        let mut fields: HashMap<DefId, (Symbol, Ty, bool)> = HashMap::new();
+        let mut members = Vec::new();
+        let mut values = Vec::new();
+        let mut taken: Vec<Symbol> = Vec::new();
+        let mut member_name = |name: &Symbol| {
+            let mut n = name.clone();
+            let mut i = 1;
+            while taken.contains(&n) {
+                n = Symbol::new(&format!("{name}#{i}"));
+                i += 1;
+            }
+            taken.push(n.clone());
+            n
+        };
+        for &c in &captures {
+            let (Some(inner), Some(outer)) = (self.def_of(c), self.resolved_def(c)) else {
+                continue;
+            };
+            let t = self.ty(c);
+            let name = member_name(&self.defs.get(inner).name);
+            values.push((name.clone(), self.use_of(c, outer, &t)));
+            fields.insert(inner, (name.clone(), t.clone(), false));
+            members.push((name, t));
+        }
+        for (d, t) in shared.iter().zip(&sig.shared) {
+            let mutable = self.defs.get(*d).mutable;
+            let fty = Ty::Ptr {
+                mutable,
+                inner: Box::new(t.clone()),
+            };
+            let name = member_name(&self.defs.get(*d).name);
+            let place = self.use_of(node, *d, t);
+            let addr = self.expr(
+                node,
+                fty.clone(),
+                ExprKind::Ref {
+                    mutable,
+                    place: Box::new(place),
+                },
+            );
+            values.push((name.clone(), addr));
+            fields.insert(*d, (name.clone(), fty.clone(), true));
+            members.push((name, fty));
+        }
+        // The closure's type, over the same parameters as the function around
+        // it — what `ty` is, with each of them standing for itself.
+        let own = Ty::Nominal {
+            def: defs.ty,
+            args: sig
+                .generics
+                .iter()
+                .map(|&p| Ty::Nominal {
+                    def: p,
+                    args: Vec::new(),
+                })
+                .collect(),
+        };
+        let type_id = self.id(node);
+        self.meta.set_ty(type_id, own.clone());
+        let type_members = members
+            .iter()
+            .map(|(name, t)| {
+                let id = self.id(node);
+                self.meta.set_ty(id, t.clone());
+                Member {
+                    id,
+                    def: None,
+                    name: name.clone(),
+                }
+            })
+            .collect();
+        self.lifted_types.push(TypeDef {
+            id: type_id,
+            def: defs.ty,
+            name: self.defs.get(defs.ty).name.clone(),
+            kind: TypeDefKind::Struct {
+                members: type_members,
+            },
+        });
+        // The body, as `call(self: *Closure, params...)`.
+        let this_ty = Ty::Ptr {
+            mutable: false,
+            inner: Box::new(own),
+        };
+        let this_id = self.id(node);
+        self.meta.set_ty(this_id, this_ty.clone());
+        let mut fparams = vec![Param {
+            id: this_id,
+            def: defs.this,
+            name: Symbol::new("self"),
+        }];
+        fparams.extend(params.iter().filter_map(|&p| self.lower_param(p)));
+        let param_tys: Vec<Ty> = fparams.iter().map(|p| self.meta.ty_or_error(p.id)).collect();
+        self.closures.push(ClosureCx {
+            this: defs.this,
+            this_ty,
+            fields,
+        });
+        let block = self.lower_block(body);
+        self.closures.pop();
+        let fid = self.id(node);
+        self.meta.set_ty(
+            fid,
+            Ty::Func {
+                params: param_tys,
+                ret: Box::new(sig.ret.clone()),
+                c: false,
+            },
+        );
+        self.meta.set(
+            fid,
+            Generics {
+                params: sig.generics.clone(),
+                own: 0,
+            },
+        );
+        self.meta.set(fid, self.boxed_in(body));
+        self.lifted.push(Function {
+            id: fid,
+            def: defs.call,
+            name: Symbol::new("call"),
+            params: fparams,
+            body: Some(block),
+            extern_abi: None,
+            recv: Recv::Ptr,
+            mutating: false,
+        });
+        self.expr(
+            node,
+            ty,
+            ExprKind::Construct {
+                def: Some(defs.ty),
+                fields: values,
+            },
+        )
+    }
+
+    /// Every local a closure written anywhere under `node` shares — what the
+    /// function `node` is the body of keeps in cells (see [`crate::ir::Boxed`]).
+    fn boxed_in(&self, node: NodeId) -> crate::ir::Boxed {
+        let mut out: Vec<DefId> = Vec::new();
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if let Some(super::Captures(defs)) = self.ast.meta::<super::Captures>(n) {
+                for d in defs {
+                    if !out.contains(&d) {
+                        out.push(d);
+                    }
+                }
+            }
+            stack.extend(self.ast.node(n).kind.children());
+        }
+        crate::ir::Boxed(out)
     }
 
     fn global_or_local(&self, node: NodeId, def: DefId, ty: Ty) -> Expr {

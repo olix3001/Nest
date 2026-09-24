@@ -89,6 +89,11 @@ pub enum DefKind {
     Field,
     /// An `enum` variant.
     Variant,
+    /// A **closure**'s type (§5.5): an anonymous struct whose fields are what
+    /// the closure captured, generic over whatever the function it is written in
+    /// is generic over. Its one member, `call`, is the closure's body as a
+    /// function taking the closure first.
+    Closure,
     /// A function parameter.
     Param,
     /// A generic **type** parameter (`<T>`, `<T: Trait>`).
@@ -126,6 +131,7 @@ impl DefKind {
         match self {
             DefKind::Namespace => "namespace",
             DefKind::Struct => "struct",
+            DefKind::Closure => "closure",
             DefKind::Enum => "enum",
             DefKind::Trait => "trait",
             DefKind::TypeAlias => "type",

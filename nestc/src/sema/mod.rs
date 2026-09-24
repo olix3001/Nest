@@ -96,6 +96,22 @@ pub struct SpreadBase;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DefMeta(pub DefId);
 
+/// What the resolver made for a closure (§5.5), stamped on its node: the
+/// closure's type, its body as a function, and that function's first parameter
+/// — the closure itself, which no source names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClosureDefs {
+    pub ty: DefId,
+    pub call: DefId,
+    pub this: DefId,
+}
+
+/// The locals a closure shares with the code around it, in the order it first
+/// names them (§5.5): every local or parameter from outside that its body — or
+/// a closure inside it — names, and that its capture list does not copy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Captures(pub Vec<DefId>);
+
 /// A **declared** function's whole signature, stamped on its `FuncExpr` by
 /// inference.
 ///

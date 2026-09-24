@@ -14,7 +14,7 @@ primary =
   | '(' expr ')'                // grouping
   | '(' expr { ',' expr } ')'   // tuple
   | composite_literal
-  | closure                     // func (...) -> T { ... }   (see 05)
+  | closure                     // { x in ... }, func (...) -> T { ... }   (see 05)
   | if_expr | block
   | 'import' string             // compile-time namespace value (see 04)
 ```

@@ -107,6 +107,9 @@ type_core   = qualified_name [ generic_args ]
             | '(' [ type { ',' type } ] ')'             // tuple / void
             | 'dyn' type                                // trait object
             | '*' func_type                             // function pointer (§3.5); never bare
+            | 'impl' type { '+' type }                  // an anonymous generic parameter (§5.4)
+            | qualified_name '(' [ type { ',' type } ] ')' [ '->' type ]
+                                                        // `Func(A) -> R` = `Func.<(A), Output = R>` (§5.5)
 generic_args = '.<' generic_arg { ',' generic_arg } '>'   // always dotted; bare `<...>` never valid here
 generic_arg  = type_or_hole | assoc_binding
 type_or_hole = type | '_'                               // '_' = infer this argument
@@ -238,7 +241,8 @@ primary = literal
         | '(' expr ')'
         | '(' expr { ',' expr } ')'            // tuple
         | composite_literal
-        | func_expr                            // closure
+        | func_expr                            // a closure spelled with its types (§5.5)
+        | closure                              // `{ x in ... }` (§5.5)
         | if_expr
         | if_match_expr
         | match_expr
@@ -286,9 +290,11 @@ Trailing-block call sugar (a final `func`-typed argument written as a block afte
 `)`, optionally with a parameter header):
 
 ```
-trailing_call  = callee [ '(' [ args ] ')' ] closure_block
-closure_block  = '{' [ closure_header ] { statement stmt_end } [ expr ] '}'
-closure_header = param { ',' param } '=>'      // params; types optional (inferred)
+trailing_call  = callee '(' [ args ] ')' ( closure | block )   // the block takes no parameters
+closure        = '{' [ capture_list ] [ closure_param { ',' closure_param } ]
+                     [ '->' type ] 'in' { statement stmt_end } [ expr ] '}'
+capture_list   = '[' identifier { ',' identifier } ']'      // copied when the closure is made
+closure_param  = identifier [ ':' type ]                    // types optional (inferred)
 ```
 
 See [05-functions-and-generics.md](05-functions-and-generics.md) §5.3. There is no

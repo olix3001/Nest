@@ -147,7 +147,7 @@ A parameter named `self` marks the function as a **method** of the type its
 ```
 impl Router {
   @public
-  get :: func (self: *mut Router, path: str, handler: func() -> Response) { ... }
+  get :: func (self: *mut Router, path: str, handler: impl Func() -> Response) { ... }
 }
 ```
 
@@ -197,37 +197,31 @@ call could do.
 
 ### Trailing block sugar
 
-When the **last** parameter has a function type, its argument may be written as a
-trailing brace block after the `)`, and the `()` dropped if it is the only
-argument:
+When the **last** parameter takes a closure, its argument may be written as a
+closure after the call's `)`:
 
 ```
 router.get("/cat") {
   const cats := client.get.<[]CatImage>(url).!
   return ...
 }
+
+list.reduce(0) { acc, x in acc + x }
+spawn() { work() }
 ```
 
-If the closure takes parameters, they are listed in a **header** terminated by
-`=>`. Parameter types are optional and inferred from the parameter's function
-type when omitted:
+The parentheses are always written, even when the block is the only argument:
+after a bare name, `{` opens a composite literal (`Point { x: 1 }`), and the
+two cannot be told apart without them. A trailing block is never taken in the
+head of an `if`, `while`, `for` or `match`, for the same reason a composite
+literal is not.
+
+A block with no header takes no parameters. Either way the trailing block is
+exactly the closure (§5.5) passed as the final argument:
 
 ```
-list.reduce(0) { acc, x =>              // types inferred
-  return acc + x
-}
-
-list.reduce(0) { acc: int, x: int =>   // types explicit
-  return acc + x
-}
-```
-
-A block with no `=>` header takes no parameters. Either way the trailing block is
-equivalent to passing a closure as the final argument:
-
-```
-router.get("/cat", func() -> Response { ... })
-list.reduce(0, func(acc: int, x: int) -> int { return acc + x })
+router.get("/cat", { in ... })
+list.reduce(0, { acc, x in acc + x })
 ```
 
 This is the idiomatic form for handler / callback APIs.
@@ -254,6 +248,18 @@ that associated type on the bound (see
 sum :: func <I: Iterator.<Item = int32> + Clone> (it: I) -> int32 { ... }
 collect :: func <I: Iterator, C: FromIterator.<Item = I.Item>> (it: I) -> C { ... }
 ```
+
+A parameter whose type is written `impl Bound` is an anonymous generic
+parameter with that bound, and the two spellings below declare the same
+function. A call cannot name the anonymous one in a turbofish.
+
+```
+apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }
+apply :: func <F: Func(i32) -> i32> (f: F, x: i32) -> i32 { return f(x) }
+```
+
+A call is held to its callee's bounds where it is written: passing a type that
+does not implement one is an error at the call.
 
 `Item` must be an associated type declared by the named trait; the constraint
 requires the implementor's choice for that associated type to equal the given
@@ -342,17 +348,85 @@ fn(x)                               // call it later
 
 ## 5.5 Closures
 
-An anonymous `func` literal that captures its environment is a closure, inhabiting
-the matching function type:
+A **closure** is a function written where a value goes, which may name the
+locals around it:
 
 ```
-const make_adder := func (n: int) -> func(int) -> int {
-  return func (x: int) -> int { return x + n }   // captures `n`
-}
+closure = '{' [ '[' identifier { ',' identifier } ']' ]
+              [ param { ',' param } ] [ '->' type ] 'in'
+              { statement } [ expr ] '}'
+param   = identifier [ ':' type ]
 ```
 
-Captures are by reference to the captured binding, kept alive by the garbage
-collector. Closures are ordinary values: store, pass, and return them.
+```
+const double := { x in x * 2 }
+const add    := { a: i32, b: i32 -> i32 in a + b }
+const now    := { in clock.now() }
+const scaled := { [n] x in x * n }
+```
+
+A parameter's type and the result type may be left out; they are inferred —
+from the parameter the closure is passed to, when there is one, and otherwise
+from how the closure is used. `in` ends the header, and a closure that takes
+nothing is `{ in body }`. A `{` whose first tokens are not a header — `in`, a
+`[` list of names, or a name followed by `,`, `:`, `->` or `in` — is a block.
+
+`func (x: i32) -> i32 { return x * 2 }` written where a value goes is a closure
+too, spelled with its types. Only a `::` binding makes a `func` literal a
+definition, and a `::` function written inside a body **never** captures: it is
+a constant, and naming a local of the function around it is an error.
+
+### Captures
+
+A closure **shares** every local it names from outside: it reads what the
+local holds when it is called, and a write through either is seen by both.
+
+```
+let mut count := 0
+list.each() { x in count += x }        // count is the sum afterwards
+```
+
+A shared local lives as long as the closure does, whatever frame bound it, so
+each binding is its own: a closure made on one pass of a loop keeps that pass's
+`let`, not the next one's.
+
+A name in the **capture list** is copied instead, when the closure is made. The
+copy is read-only.
+
+```
+let mut n := 1
+const f := { [n] x in x + n }
+n = 10
+f(1)                                   // 2
+```
+
+### Types, and calling one
+
+Every closure has a type of its own that no program names. What it and a
+function pointer (`*func(...)`, §3.5) have in common is the prelude trait
+`Func`:
+
+```
+Func :: #lang("func") trait <Args> { Output :: type }
+```
+
+`Func(A, B) -> R` is how a bound on it is written, and it means
+`Func.<(A, B), Output = R>` — the arguments as one tuple, `()` for none, and a
+missing `-> R` is `-> void`. Nothing implements `Func` but the compiler: a
+closure implements it with its own signature, and so does a `*func`.
+
+A value whose type implements `Func` is called like a function. Taking a
+closure is taking something that implements `Func`, and each closure passed
+makes its own instantiation, so the call is a direct one:
+
+```
+apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }
+
+apply(double, 3)              // a *func
+apply({ x in x + n }, 3)      // a closure
+```
+
+A closure is an ordinary value: store it, pass it, call it later.
 
 ## 5.6 Entry point
 

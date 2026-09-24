@@ -670,11 +670,12 @@ impl Mono<'_> {
     fn rewrite_call(&mut self, linked: &Linked, e: &mut Expr, depth: u32) {
         let recorded: Option<Vec<GenericArg>> = self.meta.get::<Instantiation>(e.id).map(|i| i.0);
         let callee_ty = self.meta.ty(call_callee_id(e).unwrap_or(e.id));
+        let call_id = e.id;
         let ExprKind::Call {
             callee,
+            args: call_args_exprs,
             builtin,
             dispatch,
-            ..
         } = &mut e.kind
         else {
             return;
@@ -693,12 +694,49 @@ impl Mono<'_> {
             // A call on a `Func` value, now that its type is known (§5.5). A
             // function pointer is called through, which is what a static
             // dispatch on a callee that is not a `Global` already is.
-            Dispatch::Func { self_ty } => match self_ty {
+            Dispatch::Func { self_ty } => match self_ty.clone() {
                 Ty::Func { .. } => *dispatch = Dispatch::Static,
-                _ => {
-                    let self_ty = self_ty.clone();
-                    self.report_unresolved_func(e.id, &self_ty);
+                // A closure's call is its own body, lifted into `call`, with the
+                // closure handed over first — by address, the way a method takes
+                // `self` (§5.5).
+                Ty::Nominal { def, args }
+                    if self.defs.get(def).kind == crate::sema::def::DefKind::Closure =>
+                {
+                    let Some(&call) = self.defs.get(def).ns.members.get(&Symbol::new("call"))
+                    else {
+                        self.report_unresolved_func(call_id, &Ty::Nominal { def, args });
+                        return;
+                    };
+                    let targs: Vec<GenericArg> = args.into_iter().map(GenericArg::Ty).collect();
+                    let target = self.reach(linked, call, targs, depth);
+                    let closure_ty = self.meta.ty(callee.id).unwrap_or(Ty::Error);
+                    let recv_ty = Ty::Ptr {
+                        mutable: false,
+                        inner: Box::new(closure_ty),
+                    };
+                    let mut params = vec![recv_ty.clone()];
+                    params.extend(call_args_exprs.iter().map(|a| self.meta.ty_or_error(a.id)));
+                    let fn_ty = Ty::Func {
+                        params,
+                        ret: Box::new(self.meta.ty_or_error(call_id)),
+                        c: false,
+                    };
+                    let global = Expr {
+                        id: self.derived(callee.id, fn_ty),
+                        kind: ExprKind::Global(target),
+                    };
+                    let value = std::mem::replace(&mut **callee, global);
+                    let recv = Expr {
+                        id: self.derived(value.id, recv_ty),
+                        kind: ExprKind::Ref {
+                            mutable: false,
+                            place: Box::new(value),
+                        },
+                    };
+                    call_args_exprs.insert(0, recv);
+                    *dispatch = Dispatch::Static;
                 }
+                other => self.report_unresolved_func(call_id, &other),
             },
             Dispatch::Generic {
                 trait_def,
@@ -1144,6 +1182,16 @@ impl Mono<'_> {
         ));
     }
 
+    /// A fresh node standing where `from` stands, of type `ty`.
+    fn derived(&self, from: IrId, ty: Ty) -> IrId {
+        let id = self.meta.fresh();
+        if let Some(span) = self.meta.span(from) {
+            self.meta.set_span(id, span);
+        }
+        self.meta.set_ty(id, ty);
+        id
+    }
+
     /// The `Func` counterpart of [`Mono::report_unresolved`]: a call on a value
     /// whose type turned out to be nothing that can be called.
     fn report_unresolved_func(&mut self, at: IrId, self_ty: &Ty) {
@@ -1574,6 +1622,11 @@ impl Cloner<'_> {
         }
         if self.meta.has::<RangeReported>(old) {
             self.meta.set(new, RangeReported);
+        }
+        // Which locals live in cells is a fact about the body, and every
+        // instantiation of it has the same ones.
+        if let Some(b) = self.meta.get::<crate::ir::Boxed>(old) {
+            self.meta.set(new, b);
         }
         // A nested call's own generic arguments travel with it, substituted: a
         // `push` inside `Vec.<T>.extend` is instantiated at `T`, and this is

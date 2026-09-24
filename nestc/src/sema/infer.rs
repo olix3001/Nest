@@ -277,6 +277,23 @@ pub struct Upcast {
 /// a reinterpretation and nothing more — but the method's `self` is typed `T`,
 /// not the distinct type, so the receiver has to be spelled as `T` before the
 /// usual `&` / `.*` adjustment happens. `repr` is that type.
+/// A closure's signature and what it is generic over, stamped on its node by
+/// inference (§5.5).
+///
+/// The closure's *type* is `Ty::Nominal` over its own def, which names the
+/// closure and says nothing about how it is called; this is the rest. `generics`
+/// are the type parameters of the function it is written in, in that function's
+/// order — the closure's type is instantiated with the same arguments.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClosureSig {
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub generics: Vec<DefId>,
+    /// The type of each local the closure shares, in [`super::Captures`] order:
+    /// a binding's type lives nowhere lowering can read it but here.
+    pub shared: Vec<Ty>,
+}
+
 /// Marks the callee of a call on a value that is not a function pointer but
 /// implements `Func` (§5.5) — a closure, or a generic parameter bounded by
 /// `Func`. Lowering reads it to emit [`crate::ir::Dispatch::Func`], and the
@@ -495,6 +512,7 @@ pub fn resolve_impl_targets(
             types: HashMap::new(),
             ret: Ty::Void,
             breaks: Vec::new(),
+        func: None,
             alias_stack: Vec::new(),
             const_stack: Vec::new(),
             int_values: HashMap::new(),
@@ -590,6 +608,7 @@ pub fn resolve_param_decls(
         types: HashMap::new(),
         ret: Ty::Void,
         breaks: Vec::new(),
+        func: None,
         alias_stack: Vec::new(),
         const_stack: Vec::new(),
         int_values: HashMap::new(),
@@ -682,6 +701,7 @@ pub fn fold_const_values(
         types: HashMap::new(),
         ret: Ty::Void,
         breaks: Vec::new(),
+        func: None,
         alias_stack: Vec::new(),
         const_stack: Vec::new(),
         int_values: HashMap::new(),
@@ -749,6 +769,7 @@ pub(crate) fn signature_from_tree(
         types: HashMap::new(),
         ret: Ty::Void,
         breaks: Vec::new(),
+        func: None,
         alias_stack: Vec::new(),
         const_stack: Vec::new(),
         int_values: HashMap::new(),
@@ -859,6 +880,7 @@ pub fn infer_file(
                 types: HashMap::new(),
                 ret: Ty::Void,
                 breaks: Vec::new(),
+        func: None,
                 alias_stack: Vec::new(),
                 const_stack: Vec::new(),
                 int_values: HashMap::new(),
@@ -1347,6 +1369,9 @@ struct Inferer<'a> {
     ret: Ty,
     /// One frame per enclosing `loop` / `while`, innermost last.
     breaks: Vec<LoopFrame>,
+    /// The `FuncExpr` whose body is being inferred — what a closure written in
+    /// it is generic over (§5.5).
+    func: Option<NodeId>,
     /// Type-alias / associated-type defs currently being expanded, to break
     /// cycles in [`Inferer::expand_alias`].
     alias_stack: Vec<DefId>,
@@ -1380,6 +1405,7 @@ impl Inferer<'_> {
         if let Some(def) = self.func_owner(func) {
             self.ctx = Some(def);
         }
+        let outer_func = self.func.replace(func);
         // A defaulted parameter must trail the required ones (§5.2): a call
         // supplies its positional arguments left to right, so a hole in the
         // middle could never be filled without naming the ones after it — which
@@ -1440,6 +1466,7 @@ impl Inferer<'_> {
         // A closure's body is inferred inside the body that wrote it, so the
         // place a name is written in is restored rather than dropped.
         self.ctx = outer;
+        self.func = outer_func;
     }
 
     /// Record what this function is generic over, in the order every
@@ -1452,8 +1479,16 @@ impl Inferer<'_> {
     /// them, so a call site's [`Instantiation`] lines up with this list by
     /// position.
     fn stamp_generics(&mut self, func: NodeId) {
+        if let Some(generics) = self.generics_of_func(func) {
+            self.ast.set_meta(func, generics);
+        }
+    }
+
+    /// What [`Inferer::stamp_generics`] records, computed without recording it
+    /// — a closure asks mid-body, since it is generic over the same list.
+    fn generics_of_func(&mut self, func: NodeId) -> Option<Generics> {
         let NodeKind::FuncExpr { generics, .. } = self.ast.node(func).kind.clone() else {
-            return;
+            return None;
         };
         let mut order: Vec<DefId> = generics
             .iter()
@@ -1475,7 +1510,7 @@ impl Inferer<'_> {
             }
         }
         self.close_over_projections(&mut order);
-        self.ast.set_meta(func, Generics { params: order, own });
+        Some(Generics { params: order, own })
     }
 
     /// Record what each of this file's **generic impls** makes its associated
@@ -1640,6 +1675,28 @@ impl Inferer<'_> {
             if let Some(d) = self.ast.meta::<DynCoerce>(node) {
                 let concrete = self.cx.finalize(&d.concrete, &mut || {});
                 self.ast.set_meta(node, DynCoerce { concrete, ..d });
+            }
+            if let Some(sig) = self.ast.meta::<ClosureSig>(node) {
+                let params = sig
+                    .params
+                    .iter()
+                    .map(|t| self.cx.finalize(t, &mut || {}))
+                    .collect();
+                let ret = self.cx.finalize(&sig.ret, &mut || {});
+                let shared = sig
+                    .shared
+                    .iter()
+                    .map(|t| self.cx.finalize(t, &mut || {}))
+                    .collect();
+                self.ast.set_meta(
+                    node,
+                    ClosureSig {
+                        params,
+                        ret,
+                        shared,
+                        ..sig
+                    },
+                );
             }
             if let Some(sc) = self.ast.meta::<SliceCoerce>(node) {
                 let to = self.cx.finalize(&sc.to, &mut || {});
@@ -2084,10 +2141,7 @@ impl Inferer<'_> {
             // A closure / nested function used as a value: its type is its
             // signature; its body is inferred independently by the file walker.
             NodeKind::FuncExpr { .. } => self.func_sig_ty(node),
-            NodeKind::Closure { .. } => {
-                self.report(node, "closures are not implemented yet");
-                Ty::Error
-            }
+            NodeKind::Closure { .. } => self.infer_closure(node, None),
             // Type-forming and declaration nodes are not value expressions.
             _ => Ty::Error,
         }
@@ -3457,6 +3511,156 @@ impl Inferer<'_> {
         }
     }
 
+    /// Type a closure where it is written (§5.5), and answer its type.
+    ///
+    /// It is typed **inside** the body that writes it — it shares that body's
+    /// locals, and the variables inference has not solved yet — so this is an
+    /// expression like any other rather than a function of its own. A parameter
+    /// the closure did not give a type takes the one `expected` says, when it
+    /// says: the parameter a closure is passed to is where its types come from.
+    fn infer_closure(&mut self, node: NodeId, expected: Option<Ty>) -> Ty {
+        let NodeKind::Closure {
+            captures,
+            params,
+            ret,
+            body,
+        } = self.ast.node(node).kind.clone()
+        else {
+            return Ty::Error;
+        };
+        let Some(defs) = self.ast.meta::<super::ClosureDefs>(node) else {
+            return Ty::Error;
+        };
+        // A copy is typed as what it copies.
+        for c in &captures {
+            let t = match self.resolved_def(*c) {
+                Some(outer) => self.env.get(&outer).cloned().unwrap_or(Ty::Error),
+                None => Ty::Error,
+            };
+            if let Some(inner) = self.def_of(*c) {
+                self.env.insert(inner, t.clone());
+            }
+            self.types.insert(*c, t);
+        }
+        let hint = expected.and_then(|e| self.closure_hint(&e, params.len()));
+        let mut ptys = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            let NodeKind::Param { ty, .. } = self.ast.node(*p).kind.clone() else {
+                continue;
+            };
+            let hinted = hint.as_ref().and_then(|(ps, _)| ps.get(i).cloned());
+            let pty = match (ty, hinted) {
+                (Some(t), Some(h)) => {
+                    let t = self.ty_from_node(t);
+                    self.expect(*p, &h, &t);
+                    t
+                }
+                (Some(t), None) => self.ty_from_node(t),
+                (None, Some(h)) => h,
+                (None, None) => self.cx.fresh(),
+            };
+            if let Some(def) = self.def_of(*p) {
+                self.env.insert(def, pty.clone());
+            }
+            self.types.insert(*p, pty.clone());
+            ptys.push(pty);
+        }
+        let rty = match (ret, hint.and_then(|(_, r)| r)) {
+            (Some(t), _) => self.ty_from_node(t),
+            (None, Some(r)) => r,
+            (None, None) => self.cx.fresh(),
+        };
+        // Its own `return`s, and no `break` out of it into the loop around it.
+        let outer_ret = std::mem::replace(&mut self.ret, rty.clone());
+        let outer_breaks = std::mem::take(&mut self.breaks);
+        let bty = self.infer_expr(body);
+        self.expect_return(body, &bty, &rty);
+        self.ret = outer_ret;
+        self.breaks = outer_breaks;
+        let generics: Vec<DefId> = match self.func.and_then(|f| self.generics_of_func(f)) {
+            Some(g) => g
+                .params
+                .into_iter()
+                .filter(|&p| self.defs.get(p).kind == DefKind::TypeParam)
+                .collect(),
+            None => Vec::new(),
+        };
+        let args = generics
+            .iter()
+            .map(|&p| Ty::Nominal {
+                def: p,
+                args: Vec::new(),
+            })
+            .collect();
+        let shared = match self.ast.meta::<super::Captures>(node) {
+            Some(super::Captures(defs)) => defs
+                .iter()
+                .map(|d| self.env.get(d).cloned().unwrap_or(Ty::Error))
+                .collect(),
+            None => Vec::new(),
+        };
+        self.ast.set_meta(
+            node,
+            ClosureSig {
+                params: ptys,
+                ret: rty,
+                generics,
+                shared,
+            },
+        );
+        Ty::Nominal {
+            def: defs.ty,
+            args,
+        }
+    }
+
+    /// What `expected` says a closure of `arity` parameters takes and answers.
+    ///
+    /// A function pointer type says it outright. A variable says it through the
+    /// `Func` bound its call site registered for it — `apply(f: impl Func(i32))`
+    /// makes the argument's type a variable that must implement `Func.<(i32)>`,
+    /// and the obligation is still queued when the argument is typed.
+    fn closure_hint(&mut self, expected: &Ty, arity: usize) -> Option<(Vec<Ty>, Option<Ty>)> {
+        let func = self.defs.resolve_alias(self.lang.get("func")?);
+        match self.cx.shallow(expected) {
+            Ty::Func { params, ret, .. } if params.len() == arity => Some((params, Some(*ret))),
+            v @ Ty::Var(_) => {
+                let mut params = None;
+                let mut ret = None;
+                for ob in self.cx.pending().to_vec() {
+                    match ob {
+                        Obligation::Trait {
+                            self_ty,
+                            trait_def,
+                            args,
+                            ..
+                        } if trait_def == func && self.cx.shallow(&self_ty) == v => {
+                            if let Some(a) = args.first() {
+                                params = Some(tuple_elems(&self.cx.shallow(a)));
+                            }
+                        }
+                        Obligation::Projection {
+                            self_ty,
+                            trait_def,
+                            assoc,
+                            out,
+                            ..
+                        } if trait_def == func
+                            && assoc.as_str() == "Output"
+                            && self.cx.shallow(&self_ty) == v =>
+                        {
+                            ret = Some(out);
+                        }
+                        _ => {}
+                    }
+                }
+                let params = params.filter(|p| p.len() == arity)?;
+                Some((params, ret))
+            }
+            _ => None,
+        }
+    }
+
     /// Discharge an obligation on the `Func` trait (§5.5), which no impl is
     /// written for: a function pointer and a closure implement it by being what
     /// they are, and what their `Args` and `Output` are is their signature.
@@ -3522,6 +3726,22 @@ impl Inferer<'_> {
     fn func_value_sig(&mut self, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
         match self.cx.shallow(ty) {
             Ty::Func { params, ret, .. } => Some((params, *ret)),
+            Ty::Nominal { def, args } if self.defs.get(def).kind == DefKind::Closure => {
+                let d = self.defs.get(def);
+                let (file, node) = (d.file?, d.node?);
+                let sig = self.asts.get(&file)?.meta::<ClosureSig>(node)?;
+                let mut map = Subst::default();
+                for (p, a) in sig.generics.iter().zip(args) {
+                    map.tys.insert(*p, a);
+                }
+                let params = sig
+                    .params
+                    .iter()
+                    .map(|t| self.subst_type_params(t, &map))
+                    .collect();
+                let ret = self.subst_type_params(&sig.ret, &map);
+                Some((params, ret))
+            }
             Ty::Nominal { def, .. } if self.defs.get(def).kind == DefKind::TypeParam => {
                 let func = self.defs.resolve_alias(self.lang.get("func")?);
                 if !self.param_bound_traits(def).contains(&func) {
@@ -4369,7 +4589,26 @@ impl Inferer<'_> {
             };
             return self.apply_call_with(callee, &sig, args, variadic);
         }
-        let arg_tys: Vec<Option<Ty>> = args.iter().map(|a| a.map(|n| self.infer_expr(n))).collect();
+        // A closure argument is typed against the parameter it fills, first:
+        // that is where its own parameters' types come from (§5.5).
+        let wanted: Vec<Ty> = match self.cx.shallow(callee_ty) {
+            Ty::Func { params, .. } => params,
+            _ => Vec::new(),
+        };
+        let arg_tys: Vec<Option<Ty>> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                a.map(|n| match self.ast.node(n).kind {
+                    NodeKind::Closure { .. } => {
+                        let t = self.infer_closure(n, wanted.get(i).cloned());
+                        self.types.insert(n, t.clone());
+                        t
+                    }
+                    _ => self.infer_expr(n),
+                })
+            })
+            .collect();
         match self.cx.shallow(callee_ty) {
             Ty::Func { params, ret, .. } => {
                 let fits = if variadic {

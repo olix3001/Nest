@@ -404,6 +404,17 @@ pub enum Dispatch {
     Func { self_ty: Ty },
 }
 
+/// The locals and parameters of a function that a closure inside it shares
+/// (§5.5), stamped on the [`Function`].
+///
+/// A shared local outlives the frame that binds it whenever the closure does,
+/// so it lives in a cell the collector owns and the frame holds a pointer to
+/// it: that is how a closure made in a loop and called after it still reads
+/// what the loop wrote. The list may name locals of closures nested inside
+/// this function too; each function boxes only what it binds itself.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Boxed(pub Vec<DefId>);
+
 /// A bound function parameter.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Param {

@@ -214,6 +214,14 @@ impl Walk<'_> {
             // The *binding* holding the pointer has nothing to say about it.
             ExprKind::Deref { base } => match self.meta.ty_or_error(base.id) {
                 Ty::Ptr { mutable: true, .. } => None,
+                // A closure reaching into itself: what it holds by value is a
+                // `[n]` copy, which is read-only (§5.5).
+                Ty::Ptr { inner, .. }
+                    if matches!(&*inner, Ty::Nominal { def, .. }
+                        if self.defs.get(*def).kind == DefKind::Closure) =>
+                {
+                    Some(Denial::Capture { at: base.id })
+                }
                 Ty::Ptr { mutable: false, .. } => Some(Denial::Pointer { at: base.id }),
                 // Not a pointer: already diagnosed as a type error.
                 _ => None,
@@ -247,6 +255,13 @@ impl Walk<'_> {
                 format!("cannot {what} the pointee of a read-only pointer"),
                 "this is a `*T`".to_string(),
                 "writing through a pointer requires `*mut T` (§3.2)".to_string(),
+            ),
+            Denial::Capture { .. } => (
+                format!("cannot {what} a copy the closure captured"),
+                "copied here, when the closure was made".to_string(),
+                "a name in a closure's capture list (`[n]`) is a read-only copy; leave it out of \
+                 the list to share the local itself (§5.5)"
+                    .to_string(),
             ),
             Denial::Slice { .. } => (
                 format!("cannot {what} an element of a read-only slice"),
@@ -286,12 +301,17 @@ enum Denial {
     Pointer { at: IrId },
     /// An `[i]` into a `[]T`.
     Slice { at: IrId },
+    /// A closure's `[n]` copy.
+    Capture { at: IrId },
 }
 
 impl Denial {
     fn at(&self) -> IrId {
         match self {
-            Denial::Binding { at, .. } | Denial::Pointer { at } | Denial::Slice { at } => *at,
+            Denial::Binding { at, .. }
+            | Denial::Pointer { at }
+            | Denial::Slice { at }
+            | Denial::Capture { at } => *at,
         }
     }
 }

@@ -1104,6 +1104,11 @@ impl InferCtxt {
         self.obligations.push(obligation);
     }
 
+    /// The obligations still queued, to read without taking them.
+    pub fn pending(&self) -> &[Obligation] {
+        &self.obligations
+    }
+
     /// Take the pending obligations, leaving the queue empty. The solver
     /// re-registers any it could not yet decide.
     pub fn take_obligations(&mut self) -> Vec<Obligation> {

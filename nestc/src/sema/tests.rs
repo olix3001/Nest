@@ -10119,3 +10119,57 @@ fn a_call_site_is_held_to_its_callees_bounds() {
     );
     assert!(msg.contains("`S` does not implement `Show`"), "{msg}");
 }
+
+// ===< Closures (§5.5) >===
+
+/// A `::` function is a constant and never captures: naming a local of the
+/// function around it is refused, with the closure to write instead.
+#[test]
+fn a_nested_function_cannot_capture() {
+    let msg = first_error(
+        "go :: func () -> i32 {\n\
+             let n := 1\n\
+             helper :: func () -> i32 { return n }\n\
+             return helper()\n\
+         }\n",
+    );
+    assert!(msg.contains("cannot capture"), "{msg}");
+}
+
+/// A `[n]` copy is read-only, and says so rather than naming the pointer the
+/// closure reaches it through.
+#[test]
+fn a_copied_capture_is_read_only() {
+    let msg = first_error(
+        "go :: func () {\n\
+             let n := 1\n\
+             const c := { [n] in n = 2 }\n\
+             c()\n\
+         }\n",
+    );
+    assert!(msg.contains("a copy the closure captured"), "{msg}");
+}
+
+/// A closure's parameters take their types from the `Func` bound of the
+/// parameter it is passed to, so `acc + x` is typed without an annotation.
+#[test]
+fn a_closure_takes_its_types_from_the_bound_it_meets() {
+    analyze_clean(
+        "fold :: func (xs: []i32, init: i32, f: impl Func(i32, i32) -> i32) -> i32 {\n\
+             let mut acc := init\n\
+             for x in xs { acc = f(acc, x) }\n\
+             return acc\n\
+         }\n\
+         go :: func (xs: []i32) -> i32 { return fold(xs, 0) { acc, x in acc + x } }\n",
+    );
+}
+
+/// A closure whose result does not meet the bound is reported at the call.
+#[test]
+fn a_closure_is_held_to_the_bound_it_meets() {
+    let msg = first_error(
+        "apply :: func (f: impl Func(i32) -> i32) -> i32 { return f(1) }\n\
+         go :: func () -> i32 { return apply({ x in x > 0 }) }\n",
+    );
+    assert!(msg.contains("type mismatch"), "{msg}");
+}

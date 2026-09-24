@@ -2880,3 +2880,137 @@ crowded :: extern("c") func (a: i64, b: i64, c: i64, d: i64, e: i64, v: P16) -> 
         assert!(text.contains(want), "no `{want}` in:\n{text}");
     }
 }
+
+// ===< Closures (§5.5) >===
+
+/// Build `src` into an executable, run it, and answer its exit status — `None`
+/// when the runtime is not built, which every test that runs a program skips on.
+fn run_status(src: &str) -> Option<i32> {
+    crate::codegen::link::built_runtime()?;
+    let mut session = Session::with_loader(Box::new(MemLoader::new().with("main", src)));
+    let file = session.load_entry("main").expect("entry loads");
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let layouts = crate::ir::layout::Layouts::new(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        session.options.target,
+    );
+    let program = crate::lir::lower(
+        &session.defs,
+        &session.ir_meta,
+        &session.linked,
+        &layouts,
+        &session.options,
+        &session.lang_items,
+        &session.sources,
+    );
+    let dir = std::env::temp_dir()
+        .join(format!("nestc-run-tests-{}", std::process::id()))
+        .join(format!("{:x}.{}", hash(src), unique()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let object = dir.join("prog.o");
+    let exe = dir.join("prog");
+    let mut backend = LlvmBackend::default();
+    backend.target_info(None).expect("the host resolves");
+    crate::driver::write_object(
+        &mut backend,
+        &program,
+        Some(&object),
+        "main.nest",
+        true,
+        &crate::codegen::link::LinkOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("emitting:\n{e}"));
+    crate::codegen::link::link(
+        &[object],
+        &exe,
+        &crate::codegen::link::LinkOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("linking:\n{e}"));
+    let ran = std::process::Command::new(&exe).status().expect("it runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    ran.code()
+}
+
+/// A closure is called directly, through an `impl Func` parameter, and as a
+/// trailing block — and a function pointer is passed where a closure is.
+#[test]
+fn a_closure_is_called_every_way_a_function_is() {
+    let src = "apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }\n\
+               double :: func (x: i32) -> i32 { return x * 2 }\n\
+               main :: func () -> i32 {\n\
+                   const sq := { x in x * x }\n\
+                   let a := apply(double, 3)\n\
+                   let b := apply({ x in x + 1 }, 3)\n\
+                   let c := apply({ x in x - 1 }, 3)\n\
+                   return a + b + sq(3) + c\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 6 + 4 + 9 + 2);
+    }
+}
+
+/// A closure shares the locals it names: a write inside it is seen outside,
+/// and a write outside before the call is seen inside. A `[n]` copy is not.
+#[test]
+fn a_closure_shares_what_it_names_and_copies_what_it_lists() {
+    let src = "main :: func () -> i32 {\n\
+                   let mut count := 0\n\
+                   const bump := { in count = count + 1 }\n\
+                   bump()\n\
+                   bump()\n\
+                   let mut n := 10\n\
+                   const shared := { x in x + n }\n\
+                   const copied := { [n] x in x + n }\n\
+                   n = 100\n\
+                   return count + shared(1) + copied(1)\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 2 + 101 + 11);
+    }
+}
+
+/// Each pass of a loop binds its own `let`, and a closure made on a pass keeps
+/// that pass's binding rather than the last one's.
+#[test]
+fn a_closure_made_in_a_loop_keeps_its_own_pass() {
+    let src = "run :: func (f: impl Func() -> i32) -> i32 { return f() }\n\
+               main :: func () -> i32 {\n\
+                   let mut sum := 0\n\
+                   let mut i := 0\n\
+                   while i < 3 {\n\
+                       let v := i * 10\n\
+                       sum = sum + run({ in v })\n\
+                       i = i + 1\n\
+                   }\n\
+                   return sum\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 30);
+    }
+}
+
+/// A closure in a generic function is generic with it, and one closure inside
+/// another reaches what the outer one shares.
+#[test]
+fn a_closure_is_generic_with_its_function_and_nests() {
+    let src = "call :: func <F: Func() -> i32> (f: F) -> i32 { return f() }\n\
+               wrap :: func <T> (v: T, f: impl Func(T) -> i32) -> i32 {\n\
+                   const g := { in f(v) }\n\
+                   return call(g)\n\
+               }\n\
+               main :: func () -> i32 {\n\
+                   let mut k := 1\n\
+                   const outer := { in\n\
+                       const inner := { in k = k * 5 }\n\
+                       inner()\n\
+                       k\n\
+                   }\n\
+                   return outer() + wrap(7) { x in x * 3 }\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 5 + 21);
+    }
+}

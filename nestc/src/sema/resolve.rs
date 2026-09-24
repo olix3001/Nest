@@ -51,6 +51,8 @@ pub fn resolve_file(
         unsized_ok: HashSet::new(),
         decl_static: false,
         decl_comptime: false,
+        boundaries: Vec::new(),
+        owners: Vec::new(),
     };
     if let Some(root) = ast.root() {
         r.resolve_node(root);
@@ -96,6 +98,24 @@ struct Resolver<'a> {
     /// variable an unrolled `#comptime for` binds, which names a compile-time
     /// value rather than a slot.
     decl_comptime: bool,
+    /// The function literals and closures being walked, innermost last, each
+    /// with the depth of [`Resolver::scopes`] where it starts (§5.5).
+    ///
+    /// A local bound below a closure's depth and named inside it is one the
+    /// closure captures; below a `::` function's, it is one the function cannot
+    /// see at all, since a `::` never captures.
+    boundaries: Vec<Boundary>,
+    /// The canonical path of the function or closure being walked, and how many
+    /// closures it has had, so each closure gets a path of its own to be
+    /// mangled from.
+    owners: Vec<(Vec<Symbol>, u32)>,
+}
+
+/// One entry of [`Resolver::boundaries`].
+struct Boundary {
+    depth: usize,
+    /// `None` for a `::` function; the locals it captures, for a closure.
+    captures: Option<Vec<DefId>>,
 }
 
 impl Resolver<'_> {
@@ -232,6 +252,10 @@ impl Resolver<'_> {
                 body,
                 ..
             } => {
+                self.boundaries.push(Boundary {
+                    depth: self.scopes.len(),
+                    captures: None,
+                });
                 self.push_scope();
                 self.bind_generics(&generics);
                 for g in &generics {
@@ -258,21 +282,14 @@ impl Resolver<'_> {
                     self.resolve_node(b);
                 }
                 self.pop_scope();
+                self.boundaries.pop();
             }
             NodeKind::Closure {
-                params, ret, body, ..
-            } => {
-                self.push_scope();
-                for p in &params {
-                    self.resolve_node(*p);
-                    self.bind_param(*p);
-                }
-                if let Some(r) = ret {
-                    self.resolve_node(r);
-                }
-                self.resolve_node(body);
-                self.pop_scope();
-            }
+                captures,
+                params,
+                ret,
+                body,
+            } => self.resolve_closure(id, &captures, &params, ret, body),
             NodeKind::Block { stmts, tail } => {
                 self.push_scope();
                 for s in stmts {
@@ -309,7 +326,16 @@ impl Resolver<'_> {
             // as if it were a use of the name it declares, which reported
             // `cannot resolve name` on the declaration itself.
             NodeKind::ConstBind { pattern, rhs } => {
+                let owner = matches!(self.ast.node(rhs).kind, NodeKind::FuncExpr { .. })
+                    .then(|| self.owner_path(id, pattern));
+                let pushed = owner.is_some();
+                if let Some(path) = owner {
+                    self.owners.push((path, 0));
+                }
                 self.resolve_node(rhs);
+                if pushed {
+                    self.owners.pop();
+                }
                 // An abstract associated type records what its own bounds came
                 // to, on its def — the one place a later file can read them
                 // from, having no access to this one's syntax tree. See
@@ -567,20 +593,29 @@ impl Resolver<'_> {
 
     fn resolve_root(&mut self, _id: NodeId, name: &Symbol) -> Resolution {
         match name.as_str() {
-            "self" => self
-                .lookup_local(name)
-                .map(Resolution::Def)
-                .unwrap_or(Resolution::Error),
+            "self" => match self.lookup_local(name) {
+                Some(d) => {
+                    self.note_use(_id, name, d);
+                    Resolution::Def(d)
+                }
+                None => Resolution::Error,
+            },
             "Self" => self
                 .self_ty
                 .last()
                 .copied()
                 .map(Resolution::Def)
                 .unwrap_or(Resolution::Error),
-            _ => self
-                .lookup_unqualified(name)
-                .or_else(|| self.synth_primitive(name).map(Resolution::Def))
-                .unwrap_or(Resolution::Error),
+            _ => {
+                let res = self
+                    .lookup_unqualified(name)
+                    .or_else(|| self.synth_primitive(name).map(Resolution::Def))
+                    .unwrap_or(Resolution::Error);
+                if let Resolution::Def(d) = res {
+                    self.note_use(_id, name, d);
+                }
+                res
+            }
         }
     }
 
@@ -1069,6 +1104,181 @@ impl Resolver<'_> {
                 name, ty: Some(t), ..
             } => name.as_str() == "self" && self.ast.node(*t).span == node.span,
             _ => false,
+        }
+    }
+
+    /// A closure (§5.5): its defs, its capture list, and what it shares.
+    ///
+    /// The capture list is resolved **outside** the closure, since it copies
+    /// what those names hold where the closure is made; each name is then bound
+    /// again inside, to the copy. Everything else the body names from outside is
+    /// shared, and is collected as it is resolved (see [`Resolver::note_use`]).
+    fn resolve_closure(
+        &mut self,
+        id: NodeId,
+        captures: &[NodeId],
+        params: &[NodeId],
+        ret: Option<NodeId>,
+        body: NodeId,
+    ) {
+        for &c in captures {
+            let NodeKind::Capture { name } = self.ast.node(c).kind.clone() else {
+                continue;
+            };
+            let res = self.resolve_root(c, &name);
+            match res {
+                Resolution::Def(d)
+                    if matches!(self.defs.get(d).kind, DefKind::Local | DefKind::Param) =>
+                {
+                    self.ast.set_meta(c, res);
+                }
+                Resolution::Error => {
+                    self.report(c, format!("cannot resolve name `{name}`"));
+                }
+                _ => self.report(
+                    c,
+                    format!("`{name}` is not a local, so there is nothing to copy into the closure"),
+                ),
+            }
+        }
+        let defs = self.closure_defs(id);
+        self.ast.set_meta(id, defs);
+        let (path, _) = self.owners.last().cloned().unwrap_or_default();
+        let mut own = path;
+        own.push(self.defs.get(defs.ty).name.clone());
+        self.owners.push((own, 0));
+        self.boundaries.push(Boundary {
+            depth: self.scopes.len(),
+            captures: Some(Vec::new()),
+        });
+        self.push_scope();
+        for &c in captures {
+            if let NodeKind::Capture { name } = self.ast.node(c).kind.clone() {
+                self.introduce(name, DefKind::Local, c);
+            }
+        }
+        for &p in params {
+            self.resolve_node(p);
+            self.bind_param(p);
+        }
+        if let Some(r) = ret {
+            self.resolve_node(r);
+        }
+        self.resolve_node(body);
+        self.pop_scope();
+        let shared = self
+            .boundaries
+            .pop()
+            .and_then(|b| b.captures)
+            .unwrap_or_default();
+        self.owners.pop();
+        self.ast.set_meta(id, crate::sema::Captures(shared));
+    }
+
+    /// Allocate a closure's three defs: its type, named after its place in the
+    /// function that writes it; its `call`; and `call`'s first parameter.
+    fn closure_defs(&mut self, id: NodeId) -> crate::sema::ClosureDefs {
+        let span = self.ast.node(id).span;
+        let scope = self.current_ns();
+        let (mut path, n) = match self.owners.last_mut() {
+            Some((path, n)) => {
+                *n += 1;
+                (path.clone(), *n - 1)
+            }
+            None => (Vec::new(), 0),
+        };
+        let name = Symbol::new(&format!("{{closure#{n}}}"));
+        path.push(name.clone());
+        let ty = self.defs.alloc(
+            name,
+            DefKind::Closure,
+            Visibility::Private,
+            Some(scope),
+            Some(self.file),
+            Some(span),
+            Some(id),
+            path.clone(),
+        );
+        let call_name = Symbol::new("call");
+        let mut call_path = path;
+        call_path.push(call_name.clone());
+        let call = self.defs.alloc(
+            call_name.clone(),
+            DefKind::Func,
+            Visibility::Private,
+            Some(ty),
+            Some(self.file),
+            Some(span),
+            None,
+            call_path,
+        );
+        self.defs.get_mut(ty).ns.members.insert(call_name, call);
+        let this_name = Symbol::new("self");
+        let this = self.defs.alloc(
+            this_name.clone(),
+            DefKind::Param,
+            Visibility::Private,
+            Some(scope),
+            Some(self.file),
+            Some(span),
+            None,
+            vec![this_name],
+        );
+        crate::sema::ClosureDefs { ty, call, this }
+    }
+
+    /// The canonical path of the function a `::` binding defines — the one a
+    /// closure inside it is named under.
+    fn owner_path(&self, bind: NodeId, pattern: NodeId) -> Vec<Symbol> {
+        if let Some(d) = self.def_of(bind) {
+            return self.defs.get(d).canonical.clone();
+        }
+        let mut path = self.defs.get(self.current_ns()).canonical.clone();
+        if let NodeKind::BindingPat { name, .. } = &self.ast.node(pattern).kind {
+            path.push(name.clone());
+        }
+        path
+    }
+
+    /// Record a use of `def` at `at`, if it reaches across a function or a
+    /// closure (§5.5): a closure it crosses captures it, and a `::` function it
+    /// crosses cannot see it.
+    fn note_use(&mut self, at: NodeId, name: &Symbol, def: DefId) {
+        if !matches!(self.defs.get(def).kind, DefKind::Local | DefKind::Param) {
+            return;
+        }
+        let Some(frame) = self
+            .scopes
+            .iter()
+            .rposition(|f| f.get(name) == Some(&def))
+        else {
+            return;
+        };
+        let mut crossed_item = false;
+        for b in self.boundaries.iter_mut().rev() {
+            if frame >= b.depth {
+                break;
+            }
+            match &mut b.captures {
+                Some(caps) => {
+                    if !caps.contains(&def) {
+                        caps.push(def);
+                    }
+                }
+                None => {
+                    crossed_item = true;
+                    break;
+                }
+            }
+        }
+        if crossed_item {
+            self.report(
+                at,
+                format!(
+                    "`{name}` belongs to the function around this one, and a `::` function \
+                     cannot capture it; bind a closure instead: `const f := {{ x in ... }}`"
+                ),
+            );
         }
     }
 

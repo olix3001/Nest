@@ -6,8 +6,8 @@ File
   ConstBind ::
     BindingPat apply
     FuncExpr
-      Param f:
-        ImplType
+      GenericTypeParam impl#0
+        Bounds +
           TypePath
             Path `Func`
             TupleType
@@ -16,6 +16,15 @@ File
             AssocBinding Output =
               TypePath
                 Path `i32`
+      GenericTypeParam impl#1
+        Bounds +
+          TypePath
+            Path `Display`
+          TypePath
+            Path `Debug`
+      Param f:
+        TypePath
+          Path `impl#0`
       Param g:
         PtrType *
           DynType dyn
@@ -25,11 +34,8 @@ File
               AssocBinding Output =
                 TupleType
       Param h:
-        ImplType
-          TypePath
-            Path `Display`
-          TypePath
-            Path `Debug`
+        TypePath
+          Path `impl#1`
       Block
   ConstBind ::
     BindingPat sum

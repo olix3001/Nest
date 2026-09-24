@@ -1161,7 +1161,7 @@ fn item(s: &Session, def: DefId, snippets: bool) -> CompletionItem {
     let real = target(s, def);
     let kind = match s.defs.get(real).kind {
         DefKind::Namespace | DefKind::External | DefKind::Import => CompletionItemKind::MODULE,
-        DefKind::Struct => CompletionItemKind::STRUCT,
+        DefKind::Struct | DefKind::Closure => CompletionItemKind::STRUCT,
         DefKind::Enum => CompletionItemKind::ENUM,
         DefKind::Trait => CompletionItemKind::INTERFACE,
         DefKind::TypeAlias | DefKind::Primitive => CompletionItemKind::CLASS,

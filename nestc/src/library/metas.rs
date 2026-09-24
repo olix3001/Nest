@@ -15,15 +15,18 @@ use serde::{Deserialize, Serialize};
 use crate::common::meta::MetaStore;
 use crate::common::source::FileSpan;
 use crate::ir::const_eval::ConstValue;
-use crate::ir::{DefaultValue, ImplicitCast};
+use crate::ir::{Boxed, DefaultValue, ImplicitCast};
 use crate::sema::def::Directive;
 use crate::sema::infer::{
-    ArgOrder, Coercion, ConstSlotReported, DistinctRecv, DynCoerce, Generics, IndexWrite,
+    ArgOrder, ClosureSig, Coercion, ConstSlotReported, DistinctRecv, DynCoerce, FuncCall,
+    Generics, IndexWrite,
     Instantiation, MethodRes, OpResolution, RangeReported, SliceCoerce, TyPathReported, Upcast,
     VariantTag,
 };
 use crate::sema::ty::Ty;
-use crate::sema::{DefMeta, PathRes, Resolution, Signature, SpreadBase};
+use crate::sema::{
+    Captures, ClosureDefs, DefMeta, PathRes, Resolution, Signature, SpreadBase,
+};
 
 macro_rules! persisted {
     ($($name:ident($ty:ty)),* $(,)?) => {
@@ -99,6 +102,11 @@ persisted! {
     ConstSlotReported(ConstSlotReported),
     TyPathReported(TyPathReported),
     VariantTag(VariantTag),
+    FuncCall(FuncCall),
+    ClosureSig(ClosureSig),
+    ClosureDefs(ClosureDefs),
+    Captures(Captures),
+    Boxed(Boxed),
 }
 
 /// Caches, and what monomorphization decides: rebuilt by whoever asks, so a

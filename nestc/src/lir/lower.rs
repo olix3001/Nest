@@ -1768,6 +1768,12 @@ struct Lowerer<'a, 'c> {
     local_tys: Vec<Ty>,
     /// Where each bound name lives.
     local_of: HashMap<DefId, LocalId>,
+    /// The locals a closure shares, which live in a cell (§5.5): this
+    /// function's [`crate::ir::Boxed`] list.
+    shared: std::collections::HashSet<DefId>,
+    /// The cell each shared local was moved into once it was bound. A use of
+    /// one is a use of the cell's contents from then on.
+    boxed: HashMap<DefId, LocalId>,
     blocks: Vec<PartialBlock>,
     /// The block statements are currently appended to.
     at: BlockId,
@@ -1800,12 +1806,19 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             _ => Ty::Void,
         };
         let unguarded = cx.meta.has_directive(f.id, "unsafe");
+        let shared = cx
+            .meta
+            .get::<crate::ir::Boxed>(f.id)
+            .map(|b| b.0.into_iter().collect())
+            .unwrap_or_default();
         Lowerer {
             cx,
             f,
             locals: Vec::new(),
             local_tys: Vec::new(),
             local_of: HashMap::new(),
+            shared,
+            boxed: HashMap::new(),
             blocks: Vec::new(),
             at: BlockId(0),
             loops: Vec::new(),
@@ -1842,6 +1855,14 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         if let Some(body) = &self.f.body {
             let entry = self.new_block(Some("entry".to_string()));
             self.at = entry;
+            // A parameter a closure shares moves into its cell first thing.
+            for p in &self.f.params {
+                if let Some(&id) = self.local_of.get(&p.def) {
+                    let ty = self.cx.ty_of(p.id);
+                    let span = self.cx.meta.span(p.id);
+                    self.box_if_shared(p.def, id, &ty, span);
+                }
+            }
             // The body's tail value is the function's result, so a body that
             // falls off the end returns it. One that ended in a `return` has
             // already terminated its block and this does nothing.
@@ -1996,6 +2017,38 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 label: b.label,
             })
             .collect()
+    }
+
+    /// Move a just-bound local a closure shares into a cell of its own (§5.5):
+    /// allocate one, copy the value in, and read and write the cell from here
+    /// on. A local nothing shares is left where it is.
+    ///
+    /// Each binding gets a fresh cell — a `let` in a loop body, a `for` loop's
+    /// variable — so a closure made on one pass keeps that pass's binding
+    /// rather than seeing the next one's.
+    fn box_if_shared(&mut self, def: DefId, local: LocalId, ty: &Ty, span: Option<FileSpan>) {
+        if !self.shared.contains(&def) {
+            return;
+        }
+        let cell_ty = Ty::Ptr {
+            mutable: true,
+            inner: Box::new(ty.clone()),
+        };
+        let cell = self.new_local(None, &cell_ty, span);
+        self.push(
+            LirStmtKind::Call {
+                dest: Some(Place::local(cell)),
+                callee: Callee::Intrinsic(Intrinsic::New),
+                args: Vec::new(),
+            },
+            span,
+        );
+        self.assign(
+            Place::local(cell).then(Projection::Deref),
+            Rvalue::Use(Operand::Copy(Place::local(local))),
+            span,
+        );
+        self.boxed.insert(def, cell);
     }
 
     fn assign(&mut self, place: Place, value: Rvalue, span: Option<FileSpan>) {
@@ -2304,6 +2357,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     Rvalue::Use(Operand::Copy(from.clone())),
                     span,
                 );
+                self.box_if_shared(*def, id, ty, span);
             }
             PatternKind::At { binding, pattern } => {
                 if is_void(ty) {
@@ -2317,6 +2371,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     Rvalue::Use(Operand::Copy(from.clone())),
                     span,
                 );
+                self.box_if_shared(binding.def, id, ty, span);
                 self.bind_irrefutable(pattern, from, ty);
             }
             PatternKind::Tuple(ps) | PatternKind::TupleStruct { elems: ps, .. } => {
@@ -4186,7 +4241,10 @@ impl<'a, 'c> Lowerer<'a, 'c> {
     /// what makes `(a + b).x` need no special case anywhere downstream.
     fn place_of(&mut self, e: &Expr) -> Option<Place> {
         match &e.kind {
-            ExprKind::Local(def) => self.local_of.get(def).copied().map(Place::local),
+            ExprKind::Local(def) => match self.boxed.get(def) {
+                Some(&cell) => Some(Place::local(cell).then(Projection::Deref)),
+                None => self.local_of.get(def).copied().map(Place::local),
+            },
             // A `#static` is the one global with a region of its own. A `::`
             // constant *is* its value (§2.5) and has no address, so a place is
             // made for it the way one is made for any other value that needs
@@ -4858,6 +4916,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                     Rvalue::Use(Operand::Copy(place.clone())),
                     span,
                 );
+                self.box_if_shared(binding.def, id, ty, span);
                 self.test_pattern(place, inner, ty, fail);
             }
             PatternKind::Lit(l) => {
