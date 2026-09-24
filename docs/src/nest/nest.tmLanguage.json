@@ -1,0 +1,205 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Nest",
+  "scopeName": "source.nest",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#attributes" },
+    { "include": "#directives" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#builtin-types" },
+    { "include": "#types" },
+    { "include": "#functions" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.nest",
+          "match": "//.*$"
+        },
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.nest",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [{ "include": "#block-comment" }]
+    },
+    "attributes": {
+      "name": "entity.other.attribute-name.nest",
+      "match": "@[A-Za-z_][A-Za-z0-9_]*"
+    },
+    "directives": {
+      "patterns": [
+        {
+          "name": "keyword.control.when.nest",
+          "match": "#when\\b"
+        },
+        {
+          "name": "keyword.other.directive.nest",
+          "match": "#[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        { "include": "#f-string" },
+        { "include": "#c-string" },
+        { "include": "#byte-string" },
+        { "include": "#plain-string" },
+        { "include": "#char-literal" }
+      ]
+    },
+    "plain-string": {
+      "name": "string.quoted.double.nest",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "include": "#escape-sequence" }]
+    },
+    "byte-string": {
+      "name": "string.quoted.double.byte.nest",
+      "begin": "b\"",
+      "end": "\"",
+      "patterns": [{ "include": "#escape-sequence" }]
+    },
+    "c-string": {
+      "name": "string.quoted.double.c.nest",
+      "begin": "c\"",
+      "end": "\"",
+      "patterns": [{ "include": "#escape-sequence" }]
+    },
+    "f-string": {
+      "name": "string.interpolated.nest",
+      "begin": "f\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.nest",
+          "match": "\\{\\{|\\}\\}"
+        },
+        {
+          "name": "meta.interpolation.nest",
+          "begin": "\\{",
+          "end": "\\}",
+          "patterns": [
+            { "include": "#format-spec" },
+            { "include": "$self" }
+          ]
+        },
+        { "include": "#escape-sequence" }
+      ]
+    },
+    "format-spec": {
+      "name": "keyword.other.format-spec.nest",
+      "match": ":[^}\"\\n]*"
+    },
+    "escape-sequence": {
+      "name": "constant.character.escape.nest",
+      "match": "\\\\(x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\}|[nrt0\\\\'\"])"
+    },
+    "char-literal": {
+      "name": "string.quoted.single.nest",
+      "match": "'([^'\\\\\\n]|\\\\(x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\}|[nrt0\\\\'\"]))'"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.nest",
+          "match": "\\b0[xX][0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.octal.nest",
+          "match": "\\b0[oO][0-7_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.nest",
+          "match": "\\b0[bB][01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.nest",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*([eE][+-]?[0-9_]+)?|[eE][+-]?[0-9_]+)\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.nest",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.nest",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "variable.language.nest",
+          "match": "\\b(self|Self)\\b"
+        },
+        {
+          "name": "keyword.control.nest",
+          "match": "\\b(if|else|match|while|loop|for|in|break|continue|return|defer)\\b"
+        },
+        {
+          "name": "keyword.operator.word.nest",
+          "match": "\\b(not|and|or)\\b"
+        },
+        {
+          "name": "keyword.other.nest",
+          "match": "\\b(let|const|mut|func|impl|extern|namespace|distinct|struct|enum|trait|dyn|import|static)\\b"
+        }
+      ]
+    },
+    "builtin-types": {
+      "name": "support.type.builtin.nest",
+      "match": "\\b(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|isize|usize|f16|f32|f64|f128|bool|char|str|void|never|opaque|comptime_int|comptime_float|type)\\b"
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.nest",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "comment": "name :: func (…) — a function binding",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*::\\s*(#[A-Za-z_][A-Za-z0-9_]*\\s*)*(extern\\s*\\([^)]*\\)\\s*)?func\\b)",
+          "name": "entity.name.function.nest"
+        },
+        {
+          "comment": "a call expression's callee",
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\b(?=\\s*\\()",
+          "name": "entity.name.function.call.nest"
+        }
+      ]
+    },
+    "operators": {
+      "name": "keyword.operator.nest",
+      "match": "::|:=|->|=>|\\.<|\\.\\?|\\.!|\\.\\*|\\.\\.<|\\.\\.=|\\.\\.|&&|\\|\\||==|!=|<=|>=|<<|>>|\\+=|-=|\\*=|/=|%=|[+\\-*/%&|^~!<>=]"
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.nest",
+          "match": "[,:;]"
+        },
+        {
+          "name": "punctuation.definition.nest",
+          "match": "[(){}\\[\\]]"
+        },
+        {
+          "name": "punctuation.accessor.nest",
+          "match": "\\."
+        }
+      ]
+    }
+  }
+}

@@ -166,6 +166,17 @@ test-twig:
         echo "twig is not built — skipping its tests"; \
     fi
 
+# ===< Docs >===
+
+# The docs website (Astro + Starlight, in `docs/`). Needs `pnpm`.
+[doc("Run the docs site locally, with live reload.")]
+docs:
+    cd {{ root }}/docs && pnpm install && pnpm dev
+
+[doc("Build the docs site to `docs/dist/`.")]
+docs-build:
+    cd {{ root }}/docs && pnpm install && pnpm build
+
 # ===< Housekeeping >===
 
 # Check the tools a build needs, and say which is missing rather than failing

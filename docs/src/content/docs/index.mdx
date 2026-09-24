@@ -1,0 +1,37 @@
+---
+title: Nest
+description: A modern, garbage-collected, LLVM-compiled programming language.
+template: splash
+hero:
+  tagline: A compiled, garbage-collected language that compiles to LLVM. Readable syntax, a strong type system, and first-class C interop.
+  actions:
+    - text: Get started
+      link: /getting-started/
+      icon: right-arrow
+    - text: The language
+      link: /language/bindings/
+      icon: document
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid stagger>
+	<Card title="Garbage collected, still compiled" icon="rocket">
+		Nest compiles to native code through LLVM, but memory is managed for you —
+		pointers are never null and are always live while reachable.
+	</Card>
+	<Card title="One binding form, `::`" icon="pencil">
+		Constants, types, functions, traits and namespaces are all bound with the
+		same `::` — there is no separate keyword per kind of declaration.
+	</Card>
+	<Card title="Direct C interop" icon="setting">
+		`core/c` types are aliases for Nest's own — a C call has no marshalling
+		layer, and `extern("c")` declarations read like the header they came from.
+	</Card>
+	<Card title="Closures and trait objects, no new mechanism" icon="puzzle">
+		Closures are an ordinary type implementing `Func`; a `dyn` trait object is
+		a fat pointer. Nothing here is a feature the rest of the type system
+		couldn't already express.
+	</Card>
+</CardGrid>
