@@ -448,7 +448,10 @@ use_adder :: func () -> i32 {{
         &file,
         position(&text, "add5(1)", 0, 0),
     ));
-    assert!(add5.contains("add5: impl core.ops.Func(i32) -> i32"), "{add5}");
+    assert!(
+        add5.contains("add5: impl core.ops.Func(i32) -> i32"),
+        "{add5}"
+    );
 }
 
 /// Go-to-definition lands on the name: a function's, and a field's.

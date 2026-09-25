@@ -752,15 +752,14 @@ fn opaque_bounds(
     let d = defs.get(def);
     // The pins sit on the parameters `introduce_bound_projections` added to
     // the type's namespace, one per associated type of each bound.
-    let mut assoc: Vec<(DefId, Symbol, Ty)> = d
-        .ns
-        .members
-        .values()
-        .filter_map(|&m| {
-            let proj = defs.get(m).projection.as_ref()?;
-            Some((proj.trait_def, proj.assoc.clone(), pinned(m)?))
-        })
-        .collect();
+    let mut assoc: Vec<(DefId, Symbol, Ty)> =
+        d.ns.members
+            .values()
+            .filter_map(|&m| {
+                let proj = defs.get(m).projection.as_ref()?;
+                Some((proj.trait_def, proj.assoc.clone(), pinned(m)?))
+            })
+            .collect();
     assoc.sort_by(|a, b| a.1.as_str().cmp(b.1.as_str()));
     let bounds = d.param_bounds.clone().unwrap_or_default();
     bounds
@@ -773,7 +772,12 @@ fn opaque_bounds(
                     .find(|(t, a, _)| *t == b && a.as_str() == n)
                     .map(|(_, _, ty)| ty)
             };
-            if defs.get(b).lang.as_ref().is_some_and(|l| l.as_str() == "func") {
+            if defs
+                .get(b)
+                .lang
+                .as_ref()
+                .is_some_and(|l| l.as_str() == "func")
+            {
                 let params = match of("Args") {
                     Some(Ty::Tuple(elems)) => elems
                         .iter()
