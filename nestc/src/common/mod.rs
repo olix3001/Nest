@@ -1,5 +1,6 @@
 pub mod diagnostic;
 pub mod emitter;
+pub mod install;
 pub mod meta;
 pub mod options;
 pub mod source;

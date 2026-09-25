@@ -85,7 +85,25 @@ impl Default for LinkOptions {
 /// machine" rather than fail: the runtime needs a C compiler at build time, and
 /// the compiler itself does not.
 pub fn built_runtime() -> Option<PathBuf> {
-    RUNTIME.map(PathBuf::from).filter(|p| p.exists())
+    crate::common::install::shipped("libnest_runtime.a")
+        .or_else(|| RUNTIME.map(PathBuf::from).filter(|p| p.exists()))
+}
+
+/// The collector's link-line arguments: the `libgc.a` an installed compiler
+/// ships (with `-lpthread` on Linux, which a static one needs), or what
+/// `build.rs` found.
+fn gc_args() -> Vec<String> {
+    if let Some(lib) = crate::common::install::shipped("libgc.a") {
+        let mut args = vec![lib.to_string_lossy().into_owned()];
+        if cfg!(target_os = "linux") {
+            args.push("-lpthread".to_string());
+        }
+        return args;
+    }
+    GC.into_iter()
+        .flat_map(|l| l.split('\t'))
+        .map(str::to_string)
+        .collect()
 }
 
 impl LinkOptions {
@@ -160,7 +178,7 @@ pub fn link(objects: &[PathBuf], out: &Path, options: &LinkOptions) -> Result<()
     let runtime = options.runtime_path()?;
     let mut command = Command::new(&options.linker);
     command.args(objects).arg(&runtime);
-    command.args(GC.into_iter().flat_map(|l| l.split('\t')));
+    command.args(gc_args());
     command.arg("-o").arg(out);
     command.args(&options.args);
     // After the objects, which is where a linker that resolves left to right

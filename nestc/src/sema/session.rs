@@ -37,6 +37,9 @@ pub fn default_core_path() -> String {
     if let Ok(p) = std::env::var("NEST_CORE") {
         return p;
     }
+    if let Some(p) = crate::common::install::shipped("packages/core/package.nest") {
+        return p.to_string_lossy().into_owned();
+    }
     // `nestc/` sits next to `packages/` in the repository, which is where
     // every shipped package (`core`, and later `std`, `c`, ...) lives.
     format!(
@@ -59,6 +62,9 @@ pub fn default_core_path() -> String {
 pub fn default_std_path() -> String {
     if let Ok(p) = std::env::var("NEST_STD") {
         return p;
+    }
+    if let Some(p) = crate::common::install::shipped("packages/std/package.nest") {
+        return p.to_string_lossy().into_owned();
     }
     format!(
         "{}/../packages/std/package.nest",
