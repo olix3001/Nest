@@ -39,10 +39,24 @@ if n == 0 { put_byte(48) return }    // error: expected `;` or a newline
    still inside the outer comment */
 ```
 
-Block comments nest. There are no doc-comment semantics baked into the lexer;
-tooling may treat a `//` comment immediately preceding a declaration as
-documentation, `///` may be used by external tools, as lexer treats this
-like a normal comment. Custom attributes may be used for auto-generating docs.
+Block comments nest.
+
+**Doc comments.** A run of `///` lines directly above a declaration — a
+namespace item, a struct field, an enum variant, a trait member — is that
+declaration's documentation, and is **sugar for the attribute `@doc("…")`**
+(§9.2) whose text is the lines without their `///` and one following space,
+joined by newlines. The lexer still skips them as comments; the parser reads
+them where a declaration's attributes begin. A plain `//` line between the doc
+and the declaration ends the doc; `////` is a plain comment; a `///` anywhere
+else (inside a body) is only a comment.
+
+```
+/// A point in the plane.
+@public Point :: struct { x: i32, y: i32 }
+
+@doc("A point in the plane.")          // the same declaration, written out
+@public Point :: struct { x: i32, y: i32 }
+```
 
 ## 1.3 Identifiers
 

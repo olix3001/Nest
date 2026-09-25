@@ -18,7 +18,7 @@ usage: nestc [options] <file.nest>
 |---|---|
 | `-o <path>` | where to write the output; with several codegen units, the base each unit's name is appended to |
 | `--target <triple>` | the machine to generate code for (default: the host) |
-| `--emit <list>` | comma-separated: `link` (default, a linked executable), `ast`/`ir`/`mono`/`lir` (compiler dumps, to stdout), `obj`/`asm`/`backend-ir` (backend output, to files), `nlib` (the package as a library — metadata, IR, objects). `kind=path` sends one to a file. |
+| `--emit <list>` | comma-separated: `link` (default, a linked executable), `ast`/`ir`/`mono`/`lir` (compiler dumps, to stdout), `obj`/`asm`/`backend-ir` (backend output, to files), `nlib` (the package as a library — metadata, IR, objects), `metadata` (the package's public items with their `///` docs, as JSON for a documentation generator — see below). `kind=path` sends one to a file. |
 | `-L <dir>` | a directory to search for packages; repeatable, in order |
 | `-l <name>` | a C library to link against, as the linker names it; repeatable |
 | `--link-search <dir>` | a directory to look for those libraries in |
@@ -76,7 +76,8 @@ Options:
 | `--bin <name>` | build or run only this binary |
 | `--deps` | build: only the libraries the package depends on |
 | `-v`, `--verbose` | print each compiler command before running it |
-| `--emit <list>` | build, run: also write the compiler's dumps for the package's own targets beside their objects, in `build/<profile>/obj`: `ast`, `ir`, `mono`, `lir`, `llvm-ir`, `asm` |
+| `--emit <list>` | build, run: also write the compiler's dumps for the package's own targets beside their objects, in `build/<profile>/obj`: `ast`, `ir`, `mono`, `lir`, `llvm-ir`, `asm`, `metadata` |
+| `--emit-only` | build: write the `--emit` list and nothing else for the package's library (its binaries when it has none) — no library, no link. Dependencies are still built |
 | `--build-dir <dir>` | build, run, test, metadata: where the build writes, instead of the package's own `build/` |
 | `--nestc-arg <arg>` | build, run, test: one more argument for `nestc`, last on the command line, on the package's own targets only; repeatable. `[build]` in `nest.toml` is the same thing written down |
 | `--lib` | `new`, `init`: a library rather than a binary |
@@ -116,3 +117,28 @@ link-search = ["/opt/homebrew/lib"]
 A dependency is a `path` for now — the table is a table rather than a
 string so `version` and `git` have somewhere to go once there's a
 registry.
+
+## Package metadata for documentation
+
+`nestc --emit metadata` (or `twig build --emit metadata --emit-only`, which
+writes `build/<profile>/obj/lib/<name>/<name>.json`) describes a package as
+JSON: every public item reachable from its root, walked through its public
+namespaces in declaration order. It is the input a documentation site is
+generated from, so every entry carries what such a page needs:
+
+- `name`, `path` (the public path it is described under), `kind`
+  (`namespace`, `struct`, `enum`, `trait`, `type`, `func`, `const`,
+  `overload`, and `assoc`/`assoc_type`/`assoc_const` inside a trait),
+  `visibility`, and `defined_at` when the canonical path differs;
+- `doc` — the item's `@doc`, which is what its `///` comment is — and
+  `summary`, the doc's first paragraph on one line;
+- `declaration` (the source up to the body), `location` (`file`, `line`,
+  `column`), and the other `attributes` written on it;
+- per kind: `members` (a namespace's, a trait's), `fields` and `variants` with
+  their types and docs, `methods` and `impls` (the traits a type
+  implements), `params`/`returns`/`generics`/`method` for a function.
+
+A name re-exported in several places is described once, where the walk first
+meets it, and elsewhere as `{ "name", "path", "reexport": "<first path>" }`.
+The top level is `{ "format": 1, "package": "<name>", "root": { ... } }`;
+`format` is bumped when a field changes meaning or goes away.

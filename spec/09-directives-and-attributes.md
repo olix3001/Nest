@@ -168,6 +168,20 @@ tests :: #when(test) namespace {
 }
 ```
 
+### `@doc`
+
+`@doc("text")` is a declaration's documentation, and `///` lines are the usual
+way to write it (§1.2). It is `core`'s `#lang("doc")` attribute (`doc ::
+struct { text: str }`, re-exported from `<core/reflect>`), and the compiler
+finds it **by that tag**: `@doc` and `///` mean it in every file, whether or not
+the name `doc` is in scope there, unless the program declares an `@attribute`
+of its own named `doc`.
+
+It changes nothing about how the declaration compiles. It is recorded on the
+declaration like any attribute, so the language server shows it on hover,
+`nestc --emit metadata` writes it into the package's description, and
+reflection reads it (`attr_of.<doc>(type_info.<T>().attrs)`).
+
 ### User-defined attributes
 
 Any `@name` that is not a built-in visibility attribute is a **user attribute**:

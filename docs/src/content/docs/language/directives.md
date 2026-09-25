@@ -47,6 +47,35 @@ See [Namespaces and packages](../namespaces/) for the full table and
 
 `@test` marks a function as a test — see [Testing](../testing/).
 
+## `@doc` and `///`
+
+`///` lines above a declaration — an item, a field, an enum variant, a trait
+member — are its documentation. They are sugar for one attribute, `@doc`,
+whose text is the lines without their slashes:
+
+```nest
+/// A point in the plane.
+///
+/// Both coordinates are in pixels.
+@public(all)
+Point :: struct {
+    /// Across.
+    x: i32,
+    y: i32,
+}
+
+@doc("The same, written out.")
+origin :: func () -> Point { return Point { x: 0, y: 0 } }
+```
+
+`@doc` is `core`'s (`#lang("doc")`, re-exported from `<core/reflect>`), and
+`///` means it in every file whether or not the name `doc` is in scope. A
+plain `//` line between the doc and the item ends the doc; `////` is a plain
+comment. Inside a function body a `///` is only a comment. The language
+server shows the text on hover, `nestc --emit metadata` writes it out (see
+[the toolchain](../../toolchain/)), and reflection reads it like any attribute:
+`attr_of.<doc>(type_info.<Point>().attrs)`.
+
 ## Conditional compilation — `#when`
 
 `#when(condition)` on any declaration compiles it only when `condition`
