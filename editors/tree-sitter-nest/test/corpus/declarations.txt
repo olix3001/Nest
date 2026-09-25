@@ -244,3 +244,69 @@ add :: func { add_i32, math.add_f64 }
         (field_expression
           (identifier)
           (field_identifier))))))
+
+==============================
+Bounds on Self and a pointer type in a tuple
+==============================
+
+T :: trait {
+  m :: func <Self: Sized, Self.Item: Ord> (self: Self) {}
+}
+impl <K, V> I for M.<K, V> {
+  Item :: (K, *mut V)
+}
+
+---
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (trait_type
+        (item_body
+          (declaration
+            (const_binding
+              (identifier)
+              (func_expression
+                (generic_parameters
+                  (generic_parameter
+                    (type_identifier)
+                    (bounds
+                      (type_path
+                        (type_identifier))))
+                  (generic_parameter
+                    (type_identifier)
+                    (type_identifier)
+                    (bounds
+                      (type_path
+                        (type_identifier)))))
+                (parameters
+                  (parameter
+                    (identifier)
+                    (type_path
+                      (type_identifier))))
+                (block))))))))
+  (impl_block
+    (generic_parameters
+      (generic_parameter
+        (type_identifier))
+      (generic_parameter
+        (type_identifier)))
+    (type_path
+      (type_identifier))
+    (type_path
+      (type_identifier)
+      (generic_arguments
+        (type_path
+          (type_identifier))
+        (type_path
+          (type_identifier))))
+    (item_body
+      (declaration
+        (const_binding
+          (identifier)
+          (tuple_expression
+            (identifier)
+            (pointer_type
+              (type_path
+                (type_identifier)))))))))

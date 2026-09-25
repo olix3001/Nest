@@ -1550,6 +1550,16 @@
           }
         ]
       },
+      "member": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      },
       "name": {
         "multiple": false,
         "required": true,
@@ -2532,6 +2542,10 @@
       "types": [
         {
           "type": "_expression",
+          "named": true
+        },
+        {
+          "type": "pointer_type",
           "named": true
         }
       ]

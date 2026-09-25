@@ -330,6 +330,16 @@ module.exports = grammar({
         optional(seq(':', field('bounds', $.bounds))),
       ),
       seq('const', field('name', $.identifier), ':', field('type', $._type)),
+      // `Self.Item: Ord` on a trait's method (§3.4) — a bound on one of the
+      // trait's associated types, not a parameter. `Self: Sized` is the first
+      // form above.
+      seq(
+        field('name', alias($.identifier, $.type_identifier)),
+        '.',
+        field('member', alias($.identifier, $.type_identifier)),
+        ':',
+        field('bounds', $.bounds),
+      ),
     ),
 
     bounds: $ => prec.right(seq($._type, repeat(seq('+', $._type)))),
@@ -487,10 +497,15 @@ module.exports = grammar({
 
     parenthesized_expression: $ => seq('(', $._expression, ')'),
 
+    // An element may be a pointer type: `Item :: (K, *mut V)` in an impl is a
+    // tuple of types, written where the right side of `::` is read as a value.
+    // No expression begins with `*` (a dereference is the postfix `.*`).
     tuple_expression: $ => choice(
       seq('(', ')'),
-      seq('(', $._expression, ',', commaSep($._expression), ')'),
+      seq('(', $._tuple_element, ',', commaSep($._tuple_element), ')'),
     ),
+
+    _tuple_element: $ => choice($._expression, $.pointer_type),
 
     anonymous_composite: $ => seq('.{', optional($._composite_body), '}'),
 
