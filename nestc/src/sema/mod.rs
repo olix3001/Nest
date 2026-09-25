@@ -1299,7 +1299,17 @@ fn resolve_one(session: &mut Session, file: FileId) {
         ..
     } = &mut *session;
     let ast = &asts[&file];
-    resolve::resolve_file(defs, diagnostics, ast, file, ns, &globs, builtins, pkg_of, doc);
+    resolve::resolve_file(
+        defs,
+        diagnostics,
+        ast,
+        file,
+        ns,
+        &globs,
+        builtins,
+        pkg_of,
+        doc,
+    );
 }
 
 fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {

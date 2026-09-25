@@ -3141,12 +3141,18 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 _ => return vals,
             },
         };
-        vals.extend(elems.iter().enumerate().filter(|(_, t)| !is_void(t)).map(|(i, _)| {
-            Operand::Copy(place.clone().then(Projection::Field {
-                index: i as u32,
-                name: Symbol::new(&i.to_string()),
-            }))
-        }));
+        vals.extend(
+            elems
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !is_void(t))
+                .map(|(i, _)| {
+                    Operand::Copy(place.clone().then(Projection::Field {
+                        index: i as u32,
+                        name: Symbol::new(&i.to_string()),
+                    }))
+                }),
+        );
         vals
     }
 

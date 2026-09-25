@@ -227,8 +227,9 @@ main :: func () { }
 @public(all) Wrap :: struct <S> { inner: S }
 first :: func <S: Source> (w: Wrap.<S>) -> Option.<S.Item> { return .none }
 ";
-    let mut session =
-        Session::with_loader(Box::new(MemLoader::new().with("main", mainsrc).with("b", bsrc)));
+    let mut session = Session::with_loader(Box::new(
+        MemLoader::new().with("main", mainsrc).with("b", bsrc),
+    ));
     let file = session.load_entry("main").unwrap();
     analyze(&mut session, file);
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
@@ -6646,7 +6647,10 @@ fn try_propagate_works_on_an_option() {
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
-    assert!(ir.contains("core.types.option.Option.from_residual"), "{ir}");
+    assert!(
+        ir.contains("core.types.option.Option.from_residual"),
+        "{ir}"
+    );
 }
 
 #[test]
@@ -7040,7 +7044,10 @@ main :: func () {
     let ir = ir_text(src);
     assert!(ir.contains("$cast(\"hi\": comptime_str): []u8"), "{ir}");
     assert!(ir.contains("$cast(\"hi\": comptime_str): []char"), "{ir}");
-    assert!(ir.contains("$cast(\"hi\": comptime_str): core.types.str"), "{ir}");
+    assert!(
+        ir.contains("$cast(\"hi\": comptime_str): core.types.str"),
+        "{ir}"
+    );
 }
 
 /// A literal lives in read-only data, so a mutable view of it is not one of the
@@ -9493,10 +9500,10 @@ fn importing_a_name_a_namespace_does_not_publish_is_reported() {
         .collect();
     assert_eq!(messages.len(), 2, "{messages:#?}");
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("`core.types.num` has no member `wrapping_sub`")
-                && m.contains("a method is reached through a value of its type")),
+        messages.iter().any(
+            |m| m.contains("`core.types.num` has no member `wrapping_sub`")
+                && m.contains("a method is reached through a value of its type")
+        ),
         "{messages:#?}"
     );
     assert!(
@@ -10509,7 +10516,14 @@ doc :: func () -> i32 {
         let def = session
             .defs
             .iter()
-            .find(|d| d.canonical.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".").ends_with(path))
+            .find(|d| {
+                d.canonical
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".")
+                    .ends_with(path)
+            })
             .unwrap_or_else(|| panic!("no def `{path}`"));
         session.doc_of(def.id)
     };

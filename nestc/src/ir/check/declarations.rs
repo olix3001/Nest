@@ -187,7 +187,13 @@ fn collect_nominals(defs: &DefTable, meta: &Meta, linked: &Linked, ty: &Ty, out:
 /// Whether the generic type `def` has one of its type parameters among what it
 /// holds by value — directly, or through a generic it holds that does.
 fn holds_a_parameter(defs: &DefTable, meta: &Meta, linked: &Linked, def: DefId) -> bool {
-    fn walk(defs: &DefTable, meta: &Meta, linked: &Linked, ty: &Ty, seen: &mut HashSet<DefId>) -> bool {
+    fn walk(
+        defs: &DefTable,
+        meta: &Meta,
+        linked: &Linked,
+        ty: &Ty,
+        seen: &mut HashSet<DefId>,
+    ) -> bool {
         match ty {
             Ty::Nominal { def, args } => {
                 if defs.get(*def).kind == crate::sema::def::DefKind::TypeParam {

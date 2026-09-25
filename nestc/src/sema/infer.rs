@@ -4073,7 +4073,9 @@ impl Inferer<'_> {
         // `Func` obligation is met by having one.
         if let (Some(out), Obligation::Projection { assoc, .. }) = (out, ob) {
             let have = match assoc.as_str() {
-                "Args" => self.unpinned_args(&s).unwrap_or_else(|| args_tuple(&params)),
+                "Args" => self
+                    .unpinned_args(&s)
+                    .unwrap_or_else(|| args_tuple(&params)),
                 _ => ret,
             };
             self.expect(origin, &have, out);
@@ -4497,7 +4499,8 @@ impl Inferer<'_> {
                     // that applies to every `T`: a more specific impl may apply
                     // to the type `T` turns out to be (§4.8), so which one runs
                     // is monomorphization's to say, as it is for a bound.
-                    if let Some((trait_def, decl)) = self.blanket_on_param(&recv, m, name.as_str()) {
+                    if let Some((trait_def, decl)) = self.blanket_on_param(&recv, m, name.as_str())
+                    {
                         let d = MethodDispatch::Generic {
                             trait_def,
                             args: Vec::new(),
@@ -5366,9 +5369,10 @@ impl Inferer<'_> {
             return None;
         }
         let sym = Symbol::new(name);
-        let imp = self.impls.impls.iter().find(|imp| {
-            imp.members.values().any(|&m| m == method) && imp.trait_def.is_some()
-        })?;
+        let imp =
+            self.impls.impls.iter().find(|imp| {
+                imp.members.values().any(|&m| m == method) && imp.trait_def.is_some()
+            })?;
         if !imp.self_is_generic() {
             return None;
         }

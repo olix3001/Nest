@@ -3010,7 +3010,10 @@ fn a_string_literal_pattern_calls_cores_byte_equality() {
     // this level (§9), so the argument is the slice itself rather than a
     // member read out of a wrapper.
     assert!(holds_text(&lir, "hi"), "{lir}");
-    assert!(lir.contains("call core.iter.slice.bytes_eq(s_0, _"), "{lir}");
+    assert!(
+        lir.contains("call core.iter.slice.bytes_eq(s_0, _"),
+        "{lir}"
+    );
 }
 
 /// `==` on two `str`s now resolves at all — it did not before, because nothing
@@ -3094,7 +3097,10 @@ fn a_structural_impl_is_mangled_by_its_self_type_not_its_label() {
 fn a_byte_string_pattern_compares_bytes_directly() {
     let lir = lir_text("f :: func (b: []u8) -> i32 { return b.match { b\"hi\" => 1, _ => 0 } }\n");
     assert!(holds_text(&lir, "hi"), "{lir}");
-    assert!(lir.contains("call core.iter.slice.bytes_eq(b_0, _"), "{lir}");
+    assert!(
+        lir.contains("call core.iter.slice.bytes_eq(b_0, _"),
+        "{lir}"
+    );
 }
 
 /// The empty pattern is a length test and nothing else, which is what the
@@ -3103,7 +3109,10 @@ fn a_byte_string_pattern_compares_bytes_directly() {
 fn an_empty_string_pattern_is_the_same_call() {
     let lir = lir_text("f :: func (s: str) -> i32 { return s.match { \"\" => 1, _ => 0 } }\n");
     assert!(holds_text(&lir, ""), "{lir}");
-    assert!(lir.contains("call core.iter.slice.bytes_eq(s_0, _"), "{lir}");
+    assert!(
+        lir.contains("call core.iter.slice.bytes_eq(s_0, _"),
+        "{lir}"
+    );
 }
 
 // ===< Safepoints, the cases the first pass got wrong >===

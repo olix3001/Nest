@@ -303,7 +303,11 @@ impl Parser {
         while back > 0 && matches!(self.tokens[back - 1].kind, TokenKind::Newline) {
             back -= 1;
         }
-        let from = if back == 0 { 0 } else { self.tokens[back - 1].span.end };
+        let from = if back == 0 {
+            0
+        } else {
+            self.tokens[back - 1].span.end
+        };
         let to = self.cur_span().start.min(self.src.len());
         let gap = self.src.get(from..to)?;
         let mut lines: Vec<&str> = Vec::new();

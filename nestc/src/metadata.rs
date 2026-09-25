@@ -124,8 +124,12 @@ impl Walker<'_> {
             .and_then(|(f, _)| Some((*f, self.s.asts.get(f)?.root()?)));
         let def = self.s.defs.get(ns);
         let found = file_root.or_else(|| Some((def.file?, def.node?)));
-        let Some((file, node)) = found else { return out };
-        let Some(ast) = self.s.asts.get(&file) else { return out };
+        let Some((file, node)) = found else {
+            return out;
+        };
+        let Some(ast) = self.s.asts.get(&file) else {
+            return out;
+        };
         let items = match &ast.node(node).kind {
             NodeKind::File { items } => items.clone(),
             NodeKind::ConstBind { rhs, .. } => match &ast.node(*rhs).kind {
@@ -413,7 +417,11 @@ impl Walker<'_> {
             item.insert("summary".into(), summary.trim().into());
             item.insert("doc".into(), doc.into());
         }
-        let doc = self.s.lang_items.get("doc").map(|x| self.s.defs.resolve_alias(x));
+        let doc = self
+            .s
+            .lang_items
+            .get("doc")
+            .map(|x| self.s.defs.resolve_alias(x));
         let attrs: Vec<Value> = self
             .s
             .defs
@@ -444,7 +452,9 @@ impl Walker<'_> {
         let mut end = span.end.min(src.len());
         if let (Some(ast), Some(node)) = (self.s.asts.get(&file), def.node)
             && let NodeKind::ConstBind { rhs, .. } = &ast.node(node).kind
-            && let NodeKind::FuncExpr { body: Some(body), .. } = &ast.node(*rhs).kind
+            && let NodeKind::FuncExpr {
+                body: Some(body), ..
+            } = &ast.node(*rhs).kind
         {
             end = ast.node(*body).span.start.min(end);
         } else if let Some(brace) = src[span.start..end].find(['{', '\n']) {
@@ -477,7 +487,10 @@ fn const_json(v: &ConstValue) -> Value {
     match v {
         ConstValue::Str(s) => s.clone().into(),
         ConstValue::Bool(b) => (*b).into(),
-        ConstValue::Int(n) => n.to_string().parse::<i64>().map_or_else(|_| n.to_string().into(), Value::from),
+        ConstValue::Int(n) => n
+            .to_string()
+            .parse::<i64>()
+            .map_or_else(|_| n.to_string().into(), Value::from),
         ConstValue::Float(f) => json!(f),
         ConstValue::Char(c) => c.to_string().into(),
         other => format!("{other:?}").into(),

@@ -1300,7 +1300,12 @@ impl Mono<'_> {
         };
         let bounds = self.defs.get(head).param_bounds.clone().unwrap_or_default();
         bounds.iter().all(|&t| {
-            let lang = self.defs.get(t).lang.as_ref().map(|l| l.as_str().to_string());
+            let lang = self
+                .defs
+                .get(t)
+                .lang
+                .as_ref()
+                .map(|l| l.as_str().to_string());
             matches!(lang.as_deref(), Some("func" | "sized"))
                 || self.match_impl(linked, t, ty, &[]).is_some()
         })

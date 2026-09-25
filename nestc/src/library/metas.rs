@@ -18,9 +18,9 @@ use crate::ir::const_eval::ConstValue;
 use crate::ir::{Boxed, DefaultValue, ImplicitCast, SpreadArgs};
 use crate::sema::def::Directive;
 use crate::sema::infer::{
-    ArgOrder, ClosureSig, Coercion, ConstSlotReported, DistinctRecv, DynCoerce, FuncCall, FuncCallMethod, Generics,
-    IndexWrite, Instantiation, MethodRes, OpResolution, OpaqueTy, RangeReported, SliceCoerce,
-    StaticTraitSelf, TyPathReported, Upcast, VariantTag,
+    ArgOrder, ClosureSig, Coercion, ConstSlotReported, DistinctRecv, DynCoerce, FuncCall,
+    FuncCallMethod, Generics, IndexWrite, Instantiation, MethodRes, OpResolution, OpaqueTy,
+    RangeReported, SliceCoerce, StaticTraitSelf, TyPathReported, Upcast, VariantTag,
 };
 use crate::sema::ty::Ty;
 use crate::sema::{
