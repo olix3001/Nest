@@ -63,7 +63,7 @@
 collections :: import "../collections/collections.nest"
 { Vec, HashMap } :: import "../collections/collections.nest"
 { TypeId, Member, Kind, type_id, type_info, member_ptr, attr_of } :: import <core/reflect>
-{ new, boxed, transmute } :: import <core/mem>
+{ new, boxed, transmute, zeroed } :: import <core/mem>
 { Default } :: import <core/default>
 
 /// Marks a member an autowired service gets from the provider: `*T` to read a
@@ -205,14 +205,14 @@ impl Scope {
     /// everything that asks for it, so what is handed out by default is a
     /// pointer that cannot write — `get_mut` is the deliberate other case.
     @public get :: func <T> (self: *mut Self) -> Result.<*T, Error> {
-        const p: *mut void := self.resolve(cast.<u128>(type_id.<T>()), type_info.<T>().name).?
+        const p: *mut void := self.resolve(cast.<u128>(type_id.<T>()), type_label.<T>()).?
         return .ok(transmute.<*T>(p))
     }
 
     /// The `T` this scope provides, to write: for a service the caller owns — a
     /// transient one, or a scoped one within its scope.
     @public get_mut :: func <T> (self: *mut Self) -> Result.<*mut T, Error> {
-        const p: *mut void := self.resolve(cast.<u128>(type_id.<T>()), type_info.<T>().name).?
+        const p: *mut void := self.resolve(cast.<u128>(type_id.<T>()), type_label.<T>()).?
         return .ok(transmute.<*mut T>(p))
     }
 
@@ -248,7 +248,7 @@ impl Scope {
     /// a new transient one. A singleton is refused — a copy of it would stop
     /// being the one everything else shares.
     @public get_value :: func <T> (self: *mut Self) -> Result.<T, Error> {
-        const found: (*mut void, bool) := self.lookup(cast.<u128>(type_id.<T>()), type_info.<T>().name).?
+        const found: (*mut void, bool) := self.lookup(cast.<u128>(type_id.<T>()), type_label.<T>()).?
         if found.1 { return .err(by_value_singleton(type_info.<T>().name)) }
         return .ok(transmute.<*T>(found.0).*)
     }
@@ -262,11 +262,13 @@ impl Scope {
     /// A parameter is a service the way an `@inject` member is: `*T` to read
     /// it, `*mut T` to write it, or `T` for a copy of a scoped or transient one.
     @public invoke :: func <F: Func> (self: *mut Self, f: F) -> Result.<F.Output, Error> {
-        const args: *mut F.Args := new.<F.Args>()
+        // On the stack: an `invoke` per request must not allocate for the
+        // arguments it only passes on.
+        let args: F.Args := zeroed.<F.Args>()
         for m in type_info.<F.Args>().members {
-            self.supply(member_ptr.<F.Args>(args, m), m, "parameter").?
+            self.supply(member_ptr.<F.Args>(&mut args, m), m, "parameter").?
         }
-        return .ok(f.call(args.*))
+        return .ok(f.call(args))
     }
 
     // Fill the slot `into` — a member or a parameter, described by `m` — with
@@ -274,12 +276,12 @@ impl Scope {
     supply :: func (self: *mut Self, into: *mut void, m: Member, what: str) -> Result.<void, Error> {
         return m.kind.match {
             .Ptr(pointee) => {
-                const found: (*mut void, bool) := self.lookup(cast.<u128>(m.id), pointee.name).?
+                const found: (*mut void, bool) := self.lookup(cast.<u128>(m.id), Label { what: "", name: pointee.name }).?
                 transmute.<*mut *mut void>(into).* = found.0
                 return .ok(())
             },
             _ => {
-                const found: (*mut void, bool) := self.lookup(cast.<u128>(m.id), f"{what} `{m.name}`").?
+                const found: (*mut void, bool) := self.lookup(cast.<u128>(m.id), Label { what: what, name: m.name }).?
                 if found.1 {
                     return .err(Error { message: f"{what} `{m.name}` takes a singleton by value; take a pointer to it" })
                 }
@@ -290,7 +292,7 @@ impl Scope {
     }
 
     // The service registered under `key` and whether it is a singleton.
-    lookup :: func (self: *mut Self, key: u128, name: str) -> Result.<(*mut void, bool), Error> {
+    lookup :: func (self: *mut Self, key: u128, name: Label) -> Result.<(*mut void, bool), Error> {
         const singleton: bool := self.services.index.get(key).match {
             .some(i) => self.services.entries.get(i).match {
                 .some(e) => e.lifetime.match { .Singleton => true, _ => false },
@@ -304,18 +306,18 @@ impl Scope {
     }
 
     // The service registered under `key`, built if this scope has not yet.
-    resolve :: func (self: *mut Self, key: u128, name: str) -> Result.<*mut void, Error> {
+    resolve :: func (self: *mut Self, key: u128, name: Label) -> Result.<*mut void, Error> {
         self.provided.get(key).match {
             .some(p) => { return .ok(p) },
             .none => (),
         }
         const at: usize := self.services.index.get(key).match {
             .some(i) => i,
-            .none => { return .err(Error { message: f"no service `{name}` is registered" }) },
+            .none => { return .err(Error { message: missing(name) }) },
         }
         const e: Entry := self.services.entries.get(at).match {
             .some(e) => e,
-            .none => { return .err(Error { message: f"no service `{name}` is registered" }) },
+            .none => { return .err(Error { message: missing(name) }) },
         }
         return e.lifetime.match {
             .Singleton => self.root.build(at, e),
@@ -385,6 +387,22 @@ copy_bytes :: func (to: *mut void, from: *mut void, n: usize) -> void {
 
 // The two words a slice is, for `copy_bytes` to make one of.
 Bytes :: struct { ptr: *mut void, len: usize }
+
+// What asked for a service, for an error to name: a type (`what` empty), or a
+// member or parameter by its name. Kept apart so a lookup that succeeds formats
+// nothing.
+Label :: struct { what: str, name: str }
+
+type_label :: func <T> () -> Label {
+    return Label { what: "", name: type_info.<T>().name }
+}
+
+missing :: func (l: Label) -> str {
+    if l.what == "" {
+        return f"no service `{l.name}` is registered"
+    }
+    return f"no service is registered for {l.what} `{l.name}`"
+}
 
 by_value_singleton :: func (name: str) -> Error {
     return Error { message: f"`{name}` is a singleton; take a pointer to it, not a copy" }
@@ -513,5 +531,9 @@ tests :: #when(test) namespace {
         assert(root.get.<Clock>().match { .ok(_) => false, .err(e) => strs.ends_with(e.message, "Clock` is registered") })
         assert(root.get.<Loop>().match { .ok(_) => false, .err(e) => strs.ends_with(e.message, "Loop` depends on itself") })
         assert(root.get.<Bad>().match { .ok(_) => false, .err(_) => true })
+        const missing := root.invoke({ c: *Clock, s: Stamp in c.now + s.n })
+        assert(missing.match { .ok(_) => false, .err(e) => strs.ends_with(e.message, "Clock` is registered") })
+        const by_value := root.invoke({ s: Stamp in s.n })
+        assert(by_value.match { .ok(_) => false, .err(e) => strs.ends_with(e.message, "for parameter `0`") })
     }
 }

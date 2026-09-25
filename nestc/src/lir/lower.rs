@@ -4149,6 +4149,9 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // which is the whole of what it does; reaching run time at all
             // would make "costs nothing" false.
             "comptime_assert" => Some(Rvalue::Use(Operand::Const(Constant::Undef))),
+            // A value, not a store: the type is the destination's, as every
+            // constant's is, so a backend writes its own all-zero form.
+            "zeroed" => Some(Rvalue::Use(Operand::Const(Constant::Zero))),
             _ => {
                 let vals = self.passed(args);
                 self.emit_intrinsic(name.clone(), vals, ty, span)

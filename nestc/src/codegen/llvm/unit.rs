@@ -1086,6 +1086,11 @@ impl<'ctx> Cx<'ctx, '_> {
                 .builder
                 .build_alloca(self.llty(ty)?, "")
                 .map_err(failed),
+            Operand::Const(Constant::Zero) => {
+                let slot = self.builder.build_alloca(self.llty(ty)?, "").map_err(failed)?;
+                self.builder.build_store(slot, self.zeroed(ty)?).map_err(failed)?;
+                Ok(slot)
+            }
             Operand::Const(_) => Err(failed(format!(
                 "{}: a constant of aggregate type crossing the C ABI",
                 f.name
@@ -1371,6 +1376,7 @@ impl<'ctx> Cx<'ctx, '_> {
             Constant::Variant { tag, name, payload } => {
                 self.variant_constant(ty, *tag, name, payload)?
             }
+            Constant::Zero => self.zeroed(ty)?,
             // `undef` is a value the program never reads — the `()` a call
             // returns, a slot before its first write.
             Constant::Undef => match self.llty(ty)? {

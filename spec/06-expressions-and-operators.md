@@ -158,6 +158,7 @@ The intrinsics (extensible; not a closed list):
 | `cast.<T>(x)` / `cast(x)` | explicit type conversion (§6.5) |
 | `transmute.<T>(x)` | reinterpret the bits of `x` as `T` (same size) |
 | `new.<T>()` | allocate one zeroed, GC-managed `T`; yields `*mut T` (§6.9) |
+| `zeroed.<T>()` | a `T` whose every byte is zero, as a value — no allocation |
 | `make.<[]T>(len[, cap])` | allocate a zeroed, GC-managed slice (§6.9) |
 | `size_of.<T>()` / `align_of.<T>()` | layout queries (`usize`), `#const` |
 | `len(x)` | element count of an array or slice (`usize`); the core library's `.len()` method is written in terms of it |

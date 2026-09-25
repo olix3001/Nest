@@ -827,7 +827,7 @@ impl Operand {
 
 /// A value that needs no code to produce.
 ///
-/// An **operand**'s constant is a scalar, an address or `undef` — never a blob:
+/// An **operand**'s constant is a scalar, an address, `undef` or `zero` — never a blob:
 /// a string's bytes and an aggregate's contents are [`Global`]s by the time they
 /// get here, and what the operand holds is the address. The composite cases
 /// below appear only in a global's own initializer, which is the one place that
@@ -864,6 +864,9 @@ pub enum Constant {
     /// Nothing in particular: the value of a `void`, and the contents of a slot
     /// that is about to be written member by member.
     Undef,
+    /// Every byte zero, at the destination's type — `core`'s `zeroed.<T>()`.
+    /// Unlike [`Constant::Undef`] it may be read.
+    Zero,
 }
 
 /// What a [`StmtKind::Assign`] computes.

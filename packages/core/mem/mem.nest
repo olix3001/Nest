@@ -37,6 +37,12 @@
 // `new.<T>()` yields one zeroed, GC-managed `T`.
 @public new :: #intrinsic("new") func <T> () -> *mut T
 
+// `zeroed.<T>()` is a `T` whose every byte is zero, where it is written — a
+// local, with no allocation. It is `new`'s contents without the heap: a value
+// that is filled in member by member afterwards (`std/di`'s `invoke` builds a
+// closure's arguments this way).
+@public zeroed :: #intrinsic("zeroed") func <T> () -> T
+
 // `value`, moved onto the collected heap: `new`, and the value written in.
 //
 // It is what a value whose type has no name is put on the heap with — a
@@ -102,3 +108,19 @@
 // is what it is for; filling with an *element* is `std/mem`'s `fill`, which is
 // a loop because a general `T` is not one byte.
 @public set_bytes :: #intrinsic("memset") func <T> (dst: []mut T, byte: u8) -> void
+
+tests :: #when(test) namespace {
+  { assert } :: import "../rt/fail.nest"
+
+  Mixed :: struct { n: i32, x: f64, on: bool, p: *i32, pair: (u8, i64) }
+
+  @test
+  zeroed_is_all_zero :: func () {
+    let m: Mixed := zeroed.<Mixed>()
+    assert(m.n == 0 && m.x == 0.0 && m.on == false)
+    assert(m.pair.0 == 0 && m.pair.1 == 0)
+    m.n = 4
+    assert(m.n == 4, "a zeroed local is an ordinary one")
+    assert(zeroed.<u64>() == 0)
+  }
+}

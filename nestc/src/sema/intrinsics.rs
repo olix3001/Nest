@@ -86,6 +86,9 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // program writing it takes on the question that analysis would have
     // answered, which is why `check::dropped` then refuses a later use.
     plain("new"),
+    // `new`'s contents without the heap: an all-zero value of the type
+    // argument, lowered to a constant.
+    plain("zeroed"),
     special("make", Special::MutableArg),
     plain("drop"),
     // Sequences (§3.2). `core`'s `.len()` methods **are** these — the members

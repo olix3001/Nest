@@ -220,6 +220,7 @@ impl Printer<'_> {
                 format!(".{name}#{tag}({})", parts.join(", "))
             }
             Constant::Undef => "undef".to_string(),
+            Constant::Zero => "zero".to_string(),
         }
     }
 
