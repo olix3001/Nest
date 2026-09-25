@@ -524,7 +524,7 @@ impl Cx<'_> {
                 items.extend(elems.iter().enumerate().map(|(i, e)| CompletionItem {
                     label: i.to_string(),
                     kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(format!("{i}: {}", e.display(&s.defs))),
+                    detail: Some(format!("{i}: {}", crate::ide::show(s, e))),
                     // Digits sort after letters by label, and a tuple's own
                     // members are what a `.` on one is most likely reaching for.
                     sort_text: Some(format!("0{i:03}")),

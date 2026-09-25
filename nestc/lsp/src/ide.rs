@@ -176,13 +176,20 @@ pub fn tuple_member(s: &Session, file: FileId, offset: usize) -> Option<(String,
         return Some((
             format!(
                 "```nest\n{}\n```\n\n```nest\n{digits}: {}\n```",
-                whole.display(&s.defs),
-                ty.display(&s.defs)
+                show(s, &whole),
+                show(s, ty)
             ),
             at,
         ));
     }
     None
+}
+
+/// `ty` as a hover prints it: with the associated types an `impl` return
+/// type's bounds pinned, which only the declaration table knows.
+pub fn show(s: &Session, ty: &Ty) -> String {
+    let decls = nestc::sema::decl::Decls::new(&s.defs, &s.asts, &s.decls);
+    ty.display_with(&s.defs, &|d| decls.param_pinned(d))
 }
 
 /// Where `def`'s name is written, in its own file.
@@ -244,7 +251,7 @@ const DECLARATION_LINES: usize = 16;
 pub fn declaration(s: &Session, def: DefId, use_ty: Option<Ty>) -> String {
     let d = s.defs.get(def);
     let typed = |ty: Option<Ty>| match ty {
-        Some(t) => format!("{}: {}", d.name, t.display(&s.defs)),
+        Some(t) => format!("{}: {}", d.name, show(s, &t)),
         None => d.name.to_string(),
     };
     match d.kind {

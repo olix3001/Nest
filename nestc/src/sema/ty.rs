@@ -597,6 +597,18 @@ impl Ty {
 
     /// A short, human-readable rendering (`i32`, `*mut Foo`, `(A, B)`, `?3`).
     pub fn display(&self, defs: &super::def::DefTable) -> String {
+        self.display_with(defs, &|_| None)
+    }
+
+    /// [`Ty::display`], told what each pinned associated-type parameter stands
+    /// for ([`super::decl::DeclTable::param_pinned`]) — which is what an
+    /// `impl Func(i32) -> i32` return type needs to print as written rather
+    /// than as `impl Func`.
+    pub fn display_with(
+        &self,
+        defs: &super::def::DefTable,
+        pinned: &dyn Fn(DefId) -> Option<Ty>,
+    ) -> String {
         match self {
             Ty::Var(v) => format!("?{}", v.0),
             // Print the sugar when the width is known, the family form when it
@@ -634,6 +646,12 @@ impl Ty {
             // writes `usize`, and a diagnostic that says `core.usize` names a
             // path no source ever wrote. Keyed on the `#lang` tag, not on the
             // name, so `core` may still spell them however it likes.
+            // An `impl Bounds` return type is a type parameter with a name no
+            // program wrote (`impl#return`); what the program wrote is its
+            // bounds.
+            Ty::Nominal { def, .. } if defs.get(*def).opaque => {
+                format!("impl {}", opaque_bounds(*def, defs, pinned))
+            }
             Ty::Nominal { def, args }
                 if args.is_empty()
                     && defs
@@ -651,7 +669,7 @@ impl Ty {
                 } else {
                     let inner = args
                         .iter()
-                        .map(|a| a.display(defs))
+                        .map(|a| a.display_with(defs, pinned))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("{name}.<{inner}>")
@@ -661,14 +679,14 @@ impl Ty {
                 format!(
                     "*{}{}",
                     if *mutable { "mut " } else { "" },
-                    inner.display(defs)
+                    inner.display_with(defs, pinned)
                 )
             }
             Ty::Slice { mutable, inner } => {
                 format!(
                     "[]{}{}",
                     if *mutable { "mut " } else { "" },
-                    inner.display(defs)
+                    inner.display_with(defs, pinned)
                 )
             }
             Ty::Array {
@@ -680,13 +698,13 @@ impl Ty {
                 format!(
                     "[{l}]{}{}",
                     if *mutable { "mut " } else { "" },
-                    inner.display(defs)
+                    inner.display_with(defs, pinned)
                 )
             }
             Ty::Tuple(elems) => {
                 let inner = elems
                     .iter()
-                    .map(|e| e.display(defs))
+                    .map(|e| e.display_with(defs, pinned))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("({inner})")
@@ -694,7 +712,7 @@ impl Ty {
             Ty::Struct(fields) => {
                 let inner = fields
                     .iter()
-                    .map(|(n, t)| format!("{n}: {}", t.display(defs)))
+                    .map(|(n, t)| format!("{n}: {}", t.display_with(defs, pinned)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("struct {{ {inner} }}")
@@ -702,11 +720,11 @@ impl Ty {
             Ty::Func { params, ret, c } => {
                 let ps = params
                     .iter()
-                    .map(|p| p.display(defs))
+                    .map(|p| p.display_with(defs, pinned))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let abi = if *c { "extern(\"c\") " } else { "" };
-                format!("*{abi}func({ps}) -> {}", ret.display(defs))
+                format!("*{abi}func({ps}) -> {}", ret.display_with(defs, pinned))
             }
             Ty::Dyn { def, assoc } if assoc.is_empty() => {
                 format!("dyn {}", defs.canonical_string(*def))
@@ -714,13 +732,75 @@ impl Ty {
             Ty::Dyn { def, assoc } => {
                 let parts: Vec<String> = assoc
                     .iter()
-                    .map(|(n, t)| format!("{n} = {}", t.display(defs)))
+                    .map(|(n, t)| format!("{n} = {}", t.display_with(defs, pinned)))
                     .collect();
                 format!("dyn {}.<{}>", defs.canonical_string(*def), parts.join(", "))
             }
             Ty::Error => "<error>".into(),
         }
     }
+}
+
+/// The bounds of the `impl Bounds` return type `def`, as written: each trait
+/// with the associated types it pinned — `Func(i32) -> i32` in `Func`'s sugar,
+/// `Iterator.<Item = u8>` otherwise.
+fn opaque_bounds(
+    def: DefId,
+    defs: &super::def::DefTable,
+    pinned: &dyn Fn(DefId) -> Option<Ty>,
+) -> String {
+    let d = defs.get(def);
+    // The pins sit on the parameters `introduce_bound_projections` added to
+    // the type's namespace, one per associated type of each bound.
+    let mut assoc: Vec<(DefId, Symbol, Ty)> = d
+        .ns
+        .members
+        .values()
+        .filter_map(|&m| {
+            let proj = defs.get(m).projection.as_ref()?;
+            Some((proj.trait_def, proj.assoc.clone(), pinned(m)?))
+        })
+        .collect();
+    assoc.sort_by(|a, b| a.1.as_str().cmp(b.1.as_str()));
+    let bounds = d.param_bounds.clone().unwrap_or_default();
+    bounds
+        .iter()
+        .map(|&b| {
+            let name = defs.canonical_string(b);
+            let of = |n: &str| {
+                assoc
+                    .iter()
+                    .find(|(t, a, _)| *t == b && a.as_str() == n)
+                    .map(|(_, _, ty)| ty)
+            };
+            if defs.get(b).lang.as_ref().is_some_and(|l| l.as_str() == "func") {
+                let params = match of("Args") {
+                    Some(Ty::Tuple(elems)) => elems
+                        .iter()
+                        .map(|e| e.display_with(defs, pinned))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    Some(other) => other.display_with(defs, pinned),
+                    None => return name,
+                };
+                return match of("Output") {
+                    Some(Ty::Void) | None => format!("{name}({params})"),
+                    Some(ret) => format!("{name}({params}) -> {}", ret.display_with(defs, pinned)),
+                };
+            }
+            let pins: Vec<String> = assoc
+                .iter()
+                .filter(|(t, _, _)| *t == b)
+                .map(|(_, a, ty)| format!("{a} = {}", ty.display_with(defs, pinned)))
+                .collect();
+            if pins.is_empty() {
+                name
+            } else {
+                format!("{name}.<{}>", pins.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" + ")
 }
 
 /// The result of a unification attempt.

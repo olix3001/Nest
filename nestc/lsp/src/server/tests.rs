@@ -424,6 +424,33 @@ fn a_hover_shows_the_declaration_and_its_documentation() {
     assert!(body.is_null(), "{body}");
 }
 
+/// A value of an `impl` return type hovers as the bounds the function wrote,
+/// not as the name the parser gave the type standing for them.
+#[test]
+fn an_impl_return_type_hovers_as_its_bounds() {
+    let (_dir, file, mut client) = program();
+    let text = format!(
+        "{PROGRAM}
+make_adder :: func (n: i32) -> impl Func(i32) -> i32 {{
+    return {{ x in x + n }}
+}}
+
+use_adder :: func () -> i32 {{
+    let add5 := make_adder(5)
+    return add5(1)
+}}
+"
+    );
+    client.change(&file, &text);
+
+    let add5 = hover_text(&client.at(
+        HoverRequest::METHOD,
+        &file,
+        position(&text, "add5(1)", 0, 0),
+    ));
+    assert!(add5.contains("add5: impl core.ops.Func(i32) -> i32"), "{add5}");
+}
+
 /// Go-to-definition lands on the name: a function's, and a field's.
 #[test]
 fn a_definition_is_its_name() {
