@@ -4,6 +4,7 @@
 // `Iterator.next` (§10).
 
 * :: import "option.nest"
+{ Ordering } :: import "cmp.nest"
 
 // An iterator writes `next`; everything else below comes with it (§10.4).
 //
@@ -67,6 +68,35 @@
     return StepBy.<Self> { iter: self, n: n, first: true }
   }
 
+  // Elements while `keep` holds for them, stopping at the first it does not.
+  take_while :: func <Self: Sized, P: Func(Self.Item) -> bool> (self: Self, keep: P) -> TakeWhile.<Self, P> {
+    return TakeWhile.<Self, P> { iter: self, keep: keep, done: false }
+  }
+
+  // The elements after the first ones `pred` holds for.
+  skip_while :: func <Self: Sized, P: Func(Self.Item) -> bool> (self: Self, pred: P) -> SkipWhile.<Self, P> {
+    return SkipWhile.<Self, P> { iter: self, pred: pred, started: false }
+  }
+
+  // The elements of each element in turn, when the elements are themselves
+  // iterable: over `[[1, 2], [3]]` it is 1, 2, 3. `J` is the inner iterator,
+  // which the `Flatten` impl works out from `Self.Item`.
+  flatten :: func <Self: Sized, J> (self: Self) -> Flatten.<Self, J> {
+    return Flatten.<Self, J> { iter: self, cur: .none }
+  }
+
+  // `f` on each element, then the elements of what it answered — `map(f)`
+  // then `flatten()`.
+  flat_map :: func <Self: Sized, U: IntoIterator, F: Func(Self.Item) -> U> (self: Self, f: F) -> Flatten.<Map.<Self, F>, U.Iter> {
+    return Flatten.<Map.<Self, F>, U.Iter> { iter: self.map(f), cur: .none }
+  }
+
+  // One element of look-ahead: `peek` answers what `next` will, without
+  // taking it.
+  peekable :: func <Self: Sized> (self: Self) -> Peekable.<Self, Self.Item> {
+    return Peekable.<Self, Self.Item> { iter: self, peeked: .none }
+  }
+
   // ===< Consumers >===
 
   // Call `f` on every element.
@@ -126,6 +156,49 @@
   // `.collect()` where the context names the collection.
   collect :: func <Self: Sized, C: FromIterator.<Item = Self.Item>> (self: Self) -> C {
     return FromIterator.from_iter(self)
+  }
+
+  // Combine the elements pairwise, the first standing in for `fold`'s
+  // `init`: `(1..=4).reduce({ a, b in a + b })` is `.some(10)`, and an empty
+  // iterator's is `.none`.
+  reduce :: func <Self: Sized, F: Func(Self.Item, Self.Item) -> Self.Item> (self: Self, f: F) -> Option.<Self.Item> {
+    let mut it := self
+    return it.next().match {
+      .some(first) => .some(it.fold(first, f)),
+      .none => .none,
+    }
+  }
+
+  // The last element.
+  last :: func <Self: Sized> (self: Self) -> Option.<Self.Item> {
+    let mut it := self
+    let mut out: Option.<Self.Item> := .none
+    loop {
+      it.next().match {
+        .some(x) => { out = .some(x) },
+        .none => { return out },
+      }
+    }
+  }
+
+  // The greatest element by `cmp`; of equals, the last.
+  max_by :: func <Self: Sized, F: Func(Self.Item, Self.Item) -> Ordering> (self: Self, cmp: F) -> Option.<Self.Item> {
+    return self.reduce({ a, b in
+      cmp(a, b).match {
+        .greater => a,
+        _ => b,
+      }
+    })
+  }
+
+  // The least element by `cmp`; of equals, the first.
+  min_by :: func <Self: Sized, F: Func(Self.Item, Self.Item) -> Ordering> (self: Self, cmp: F) -> Option.<Self.Item> {
+    return self.reduce({ a, b in
+      cmp(a, b).match {
+        .greater => b,
+        _ => a,
+      }
+    })
   }
 
   // The first element `pred` holds for.
@@ -289,6 +362,115 @@ impl <I: Iterator> Iterator for StepBy.<I> {
       }
     }
     return self.iter.next()
+  }
+}
+
+@public TakeWhile :: struct <I, P> {
+  iter: I,
+  keep: P,
+  done: bool,
+}
+
+impl <I: Iterator, P: Func(I.Item) -> bool> Iterator for TakeWhile.<I, P> {
+  Item :: I.Item
+  next :: func (self: *mut TakeWhile.<I, P>) -> Option.<I.Item> {
+    if self.done { return .none }
+    return self.iter.next().match {
+      .some(x) => {
+        if self.keep(x) { return .some(x) }
+        self.done = true
+        return .none
+      },
+      .none => .none,
+    }
+  }
+}
+
+@public SkipWhile :: struct <I, P> {
+  iter: I,
+  pred: P,
+  started: bool,
+}
+
+impl <I: Iterator, P: Func(I.Item) -> bool> Iterator for SkipWhile.<I, P> {
+  Item :: I.Item
+  next :: func (self: *mut SkipWhile.<I, P>) -> Option.<I.Item> {
+    if self.started { return self.iter.next() }
+    loop {
+      self.iter.next().match {
+        .some(x) => {
+          if not self.pred(x) {
+            self.started = true
+            return .some(x)
+          }
+        },
+        .none => { return .none },
+      }
+    }
+  }
+}
+
+// `cur` is the inner iterator being walked, `.none` between two of them.
+@public Flatten :: struct <I, J> {
+  iter: I,
+  cur: Option.<J>,
+}
+
+impl <J: Iterator, U: IntoIterator.<Iter = J>, I: Iterator.<Item = U>> Iterator for Flatten.<I, J> {
+  Item :: J.Item
+  next :: func (self: *mut Flatten.<I, J>) -> Option.<J.Item> {
+    loop {
+      self.cur.match {
+        .some(j) => {
+          let mut inner := j
+          const x := inner.next()
+          self.cur = .some(inner)
+          x.match {
+            .some(v) => { return .some(v) },
+            .none => { self.cur = .none },
+          }
+        },
+        .none => {},
+      }
+      self.iter.next().match {
+        .some(u) => { self.cur = .some(u.into_iter()) },
+        .none => { return .none },
+      }
+    }
+  }
+}
+
+// `peeked` is what `peek` took from `iter` and `next` has not handed out yet
+// — itself an `Option`, since `peek` may have seen the end.
+@public Peekable :: struct <I, T> {
+  iter: I,
+  peeked: Option.<Option.<T>>,
+}
+
+impl <T, I: Iterator.<Item = T>> Iterator for Peekable.<I, T> {
+  Item :: T
+  next :: func (self: *mut Peekable.<I, T>) -> Option.<T> {
+    return self.peeked.match {
+      .some(p) => {
+        self.peeked = .none
+        return p
+      },
+      .none => self.iter.next(),
+    }
+  }
+}
+
+impl <T, I: Iterator.<Item = T>> Peekable.<I, T> {
+  // What `next` will answer, without taking it.
+  @public peek :: func (self: *mut Self) -> Option.<T> {
+    return self.peeked.match {
+      .some(p) => p,
+      .none => {
+        const p := self.iter.next()
+        self.peeked = .some(p)
+        return p
+      },
+    }
   }
 }
 

@@ -1571,6 +1571,23 @@ impl Inferer<'_> {
                 order.push(d);
             }
         }
+        // A method is generic over *all* of its impl's parameters, not only
+        // the ones its signature names: `Flatten`'s `next` never writes `U`,
+        // which only `I: Iterator.<Item = U>` fixes, and its body is full of
+        // it.
+        if let Some(owner) = self.func_owner(func)
+            && let Some(imp) = self
+                .impls
+                .impls
+                .iter()
+                .find(|i| i.members.values().any(|&m| m == owner))
+        {
+            for d in imp.generics.clone() {
+                if !order.contains(&d) {
+                    order.push(d);
+                }
+            }
+        }
         self.close_over_projections(&mut order);
         Some(Generics { params: order, own })
     }
@@ -3779,6 +3796,29 @@ impl Inferer<'_> {
         }
     }
 
+    /// Type one call argument. A closure — written bare or as a named
+    /// argument's value — is typed against the parameter it fills, which is
+    /// where its own parameters' types come from (§5.5); anything else is an
+    /// ordinary expression.
+    fn infer_arg(&mut self, n: NodeId, wanted: Option<Ty>) -> Ty {
+        let closure = match self.ast.node(n).kind {
+            NodeKind::Closure { .. } => Some(n),
+            NodeKind::Arg { value, .. }
+                if matches!(self.ast.node(value).kind, NodeKind::Closure { .. }) =>
+            {
+                Some(value)
+            }
+            _ => None,
+        };
+        let Some(c) = closure else {
+            return self.infer_expr(n);
+        };
+        let t = self.infer_closure(c, wanted);
+        self.types.insert(c, t.clone());
+        self.types.insert(n, t.clone());
+        t
+    }
+
     /// Type a closure where it is written (§5.5), and answer its type.
     ///
     /// It is typed **inside** the body that writes it — it shares that body's
@@ -4956,14 +4996,7 @@ impl Inferer<'_> {
             .iter()
             .enumerate()
             .map(|(i, a)| {
-                a.map(|n| match self.ast.node(n).kind {
-                    NodeKind::Closure { .. } => {
-                        let t = self.infer_closure(n, wanted.get(i).cloned());
-                        self.types.insert(n, t.clone());
-                        t
-                    }
-                    _ => self.infer_expr(n),
-                })
+                a.map(|n| self.infer_arg(n, wanted.get(i).cloned()))
             })
             .collect();
         match self.cx.shallow(callee_ty) {
@@ -6120,8 +6153,16 @@ impl Inferer<'_> {
         };
         let args = &args[..];
         // A `None` slot is a defaulted parameter the call left out: checked once
-        // at the declaration, filled in by lowering, nothing to do here.
-        let arg_tys: Vec<Option<Ty>> = args.iter().map(|a| a.map(|n| self.infer_expr(n))).collect();
+        // at the declaration, filled in by lowering, nothing to do here. A
+        // closure is typed against the parameter it fills, as in a plain call:
+        // `max_by({ a, b in a.cmp(b) })` knows `a` from `max_by`'s bound.
+        let arg_tys: Vec<Option<Ty>> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                a.map(|n| self.infer_arg(n, value_params.get(i).cloned()))
+            })
+            .collect();
         if value_params.len() == arg_tys.len() {
             for (p, (arg_node, aty)) in value_params.iter().zip(args.iter().zip(&arg_tys)) {
                 if let (Some(node), Some(aty)) = (arg_node, aty) {

@@ -44,9 +44,9 @@ impl <T> IntoIterator for Range.<T> {
 // literal onto its default before the body has said what it is.
 //
 // It is deliberately not `Ord` + `Add`. Those are what a *user* type
-// implements to join in with `<` and `+`, and giving every integer an `Ord`
-// impl would put a second answer beside the instruction the compiler already
-// emits for `a < b`. `Step` is asked only by the loop below.
+// implements to join in with `<` and `+`; the integers' `Ord` impls
+// (`cmp.nest`) are there for generic callers, and `Add` has none. `Step` is
+// asked only by the loop below.
 
 @public Step :: trait {
   // How `self` stands to `rhs`. One method rather than `lt` and `eq` because

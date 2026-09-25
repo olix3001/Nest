@@ -3570,3 +3570,53 @@ main :: func () -> i32 {
         assert_eq!(code, 42);
     }
 }
+
+
+// ===< More adapters and consumers >===
+
+/// `reduce`, `last`, `max_by`/`min_by`, `take_while`/`skip_while`,
+/// `peekable`, `flat_map` and `flatten`. A closure's parameters come from
+/// the method's bound even when the body calls a trait method on them
+/// (`a.cmp(b)`), and an impl method is generic over the impl parameters its
+/// signature never names (`Flatten`'s `U`).
+#[test]
+fn the_further_iterator_methods_run() {
+    let src = r#"
+{ Iterator } :: import <core/iter>
+{ Ord } :: import <core/cmp>
+
+is :: func (o: Option.<i32>, want: i32) -> bool {
+    return o.match {
+        .some(v) => v == want,
+        .none => false,
+    }
+}
+
+main :: func () -> i32 {
+    const xs := [_]i32 { 3, 1, 4, 1, 5 }
+    let mut fails := 0
+    if not is(xs[..].iter().reduce({ a, b in a + b }), 14) { fails = fails + 1 }
+    if not is(xs[..].iter().last(), 5) { fails = fails + 2 }
+    if not is(xs[..].iter().max_by({ a, b in a.cmp(b) }), 5) { fails = fails + 4 }
+    if not is(xs[..].iter().min_by({ a, b in a.cmp(b) }), 1) { fails = fails + 8 }
+    if xs[..].iter().take_while({ x in x != 4 }).count() != 2 { fails = fails + 16 }
+    if xs[..].iter().skip_while({ x in x != 4 }).fold(0, { a, x in a + x }) != 10 { fails = fails + 32 }
+    let mut p := xs[..].iter().peekable()
+    if not is(p.peek(), 3) { fails = fails + 64 }
+    if not is(p.next(), 3) { fails = fails + 128 }
+    if not is(p.next(), 1) { fails = fails + 256 }
+    const ys := [_]i32 { 1, 2 }
+    if xs[..].iter().flat_map({ x in ys[..] }).count() != 10 { fails = fails + 512 }
+    const empty := [_]i32 {}
+    if empty[..].iter().reduce({ a, b in a + b }).match { .some(v) => true, .none => false } { fails = fails + 1024 }
+    const a := [_]i32 { 1, 2 }
+    const b := [_]i32 { 3 }
+    const vv := [_][]i32 { a[..], b[..] }
+    if vv[..].iter().flatten().fold(0, { acc, x in acc * 10 + x }) != 123 { fails = fails + 2048 }
+    return fails
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 0);
+    }
+}

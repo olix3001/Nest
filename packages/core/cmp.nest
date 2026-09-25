@@ -58,3 +58,58 @@ impl Eq for bool {
 impl Eq for char {
   eq :: func (self: Self, rhs: Self) -> bool { return self == rhs }
 }
+
+// `Ord` for the same reason as `Eq` above: `a < b` on two integers is an
+// instruction, and these are for the generic caller that has only a bound to go
+// on — `Iterator.max` asks for `Self.Item: Ord`. Floats have none: `NaN` is
+// ordered against nothing, so a total order would be a lie (`max_by` takes a
+// comparison instead).
+
+impl <const N: u16> Ord for uint.<N> {
+  cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self < rhs { return .less }
+    if self == rhs { return .equal }
+    return .greater
+  }
+}
+
+impl <const N: u16> Ord for int.<N> {
+  cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self < rhs { return .less }
+    if self == rhs { return .equal }
+    return .greater
+  }
+}
+
+impl Ord for usize {
+  cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self < rhs { return .less }
+    if self == rhs { return .equal }
+    return .greater
+  }
+}
+
+impl Ord for isize {
+  cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self < rhs { return .less }
+    if self == rhs { return .equal }
+    return .greater
+  }
+}
+
+// `false` before `true`.
+impl Ord for bool {
+  cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self == rhs { return .equal }
+    if rhs { return .less }
+    return .greater
+  }
+}
+
+impl Ord for char {
+  cmp :: func (self: Self, rhs: Self) -> Ordering {
+    if self < rhs { return .less }
+    if self == rhs { return .equal }
+    return .greater
+  }
+}
