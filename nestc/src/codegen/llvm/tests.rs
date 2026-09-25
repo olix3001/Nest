@@ -3496,3 +3496,77 @@ main :: func () -> i32 {
         assert_eq!(code, 14 + 6 + 7 + 3 + 30);
     }
 }
+
+// ===< `Sized`, and iterators as trait objects >===
+
+/// `Iterator`'s adapters are `<Self: Sized>`, so `*mut dyn Iterator.<Item = T>`
+/// is a type: `next` goes through the vtable, and the adapters reach it through
+/// `impl Iterator for *mut I`.
+#[test]
+fn an_iterator_is_a_trait_object() {
+    let src = r#"
+{ Iterator } :: import <core/iter>
+
+Count :: struct { n: i32 }
+impl Iterator for Count {
+    Item :: i32
+    next :: func (self: *mut Count) -> Option.<i32> {
+        if self.n == 0 { return .none }
+        self.n = self.n - 1
+        return .some(self.n)
+    }
+}
+
+total :: func (it: *mut dyn Iterator.<Item = i32>) -> i32 {
+    let mut sum := 0
+    loop {
+        it.next().match {
+            .some(x) => { sum = sum + x },
+            .none => { break },
+        }
+    }
+    return sum
+}
+
+doubled :: func (it: *mut dyn Iterator.<Item = i32>) -> i32 {
+    return it.map({ x in x * 2 }).fold(0, { a, x in a + x })
+}
+
+main :: func () -> i32 {
+    const xs := [_]i32 { 1, 2, 3 }
+    let mut a := xs[..].iter()
+    let mut c := Count { n: 4 }
+    let mut d := Count { n: 3 }
+    return total(&mut a) + total(&mut c) + doubled(&mut d)
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 6 + 6 + 6);
+    }
+}
+
+/// A method called on `*dyn T.<Assoc = X>` answers in `X`, not in the trait's
+/// own `Self.Assoc`.
+#[test]
+fn a_dyn_call_sees_the_objects_associated_types() {
+    let src = r#"
+Get :: trait {
+    Out :: type
+    get :: func (self: *Self) -> Self.Out
+}
+Pair :: struct { a: i64, b: i64 }
+impl Get for Pair {
+    Out :: (i64, i64)
+    get :: func (self: *Pair) -> (i64, i64) { return (self.a, self.b) }
+}
+main :: func () -> i32 {
+    const p := Pair { a: 40, b: 2 }
+    const g: *dyn Get.<Out = (i64, i64)> := &p
+    const v := g.get()
+    return cast.<i32>(v.0 + v.1)
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 42);
+    }
+}

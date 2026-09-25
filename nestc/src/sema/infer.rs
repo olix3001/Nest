@@ -2919,6 +2919,15 @@ impl Inferer<'_> {
                 // Iterator>.Item` for `<I: Iterator>` is `I.Item`.
                 Select::ByBound => {
                     let head = self.cx.shallow(self_ty);
+                    // A trait object says what its associated types are in
+                    // its own type: `dyn Iterator.<Item = i32>`'s is `i32`.
+                    if let Ty::Dyn { assoc: pins, .. } = &head
+                        && let Some((_, t)) = pins.iter().find(|(n, _)| n == assoc)
+                    {
+                        let t = t.clone();
+                        self.expect(*origin, &t, out);
+                        return Outcome::Solved;
+                    }
                     let minted = match &head {
                         Ty::Nominal { def, .. } => {
                             self.defs.get(*def).ns.members.get(assoc).copied()
@@ -3327,6 +3336,23 @@ impl Inferer<'_> {
         if self.is_func_trait(trait_def) && self.func_value_sig(&s).is_some() {
             return Select::ByBound;
         }
+        // A trait object implements its own trait: that is what it is. The
+        // vtable is the impl, chosen where the object was made.
+        if let Ty::Dyn { def, .. } = &s
+            && self.defs.resolve_alias(*def) == trait_def
+        {
+            return Select::ByBound;
+        }
+        // `Sized` is every type but a trait object (§3.4), and the compiler is
+        // what knows which one it has. A type parameter is sized without saying
+        // so: nothing holds a `dyn T` but through a pointer.
+        if self.is_sized_trait(trait_def) {
+            return match s {
+                Ty::Var(_) => Select::Defer,
+                Ty::Dyn { .. } => Select::NoImpl,
+                _ => Select::ByBound,
+            };
+        }
         let candidates: Vec<usize> = (0..self.impls.impls.len())
             .filter(|&i| self.impls.impls[i].trait_def == Some(trait_def))
             .collect();
@@ -3462,6 +3488,11 @@ impl Inferer<'_> {
         }
         self.cx.rollback(snap);
         ok
+    }
+
+    /// Whether `t` is the `#lang("sized")` trait.
+    fn is_sized_trait(&self, t: DefId) -> bool {
+        Some(t) == self.lang.get("sized").map(|d| self.defs.resolve_alias(d))
     }
 
     /// Whether `t` is the `#lang("func")` trait.
@@ -4249,6 +4280,34 @@ impl Inferer<'_> {
                 // vtable built beside it went unused, and the answer was about
                 // `dyn Trait` rather than about what was in it.
                 if let Some(m) = self.dyn_method_def(&recv, name.as_str()) {
+                    // A `<Self: Sized>` method has no slot (§3.4). It is still
+                    // reachable when the *pointer* is itself an implementation
+                    // — `impl <I: Iterator> Iterator for *mut I` — and then
+                    // `Self` is the pointer, whose size is known.
+                    if self.decls().sized_self(m) {
+                        let through_ptr = matches!(self.cx.shallow(&recv), Ty::Ptr { .. })
+                            && self.defs.get(m).parent.is_some_and(|t| {
+                                matches!(self.select(&recv, t, &[]), Select::Ok(_))
+                            });
+                        if through_ptr {
+                            return self.infer_method_call(
+                                callee,
+                                &recv,
+                                m,
+                                MethodDispatch::Static,
+                                args,
+                                &targs,
+                            );
+                        }
+                        let msg = format!(
+                            "`{name}` cannot be called on `{}`: it is bounded `Self: Sized`, and \
+                             a trait object's size is not known",
+                            self.cx.resolve(&recv).display(self.defs)
+                        );
+                        self.report(callee, msg);
+                        self.infer_args_only(args);
+                        return Ty::Error;
+                    }
                     let d = self.method_dispatch(m, MethodDispatch::Virtual);
                     return self.infer_method_call(callee, &recv, m, d, args, &targs);
                 }
@@ -5745,9 +5804,13 @@ impl Inferer<'_> {
             return None;
         }
         // Look through the receiver's pointer: `*dyn T` and `*I` both stand for
-        // a `Self` of `dyn T` / `I`.
+        // a `Self` of `dyn T` / `I`. Except for a `<Self: Sized>` method on a
+        // `*dyn T`, which is never `dyn T`'s: there the pointer is `Self`.
         let head = match self.cx.shallow(recv) {
-            Ty::Ptr { inner, .. } => self.cx.shallow(&inner),
+            Ty::Ptr { inner, .. } => match self.cx.shallow(&inner) {
+                Ty::Dyn { .. } if self.decls().sized_self(method) => self.cx.shallow(recv),
+                inner => inner,
+            },
             other => other,
         };
         if matches!(head, Ty::Error) || is_var(&head) {
@@ -5766,7 +5829,7 @@ impl Inferer<'_> {
         // and answers from its own namespace like a parameter does.
         let is_param = matches!(&head, Ty::Nominal { def, .. }
             if matches!(self.defs.get(*def).kind, DefKind::TypeParam | DefKind::Trait));
-        if !is_param && matches!(head, Ty::Nominal { .. }) {
+        if !is_param && matches!(head, Ty::Nominal { .. } | Ty::Ptr { .. }) {
             let assocs: Vec<(Symbol, DefId)> = self
                 .defs
                 .get(parent)
@@ -5793,6 +5856,15 @@ impl Inferer<'_> {
                     method: None,
                 });
                 tys.insert(adef, out);
+            }
+        } else if let Ty::Dyn { assoc: pins, .. } = &head {
+            // A trait object carries its associated types in its type:
+            // `dyn Get.<Out = i32>`'s `get` answers an `i32`. One the type
+            // left unpinned is not known, and stays the trait's own.
+            for (name, t) in pins {
+                if let Some(&adef) = self.defs.get(parent).ns.members.get(name) {
+                    tys.insert(self.defs.resolve_alias(adef), t.clone());
+                }
             }
         } else if let Ty::Nominal { def: head_def, .. } = &head {
             let assocs: Vec<(Symbol, DefId)> = self

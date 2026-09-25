@@ -946,7 +946,7 @@ impl Cx<'_> {
             .enumerate()
             .map(|(i, m)| TypeMember {
                 name: m.name.clone(),
-                ty: self.slot_ty(m.id),
+                ty: self.slot_ty(m, &HashMap::new()),
                 offset: i as u64 * w,
             })
             .collect();
@@ -971,8 +971,11 @@ impl Cx<'_> {
             return self.vtable_type(DefId(u32::MAX));
         };
         let is_func = self.lang.get("func").map(|d| self.defs.resolve_alias(d)) == Some(*def);
-        if !is_func {
+        if !is_func && assoc.is_empty() {
             return self.vtable_type(*def);
+        }
+        if !is_func {
+            return self.pinned_vtable_type(object, *def, assoc);
         }
         let key = format!("$vtfunc{}", self.key(object));
         if let Some(id) = self.type_index.get(&key) {
@@ -1021,13 +1024,73 @@ impl Cx<'_> {
         id
     }
 
+    /// The vtable type of a trait object that pins associated types —
+    /// `dyn Iterator.<Item = i32>` — one per object type: a slot's signature
+    /// may say `Self.Item`, and only the object's type says what that is.
+    fn pinned_vtable_type(&mut self, object: &Ty, trait_def: DefId, pins: &[(Symbol, Ty)]) -> TypeId {
+        let key = format!("$vtobj{}", self.key(object));
+        if let Some(id) = self.type_index.get(&key) {
+            return *id;
+        }
+        let map: HashMap<DefId, Ty> = pins
+            .iter()
+            .filter_map(|(n, t)| {
+                let d = *self.defs.get(trait_def).ns.members.get(n)?;
+                Some((self.defs.resolve_alias(d), t.clone()))
+            })
+            .collect();
+        let methods = match self.linked.ty(trait_def).map(|t| t.kind.clone()) {
+            Some(TypeDefKind::Trait { methods, .. }) => methods,
+            _ => Vec::new(),
+        };
+        let w = self.layouts.pointer_size();
+        let id = TypeId(self.types.len() as u32);
+        self.type_index.insert(key.clone(), id);
+        self.types.push(TypeDef {
+            id,
+            key,
+            name: format!("vtable.{}", object.display(self.defs)),
+            members: Vec::new(),
+            layout: Layout::ZERO,
+            origin: Origin::Vtable {
+                trait_name: self.defs.canonical_string(trait_def),
+            },
+        });
+        let members: Vec<TypeMember> = methods
+            .iter()
+            .enumerate()
+            .map(|(i, m)| TypeMember {
+                name: m.name.clone(),
+                ty: self.slot_ty(m, &map),
+                offset: i as u64 * w,
+            })
+            .collect();
+        self.types[id.0 as usize].layout = Layout {
+            size: members.len() as u64 * w,
+            align: w,
+        };
+        self.types[id.0 as usize].members = members;
+        id
+    }
+
     /// The type of one vtable slot: the method's signature with the receiver
-    /// erased, which is what a `dyn` call actually has in hand.
-    fn slot_ty(&mut self, method: IrId) -> LirTy {
-        let Some(Ty::Func { params, ret, .. }) = self.meta.ty(method) else {
+    /// erased, which is what a `dyn` call actually has in hand, and the
+    /// object's pinned associated types put in (`pins`).
+    ///
+    /// A `<Self: Sized>` method's slot is empty (§3.4) and has no signature
+    /// worth laying out — it may be generic — so it is a bare pointer.
+    fn slot_ty(&mut self, method: &crate::ir::TraitMethod, pins: &HashMap<DefId, Ty>) -> LirTy {
+        if method.sized_self {
+            return LirTy::ptr(LirTy::Void);
+        }
+        let Some(Ty::Func { params, ret, .. }) = self.meta.ty(method.id) else {
             return LirTy::ptr(LirTy::Void);
         };
-        let ret = self.lir(&ret);
+        let params: Vec<Ty> = params
+            .iter()
+            .map(|p| crate::ir::layout::subst_ty(pins, p))
+            .collect();
+        let ret = self.lir(&crate::ir::layout::subst_ty(pins, &ret));
         let mut ps: Vec<LirTy> = Vec::with_capacity(params.len());
         for (i, p) in params.iter().enumerate() {
             // `self` is a `*dyn Trait` at the call site and the concrete type is
@@ -1071,9 +1134,10 @@ impl Cx<'_> {
             .slots
             .iter()
             .map(|slot| match slot {
-                // A slot object safety should have made impossible to leave
-                // empty. `undef` is how that shows up as a defect rather than as
-                // a call to the wrong function.
+                // A `<Self: Sized>` method's slot, which no call reads; any
+                // other empty slot is one object safety should have made
+                // impossible. `undef` is how that shows up as a defect rather
+                // than as a call to the wrong function.
                 Some(def) => Constant::Func(self.func_id(*def)),
                 None => Constant::Undef,
             })
@@ -2903,7 +2967,8 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             // not of the call. Reaching it is two ordinary projections and an
             // indirect call — the trait has disappeared by this level (§9).
             Dispatch::Virtual { trait_def, method } => {
-                let callee = self.vtable_slot(*trait_def, *method, vals.first(), span)?;
+                let object = args.first().map(|a| self.cx.ty_of(a.id));
+                let callee = self.vtable_slot(*trait_def, *method, object, vals.first(), span)?;
                 // **The receiver passed is the data pointer, not the fat
                 // pointer.** A `*dyn Trait` is `{ data, vtable }` (§7b) and the
                 // slot's type says `func(*void, …)` — `Cx::slot_ty` erases the
@@ -3056,6 +3121,7 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         &mut self,
         trait_def: DefId,
         method: DefId,
+        object: Option<Ty>,
         recv: Option<&Operand>,
         span: Option<FileSpan>,
     ) -> Option<Callee> {
@@ -3075,7 +3141,14 @@ impl<'a, 'c> Lowerer<'a, 'c> {
         // The slot's type is the one the trait's vtable struct gives it, which
         // is the whole point of the vtable being a struct: the offset and the
         // signature both come from the table.
-        let vt = self.cx.vtable_type(trait_def);
+        // A receiver's pointee is the object type, which is what says what
+        // an associated type in the slot's signature is.
+        let vt = match object {
+            Some(Ty::Ptr { inner, .. }) if matches!(*inner, Ty::Dyn { .. }) => {
+                self.cx.object_vtable_type(&inner)
+            }
+            _ => self.cx.vtable_type(trait_def),
+        };
         let fty = self
             .cx
             .types

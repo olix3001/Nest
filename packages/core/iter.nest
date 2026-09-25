@@ -13,6 +13,12 @@
 // P>, F>`, and nothing runs until something calls `next`. Being monomorphized,
 // the chain compiles to the loop it stands for. The **consumers** are the ones
 // that loop: they pull `next` until it answers `.none`.
+//
+// Every one of them is `<Self: Sized>` (§3.4): generic, or taking `self` by
+// value, none could be a vtable slot, and the bound leaves them out of it — so
+// `*mut dyn Iterator.<Item = T>` exists, with `next` its one slot. The
+// adapters still apply to one, through the pointer: `*mut I` is an iterator
+// itself (below).
 @public Iterator :: #lang("iterator") trait {
   Item :: type
   next :: func (self: *mut Self) -> Option.<Self.Item>
@@ -20,43 +26,43 @@
   // ===< Adapters >===
 
   // Each element passed through `f`.
-  map :: func <B, F: Func(Self.Item) -> B> (self: Self, f: F) -> Map.<Self, F> {
+  map :: func <Self: Sized, B, F: Func(Self.Item) -> B> (self: Self, f: F) -> Map.<Self, F> {
     return Map.<Self, F> { iter: self, f: f }
   }
 
   // Only the elements `keep` answers `true` for.
-  filter :: func <P: Func(Self.Item) -> bool> (self: Self, keep: P) -> Filter.<Self, P> {
+  filter :: func <Self: Sized, P: Func(Self.Item) -> bool> (self: Self, keep: P) -> Filter.<Self, P> {
     return Filter.<Self, P> { iter: self, keep: keep }
   }
 
   // Each element with its position, counting from 0: `(0, a), (1, b), …`.
-  enumerate :: func (self: Self) -> Enumerate.<Self> {
+  enumerate :: func <Self: Sized> (self: Self) -> Enumerate.<Self> {
     return Enumerate.<Self> { iter: self, count: 0 }
   }
 
   // Pairs of this iterator's elements and `other`'s, ending with the shorter.
-  zip :: func <J: Iterator> (self: Self, other: J) -> Zip.<Self, J> {
+  zip :: func <Self: Sized, J: Iterator> (self: Self, other: J) -> Zip.<Self, J> {
     return Zip.<Self, J> { a: self, b: other }
   }
 
   // This iterator's elements, then `other`'s.
-  chain :: func <J: Iterator.<Item = Self.Item>> (self: Self, other: J) -> Chain.<Self, J> {
+  chain :: func <Self: Sized, J: Iterator.<Item = Self.Item>> (self: Self, other: J) -> Chain.<Self, J> {
     return Chain.<Self, J> { a: self, b: other, a_done: false }
   }
 
   // At most the first `n` elements.
-  take :: func (self: Self, n: usize) -> Take.<Self> {
+  take :: func <Self: Sized> (self: Self, n: usize) -> Take.<Self> {
     return Take.<Self> { iter: self, left: n }
   }
 
   // Everything after the first `n` elements.
-  skip :: func (self: Self, n: usize) -> Skip.<Self> {
+  skip :: func <Self: Sized> (self: Self, n: usize) -> Skip.<Self> {
     return Skip.<Self> { iter: self, left: n }
   }
 
   // The first element, then every `n`th after it: `(0..<10).step(3)` is 0, 3,
   // 6, 9. A step of 0 would never move, so it panics.
-  step :: func (self: Self, n: usize) -> StepBy.<Self> {
+  step :: func <Self: Sized> (self: Self, n: usize) -> StepBy.<Self> {
     if n == 0 { panic("`step` of 0") }
     return StepBy.<Self> { iter: self, n: n, first: true }
   }
@@ -64,7 +70,7 @@
   // ===< Consumers >===
 
   // Call `f` on every element.
-  each :: func <F: Func(Self.Item)> (self: Self, f: F) {
+  each :: func <Self: Sized, F: Func(Self.Item)> (self: Self, f: F) {
     let mut it := self
     loop {
       it.next().match {
@@ -76,7 +82,7 @@
 
   // Combine every element into one value, starting from `init`:
   // `(1..=4).fold(0, { acc, x in acc + x })` is 10.
-  fold :: func <A, F: Func(A, Self.Item) -> A> (self: Self, init: A, f: F) -> A {
+  fold :: func <Self: Sized, A, F: Func(A, Self.Item) -> A> (self: Self, init: A, f: F) -> A {
     let mut it := self
     let mut acc := init
     loop {
@@ -89,12 +95,12 @@
   }
 
   // How many elements there are.
-  count :: func (self: Self) -> usize {
+  count :: func <Self: Sized> (self: Self) -> usize {
     return self.fold(cast.<usize>(0), { n, x in n + 1 })
   }
 
   // Whether `pred` holds for some element. Stops at the first that does.
-  any :: func <P: Func(Self.Item) -> bool> (self: Self, pred: P) -> bool {
+  any :: func <Self: Sized, P: Func(Self.Item) -> bool> (self: Self, pred: P) -> bool {
     let mut it := self
     loop {
       it.next().match {
@@ -105,7 +111,7 @@
   }
 
   // Whether `pred` holds for every element. Stops at the first that does not.
-  all :: func <P: Func(Self.Item) -> bool> (self: Self, pred: P) -> bool {
+  all :: func <Self: Sized, P: Func(Self.Item) -> bool> (self: Self, pred: P) -> bool {
     let mut it := self
     loop {
       it.next().match {
@@ -118,12 +124,12 @@
   // Every element, gathered into a collection that says how to build itself
   // from them (`FromIterator`): `.collect.<Vec.<i32>>()`, or a plain
   // `.collect()` where the context names the collection.
-  collect :: func <C: FromIterator.<Item = Self.Item>> (self: Self) -> C {
+  collect :: func <Self: Sized, C: FromIterator.<Item = Self.Item>> (self: Self) -> C {
     return FromIterator.from_iter(self)
   }
 
   // The first element `pred` holds for.
-  find :: func <P: Func(Self.Item) -> bool> (self: Self, pred: P) -> Option.<Self.Item> {
+  find :: func <Self: Sized, P: Func(Self.Item) -> bool> (self: Self, pred: P) -> Option.<Self.Item> {
     let mut it := self
     loop {
       it.next().match {
@@ -283,6 +289,18 @@ impl <I: Iterator> Iterator for StepBy.<I> {
       }
     }
     return self.iter.next()
+  }
+}
+
+// A pointer to an iterator is one: `next` advances what it points at. This is
+// what puts the adapters within reach of a trait object — `it.map(f)` on a
+// `*mut dyn Iterator.<Item = T>` maps the pointer, whose size is known, and
+// every `next` it makes goes through the vtable.
+impl <I: Iterator> Iterator for *mut I {
+  Item :: I.Item
+  next :: func (self: *mut *mut I) -> Option.<I.Item> {
+    const it: *mut I := self.*
+    return it.next()
   }
 }
 

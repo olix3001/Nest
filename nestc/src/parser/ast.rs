@@ -552,6 +552,11 @@ pub enum NodeKind {
         directives: Vec<NodeId>,
         extern_abi: Option<Symbol>,
         generics: Vec<NodeId>,
+        /// The bounds of a `Self: Bounds` written in a trait method's generic
+        /// list (§3.4): not a parameter — `Self` is the trait's — but what the
+        /// implementing type must also be for the method to exist. Kept out of
+        /// `generics` so nothing counting parameters sees it.
+        self_bounds: Option<NodeId>,
         params: Vec<NodeId>,
         ret: Option<NodeId>,
         body: Option<NodeId>,
@@ -894,6 +899,7 @@ impl NodeKind {
             FuncExpr {
                 directives,
                 generics,
+                self_bounds,
                 params,
                 ret,
                 body,
@@ -901,6 +907,7 @@ impl NodeKind {
             } => {
                 out.extend_from_slice(directives);
                 out.extend_from_slice(generics);
+                push_opt(out, self_bounds);
                 out.extend_from_slice(params);
                 push_opt(out, ret);
                 push_opt(out, body);

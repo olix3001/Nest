@@ -251,11 +251,42 @@ impl Resolver<'_> {
             }
             NodeKind::FuncExpr {
                 generics,
+                self_bounds,
                 params,
                 ret,
                 body,
                 ..
             } => {
+                // `<Self: Sized>` (§3.4) says something about the implementing
+                // type, which only a trait's own method has to say.
+                if let Some(b) = self_bounds {
+                    let in_trait = self.boundaries.is_empty()
+                        && self.defs.get(self.current_ns()).kind == DefKind::Trait;
+                    if in_trait {
+                        self.resolve_node(b);
+                        // Any other bound would be a condition a call has to
+                        // prove and the body may assume, which nothing needs
+                        // yet; `Sized` only says which receivers have a slot.
+                        let bounds = match self.ast.node(b).kind.clone() {
+                            NodeKind::Bounds { bounds } => bounds,
+                            _ => vec![b],
+                        };
+                        for t in bounds {
+                            let sized = self.bound_trait_def(t).is_some_and(|d| {
+                                self.defs.get(d).lang.as_ref().is_some_and(|l| l.as_str() == "sized")
+                            });
+                            if !sized {
+                                self.report(t, "`Self` may only be bounded by `Sized`");
+                            }
+                        }
+                    } else {
+                        self.report(
+                            b,
+                            "only a trait's method may bound `Self`; everywhere else `Self` \
+                             is one known type",
+                        );
+                    }
+                }
                 self.boundaries.push(Boundary {
                     depth: self.scopes.len(),
                     captures: None,

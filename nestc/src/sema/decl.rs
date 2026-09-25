@@ -125,6 +125,10 @@ pub struct FuncDecl {
     /// that reads this function out of a library. The language server is what
     /// asks: a method is offered after `value.` and a free function is not.
     pub recv: bool,
+    /// Whether it is a trait method bounded `<Self: Sized>` (§3.4): one for
+    /// implementing types only, with no vtable slot and not callable on a
+    /// `dyn` receiver.
+    pub sized_self: bool,
     /// Its signature, generics left standing: the `Ty::Func` a call site
     /// instantiates and unifies its arguments against.
     ///
@@ -678,6 +682,40 @@ impl<'a> Decls<'a> {
         )
     }
 
+    /// Whether `def` is a trait method bounded `<Self: Sized>` — see
+    /// [`FuncDecl::sized_self`].
+    pub fn sized_self(&self, def: DefId) -> bool {
+        if let Some(f) = self.func_decl(def) {
+            return f.sized_self;
+        }
+        let Some((file, func)) = self.func(def) else {
+            return false;
+        };
+        let ast = &self.asts[&file];
+        let NodeKind::FuncExpr {
+            self_bounds: Some(b),
+            ..
+        } = ast.node(func).kind
+        else {
+            return false;
+        };
+        let bounds = match &ast.node(b).kind {
+            NodeKind::Bounds { bounds } => bounds.clone(),
+            _ => vec![b],
+        };
+        bounds.iter().any(|&t| {
+            ast.meta::<Resolution>(t).is_some_and(|r| match r {
+                Resolution::Def(d) => self
+                    .defs
+                    .get(self.defs.resolve_alias(d))
+                    .lang
+                    .as_ref()
+                    .is_some_and(|l| l.as_str() == "sized"),
+                _ => false,
+            })
+        })
+    }
+
     /// What `def` **requires** of an impl, when it is a trait member that
     /// requires anything.
     ///
@@ -995,6 +1033,7 @@ pub fn record(defs: &DefTable, asts: &HashMap<FileId, Ast>, table: &mut DeclTabl
                 generics: q.generic_params(d.id),
                 has_body: q.has_body(d.id),
                 recv: q.takes_receiver(d.id),
+                sized_self: q.sized_self(d.id),
                 sig: None,
             }),
             DefKind::Struct | DefKind::Enum | DefKind::Trait => Decl::Type(TypeDecl {
@@ -1049,6 +1088,7 @@ mod tests {
                 "{what}"
             );
             assert_eq!(table.has_body(d.id), tree.has_body(d.id), "{what}");
+            assert_eq!(table.sized_self(d.id), tree.sized_self(d.id), "{what}");
             assert_eq!(table.requirement(d.id), tree.requirement(d.id), "{what}");
             assert_eq!(
                 table.generic_arity(d.id),

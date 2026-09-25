@@ -260,6 +260,10 @@ pub struct TraitMethod {
     /// Whether the trait itself supplies a body — a default method. It still
     /// occupies a slot; it only changes what fills it when an impl is silent.
     pub has_default: bool,
+    /// Whether it is bounded `<Self: Sized>` (§3.4): for implementing types
+    /// only. It has no slot to fill — its vtable entry stays empty — and so
+    /// nothing about its signature stops the trait being object-safe.
+    pub sized_self: bool,
 }
 
 /// One member of a struct, of a variant's payload, or the representation of a

@@ -63,6 +63,17 @@
   Output :: type
 }
 
+// Every type whose size is known where it is used — which is every type but a
+// trait object, `dyn T`, whose size was erased (§3.4). Nothing but the compiler
+// implements it.
+//
+// It exists for one bound: `<Self: Sized>` on a trait's method says the method
+// is for implementing types only, never for `dyn T`. Such a method takes no
+// vtable slot, so a generic or by-value method written that way does not stop
+// the trait being made into a trait object. A generic parameter is sized
+// without saying so: nothing holds a `dyn T` but through a pointer.
+@public Sized :: #lang("sized") trait {}
+
 // ===< Prefix unaries >===
 
 @public Neg :: #lang("neg") trait {

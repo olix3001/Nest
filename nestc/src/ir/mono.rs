@@ -758,6 +758,17 @@ impl Mono<'_> {
             } => {
                 let (trait_def, method) = (*trait_def, *method);
                 let (self_ty, trait_args) = (self_ty.clone(), trait_args.clone());
+                // A parameter instantiated at the trait's own object type —
+                // `impl <I: Iterator> Iterator for *mut I` at `I = dyn
+                // Iterator` — has no impl to select: the object's vtable is
+                // the impl, so the call goes through it.
+                if let Ty::Ptr { inner, .. } = &self_ty
+                    && matches!(&**inner, Ty::Dyn { def, .. }
+                        if self.defs.resolve_alias(*def) == trait_def)
+                {
+                    *dispatch = Dispatch::Virtual { trait_def, method };
+                    return;
+                }
                 let call_args = recorded.unwrap_or_default();
                 match self.select(linked, trait_def, method, &self_ty, &trait_args, &call_args) {
                     Some((target, targs)) => {
@@ -781,22 +792,29 @@ impl Mono<'_> {
                 // written against the trait's own `Self` and meaningful only
                 // once an instantiation said what that is.
                 if let Some(trait_def) = self.default_body_of(target) {
-                    let has_receiver = match linked.ty(trait_def).map(|t| &t.kind) {
+                    let recv = match linked.ty(trait_def).map(|t| &t.kind) {
                         Some(super::TypeDefKind::Trait { methods, .. }) => methods
                             .iter()
-                            .any(|m| m.def == target && m.recv != super::Recv::None),
-                        _ => false,
+                            .find(|m| m.def == target)
+                            .map(|m| m.recv),
+                        _ => None,
                     };
+                    let has_receiver = recv.is_some_and(|r| r != super::Recv::None);
+                    // `Self` is the receiver less the pointer a `self: *Self`
+                    // put on it; a `self: Self` receiver is `Self` as it is,
+                    // pointer or not (`impl Iterator for *mut I`).
+                    let by_ptr = matches!(recv, Some(super::Recv::Ptr | super::Recv::MutPtr));
                     let receiver = has_receiver
                         .then_some(callee_ty.as_ref())
                         .flatten()
                         .and_then(|t| match t {
-                            Ty::Func { params, .. } => params.first().map(strip_ptr),
+                            Ty::Func { params, .. } => params.first().cloned(),
                             _ => None,
                         })
                         .filter(|t| {
+                            let t = if by_ptr { strip_ptr(t) } else { t.clone() };
                             !matches!(t, Ty::Dyn { .. })
-                                && !matches!(t, Ty::Nominal { def, .. } if *def == trait_def)
+                                && !matches!(t, Ty::Nominal { def, .. } if def == trait_def)
                         });
                     if let Some(self_ty) = receiver {
                         let call_args = recorded.clone().unwrap_or_default();
@@ -951,14 +969,21 @@ impl Mono<'_> {
         // arguments to give — `dyn Add.<f64>` would carry them in the type
         // itself, and object safety is a separate question. Nothing to match.
         let (i, bindings) = self.match_impl(linked, trait_def, concrete, &[])?;
-        let methods: Vec<(Symbol, DefId)> = match linked.ty(trait_def).map(|t| &t.kind) {
-            Some(super::TypeDefKind::Trait { methods, .. }) => {
-                methods.iter().map(|m| (m.name.clone(), m.def)).collect()
-            }
+        let methods: Vec<(Symbol, DefId, bool)> = match linked.ty(trait_def).map(|t| &t.kind) {
+            Some(super::TypeDefKind::Trait { methods, .. }) => methods
+                .iter()
+                .map(|m| (m.name.clone(), m.def, m.sized_self))
+                .collect(),
             _ => Vec::new(),
         };
         let mut slots = Vec::with_capacity(methods.len());
-        for (name, decl) in methods {
+        for (name, decl, sized_self) in methods {
+            // A `<Self: Sized>` method is never called through the table, so
+            // its slot stays empty rather than instantiating it for nothing.
+            if sized_self {
+                slots.push(None);
+                continue;
+            }
             // An impl that does not override a method still supplies it when the
             // trait gave it a default body; that body belongs to the trait, so
             // the trait's own declaration is the function to put in the slot.
@@ -1077,8 +1102,12 @@ impl Mono<'_> {
         let own = self.own_count(linked, target);
         let mut args: Vec<GenericArg> = call_args.iter().take(own).cloned().collect();
         args.extend(self.inherited_args(linked, target, &bindings));
+        // `Self` is the receiver, less the pointer a `self: *Self` put on it.
+        // A `self: Self` method's receiver *is* `Self`, even when that is a
+        // pointer: `impl Iterator for *mut I` maps the pointer.
         if target == method && self.default_body_of(target).is_some() {
-            args.push(GenericArg::Ty(strip_ptr(self_ty)));
+            let self_ty = if by_ptr { strip_ptr(self_ty) } else { self_ty.clone() };
+            args.push(GenericArg::Ty(self_ty));
         }
         Some((target, args))
     }
@@ -1305,6 +1334,12 @@ impl Mono<'_> {
     /// `<base as trait_def>.assoc` for a concrete `base`: a callable's own
     /// signature for `Func` (§5.5), and otherwise the matching impl's binding.
     fn project(&self, linked: &Linked, base: &Ty, trait_def: DefId, assoc: &Symbol) -> Option<Ty> {
+        // A trait object carries its associated types in its type.
+        if let Ty::Dyn { def, assoc: pins } = base
+            && self.defs.resolve_alias(*def) == trait_def
+        {
+            return pins.iter().find(|(n, _)| n == assoc).map(|(_, t)| t.clone());
+        }
         let is_func = self
             .defs
             .get(trait_def)

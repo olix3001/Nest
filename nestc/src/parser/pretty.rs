@@ -173,11 +173,18 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         }
         OverloadSet { members } => format!("OverloadSet ({})", members.len()),
         FuncExpr {
-            extern_abi, body, ..
+            extern_abi,
+            body,
+            self_bounds,
+            ..
         } => {
             let mut tag = String::from("FuncExpr");
             if let Some(abi) = extern_abi {
                 tag.push_str(&format!(" extern(\"{abi}\")"));
+            }
+            // Its `Bounds` child is then `Self`'s, not a parameter's.
+            if self_bounds.is_some() {
+                tag.push_str(" (Self bounded)");
             }
             if body.is_none() {
                 tag.push_str(" (bodyless)");

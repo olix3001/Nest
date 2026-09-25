@@ -3230,6 +3230,60 @@ f :: func (s: *S) { let d: *dyn T := s }
     );
 }
 
+/// A `<Self: Sized>` method has no vtable slot (§3.4), so being generic or
+/// taking `self` by value no longer stops the trait being made into an object.
+#[test]
+fn a_sized_self_method_leaves_the_trait_object_safe() {
+    let src = "\
+Shape :: trait {
+    area :: func (self: *Self) -> i32
+    scaled :: func <Self: Sized, F: Func(i32) -> i32> (self: Self, f: F) -> i32 { return f(self.area()) }
+}
+S :: struct { n: i32 }
+impl Shape for S { area :: func (self: *S) -> i32 { return self.n } }
+f :: func (s: *S) -> i32 {
+    const d: *dyn Shape := s
+    return d.area() + s.*.scaled({ x in x * 2 })
+}
+";
+    assert!(messages(src).is_empty(), "{:?}", messages(src));
+}
+
+/// And it cannot be called through the object: the size the bound asks for is
+/// exactly what a trait object erased.
+#[test]
+fn a_sized_self_method_is_not_callable_on_a_trait_object() {
+    let src = "\
+Shape :: trait {
+    area :: func (self: *Self) -> i32
+    scaled :: func <Self: Sized, F: Func(i32) -> i32> (self: Self, f: F) -> i32 { return f(self.area()) }
+}
+S :: struct { n: i32 }
+impl Shape for S { area :: func (self: *S) -> i32 { return self.n } }
+f :: func (d: *dyn Shape) -> i32 { return d.scaled({ x in x * 2 }) }
+";
+    let errs = messages(src);
+    assert!(
+        errs.iter().any(|m| m.contains("`scaled` cannot be called on `*dyn Shape`")),
+        "{errs:?}"
+    );
+}
+
+/// `Self` is bounded only on a trait's method, and only by `Sized`.
+#[test]
+fn self_may_only_be_bounded_by_sized_on_a_trait_method() {
+    let src = "\
+T :: trait {
+    m :: func <Self: Sized + Copy> (self: Self) {}
+}
+Copy :: trait {}
+g :: func <Self: Sized> () {}
+";
+    let errs = messages(src);
+    assert!(errs.iter().any(|m| m.contains("`Self` may only be bounded by `Sized`")), "{errs:?}");
+    assert!(errs.iter().any(|m| m.contains("only a trait's method may bound `Self`")), "{errs:?}");
+}
+
 #[test]
 fn the_ir_records_a_traits_methods_in_slot_order() {
     // Declaration order *is* the vtable's layout, so a slot index means nothing

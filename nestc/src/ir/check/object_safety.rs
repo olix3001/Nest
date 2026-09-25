@@ -101,7 +101,9 @@ impl Cx<'_> {
             );
             return;
         }
-        for m in methods {
+        // A `<Self: Sized>` method is not callable on a trait object at all,
+        // so it needs no slot and asks nothing of the vtable.
+        for m in methods.iter().filter(|m| !m.sized_self) {
             let Some(why) = self.unsafe_reason(trait_def, m) else {
                 continue;
             };

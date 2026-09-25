@@ -477,6 +477,7 @@ impl Lowerer<'_> {
                         recv,
                         generic: !generics.is_empty(),
                         has_default: body.is_some(),
+                        sized_self: self.decls().sized_self(def),
                     });
                 }
                 // An associated type is a slot in the *impl*, not in the vtable.

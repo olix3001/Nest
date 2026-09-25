@@ -355,6 +355,29 @@ impl Parser {
         self.alloc(span, NodeKind::GenericTypeParam { name, constraint })
     }
 
+    /// Take a `Self: Bounds` out of a generic list (§3.4). `Self` is not a
+    /// parameter — it is the trait's — so what is left is the bounds, which
+    /// resolution checks are written on a trait's method. Written twice, the
+    /// second is refused here: one list of bounds says it all.
+    fn split_self_bounds(&mut self, generics: Vec<NodeId>) -> (Vec<NodeId>, Option<NodeId>) {
+        let mut out = Vec::with_capacity(generics.len());
+        let mut bounds = None;
+        for g in generics {
+            match self.clone_kind(g) {
+                NodeKind::GenericTypeParam { name, constraint } if name.as_str() == "Self" => {
+                    let span = self.node_span(g);
+                    match (constraint, bounds) {
+                        (None, _) => self.error(span, "`Self` is not a generic parameter: write `Self: Bound` to bound it"),
+                        (Some(_), Some(_)) => self.error(span, "`Self` is bounded twice; join the bounds with `+`"),
+                        (Some(c), None) => bounds = Some(c),
+                    }
+                }
+                _ => out.push(g),
+            }
+        }
+        (out, bounds)
+    }
+
     /// Turn each parameter written `impl Bounds` into an anonymous generic
     /// parameter with those bounds (§5.4): `func (f: impl Func(i32))` is
     /// `func <F: Func(i32)> (f: F)`, with a name nothing can write.
@@ -902,6 +925,7 @@ impl Parser {
             return self.parse_overload_set(start);
         }
         let generics = self.parse_generics();
+        let (generics, self_bounds) = self.split_self_bounds(generics);
         let params = self.parse_params();
         let generics = self.lift_impl_params(generics, &params);
         let mut end = self.cur_span();
@@ -925,6 +949,7 @@ impl Parser {
                 directives,
                 extern_abi,
                 generics,
+                self_bounds,
                 params,
                 ret,
                 body,
