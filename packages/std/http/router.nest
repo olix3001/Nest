@@ -72,7 +72,7 @@ impl Context {
 /// by itself, or call `next.run(ctx)` and look at — or change — what comes back.
 ///
 /// ```nest
-/// app.use() { ctx, next in
+/// app.use { ctx, next in
 ///     if ctx.header("Authorization").match { .some(_) => false, .none => true } {
 ///         return http.status(401, "who are you?")
 ///     }

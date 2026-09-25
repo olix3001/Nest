@@ -27,7 +27,7 @@ main :: func () -> i32 {
     let mut app: http.App := http.app(services.build())
 
     // Every request is logged, whatever answers it.
-    app.use() { ctx, next in
+    app.use { ctx, next in
         const res := next.run(ctx)
         io.println(f"{ctx.request().method} {ctx.request().path} -> {res.status}")
         res
@@ -39,7 +39,7 @@ main :: func () -> i32 {
 
     app.route("/api") { r in
         // Everything under `/api` needs an `Authorization` header.
-        r.use() { ctx, next in
+        r.use { ctx, next in
             ctx.header("Authorization").match {
                 .some(_) => next.run(ctx),
                 .none => http.status(401, "who are you?"),

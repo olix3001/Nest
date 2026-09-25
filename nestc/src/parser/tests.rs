@@ -550,3 +550,26 @@ make :: func (n: i32) -> impl Func(i32) -> i32 { return { x in x + n } }
 "
     ));
 }
+
+/// A `{` after a path is a trailing closure — a call with no `()` — when it
+/// holds a closure header and an `in` at its own level; otherwise it is still
+/// a struct literal, including the two that start the way a header does.
+#[test]
+fn a_bare_trailing_closure_is_told_from_a_struct_literal() {
+    let closure = |src: &str| {
+        let t = tree(src);
+        t.contains("Call") && t.contains("Closure")
+    };
+    assert!(closure("f :: func () { app.use { ctx, next in next(ctx) } }\n"));
+    assert!(closure("f :: func () { app.get { x: i32 in x } }\n"));
+    assert!(closure("f :: func () { run { in 1 } }\n"));
+    assert!(closure("f :: func () { run { [n] x in x + n } }\n"));
+    for src in [
+        "f :: func () { const p := P { a, b } }\n",
+        "f :: func () { const p := P { x: 1, y: 2 } }\n",
+    ] {
+        let t = tree(src);
+        assert!(t.contains("CompositeLit (typed"), "{t}");
+        assert!(!t.lines().any(|l| l.trim() == "Call"), "{t}");
+    }
+}

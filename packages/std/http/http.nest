@@ -33,7 +33,7 @@
 // **Middleware** wraps the routes registered after it, on its router and the
 // routers `route` makes from it — logging, authentication, headers:
 //
-//     app.use() { ctx, next in
+//     app.use { ctx, next in
 //         const res := next.run(ctx)
 //         io.println(f"{ctx.request().method} {ctx.request().path} {res.status}")
 //         res
@@ -61,10 +61,10 @@ tests :: #when(test) namespace {
         let mut services: di.Services := di.services()
         services.add_singleton({ sp in Greeter { greeting: "hello" } })
         let mut a: App := app(services.build())
-        a.use() { ctx, next in next.run(ctx).header("X-Served-By", "nest") }
+        a.use { ctx, next in next.run(ctx).header("X-Served-By", "nest") }
         a.get("/") { in text("home") }
         a.route("/api") { r in
-            r.use() { ctx, next in
+            r.use { ctx, next in
                 ctx.header("Authorization").match {
                     .some(_) => next.run(ctx),
                     .none => status(401, "who are you?"),

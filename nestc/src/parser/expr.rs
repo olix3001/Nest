@@ -244,6 +244,12 @@ impl Parser {
                 Some(TokenKind::LBrace) if !self.struct_lit_suppressed() => {
                     if self.node_is_call(e) {
                         self.attach_trailing_closure(e)
+                    } else if self.node_is_pathlike(e) && self.braced_closure_ahead() {
+                        // `app.use { ctx, next in … }`: a call whose only
+                        // argument is the trailing closure, with no `()`.
+                        let span = self.node_span(e);
+                        let call = self.alloc(span, NodeKind::Call { callee: e, args: Vec::new() });
+                        self.attach_trailing_closure(call)
                     } else if self.node_is_pathlike(e) {
                         self.parse_typed_composite(e)
                     } else {
@@ -870,6 +876,38 @@ impl Parser {
                 default: None,
             },
         )
+    }
+
+    /// Whether the `{` at the cursor, written after a path, is a closure rather
+    /// than a struct literal: it opens a closure header **and** an `in` stands
+    /// at the brace's own level before its `}`.
+    ///
+    /// The header alone does not decide it here — `P { a, b }` and `P { x: 1 }`
+    /// start the way `{ a, b in … }` and `{ x: i32 in … }` do. The `in` does: a
+    /// struct literal's own level holds fields and values, and an `in` can only
+    /// stand inside something nested in one (a block, a closure), never beside
+    /// its fields.
+    fn braced_closure_ahead(&self) -> bool {
+        if !self.closure_header_ahead() {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut i = 0;
+        while let Some(t) = self.peek_nth(i) {
+            match t {
+                TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket => depth += 1,
+                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::Ident(s) if depth == 1 && s.as_str() == "in" => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
     }
 
     /// Whether the `{` at the cursor opens a closure **header**, which is what
