@@ -377,6 +377,23 @@ pub struct Session {
 }
 
 impl Session {
+    /// The text of `def`'s `@doc` — its `///` comment — when it has one.
+    ///
+    /// Read off the def, where resolution recorded the attribute's value, so it
+    /// answers for a declaration in a compiled library as well as in source.
+    pub fn doc_of(&self, def: DefId) -> Option<String> {
+        let doc = self.defs.resolve_alias(self.lang_items.get("doc")?);
+        self.defs
+            .get(def)
+            .attrs
+            .iter()
+            .find(|a| self.defs.resolve_alias(a.def) == doc)
+            .and_then(|a| match a.args.first() {
+                Some((_, crate::ir::const_eval::ConstValue::Str(s))) => Some(s.clone()),
+                _ => None,
+            })
+    }
+
     /// A session using the real filesystem loader, with `core` at
     /// [`default_core_path`].
     pub fn new() -> Self {

@@ -9,5 +9,6 @@ pub mod driver;
 pub mod ir;
 pub mod library;
 pub mod lir;
+pub mod metadata;
 pub mod parser;
 pub mod sema;

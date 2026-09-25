@@ -7,7 +7,7 @@ unit mem:main {
     ptr: *u8                    // +0
     len: u64                    // +8
   }
-  type core.loc.Location = struct {           // was a struct; size 24, align 8
+  type core.rt.loc.Location = struct {           // was a struct; size 24, align 8
     file: []u8                    // +0
     line: u32                    // +16
     column: u32                    // +20
@@ -24,15 +24,15 @@ unit mem:main {
     let _0: (u32, bool)
     let _1: []u8
     let _2: []u8
-    let _3: core.loc.Location
+    let _3: core.rt.loc.Location
   bb0:                    // entry
     _0 := add_checked.u32 @counter, 1
     switch.bool _0.1 { 1 => bb1, _ => bb2 }
   bb1:                    // overflow
     _1 := []u8(&const.str.3, 16)
     _2 := []u8(&const.str.4, 8)
-    _3 := core.loc.Location(_2, 4, 13)
-    call core.fail.panic(_1, _3)
+    _3 := core.rt.loc.Location(_2, 4, 13)
+    call core.rt.fail.panic(_1, _3)
       @safepoint { live: [_1, _3]
         _1 := reloc _1
         _3 := reloc _3
@@ -48,5 +48,5 @@ unit mem:main {
     _1 := eq.i32 n_0, 10
     return _1
 
-  declare func core.fail.panic(msg_0: []u8, loc_1: core.loc.Location) -> never @public  // _NC4core4fail5panic
+  declare func core.rt.fail.panic(msg_0: []u8, loc_1: core.rt.loc.Location) -> never @public  // _NC4core2rt4fail5panic
 }

@@ -36,6 +36,7 @@ pub fn resolve_file(
     prelude_globs: &[DefId],
     builtins: DefId,
     pkg_of: &HashMap<FileId, String>,
+    doc: Option<DefId>,
 ) {
     let mut r = Resolver {
         defs,
@@ -54,6 +55,8 @@ pub fn resolve_file(
         boundaries: Vec::new(),
         owners: Vec::new(),
         impl_generics: Vec::new(),
+        attr_parents: None,
+        doc,
     };
     if let Some(root) = ast.root() {
         r.resolve_node(root);
@@ -114,6 +117,15 @@ struct Resolver<'a> {
     /// An `impl` return type inside one is generic over them as well as over
     /// its function's own (see [`Resolver::bind_opaque`]).
     impl_generics: Vec<Vec<NodeId>>,
+    /// Each attribute node's parent, built the first time an attribute is
+    /// resolved: [`Resolver::attr_owner`] asks it once per attribute, and a
+    /// file whose declarations all carry `///` docs has as many of those as it
+    /// has declarations.
+    attr_parents: Option<HashMap<NodeId, NodeId>>,
+    /// `core`'s `#lang("doc")` attribute, which `@doc` — and so every `///`
+    /// comment — means wherever the name `doc` is not an `@attribute` of the
+    /// program's own.
+    doc: Option<DefId>,
 }
 
 /// One entry of [`Resolver::boundaries`].
@@ -802,10 +814,16 @@ impl Resolver<'_> {
     /// one. A name that resolves to something that is *not* an `@attribute` is
     /// the error — the program meant a struct it may not use this way.
     fn resolve_attribute(&mut self, id: NodeId, name: &Symbol, args: &[NodeId]) {
-        let Some(Resolution::Def(def)) = self.lookup_unqualified(name) else {
-            return;
+        let found = match self.lookup_unqualified(name) {
+            Some(Resolution::Def(d)) => Some(self.defs.resolve_alias(d)),
+            _ => None,
         };
-        let def = self.defs.resolve_alias(def);
+        let def = match (found, self.doc) {
+            (Some(d), _) if self.defs.get(d).attribute => d,
+            (_, Some(doc)) if name.as_str() == "doc" => doc,
+            (Some(d), _) => d,
+            (None, _) => return,
+        };
         if !self.defs.get(def).attribute {
             let msg = format!(
                 "`{name}` is not an `@attribute`; declare it `@attribute {name} :: struct {{ ... }}`"
@@ -854,23 +872,29 @@ impl Resolver<'_> {
 
     /// The def an attribute node decorates: the field it sits on, or the
     /// binding the enclosing `Decl` introduces.
-    fn attr_owner(&self, attr: NodeId) -> Option<DefId> {
-        let mut stack = vec![self.ast.root()?];
-        while let Some(n) = stack.pop() {
-            let kids = self.ast.children(n);
-            if kids.contains(&attr) {
-                if let Some(DefMeta(d)) = self.ast.meta::<DefMeta>(n) {
-                    return Some(d);
-                }
-                // A `Decl` carries the attributes and its `item` carries the def.
-                if let NodeKind::Decl { item, .. } = &self.ast.node(n).kind {
-                    if let Some(DefMeta(d)) = self.ast.meta::<DefMeta>(*item) {
-                        return Some(d);
+    fn attr_owner(&mut self, attr: NodeId) -> Option<DefId> {
+        if self.attr_parents.is_none() {
+            let mut parents = HashMap::new();
+            let mut stack = vec![self.ast.root()?];
+            while let Some(n) = stack.pop() {
+                for k in self.ast.children(n) {
+                    if matches!(self.ast.node(k).kind, NodeKind::Attribute { .. }) {
+                        parents.insert(k, n);
                     }
+                    stack.push(k);
                 }
-                return None;
             }
-            stack.extend(kids);
+            self.attr_parents = Some(parents);
+        }
+        let n = *self.attr_parents.as_ref()?.get(&attr)?;
+        if let Some(DefMeta(d)) = self.ast.meta::<DefMeta>(n) {
+            return Some(d);
+        }
+        // A `Decl` carries the attributes and its `item` carries the def.
+        if let NodeKind::Decl { item, .. } = &self.ast.node(n).kind
+            && let Some(DefMeta(d)) = self.ast.meta::<DefMeta>(*item)
+        {
+            return Some(d);
         }
         None
     }

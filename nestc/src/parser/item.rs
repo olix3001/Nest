@@ -5,7 +5,7 @@
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 
-use super::ast::{AssignOp, ImportPath, NodeId, NodeKind, VariantArgs};
+use super::ast::{AssignOp, ImportPath, Lit, NodeId, NodeKind, VariantArgs};
 use super::lexer::TokenKind;
 use super::parse::Parser;
 
@@ -54,7 +54,7 @@ impl Parser {
     /// block expands to several bindings, hence the `out` sink.
     fn parse_file_item(&mut self, out: &mut Vec<NodeId>) {
         let start = self.cur_span();
-        let attrs = self.parse_attributes();
+        let attrs = self.parse_documented_attributes();
         let directives = self.parse_directives();
         let decorated = !attrs.is_empty() || !directives.is_empty();
 
@@ -132,10 +132,29 @@ impl Parser {
 
     /// `{ '@' name [ '(' args ')' ] }` — the attributes preceding a declaration.
     pub(crate) fn parse_attributes(&mut self) -> Vec<NodeId> {
+        self.parse_attributes_with(false)
+    }
+
+    /// [`Parser::parse_attributes`] where a declaration is certain to follow —
+    /// a namespace item, a field, a variant, a trait member — so a `///` doc
+    /// comment above it is its `@doc("...")` (§9.2). The doc is the first
+    /// attribute, whatever order it was written in: attributes are unordered.
+    pub(crate) fn parse_documented_attributes(&mut self) -> Vec<NodeId> {
+        self.parse_attributes_with(true)
+    }
+
+    fn parse_attributes_with(&mut self, docs: bool) -> Vec<NodeId> {
         let mut attrs = Vec::new();
+        let mut doc: Option<(Span, String)> = None;
         loop {
             // Attributes each sit on their own line before the declaration.
             self.skip_newlines();
+            if docs && let Some((span, text)) = self.doc_before() {
+                doc = Some(match doc {
+                    Some((s, t)) => (s.to(span), format!("{t}\n{text}")),
+                    None => (span, text),
+                });
+            }
             if !self.at(&TokenKind::At) {
                 break;
             }
@@ -148,6 +167,17 @@ impl Parser {
                 (Vec::new(), start)
             };
             attrs.push(self.alloc(start.to(end), NodeKind::Attribute { name, args }));
+        }
+        if let Some((span, text)) = doc {
+            let lit = self.alloc(span, NodeKind::Lit(Lit::Str(text)));
+            let attr = self.alloc(
+                span,
+                NodeKind::Attribute {
+                    name: Symbol::new("doc"),
+                    args: vec![lit],
+                },
+            );
+            attrs.insert(0, attr);
         }
         attrs
     }

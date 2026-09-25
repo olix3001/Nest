@@ -160,7 +160,7 @@ fn holds_text(lir: &str, text: &str) -> bool {
 /// Whether the dump panics with this message: the bytes are in the data, and a
 /// call to `core.panic` reads them.
 fn panics_with(lir: &str, message: &str) -> bool {
-    holds_text(lir, message) && lir.contains("call core.fail.panic(")
+    holds_text(lir, message) && lir.contains("call core.rt.fail.panic(")
 }
 
 /// `while` is a `loop` with a guard by the time the IR has it (§ the IR's
@@ -1826,7 +1826,7 @@ fn one_program_holds_core_and_every_instantiation() {
     let unit = program.unit();
     let named = |n: &str| unit.funcs.iter().any(|f| f.name == n);
     assert!(named("main"), "the entry file's function");
-    assert!(named("core.fail.panic"), "`core`'s, in the same program");
+    assert!(named("core.rt.fail.panic"), "`core`'s, in the same program");
     assert!(
         named("f.<i32>"),
         "and the instantiation, which no file wrote"
@@ -1835,8 +1835,8 @@ fn one_program_holds_core_and_every_instantiation() {
     let panic = unit
         .funcs
         .iter()
-        .find(|f| f.name == "core.fail.panic")
-        .expect("core.fail.panic");
+        .find(|f| f.name == "core.rt.fail.panic")
+        .expect("core.rt.fail.panic");
     assert!(!panic.blocks.is_empty(), "core.panic has a body");
 }
 
@@ -3010,7 +3010,7 @@ fn a_string_literal_pattern_calls_cores_byte_equality() {
     // this level (§9), so the argument is the slice itself rather than a
     // member read out of a wrapper.
     assert!(holds_text(&lir, "hi"), "{lir}");
-    assert!(lir.contains("call core.slice.bytes_eq(s_0, _"), "{lir}");
+    assert!(lir.contains("call core.iter.slice.bytes_eq(s_0, _"), "{lir}");
 }
 
 /// `==` on two `str`s now resolves at all — it did not before, because nothing
@@ -3021,7 +3021,7 @@ fn str_equality_goes_through_the_eq_impl_to_the_same_function() {
     let src = "eq :: func (a: str, b: str) -> bool { return a == b }\n@public main :: func () {}\n";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
     assert!(
-        lir_text(src).contains("call core.str.<impl str>.<as core.cmp.Eq>.eq"),
+        lir_text(src).contains("call core.types.str.<impl str>.<as core.cmp.Eq>.eq"),
         "{}",
         lir_text(src)
     );
@@ -3044,7 +3044,7 @@ fn str_equality_goes_through_the_eq_impl_to_the_same_function() {
             _ => None,
         })
         .collect();
-    assert!(calls.contains(&"core.slice.bytes_eq"), "{calls:?}");
+    assert!(calls.contains(&"core.iter.slice.bytes_eq"), "{calls:?}");
 }
 
 /// A structural impl's namespace is named `<impl []T>` for a dump, and a space
@@ -3094,7 +3094,7 @@ fn a_structural_impl_is_mangled_by_its_self_type_not_its_label() {
 fn a_byte_string_pattern_compares_bytes_directly() {
     let lir = lir_text("f :: func (b: []u8) -> i32 { return b.match { b\"hi\" => 1, _ => 0 } }\n");
     assert!(holds_text(&lir, "hi"), "{lir}");
-    assert!(lir.contains("call core.slice.bytes_eq(b_0, _"), "{lir}");
+    assert!(lir.contains("call core.iter.slice.bytes_eq(b_0, _"), "{lir}");
 }
 
 /// The empty pattern is a length test and nothing else, which is what the
@@ -3103,7 +3103,7 @@ fn a_byte_string_pattern_compares_bytes_directly() {
 fn an_empty_string_pattern_is_the_same_call() {
     let lir = lir_text("f :: func (s: str) -> i32 { return s.match { \"\" => 1, _ => 0 } }\n");
     assert!(holds_text(&lir, ""), "{lir}");
-    assert!(lir.contains("call core.slice.bytes_eq(s_0, _"), "{lir}");
+    assert!(lir.contains("call core.iter.slice.bytes_eq(s_0, _"), "{lir}");
 }
 
 // ===< Safepoints, the cases the first pass got wrong >===

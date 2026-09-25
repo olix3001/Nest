@@ -18,7 +18,7 @@ unit mem:main {
     let _5: bool
   bb0:                    // entry
     _2 := []u8(&const.str.2, 3)
-    _3 := call core.slice.bytes_eq(s_0, _2)
+    _3 := call core.iter.slice.bytes_eq(s_0, _2)
       @safepoint { live: [s_0, _2]
         s_0 := reloc s_0
         _2 := reloc _2
@@ -39,7 +39,7 @@ unit mem:main {
     unreachable
   bb6:
     _4 := []u8(&const.str.3, 2)
-    _5 := call core.slice.bytes_eq(s_0, _4)
+    _5 := call core.iter.slice.bytes_eq(s_0, _4)
       @safepoint { live: [s_0, _4]
         s_0 := reloc s_0
         _4 := reloc _4
@@ -55,14 +55,14 @@ unit mem:main {
   internal func same(a_0: []u8, b_1: []u8) -> bool  // _NC4same
     let _2: bool
   bb0:                    // entry
-    _2 := call core.str.<impl str>.<as core.cmp.Eq>.eq(a_0, b_1)
+    _2 := call core.types.str.<impl str>.<as core.cmp.Eq>.eq(a_0, b_1)
       @safepoint { live: [a_0, b_1]
         a_0 := reloc a_0
         b_1 := reloc b_1
       }
     return _2
 
-  declare func core.slice.bytes_eq(a_0: []u8, b_1: []u8) -> bool @public  // _NC4core5slice8bytes_eq
+  declare func core.iter.slice.bytes_eq(a_0: []u8, b_1: []u8) -> bool @public  // _NC4core4iter5slice8bytes_eq
 
-  declare func core.str.<impl str>.<as core.cmp.Eq>.eq(self_0: []u8, rhs_1: []u8) -> bool  // _NC4core3strMN4core3str3strIEXN4core3cmp2EqIE2eq
+  declare func core.types.str.<impl str>.<as core.cmp.Eq>.eq(self_0: []u8, rhs_1: []u8) -> bool  // _NC4core5types3strMN4core5types3str3strIEXN4core3cmp2EqIE2eq
 }

@@ -22,6 +22,9 @@
 { Eq } :: import "cmp.nest"
 { transmute } :: import "mem/mem.nest"
 
+// The one attribute the compiler writes itself, for `///` (see `doc.nest`).
+@public { doc } :: import "doc.nest"
+
 // ===< Identity >===
 
 // A globally unique identity for a monomorphized type.

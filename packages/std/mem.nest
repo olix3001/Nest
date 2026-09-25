@@ -16,16 +16,16 @@
 // only where the trait itself is in scope.
 { Eq } :: import <core/cmp>
 
-// Copy `src` into the front of `dst`, answering how many elements moved — the
-// smaller of the two lengths.
-//
-// It does **not** panic on a short destination. A copy that fills what it was
-// given and says how much is what a reader filling a buffer wants; a caller
-// that meant to copy everything compares the answer against `src.len()`.
-//
-// The two must not overlap. Nothing here can check that — a slice knows its
-// address and its length, and two slices into one buffer are two ordinary
-// values — so it is stated rather than enforced.
+/// Copy `src` into the front of `dst`, answering how many elements moved — the
+/// smaller of the two lengths.
+///
+/// It does **not** panic on a short destination. A copy that fills what it was
+/// given and says how much is what a reader filling a buffer wants; a caller
+/// that meant to copy everything compares the answer against `src.len()`.
+///
+/// The two must not overlap. Nothing here can check that — a slice knows its
+/// address and its length, and two slices into one buffer are two ordinary
+/// values — so it is stated rather than enforced.
 @public copy :: func <T> (dst: []mut T, src: []T) -> usize {
   let mut n: usize := src.len()
   if dst.len() < n { n = dst.len() }
@@ -33,17 +33,17 @@
   return n
 }
 
-// Set every element of `dst` to `value`.
-//
-// Not a `memset`: that writes a *byte* pattern, and a general `T` is not one
-// byte — `zero` below is the case that is. What it is instead is a `memcpy`
-// that doubles. Write the value once, then copy the filled prefix onto the
-// front of what is still empty, which doubles the filled length each time; a
-// run of `n` elements is filled by `ceil(log2(n))` block moves rather than by
-// `n` element writes.
-//
-// The two slices handed to each copy never overlap: the source is `[0, take)`
-// and the destination starts at `done`, which is never less than `take`.
+/// Set every element of `dst` to `value`.
+///
+/// Not a `memset`: that writes a *byte* pattern, and a general `T` is not one
+/// byte — `zero` below is the case that is. What it is instead is a `memcpy`
+/// that doubles. Write the value once, then copy the filled prefix onto the
+/// front of what is still empty, which doubles the filled length each time; a
+/// run of `n` elements is filled by `ceil(log2(n))` block moves rather than by
+/// `n` element writes.
+///
+/// The two slices handed to each copy never overlap: the source is `[0, take)`
+/// and the destination starts at `done`, which is never less than `take`.
 @public fill :: func <T> (dst: []mut T, value: T) -> void {
   let n: usize := dst.len()
   if n == 0 { return }
@@ -58,37 +58,37 @@
   }
 }
 
-// Set every byte of `dst` to zero.
-//
-// Separate from `fill` because it is a different operation on the machine: one
-// fill instruction over the whole run, whatever the element type, where `fill`
-// has to write an element at a time.
+/// Set every byte of `dst` to zero.
+///
+/// Separate from `fill` because it is a different operation on the machine: one
+/// fill instruction over the whole run, whatever the element type, where `fill`
+/// has to write an element at a time.
 @public zero :: func <T> (dst: []mut T) -> void {
   set_bytes.<T>(dst, 0)
 }
 
-// A fresh slice holding `src`'s elements.
-//
-// The one function here that allocates, and it is here because the alternative
-// is every caller writing the same three lines. The copy is independent of the
-// original: writing to one does not change the other — and the fresh slice
-// cannot overlap what it was made from, which is what lets this be the block
-// move rather than a loop.
+/// A fresh slice holding `src`'s elements.
+///
+/// The one function here that allocates, and it is here because the alternative
+/// is every caller writing the same three lines. The copy is independent of the
+/// original: writing to one does not change the other — and the fresh slice
+/// cannot overlap what it was made from, which is what lets this be the block
+/// move rather than a loop.
 @public clone :: func <T> (src: []T) -> []mut T {
   let out: []mut T := make.<[]T>(src.len())
   copy_nonoverlapping.<T>(out, src)
   return out
 }
 
-// Whether two slices hold equal elements, in order.
-//
-// Generic over any `T: Eq`, where `core`'s `bytes_eq` is bytes only — that one
-// is what a `str` comparison and a `"..."` pattern both call, and it stays
-// where it is because the compiler reaches it by tag.
-// A loop over `T`'s own `eq`, deliberately: a block *comparison* is a test on
-// bytes, and two values that compare equal need not have equal bytes — padding
-// in a struct, and any `Eq` a program wrote itself. `core`'s `bytes_eq` is the
-// byte test, and it is what `str` uses because a `str`'s bytes *are* its value.
+/// Whether two slices hold equal elements, in order.
+///
+/// Generic over any `T: Eq`, where `core`'s `bytes_eq` is bytes only — that one
+/// is what a `str` comparison and a `"..."` pattern both call, and it stays
+/// where it is because the compiler reaches it by tag.
+/// A loop over `T`'s own `eq`, deliberately: a block *comparison* is a test on
+/// bytes, and two values that compare equal need not have equal bytes — padding
+/// in a struct, and any `Eq` a program wrote itself. `core`'s `bytes_eq` is the
+/// byte test, and it is what `str` uses because a `str`'s bytes *are* its value.
 @public equal :: func <T: Eq> (a: []T, b: []T) -> bool {
   if a.len() != b.len() { return false }
   for i in 0..<a.len() {
@@ -97,7 +97,7 @@
   return true
 }
 
-// Where `value` first appears in `xs`, or `.none`.
+/// Where `value` first appears in `xs`, or `.none`.
 @public index_of :: func <T: Eq> (xs: []T, value: T) -> Option.<usize> {
   for i in 0..<xs.len() {
     if xs[i].eq(value) { return .some(i) }
@@ -105,24 +105,24 @@
   return .none
 }
 
-// Whether `xs` holds `value` at all.
+/// Whether `xs` holds `value` at all.
 @public contains :: func <T: Eq> (xs: []T, value: T) -> bool {
   return index_of.<T>(xs, value).match { .some(_) => true, .none => false }
 }
 
-// Exchange what two places hold.
+/// Exchange what two places hold.
 @public swap :: func <T> (a: *mut T, b: *mut T) -> void {
   let held: T := a.*
   a.* = b.*
   b.* = held
 }
 
-// Move `a`'s elements into `b` and `b`'s into `a`, for as many as both have.
-//
-// An element at a time, and not a block move: every byte of both slices is both
-// a source and a destination, so a `memcpy` either way would overwrite what it
-// still has to read. Doing it in blocks needs somewhere to hold one side, and
-// nothing in this file allocates.
+/// Move `a`'s elements into `b` and `b`'s into `a`, for as many as both have.
+///
+/// An element at a time, and not a block move: every byte of both slices is both
+/// a source and a destination, so a `memcpy` either way would overwrite what it
+/// still has to read. Doing it in blocks needs somewhere to hold one side, and
+/// nothing in this file allocates.
 @public swap_ranges :: func <T> (a: []mut T, b: []mut T) -> usize {
   let mut n: usize := a.len()
   if b.len() < n { n = b.len() }
@@ -134,11 +134,11 @@
   return n
 }
 
-// Reverse `xs` where it lies.
-//
-// An element at a time, for the same reason `swap_ranges` is: the two halves
-// are each other's source and destination, and a block move reads what it has
-// already written.
+/// Reverse `xs` where it lies.
+///
+/// An element at a time, for the same reason `swap_ranges` is: the two halves
+/// are each other's source and destination, and a block move reads what it has
+/// already written.
 @public reverse :: func <T> (xs: []mut T) -> void {
   if xs.len() < 2 { return }
   let mut lo: usize := 0

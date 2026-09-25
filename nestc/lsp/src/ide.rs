@@ -365,28 +365,9 @@ fn def_ty(s: &Session, def: DefId) -> Option<Ty> {
     })
 }
 
-/// The `///` lines right above `def`, without their slashes.
+/// `def`'s doc comment: the `@doc` that `///` lines above it are sugar for.
 pub fn docs(s: &Session, def: DefId) -> Option<String> {
-    let d = s.defs.get(def);
-    let src = source(s, d.file?)?;
-    let start = d.span?.start.min(src.len());
-    let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
-    let mut lines: Vec<&str> = Vec::new();
-    for line in src[..line_start].lines().rev() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("///") {
-            lines.push(rest.strip_prefix(' ').unwrap_or(rest));
-        } else if lines.is_empty() && (t.starts_with('@') || t.starts_with('#')) {
-            continue;
-        } else {
-            break;
-        }
-    }
-    if lines.is_empty() {
-        return None;
-    }
-    lines.reverse();
-    Some(lines.join("\n"))
+    s.doc_of(def)
 }
 
 pub(crate) fn contains(span: Span, offset: usize) -> bool {

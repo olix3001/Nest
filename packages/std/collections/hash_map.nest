@@ -25,12 +25,27 @@ OCCUPIED: u8 :: 1
 // in.
 DELETED:  u8 :: 2
 
-// A table keyed by `K`.
-//
-// **Open addressing with linear probing**: the entries live in the table rather
-// than in a chain off each bucket, so a lookup is one cache line most of the
-// time and there is no allocation per entry. The capacity is a power of two, so
-// the bucket is a mask rather than a division.
+/// A table from keys `K` to values `V`. A key is anything `Hash` and `Eq`: the
+/// integers, `bool`, `char`, `str` and `String`, or a type of your own that
+/// implements both.
+///
+/// ```nest
+/// { HashMap } :: import <std/collections>
+/// hash_map :: import <std/collections/hash_map>
+///
+/// let mut ages: HashMap.<str, i32> := hash_map.new.<str, i32>()
+/// ages.insert("ada", 36)
+/// const a: Option.<i32> := ages.get("ada")
+/// for (name, age) in ages { io.println(f"{name}: {age}") }
+/// ```
+///
+/// Iteration order is the table's, not insertion order, and the table does not
+/// shrink.
+///
+/// **Open addressing with linear probing**: the entries live in the table rather
+/// than in a chain off each bucket, so a lookup is one cache line most of the
+/// time and there is no allocation per entry. The capacity is a power of two, so
+/// the bucket is a mask rather than a division.
 @public HashMap :: struct <K, V> {
   slot_keys: []mut K,
   slot_values: []mut V,
@@ -43,7 +58,7 @@ DELETED:  u8 :: 2
   used: usize,
 }
 
-// An empty table, with no storage until the first insert.
+/// An empty table, with no storage until the first insert.
 @public new :: func <K, V> () -> HashMap.<K, V> {
   return HashMap.<K, V> {
     slot_keys: make.<[]K>(0),
@@ -108,11 +123,11 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
     }
   }
 
-  // Put `value` under `key`, answering what was there before.
-  //
-  // It grows when the table is **three-quarters used**, counting tombstones:
-  // past that, linear probing's probe lengths stop being short, which is the
-  // one thing it depends on.
+  /// Put `value` under `key`, answering what was there before.
+  ///
+  /// It grows when the table is **three-quarters used**, counting tombstones:
+  /// past that, linear probing's probe lengths stop being short, which is the
+  /// one thing it depends on.
   @public insert :: func (self: *mut Self, key: K, value: V) -> Option.<V> {
     if (self.used + 1) * 4 > self.state.len() * 3 { self.grow() }
     let p: Probe := self.probe(key)
@@ -129,7 +144,7 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
     return .none
   }
 
-  // What is under `key`, or `.none`.
+  /// What is under `key`, or `.none`.
   @public get :: func (self: *Self, key: K) -> Option.<V> {
     if self.count == 0 { return .none }
     let p: Probe := self.probe(key)
@@ -137,16 +152,16 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
     return .none
   }
 
-  // Whether `key` is in the table.
+  /// Whether `key` is in the table.
   @public contains :: func (self: *Self, key: K) -> bool {
     return self.get(key).match { .some(_) => true, .none => false }
   }
 
-  // Take `key` out, answering what it held.
-  //
-  // The slot becomes a tombstone rather than empty, so that a key which probed
-  // past it is still reachable. `used` does not drop, which is what makes a
-  // remove-and-insert cycle eventually rehash instead of degrading.
+  /// Take `key` out, answering what it held.
+  ///
+  /// The slot becomes a tombstone rather than empty, so that a key which probed
+  /// past it is still reachable. `used` does not drop, which is what makes a
+  /// remove-and-insert cycle eventually rehash instead of degrading.
   @public remove :: func (self: *mut Self, key: K) -> Option.<V> {
     if self.count == 0 { return .none }
     let p: Probe := self.probe(key)
@@ -157,8 +172,8 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
     return .some(held)
   }
 
-  // Every key, in no particular order. A fresh list, because the keys are
-  // scattered through the table rather than laid out end to end.
+  /// Every key, in no particular order. A fresh list, because the keys are
+  /// scattered through the table rather than laid out end to end.
   @public keys_of :: func (self: *Self) -> []K {
     let out: []mut K := make.<[]K>(self.count)
     let mut have: usize := 0
@@ -171,7 +186,7 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
     return cast.<[]K>(out)
   }
 
-  // Forget every entry, keeping the storage.
+  /// Forget every entry, keeping the storage.
   @public clear :: func (self: *mut Self) -> void {
     for i in 0..<self.state.len() { self.state[i] = EMPTY }
     self.count = 0
@@ -187,22 +202,22 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
 // are pointers into the table, so that writing through one writes the entry.
 
 impl <K, V> HashMap.<K, V> {
-  // Every `(key, value)`.
+  /// Every `(key, value)`.
   @public iter :: func (self: *Self) -> MapIter.<K, V> {
     return MapIter.<K, V> { slot_keys: self.slot_keys, slot_values: self.slot_values, state: self.state, pos: 0 }
   }
 
-  // Every key, with a pointer to its value.
+  /// Every key, with a pointer to its value.
   @public iter_mut :: func (self: *mut Self) -> MapIterMut.<K, V> {
     return MapIterMut.<K, V> { slot_keys: self.slot_keys, slot_values: self.slot_values, state: self.state, pos: 0 }
   }
 
-  // Every key.
+  /// Every key.
   @public keys :: func (self: *Self) -> impl Iterator.<Item = K> {
     return self.iter().map({ e in e.0 })
   }
 
-  // Every value.
+  /// Every value.
   @public values :: func (self: *Self) -> impl Iterator.<Item = V> {
     return self.iter().map({ e in e.1 })
   }

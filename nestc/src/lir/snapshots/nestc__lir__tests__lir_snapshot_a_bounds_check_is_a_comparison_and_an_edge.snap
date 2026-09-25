@@ -11,7 +11,7 @@ unit mem:main {
     ptr: *u8                    // +0
     len: u64                    // +8
   }
-  type core.loc.Location = struct {           // was a struct; size 24, align 8
+  type core.rt.loc.Location = struct {           // was a struct; size 24, align 8
     file: []u8                    // +0
     line: u32                    // +16
     column: u32                    // +20
@@ -24,7 +24,7 @@ unit mem:main {
     let _3: bool
     let _4: []u8
     let _5: []u8
-    let _6: core.loc.Location
+    let _6: core.rt.loc.Location
     let _7: *i32
   bb0:                    // entry
     _2 := &s_0
@@ -33,8 +33,8 @@ unit mem:main {
   bb1:                    // out of bounds
     _4 := []u8(&const.str.2, 19)
     _5 := []u8(&const.str.3, 8)
-    _6 := core.loc.Location(_5, 1, 50)
-    call core.fail.panic(_4, _6)
+    _6 := core.rt.loc.Location(_5, 1, 50)
+    call core.rt.fail.panic(_4, _6)
       @safepoint { live: [_4, _6]
         _4 := reloc _4
         _6 := reloc _6
@@ -44,5 +44,5 @@ unit mem:main {
     _7 := _2.*.ptr + k_1 * 4
     return _7.*
 
-  declare func core.fail.panic(msg_0: []u8, loc_1: core.loc.Location) -> never @public  // _NC4core4fail5panic
+  declare func core.rt.fail.panic(msg_0: []u8, loc_1: core.rt.loc.Location) -> never @public  // _NC4core2rt4fail5panic
 }

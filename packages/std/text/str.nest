@@ -37,23 +37,23 @@
 
 // ===< Validating >===
 
-// `bytes` as text, if they are UTF-8.
-//
-// The one conversion that needs a check, and the reason `str` is `distinct`
-// (§2.4): every other operation may then assume the invariant instead of
-// re-establishing it. `fs.read_to_string` deliberately does *not* call this —
-// see the note there.
+/// `bytes` as text, if they are UTF-8.
+///
+/// The one conversion that needs a check, and the reason `str` is `distinct`
+/// (§2.4): every other operation may then assume the invariant instead of
+/// re-establishing it. `fs.read_to_string` deliberately does *not* call this —
+/// see the note there.
 @public from_utf8 :: func (bytes: []u8) -> Option.<str> {
   if valid_utf8(bytes) == false { return .none }
   return .some(cast.<str>(bytes))
 }
 
-// Whether `bytes` are well-formed UTF-8.
-//
-// It rejects what the encoding rejects and not merely what it cannot decode:
-// an over-long encoding, a surrogate, and anything above `U+10FFFF` are all
-// refused, because each is a byte sequence that *looks* decodable and is not
-// valid text. That is what makes this a check rather than a guess.
+/// Whether `bytes` are well-formed UTF-8.
+///
+/// It rejects what the encoding rejects and not merely what it cannot decode:
+/// an over-long encoding, a surrogate, and anything above `U+10FFFF` are all
+/// refused, because each is a byte sequence that *looks* decodable and is not
+/// valid text. That is what makes this a check rather than a guess.
 @public valid_utf8 :: func (bytes: []u8) -> bool {
   let mut i: usize := 0
   while i < bytes.len() {
@@ -111,23 +111,23 @@ cont :: func (bytes: []u8, at: usize) -> bool {
 
 // ===< Looking >===
 
-// Whether `s` begins with `prefix`.
+/// Whether `s` begins with `prefix`.
 @public starts_with :: func (s: str, prefix: str) -> bool {
   if prefix.len() > s.len() { return false }
   return slice(s, 0, prefix.len()) == prefix
 }
 
-// Whether `s` ends with `suffix`.
+/// Whether `s` ends with `suffix`.
 @public ends_with :: func (s: str, suffix: str) -> bool {
   if suffix.len() > s.len() { return false }
   return slice(s, s.len() - suffix.len(), s.len()) == suffix
 }
 
-// Where `needle` first appears in `s`, as a byte index, or `.none`.
-//
-// The plain scan, not Boyer-Moore: the needles a program actually searches for
-// are a few bytes long, and a table costs more to build than the scan costs to
-// run. An empty needle is at `0`, which is where it is.
+/// Where `needle` first appears in `s`, as a byte index, or `.none`.
+///
+/// The plain scan, not Boyer-Moore: the needles a program actually searches for
+/// are a few bytes long, and a table costs more to build than the scan costs to
+/// run. An empty needle is at `0`, which is where it is.
 @public find :: func (s: str, needle: str) -> Option.<usize> {
   if needle.len() == 0 { return .some(0) }
   if needle.len() > s.len() { return .none }
@@ -138,7 +138,7 @@ cont :: func (bytes: []u8, at: usize) -> bool {
   return .none
 }
 
-// Where `needle` last appears, or `.none`.
+/// Where `needle` last appears, or `.none`.
 @public rfind :: func (s: str, needle: str) -> Option.<usize> {
   if needle.len() == 0 { return .some(s.len()) }
   if needle.len() > s.len() { return .none }
@@ -150,16 +150,16 @@ cont :: func (bytes: []u8, at: usize) -> bool {
   return .none
 }
 
-// Whether `needle` appears at all.
+/// Whether `needle` appears at all.
 @public contains :: func (s: str, needle: str) -> bool {
   return find(s, needle).match { .some(_) => true, .none => false }
 }
 
-// `s`'s bytes from `from` up to `to`, as text.
-//
-// **It panics on a bad range**, because a slice out of bounds is a bug in the
-// caller rather than a condition to report: the indices come from `find` and
-// from `len`, both of which answer positions in this same string.
+/// `s`'s bytes from `from` up to `to`, as text.
+///
+/// **It panics on a bad range**, because a slice out of bounds is a bug in the
+/// caller rather than a condition to report: the indices come from `find` and
+/// from `len`, both of which answer positions in this same string.
 @public slice :: func (s: str, from: usize, to: usize) -> str {
   if from > to { panic("a `str` slice whose start is past its end") }
   if to > s.len() { panic("a `str` slice past the end of the string") }
@@ -168,12 +168,12 @@ cont :: func (bytes: []u8, at: usize) -> bool {
 
 // ===< Trimming >===
 
-// `s` without leading or trailing ASCII whitespace.
-//
-// **ASCII whitespace**, not Unicode's: the full set needs a table of properties
-// that belongs with the rest of Unicode support rather than in the file that
-// splits a configuration file into lines. The five characters below are the
-// ones a text format actually puts between tokens.
+/// `s` without leading or trailing ASCII whitespace.
+///
+/// **ASCII whitespace**, not Unicode's: the full set needs a table of properties
+/// that belongs with the rest of Unicode support rather than in the file that
+/// splits a configuration file into lines. The five characters below are the
+/// ones a text format actually puts between tokens.
 @public trim :: func (s: str) -> str { return trim_end(trim_start(s)) }
 
 @public trim_start :: func (s: str) -> str {
@@ -197,15 +197,15 @@ space :: func (b: u8) -> bool {
 
 // ===< Splitting >===
 
-// `s` cut at every occurrence of `sep`.
-//
-// The pieces are **views** into `s`, so this costs the list and nothing else.
-// An empty `sep` would cut everywhere and nowhere, so it answers the whole
-// string as one piece rather than looping forever.
-//
-// Adjacent separators produce empty pieces, and so do leading and trailing
-// ones: `",a,".split(",")` is three pieces, two of them empty. That is the
-// answer a parser wants, because it is the one that can be rebuilt with `join`.
+/// `s` cut at every occurrence of `sep`.
+///
+/// The pieces are **views** into `s`, so this costs the list and nothing else.
+/// An empty `sep` would cut everywhere and nowhere, so it answers the whole
+/// string as one piece rather than looping forever.
+///
+/// Adjacent separators produce empty pieces, and so do leading and trailing
+/// ones: `",a,".split(",")` is three pieces, two of them empty. That is the
+/// answer a parser wants, because it is the one that can be rebuilt with `join`.
 @public split :: func (s: str, sep: str) -> []str {
   if sep.len() == 0 {
     let one: []mut str := make.<[]str>(1)
@@ -234,11 +234,11 @@ space :: func (b: u8) -> bool {
   return cast.<[]str>(out[0..<have])
 }
 
-// `s` split at newlines, with a trailing `\r` dropped from each line.
-//
-// A final newline does **not** produce an empty last line: a file ending in
-// `\n` has as many lines as it has newlines, which is what every other tool
-// counts.
+/// `s` split at newlines, with a trailing `\r` dropped from each line.
+///
+/// A final newline does **not** produce an empty last line: a file ending in
+/// `\n` has as many lines as it has newlines, which is what every other tool
+/// counts.
 @public lines :: func (s: str) -> []str {
   let body: str := if ends_with(s, "\n") { slice(s, 0, s.len() - 1) } else { s }
   if body.len() == 0 {
@@ -253,7 +253,7 @@ space :: func (b: u8) -> bool {
   return cast.<[]str>(out)
 }
 
-// How many times `needle` appears, without overlapping.
+/// How many times `needle` appears, without overlapping.
 @public count :: func (s: str, needle: str) -> usize {
   if needle.len() == 0 { return 0 }
   let mut n: usize := 0
@@ -271,7 +271,7 @@ space :: func (b: u8) -> bool {
 
 // ===< Building >===
 
-// `a` then `b`, in fresh storage.
+/// `a` then `b`, in fresh storage.
 @public concat :: func (a: str, b: str) -> str {
   let mut out: Buf := start()
   a.display(&mut out)
@@ -279,7 +279,7 @@ space :: func (b: u8) -> bool {
   return end(&mut out)
 }
 
-// Every piece of `parts`, with `sep` between them.
+/// Every piece of `parts`, with `sep` between them.
 @public join :: func (parts: []str, sep: str) -> str {
   let mut out: Buf := start()
   for i in 0..<parts.len() {
@@ -289,15 +289,15 @@ space :: func (b: u8) -> bool {
   return end(&mut out)
 }
 
-// `s`, `n` times over.
+/// `s`, `n` times over.
 @public repeat :: func (s: str, n: usize) -> str {
   let mut out: Buf := start()
   for _ in 0..<n { s.display(&mut out) }
   return end(&mut out)
 }
 
-// Any `Display` value as text. What `f"{v}"` does, available to a program that
-// has the value in hand rather than a literal to interpolate it into.
+/// Any `Display` value as text. What `f"{v}"` does, available to a program that
+/// has the value in hand rather than a literal to interpolate it into.
 @public to_string :: func <T: Display> (v: T) -> str {
   let mut out: Buf := start()
   v.display(&mut out)
@@ -306,12 +306,12 @@ space :: func (b: u8) -> bool {
 
 // ===< Reading numbers >===
 
-// `s` as a decimal integer, or `.none` when it is not one.
-//
-// **All or nothing**: `"12x"` is `.none` rather than `12`, because a parser
-// that stops early and does not say where it stopped turns a typo into a
-// number. A leading `+` or `-` is accepted, and nothing else is — no
-// underscores, no radix prefix, no whitespace.
+/// `s` as a decimal integer, or `.none` when it is not one.
+///
+/// **All or nothing**: `"12x"` is `.none` rather than `12`, because a parser
+/// that stops early and does not say where it stopped turns a typo into a
+/// number. A leading `+` or `-` is accepted, and nothing else is — no
+/// underscores, no radix prefix, no whitespace.
 @public parse_int :: func (s: str) -> Option.<i64> {
   if s.len() == 0 { return .none }
   let raw: []u8 := s.as_bytes()
@@ -336,7 +336,7 @@ space :: func (b: u8) -> bool {
   return .some(0 - value)
 }
 
-// `s` as a decimal `usize`, for the sizes and counts a manifest is full of.
+/// `s` as a decimal `usize`, for the sizes and counts a manifest is full of.
 @public parse_usize :: func (s: str) -> Option.<usize> {
   return parse_int(s).match {
     .some(v) => if v < 0 { .none } else { .some(cast.<usize>(v)) },

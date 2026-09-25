@@ -42,7 +42,12 @@ usage :: func () -> str {
     "  -v, --verbose    print each compiler command before running it",
     "  --emit <list>    build, run: also write the compiler's dumps for the",
     "                   package's own targets beside their objects, in",
-    "                   build/<profile>/obj: ast, ir, mono, lir, llvm-ir, asm",
+    "                   build/<profile>/obj: ast, ir, mono, lir, llvm-ir, asm,",
+    "                   metadata (the package's public items and their docs,",
+    "                   as JSON for a documentation generator)",
+    "  --emit-only      build: write the --emit list and nothing else for the",
+    "                   package's library (its binaries when it has none): no",
+    "                   library, no link. Dependencies are still built",
     "  --build-dir <dir>  build, run, test, metadata: where the build writes,",
     "                   instead of the package's own build/. Everything goes",
     "                   there, this package's targets and its dependencies'",
@@ -64,6 +69,7 @@ Options :: struct {
   lib: bool,
   deps: bool,
   emit: Vec.<str>,
+  emit_only: bool,
   // `--build-dir`: where the build writes, instead of the root package's own
   // `build/`.
   build_dir: Option.<str>,
@@ -116,6 +122,7 @@ parse :: func (args: []str) -> Result.<Options, str> {
     lib: false,
     deps: false,
     emit: collections.vec.new.<str>(),
+    emit_only: false,
     build_dir: .none,
     nestc_args: collections.vec.new.<str>(),
     positional: collections.vec.new.<str>(),
@@ -138,6 +145,8 @@ parse :: func (args: []str) -> Result.<Options, str> {
       o.lib = true
     } else if a == "--deps" {
       o.deps = true
+    } else if a == "--emit-only" {
+      o.emit_only = true
     } else if a == "--emit" {
       if i + 1 == args.len() { return .err("`--emit` needs a list") }
       for e in s.split(args[i + 1], ",") {
@@ -225,9 +234,13 @@ run_build :: func (o: *Options) -> Result.<i32, str> {
   p.nestc_args = o.nestc_args.as_slice()
   p.verbose = o.verbose
   p.build_dir = build_dir(o).?
+  p.emit_only = o.emit_only
   if o.deps {
     compile_deps(&ws, p).?
     return .ok(0)
+  }
+  if o.emit_only {
+    return emit_only(&ws, p, o.bin)
   }
   let all: []Target := build.binaries(&ws)
   let chosen: []Target := o.bin.match {
@@ -346,6 +359,32 @@ compile_all :: func (ws: *Workspace, p: Profile, bins: []Target) -> Result.<void
   for t in bins { build.compile(ws, p, t).? }
   term.status("Finished", f"`{p.name}` profile, in `{shown(ws, build.out_dir(ws, p))}`")
   return .ok(())
+}
+
+// `twig build --emit <list> --emit-only`: the dumps for the root package's
+// library — or its binaries, when it has none — and nothing else. The
+// dependencies are compiled as usual, because analyzing a package reads the
+// libraries it imports; what is skipped is producing the package's own.
+emit_only :: func (ws: *Workspace, p: Profile, bin: Option.<str>) -> Result.<i32, str> {
+  if p.emit.len() == 0 { return .err("`--emit-only` needs an `--emit` list") }
+  compile_deps(ws, p).?
+  let mut targets: Vec.<Target> := collections.vec.new.<Target>()
+  for t in build.libraries(ws) {
+    if t.name == ws.root.name && bin.match { .some(_) => false, .none => true } { targets.push(t) }
+  }
+  if targets.len() == 0 {
+    let all: []Target := build.binaries(ws)
+    let chosen: []Target := bin.match {
+      .some(name) => select(all, name).?,
+      .none => all,
+    }
+    targets.extend(chosen)
+  }
+  for t in targets.as_slice() {
+    term.status("Emitting", f"{t.name} ({shown(ws, build.objects(ws, p, t))})")
+    build.compile(ws, p, t).?
+  }
+  return .ok(0)
 }
 
 // Compile `targets` in order, numbering each line from `from` out of `total`,

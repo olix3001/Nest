@@ -670,7 +670,7 @@ impl Parser {
     /// `@using` upcast, directives control layout (`#align(4)`, `#raw` — §9).
     fn parse_field(&mut self) -> NodeId {
         let start = self.cur_span();
-        let attrs = self.parse_attributes();
+        let attrs = self.parse_documented_attributes();
         let directives = self.parse_directives();
         let name = self.expect_ident();
         self.expect(&TokenKind::Colon);
@@ -740,7 +740,7 @@ impl Parser {
     /// `[attrs] name [ payload ] [ '=' expr ]` — one enum variant declaration.
     fn parse_variant(&mut self) -> NodeId {
         let start = self.cur_span();
-        let attrs = self.parse_attributes();
+        let attrs = self.parse_documented_attributes();
         let name = self.expect_ident();
         let mut end = start;
         let payload = match self.peek() {
@@ -873,6 +873,25 @@ impl Parser {
     /// binding whose RHS is either a bodyless `func` (a method signature) or the
     /// contextual `type [ ':' bounds ]` (an associated type).
     fn parse_trait_member(&mut self) -> NodeId {
+        let attrs = self.parse_documented_attributes();
+        let member = self.parse_undocumented_trait_member();
+        if attrs.is_empty() {
+            return member;
+        }
+        // A documented member is a `Decl` like any documented item; the passes
+        // that walk a trait's members look through one ([`Ast::decl_item`]).
+        let span = self.node_span(attrs[0]).to(self.node_span(member));
+        self.alloc(
+            span,
+            NodeKind::Decl {
+                attrs,
+                directives: Vec::new(),
+                item: member,
+            },
+        )
+    }
+
+    fn parse_undocumented_trait_member(&mut self) -> NodeId {
         if self.at_comptime_item() {
             return self.parse_expr();
         }

@@ -33,7 +33,7 @@ libc :: import "../os/libc.nest"
 
 // ===< Errors >===
 
-// Why an operation on the outside world did not happen.
+/// Why an operation on the outside world did not happen.
 @public(fields: package) Error :: struct {
   // What was being attempted — `"open"`, `"read"`, `"spawn"`. A short verb, so
   // that the report below reads as a sentence.
@@ -47,17 +47,17 @@ libc :: import "../os/libc.nest"
 }
 
 impl Error {
-  // The C library's message for this error. Already a copy — see `sys.message`
-  // — so it keeps as long as anything holds it.
+  /// The C library's message for this error. Already a copy — see `sys.message`
+  /// — so it keeps as long as anything holds it.
   @public message :: func (self: Self) -> str { return sys.message(self.code) }
 
-  // Whether the thing operated on was not there. The one code worth asking
-  // about by name: "no such file" is an answer a program acts on, where every
-  // other code is something it reports.
+  /// Whether the thing operated on was not there. The one code worth asking
+  /// about by name: "no such file" is an answer a program acts on, where every
+  /// other code is something it reports.
   @public not_found :: func (self: Self) -> bool { return self.code == libc.ENOENT }
 
-  // The whole report, as one line and no newline: `open "nest.toml": No such
-  // file or directory`.
+  /// The whole report, as one line and no newline: `open "nest.toml": No such
+  /// file or directory`.
   @public describe :: func (self: Self) -> str {
     let mut b: Buf := start()
     self.op.display(&mut b)
@@ -72,18 +72,18 @@ impl Error {
   }
 }
 
-// An `Error` out of a failed `sys.Res`. Internal, and the only place the two
-// layers meet: above here nothing knows what an `errno` is.
+/// An `Error` out of a failed `sys.Res`. Internal, and the only place the two
+/// layers meet: above here nothing knows what an `errno` is.
 @public error_of :: func (op: str, subject: str, r: sys.Res) -> Error {
   return Error { op: op, subject: subject, code: r.err }
 }
 
-// What every operation here answers.
+/// What every operation here answers.
 @public Res :: Result.<usize, Error>
 
 // ===< The two contracts >===
 
-// Somewhere bytes can be written.
+/// Somewhere bytes can be written.
 @public Write :: trait {
   // Take as many of `bytes` as this sink will take now, answering how many.
   // Zero is legal and means no progress, which `write_all` treats as the end.
@@ -94,7 +94,7 @@ impl Error {
   flush :: func (self: *mut Self) -> Result.<void, Error> { return .ok(()) }
 }
 
-// Somewhere bytes come from.
+/// Somewhere bytes come from.
 @public Read :: trait {
   // Fill as much of `into` as is available now, answering how much. **Zero is
   // end of input**, and it is the only way to say so — a reader with nothing
@@ -104,15 +104,15 @@ impl Error {
 
 // ===< What every writer gets for free >===
 
-// Write all of `bytes`, however many calls that takes.
-//
-// A free function rather than a default method on `Write`: a default body can
-// only call the trait's own members, and this needs to loop over a `*mut W`
-// that is generic — which is what a bounded free function says plainly.
-//
-// A sink that answers zero without having taken everything has stopped
-// accepting bytes and will not start again, so that is reported rather than
-// looped on forever.
+/// Write all of `bytes`, however many calls that takes.
+///
+/// A free function rather than a default method on `Write`: a default body can
+/// only call the trait's own members, and this needs to loop over a `*mut W`
+/// that is generic — which is what a bounded free function says plainly.
+///
+/// A sink that answers zero without having taken everything has stopped
+/// accepting bytes and will not start again, so that is reported rather than
+/// looped on forever.
 @public write_all :: func <W: Write> (w: *mut W, bytes: []u8) -> Result.<void, Error> {
   let mut done: usize := 0
   while done < bytes.len() {
@@ -125,10 +125,10 @@ impl Error {
   return .ok(())
 }
 
-// Read until the input ends, answering everything that arrived.
-//
-// The buffer doubles rather than growing by a constant, so reading an `n`-byte
-// input costs `O(n)` copies in total instead of `O(n²)`.
+/// Read until the input ends, answering everything that arrived.
+///
+/// The buffer doubles rather than growing by a constant, so reading an `n`-byte
+/// input costs `O(n)` copies in total instead of `O(n²)`.
 @public read_to_end :: func <R: Read> (r: *mut R) -> Result.<[]u8, Error> {
   let mut out: []mut u8 := make.<[]u8>(4096)
   let mut len: usize := 0

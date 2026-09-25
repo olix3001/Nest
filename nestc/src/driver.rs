@@ -39,6 +39,10 @@ options:
                            obj, asm, backend-ir what the backend writes, to files
                            nlib                 the package as a library: its
                                                 metadata, its IR and its objects
+                           metadata             the package's public items, their
+                                                docs and attributes, as JSON for
+                                                a documentation generator; to
+                                                `-o`, or stdout
                          a dump or a backend output written `kind=path` goes
                          to that file instead
   -L <dir>               a directory to search for packages; `<foo/...>` is
@@ -120,6 +124,9 @@ struct Emit {
     /// The entry package as a library: its metadata, its IR and its objects in
     /// one archive.
     nlib: bool,
+    /// The entry package described as JSON, for a documentation generator
+    /// ([`crate::metadata`]).
+    metadata: bool,
     /// The outputs named with a path, `kind=path`, and where each goes.
     paths: Vec<(String, PathBuf)>,
 }
@@ -147,6 +154,7 @@ impl Emit {
             backend: Vec::new(),
             link: false,
             nlib: false,
+            metadata: false,
             paths: Vec::new(),
         }
     }
@@ -168,7 +176,7 @@ impl Emit {
                 Some((name, path)) => {
                     if !matches!(
                         name,
-                        "ast" | "ir" | "mono" | "lir" | "obj" | "asm" | "backend-ir"
+                        "ast" | "ir" | "mono" | "lir" | "obj" | "asm" | "backend-ir" | "metadata"
                     ) {
                         return Err(format!("`--emit {name}` takes no path; it follows `-o`"));
                     }
@@ -187,9 +195,10 @@ impl Emit {
                 "backend-ir" => e.backend.push(OutputKind::Ir),
                 "link" => e.link = true,
                 "nlib" => e.nlib = true,
+                "metadata" => e.metadata = true,
                 other => {
                     return Err(format!(
-                        "`--emit` does not know `{other}`; it takes link, ast, ir, mono, lir, obj, asm, backend-ir, nlib"
+                        "`--emit` does not know `{other}`; it takes link, ast, ir, mono, lir, obj, asm, backend-ir, nlib, metadata"
                     ));
                 }
             }
@@ -596,6 +605,32 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<ExitCode, String> {
             sema::pretty::defs_to_string(&session)
         );
         dump(&emit, "ast", "", &text)?;
+    }
+
+    // The package's public surface, for a documentation generator. Written
+    // even when analysis reported an error — the declarations that did check
+    // are still worth describing — but not over one: the errors are reported
+    // below like any build's.
+    if emit.metadata {
+        let text = serde_json::to_string_pretty(&crate::metadata::describe(&session, file))
+            .map_err(|err| format!("cannot write the metadata: {err}"))?;
+        // `metadata=path` goes there; a bare `metadata` goes to `-o` when
+        // nothing else is being written to it, and to stdout otherwise.
+        let to = emit
+            .path("metadata")
+            .map(Path::to_path_buf)
+            .or_else(|| out.clone().filter(|_| !(emit.link || emit.nlib)));
+        match to {
+            Some(path) => {
+                if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(dir)
+                        .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+                }
+                std::fs::write(&path, text + "\n")
+                    .map_err(|err| format!("cannot write {}: {err}", path.display()))?
+            }
+            None => println!("{text}"),
+        }
     }
 
     // The lowered IR of the entry file.

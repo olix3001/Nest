@@ -52,8 +52,13 @@ string :: import <std/text/string>
   // `0`, `1`, `2`, `3`, `s` or `z`, as `nestc -C opt-level` takes it.
   opt_level: str,
   // The compiler's dumps to write for the root package's targets, beside their
-  // objects: any of `ast`, `ir`, `mono`, `lir`, `llvm-ir` and `asm`.
+  // objects: any of `ast`, `ir`, `mono`, `lir`, `llvm-ir`, `asm` and
+  // `metadata`.
   emit: []str,
+  // `--emit-only`: write the dumps and nothing else for the root package's
+  // targets — no library, no link. What `--emit metadata` wants when all that
+  // is wanted is the package's description.
+  emit_only: bool,
   // Where the build writes, when it is not the root package's own `build/`:
   // `twig --build-dir`. A build of a package that is only *depended on* — the
   // shipped `std`, whose own tests `just test` runs — would otherwise put a
@@ -74,9 +79,9 @@ string :: import <std/text/string>
 // program's decision.
 @public profile :: func (m: *Manifest, release: bool) -> Profile {
   let mut p: Profile := if release {
-    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3", emit: .{}, build_dir: .none, verbose: false, nestc_args: .{} }
+    Profile { name: "release", overflow: "wrap", codegen_units: 1, opt_level: "3", emit: .{}, emit_only: false, build_dir: .none, verbose: false, nestc_args: .{} }
   } else {
-    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0", emit: .{}, build_dir: .none, verbose: false, nestc_args: .{} }
+    Profile { name: "debug", overflow: "trap", codegen_units: 1, opt_level: "0", emit: .{}, emit_only: false, build_dir: .none, verbose: false, nestc_args: .{} }
   }
   let settings: Option.<ProfileSettings> := m.profile.match {
     .some(ps) => if release { ps.release } else { ps.debug },
@@ -216,11 +221,12 @@ EXE: str :: OS.match {
 }
 
 // The dumps `--emit` accepts, for a message.
-@public EMITS: str :: "ast, ir, mono, lir, llvm-ir, asm"
+@public EMITS: str :: "ast, ir, mono, lir, llvm-ir, asm, metadata"
 
 // Whether `--emit` accepts `e`.
 @public known_emit :: func (e: str) -> bool {
-  return e == "ast" || e == "ir" || e == "mono" || e == "lir" || e == "llvm-ir" || e == "asm"
+  return e == "ast" || e == "ir" || e == "mono" || e == "lir" || e == "llvm-ir" || e == "asm" ||
+    e == "metadata"
 }
 
 // What `nestc --emit` calls the dump twig calls `e`.
@@ -233,6 +239,9 @@ emit_kind :: func (e: str) -> str {
 extension :: func (e: str) -> str {
   if e == "llvm-ir" { return "ll" }
   if e == "asm" { return "s" }
+  // The package described for a documentation generator (`nestc --emit
+  // metadata`), as JSON.
+  if e == "metadata" { return "json" }
   return e
 }
 
@@ -267,11 +276,13 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
   args.push("--emit")
   // A test target links a program whatever it was made from: what it produces is
   // something to run, not something to depend on.
-  let mut emit: str := if t.lib && t.test == false { "nlib" } else { "link" }
+  let only: bool := p.emit_only && own(ws, t) && p.emit.len() > 0
+  let mut emit: str := if only { "" } else if t.lib && t.test == false { "nlib" } else { "link" }
   if own(ws, t) {
     for e in p.emit {
       let file: str := path.join(objects(ws, p, t), f"{t.name}.{extension(e)}")
-      emit = f"{emit},{emit_kind(e)}={file}"
+      let item: str := f"{emit_kind(e)}={file}"
+      emit = if emit.len() == 0 { item } else { f"{emit},{item}" }
     }
   }
   args.push(emit)
@@ -469,6 +480,7 @@ tests :: #when(test) namespace {
             codegen_units: 1,
             opt_level: "0",
             emit: .{},
+            emit_only: false,
             build_dir: .none,
             verbose: false,
             nestc_args: .{},
@@ -602,5 +614,7 @@ tests :: #when(test) namespace {
         assert(extension("llvm-ir") == "ll")
         assert(extension("asm") == "s")
         assert(extension("mono") == "mono")
+        assert(known_emit("metadata"))
+        assert(extension("metadata") == "json")
     }
 }

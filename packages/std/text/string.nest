@@ -26,31 +26,31 @@ io :: import "../io/io.nest"
   bytes: Vec.<u8>,
 }
 
-// An empty one.
+/// An empty one.
 @public new :: func () -> String {
   return String { bytes: collections.vec.new.<u8>() }
 }
 
-// An empty one with room for `n` bytes.
+/// An empty one with room for `n` bytes.
 @public with_capacity :: func (n: usize) -> String {
   return String { bytes: collections.vec.with_capacity.<u8>(n) }
 }
 
-// A copy of `s`.
+/// A copy of `s`.
 @public from :: func (s: str) -> String {
   let mut out: String := with_capacity(s.len())
   out.push_str(s)
   return out
 }
 
-// `bytes` as a `String`, taking the vector as it is. The caller promises the
-// bytes are UTF-8; nothing checks.
+/// `bytes` as a `String`, taking the vector as it is. The caller promises the
+/// bytes are UTF-8; nothing checks.
 @public from_utf8_unchecked :: func (bytes: Vec.<u8>) -> String {
   return String { bytes: bytes }
 }
 
-// The UTF-8 encoding of `c`, appended to `out` — shared with anything else that
-// writes a `char` into bytes.
+/// The UTF-8 encoding of `c`, appended to `out` — shared with anything else that
+/// writes a `char` into bytes.
 @public encode_char :: func (c: char, out: *mut Vec.<u8>) -> void {
   let n: u32 := cast.<u32>(c)
   if n < 0x80 {
@@ -71,13 +71,13 @@ io :: import "../io/io.nest"
 }
 
 impl String {
-  // The length in bytes, which is what `str.len()` counts too.
+  /// The length in bytes, which is what `str.len()` counts too.
   @public len :: #inline func (self: *Self) -> usize { return self.bytes.len() }
   @public is_empty :: #inline func (self: *Self) -> bool { return self.bytes.is_empty() }
   @public capacity :: #inline func (self: *Self) -> usize { return self.bytes.capacity() }
 
-  // A view of the text. Like `Vec.as_slice`, it stops being valid when the
-  // string grows out from under it.
+  /// A view of the text. Like `Vec.as_slice`, it stops being valid when the
+  /// string grows out from under it.
   @public as_str :: #inline func (self: *Self) -> str {
     return cast.<str>(self.bytes.as_slice())
   }
@@ -88,8 +88,8 @@ impl String {
 
   @public clear :: func (self: *mut Self) -> void { self.bytes.clear() }
 
-  // Keep the first `n` bytes. A cut inside a character is the caller's to avoid,
-  // as it is for `str.slice`.
+  /// Keep the first `n` bytes. A cut inside a character is the caller's to avoid,
+  /// as it is for `str.slice`.
   @public truncate :: func (self: *mut Self, n: usize) -> void {
     if n < self.bytes.count { self.bytes.count = n }
   }
@@ -102,17 +102,17 @@ impl String {
     encode_char(c, &mut self.bytes)
   }
 
-  // One byte, for a caller writing ASCII it already knows is ASCII.
+  /// One byte, for a caller writing ASCII it already knows is ASCII.
   @public push_byte :: func (self: *mut Self, b: u8) -> void {
     self.bytes.push(b)
   }
 
-  // Anything `Display`, written on the end — `f"{v}"` without the temporary.
+  /// Anything `Display`, written on the end — `f"{v}"` without the temporary.
   @public append :: func <T: Display> (self: *mut Self, v: T) -> void {
     self.push_str(f"{v}")
   }
 
-  // An independent copy: its bytes are its own.
+  /// An independent copy: its bytes are its own.
   @public clone :: func (self: *Self) -> String { return from(self.as_str()) }
 }
 

@@ -2,8 +2,8 @@
 source: src/sema/tests.rs
 expression: ir_text(src)
 ---
-func choose(o: core.option.Option.<i32>) -> i32 {
-  match o: core.option.Option.<i32> {
+func choose(o: core.types.option.Option.<i32>) -> i32 {
+  match o: core.types.option.Option.<i32> {
     block: void {
       return v: i32
     }

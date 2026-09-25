@@ -11,7 +11,7 @@ unit mem:main {
     ptr: *u8                    // +0
     len: u64                    // +8
   }
-  type core.loc.Location = struct {           // was a struct; size 24, align 8
+  type core.rt.loc.Location = struct {           // was a struct; size 24, align 8
     file: []u8                    // +0
     line: u32                    // +16
     column: u32                    // +20
@@ -31,12 +31,12 @@ unit mem:main {
     let _5: bool   // mem:main:3:19
     let _6: []u8   // mem:main:3:19
     let _7: []u8   // mem:main:3:19
-    let _8: core.loc.Location   // mem:main:3:19
+    let _8: core.rt.loc.Location   // mem:main:3:19
     let _9: *i32   // mem:main:3:19
     let _10: (i32, bool)   // mem:main:3:11
     let _11: []u8   // mem:main:3:11
     let _12: []u8   // mem:main:3:11
-    let _13: core.loc.Location   // mem:main:3:11
+    let _13: core.rt.loc.Location   // mem:main:3:11
   bb0:                    // entry
     _2 := 0   // mem:main:2:3
     total_3 := _2   // mem:main:2:7
@@ -46,8 +46,8 @@ unit mem:main {
   bb1:                    // out of bounds
     _6 := []u8(&const.str.2, 19)   // mem:main:3:19
     _7 := []u8(&const.str.3, 8)   // mem:main:3:19
-    _8 := core.loc.Location(_7, 3, 19)   // mem:main:3:19
-    call core.fail.panic(_6, _8)   // mem:main:3:19
+    _8 := core.rt.loc.Location(_7, 3, 19)   // mem:main:3:19
+    call core.rt.fail.panic(_6, _8)   // mem:main:3:19
       @safepoint { live: [_6, _8]
         _6 := reloc _6
         _8 := reloc _8
@@ -60,8 +60,8 @@ unit mem:main {
   bb3:                    // overflow
     _11 := []u8(&const.str.4, 16)   // mem:main:3:11
     _12 := []u8(&const.str.3, 8)   // mem:main:3:11
-    _13 := core.loc.Location(_12, 3, 11)   // mem:main:3:11
-    call core.fail.panic(_11, _13)   // mem:main:3:11
+    _13 := core.rt.loc.Location(_12, 3, 11)   // mem:main:3:11
+    call core.rt.fail.panic(_11, _13)   // mem:main:3:11
       @safepoint { live: [_11, _13]
         _11 := reloc _11
         _13 := reloc _13
@@ -71,5 +71,5 @@ unit mem:main {
     total_3 := _10.0   // mem:main:3:3
     return total_3   // mem:main:4:3
 
-  declare func core.fail.panic(msg_0: []u8, loc_1: core.loc.Location) -> never @public  // _NC4core4fail5panic   // fail.nest:26:18
+  declare func core.rt.fail.panic(msg_0: []u8, loc_1: core.rt.loc.Location) -> never @public  // _NC4core2rt4fail5panic   // fail.nest:26:18
 }

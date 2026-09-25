@@ -68,7 +68,7 @@ fn prelude_types_resolve_to_core() {
     .expect("an `Option` path");
     match resolution(&session, file, path) {
         Resolution::Def(d) => {
-            assert_eq!(session.defs.canonical_string(d), "core.option.Option");
+            assert_eq!(session.defs.canonical_string(d), "core.types.option.Option");
             assert_eq!(session.defs.get(d).kind, DefKind::Enum);
         }
         other => panic!("Option did not resolve to a def: {other:?}"),
@@ -6261,7 +6261,7 @@ fn a_string_literal_is_the_core_str_lang_item() {
     let file = entry_file(&session);
     let text =
         crate::ir::pretty::program_to_string(&session.defs, &session.ir_meta, &session.ir[&file]);
-    assert!(text.contains("core.str"), "{text}");
+    assert!(text.contains("core.types.str"), "{text}");
     // The length is the *byte* length, inherited from the slice impl — whose
     // `len` **is** the intrinsic (§6.4), so the call is the operation rather
     // than a jump to a body.
@@ -6637,7 +6637,7 @@ fn try_propagate_works_on_an_option() {
     );
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
-    assert!(ir.contains("core.option.Option.from_residual"), "{ir}");
+    assert!(ir.contains("core.types.option.Option.from_residual"), "{ir}");
 }
 
 #[test]
@@ -6657,7 +6657,7 @@ fn try_propagate_across_unrelated_residuals_is_reported() {
         "read :: func () -> Result.<i32, str> { return .ok(1) }\nf :: func () -> Option.<i32> {\n  const v := read().?\n  return .some(v)\n}\n",
     );
     assert!(
-        msg.contains("core.control.FromResidual.<core.str.str>"),
+        msg.contains("core.types.control.FromResidual.<core.types.str.str>"),
         "{msg}"
     );
 }
@@ -7031,7 +7031,7 @@ main :: func () {
     let ir = ir_text(src);
     assert!(ir.contains("$cast(\"hi\": comptime_str): []u8"), "{ir}");
     assert!(ir.contains("$cast(\"hi\": comptime_str): []char"), "{ir}");
-    assert!(ir.contains("$cast(\"hi\": comptime_str): core.str"), "{ir}");
+    assert!(ir.contains("$cast(\"hi\": comptime_str): core.types.str"), "{ir}");
 }
 
 /// A literal lives in read-only data, so a mutable view of it is not one of the
@@ -7060,7 +7060,7 @@ main :: func () {
     let ir = ir_text(src);
     assert!(ir.contains("const A: comptime_str"), "{ir}");
     assert!(ir.contains("(A: []u8)"), "{ir}");
-    assert!(ir.contains("(A: core.str.str)"), "{ir}");
+    assert!(ir.contains("(A: core.types.str.str)"), "{ir}");
 }
 
 /// The `[]char` case is a real transcoding, and §1.5 says it happens at compile
@@ -7097,7 +7097,7 @@ fn a_byte_string_is_a_byte_slice() {
     // It is not a `str`, and no conversion makes it one implicitly.
     let msg = first_error("f :: func (s: str) {}\nmain :: func () { f(b\"hi\") }\n");
     assert!(
-        msg.contains("expected `core.str.str`, found `[]u8`"),
+        msg.contains("expected `core.types.str.str`, found `[]u8`"),
         "{msg}"
     );
 }
@@ -8484,7 +8484,7 @@ fn every_call_names_a_function_the_program_still_has() {
     // forwarding to a separate intrinsic.
     let names = instances(&session);
     assert!(
-        names.contains(&"core.str.<impl str>.as_bytes".to_string()),
+        names.contains(&"core.types.str.<impl str>.as_bytes".to_string()),
         "{names:?}"
     );
     assert!(
@@ -9486,7 +9486,7 @@ fn importing_a_name_a_namespace_does_not_publish_is_reported() {
     assert!(
         messages
             .iter()
-            .any(|m| m.contains("`core.num` has no member `wrapping_sub`")
+            .any(|m| m.contains("`core.types.num` has no member `wrapping_sub`")
                 && m.contains("a method is reached through a value of its type")),
         "{messages:#?}"
     );
@@ -10453,4 +10453,63 @@ f :: func (a: *dyn Func, b: *mut dyn Iterator, c: *dyn Func(i32) -> i32, d: *mut
         errs.iter().any(|m| m.contains("`Item` is missing")),
         "{errs:?}"
     );
+}
+
+/// `///` lines are `@doc("...")` (§9.2) on the declaration below them — an item,
+/// a field, a variant, a trait member — found by `#lang("doc")`, so a program's
+/// own `doc` does not get in the way; one inside a body is a plain comment.
+#[test]
+fn doc_comments_are_doc_attributes() {
+    let src = "\
+/// A point.
+/// Two lines.
+@public(all)
+Point :: struct {
+    /// Across.
+    x: i32,
+    y: i32,
+}
+
+//// Not a doc.
+Color :: enum {
+    /// Like the sky.
+    blue,
+}
+
+Shape :: trait {
+    /// How big.
+    area :: func (self: *Self) -> i32
+}
+
+/// Written out.
+// a plain comment after it ends the doc
+unused :: func () { }
+
+@doc(\"By hand.\")
+by_hand :: func () { }
+
+doc :: func () -> i32 {
+    /// Not an item.
+    const n := 1
+    return n
+}
+";
+    let session = crate::sema::analyze_source("docs", src, &[]);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let doc_of = |path: &str| {
+        let def = session
+            .defs
+            .iter()
+            .find(|d| d.canonical.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".").ends_with(path))
+            .unwrap_or_else(|| panic!("no def `{path}`"));
+        session.doc_of(def.id)
+    };
+    assert_eq!(doc_of("Point").as_deref(), Some("A point.\nTwo lines."));
+    assert_eq!(doc_of("Point.x").as_deref(), Some("Across."));
+    assert_eq!(doc_of("Point.y"), None);
+    assert_eq!(doc_of("Color.blue").as_deref(), Some("Like the sky."));
+    assert_eq!(doc_of("Color"), None);
+    assert_eq!(doc_of("Shape.area").as_deref(), Some("How big."));
+    assert_eq!(doc_of("unused"), None);
+    assert_eq!(doc_of("by_hand").as_deref(), Some("By hand."));
 }

@@ -42,21 +42,21 @@ c :: import <core/c>
 // which is what this file is.
 
 extern("c") {
-  // `errno`, which cannot be declared: see `nest_errno` in the runtime.
+  /// `errno`, which cannot be declared: see `nest_errno` in the runtime.
   @public nest_errno :: func () -> c.int
 
-  // The **live** environment table. Not `envp`, which is a snapshot `setenv`
-  // replaces from under a program: this reads `environ`, which macOS hides
-  // behind a feature macro that keeps a dynamic executable from linking against
-  // it directly. `argc` and `argv` are not here — the entry point hands those
-  // to `#lang("start")`, which is `sys.start`.
+  /// The **live** environment table. Not `envp`, which is a snapshot `setenv`
+  /// replaces from under a program: this reads `environ`, which macOS hides
+  /// behind a feature macro that keeps a dynamic executable from linking against
+  /// it directly. `argc` and `argv` are not here — the entry point hands those
+  /// to `#lang("start")`, which is `sys.start`.
   @public nest_envp :: func () -> c.ptr.<c.cstr>
 
-  // A directory's entries, one name at a time. `struct dirent` is one of the
-  // layouts that differ between Linux and macOS (see above), so the runtime
-  // reads `d_name` out of it and hands over only that: `nest_dir_open` is
-  // `opendir`, `nest_dir_next` the next name or null at the end, and
-  // `nest_dir_close` is `closedir`.
+  /// A directory's entries, one name at a time. `struct dirent` is one of the
+  /// layouts that differ between Linux and macOS (see above), so the runtime
+  /// reads `d_name` out of it and hands over only that: `nest_dir_open` is
+  /// `opendir`, `nest_dir_next` the next name or null at the end, and
+  /// `nest_dir_close` is `closedir`.
   @public nest_dir_open :: func (path: c.cstr) -> c.ptr.<c.anyopaque>
   @public nest_dir_next :: func (dir: c.ptr.<c.anyopaque>) -> c.cstr
   @public nest_dir_close :: func (dir: c.ptr.<c.anyopaque>) -> c.int
@@ -65,9 +65,9 @@ extern("c") {
 // ===< Files and descriptors >===
 
 extern("c") {
-  // `open`'s `mode` is the tail: C reads it only when the flags ask to create a
-  // file, and a caller that is not creating one passes nothing. Everything else
-  // on this list is fixed-arity in C and is declared as itself.
+  /// `open`'s `mode` is the tail: C reads it only when the flags ask to create a
+  /// file, and a caller that is not creating one passes nothing. Everything else
+  /// on this list is fixed-arity in C and is declared as itself.
   @public open  :: #c_vararg func (path: c.cstr, flags: c.int) -> c.int
   @public close :: func (fd: c.int) -> c.int
   @public read  :: func (fd: c.int, buf: c.ptr.<c.uchar>, n: c.size_t) -> c.ssize_t
@@ -110,19 +110,19 @@ extern("c") {
 // ===< Messages >===
 
 extern("c") {
-  // The message for an `errno`. It returns a pointer into storage the library
-  // owns, which is why `std/io`'s `Error` copies the bytes out rather than
-  // keeping the pointer.
+  /// The message for an `errno`. It returns a pointer into storage the library
+  /// owns, which is why `std/io`'s `Error` copies the bytes out rather than
+  /// keeping the pointer.
   @public strerror :: func (code: c.int) -> c.cstr
 }
 
 // ===< Numbers as text >===
 
 extern("c") {
-  // `std/serialize` finds a float's text the way `core/fmt` does — `snprintf`
-  // at rising precision until `strtod` reads the same bits back. Both declare
-  // these two, which is fine: two `extern("c")` declarations of one symbol are
-  // declarations of the same function, and codegen emits one global for them.
+  /// `std/serialize` finds a float's text the way `core/fmt` does — `snprintf`
+  /// at rising precision until `strtod` reads the same bits back. Both declare
+  /// these two, which is fine: two `extern("c")` declarations of one symbol are
+  /// declarations of the same function, and codegen emits one global for them.
   @public snprintf :: #c_vararg func (buf: c.ptr.<c.uchar>, n: c.size_t, fmt: c.cstr) -> c.int
   @public strtod   :: func (s: c.cstr, end: c.ptr.<c.cstr>) -> c.double
 }
@@ -134,7 +134,7 @@ extern("c") {
 // every target below — POSIX fixes them — and the four that are not are the
 // `open` flags, which **branch on the build's own target** instead.
 
-// `open`'s access modes. POSIX fixes these three as values rather than bits.
+/// `open`'s access modes. POSIX fixes these three as values rather than bits.
 @public O_RDONLY: c.int :: 0
 @public O_WRONLY: c.int :: 1
 @public O_RDWR:   c.int :: 2
@@ -164,61 +164,61 @@ bsd_flags :: #inline func () -> bool {
   }
 }
 
-// Create the file if it does not exist.
+/// Create the file if it does not exist.
 @public O_CREAT :: #inline func () -> c.int {
   if bsd_flags() { return 512 }
   return 64
 }
 
-// Truncate it to nothing if it does.
+/// Truncate it to nothing if it does.
 @public O_TRUNC :: #inline func () -> c.int {
   if bsd_flags() { return 1024 }
   return 512
 }
 
-// Every write goes to the end, whatever the offset is.
+/// Every write goes to the end, whatever the offset is.
 @public O_APPEND :: #inline func () -> c.int {
   if bsd_flags() { return 8 }
   return 1024
 }
 
-// Fail if the file already exists. With `O_CREAT`, this is how a file is
-// created *or* the attempt reported, with nothing in between.
+/// Fail if the file already exists. With `O_CREAT`, this is how a file is
+/// created *or* the attempt reported, with nothing in between.
 @public O_EXCL :: #inline func () -> c.int {
   if bsd_flags() { return 2048 }
   return 128
 }
 
-// `lseek` origins. POSIX fixes all three.
+/// `lseek` origins. POSIX fixes all three.
 @public SEEK_SET: c.int :: 0
 @public SEEK_CUR: c.int :: 1
 @public SEEK_END: c.int :: 2
 
-// `access` modes.
+/// `access` modes.
 @public F_OK: c.int :: 0
 @public X_OK: c.int :: 1
 @public W_OK: c.int :: 2
 @public R_OK: c.int :: 4
 
-// The three descriptors every process starts with.
+/// The three descriptors every process starts with.
 @public STDIN:  c.int :: 0
 @public STDOUT: c.int :: 1
 @public STDERR: c.int :: 2
 
-// The permission bits a created file and a created directory ask for, before
-// the process umask is applied: `0644` and `0755`, in decimal because the
-// language has no octal literal (§1.4).
+/// The permission bits a created file and a created directory ask for, before
+/// the process umask is applied: `0644` and `0755`, in decimal because the
+/// language has no octal literal (§1.4).
 @public MODE_FILE: c.uint :: 420
 @public MODE_DIR:  c.uint :: 493
 
-// The `errno` values `std` reads by name rather than only reporting. All four
-// are the same number on Linux and on the BSDs.
+/// The `errno` values `std` reads by name rather than only reporting. All four
+/// are the same number on Linux and on the BSDs.
 @public ENOENT: c.int :: 2
 @public EIO:    c.int :: 5
 @public EINTR:  c.int :: 4
 @public EEXIST: c.int :: 17
 @public EISDIR: c.int :: 21
 
-// What `getcwd` answers when the buffer is too small for the path. Also the
-// same number on both.
+/// What `getcwd` answers when the buffer is too small for the path. Also the
+/// same number on both.
 @public ERANGE: c.int :: 34

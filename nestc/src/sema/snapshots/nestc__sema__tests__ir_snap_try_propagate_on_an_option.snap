@@ -2,21 +2,21 @@
 source: src/sema/tests.rs
 expression: "ir_text(\"head :: func () -> Option.<i32> { return .none }\\ntpo :: func () -> Option.<i32> {\\n  const x := head().?\\n  return .some(x)\\n}\\n\")"
 ---
-func head() -> core.option.Option.<i32> {
-  return .none: core.option.Option.<i32>
+func head() -> core.types.option.Option.<i32> {
+  return .none: core.types.option.Option.<i32>
 }
-func tpo() -> core.option.Option.<i32> {
+func tpo() -> core.types.option.Option.<i32> {
   block: i32 {
-    let __try1: core.control.ControlFlow.<void, i32> = (core.option.Option.branch: *func(core.option.Option.<i32>) -> core.control.ControlFlow.<void, i32>)((head: *func() -> core.option.Option.<i32>)(): core.option.Option.<i32>): core.control.ControlFlow.<void, i32>
-    match __try1: core.control.ControlFlow.<void, i32> {
+    let __try1: core.types.control.ControlFlow.<void, i32> = (core.types.option.Option.branch: *func(core.types.option.Option.<i32>) -> core.types.control.ControlFlow.<void, i32>)((head: *func() -> core.types.option.Option.<i32>)(): core.types.option.Option.<i32>): core.types.control.ControlFlow.<void, i32>
+    match __try1: core.types.control.ControlFlow.<void, i32> {
       .proceed(__v2) => __v2: i32
       block: void {
-        return (core.option.Option.from_residual: *func(void) -> core.option.Option.<i32>)(__r3: void): core.option.Option.<i32>
+        return (core.types.option.Option.from_residual: *func(void) -> core.types.option.Option.<i32>)(__r3: void): core.types.option.Option.<i32>
       }
       .stop(__r3) => <block: void>
     }
     tail <match: i32>
   }
   let x: i32 = <block: i32>
-  return .some(x: i32): core.option.Option.<i32>
+  return .some(x: i32): core.types.option.Option.<i32>
 }

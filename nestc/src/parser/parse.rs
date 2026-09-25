@@ -45,6 +45,10 @@ pub struct Parser {
     file: FileId,
     /// Byte length of the source, for the end-of-input span.
     src_len: usize,
+    /// The source itself, read for `///` doc comments (see
+    /// [`Parser::doc_before`]): the lexer skips every `//` comment, and a doc
+    /// comment is only a doc where a declaration follows it.
+    src: String,
     /// Accumulated diagnostics; parsing never aborts on the first one.
     errors: Vec<ParseError>,
     /// When set, a bare `Name { ... }` is **not** treated as a struct literal —
@@ -99,6 +103,7 @@ impl Parser {
             ast: Ast::new(),
             file,
             src_len: source.len(),
+            src: source.to_string(),
             errors,
             no_struct_lit: false,
         }
@@ -283,6 +288,42 @@ impl Parser {
             );
             false
         }
+    }
+
+    /// The `///` lines written right before the next token, without their
+    /// slashes, and where they are — or `None` when there are none.
+    ///
+    /// The lexer skips every comment, so this reads the source between the last
+    /// token that is not a newline and the next one: what is there is blank
+    /// space and comments. A plain `//` line after a doc line ends that doc
+    /// (it documented something else, or nothing); a blank line does not.
+    /// `////` is a plain comment, as it is in Rust.
+    pub(crate) fn doc_before(&self) -> Option<(Span, String)> {
+        let mut back = self.pos;
+        while back > 0 && matches!(self.tokens[back - 1].kind, TokenKind::Newline) {
+            back -= 1;
+        }
+        let from = if back == 0 { 0 } else { self.tokens[back - 1].span.end };
+        let to = self.cur_span().start.min(self.src.len());
+        let gap = self.src.get(from..to)?;
+        let mut lines: Vec<&str> = Vec::new();
+        let mut first = None;
+        let mut offset = from;
+        for line in gap.split_inclusive('\n') {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("///").filter(|_| !t.starts_with("////")) {
+                if lines.is_empty() {
+                    first = Some(offset + (line.len() - line.trim_start().len()));
+                }
+                lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+            } else if t.starts_with("//") {
+                lines.clear();
+                first = None;
+            }
+            offset += line.len();
+        }
+        let start = first?;
+        Some((Span::new(start, to), lines.join("\n")))
     }
 
     /// Consume runs of [`TokenKind::Newline`].

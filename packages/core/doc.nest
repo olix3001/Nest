@@ -1,0 +1,16 @@
+// `@doc("...")`: what a declaration is for, in prose.
+//
+// `///` lines are sugar for it: the parser turns the run of them above a
+// declaration — an item, a field, a variant, a trait member — into one `@doc`
+// whose `text` is the lines without their slashes, joined by newlines. Written
+// out, it is an ordinary attribute:
+//
+//     @doc("The number of elements.")
+//     len :: func (self: *Self) -> usize { ... }
+//
+// The compiler finds it by its `#lang` tag, so `///` means this attribute in
+// every file whether or not the name `doc` is in scope there, and a program's
+// own `doc` does not change what a doc comment is. The language server shows
+// the text on hover, `nestc --emit metadata` writes it out, and reflection reads
+// it like any attribute (`attr_of.<doc>(m.attrs)`).
+@public(all) @attribute doc :: #lang("doc") struct { text: str }

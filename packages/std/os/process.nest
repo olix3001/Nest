@@ -18,17 +18,17 @@ libc :: import "libc.nest"
 
 // ===< Ending >===
 
-// Stop with this status, now.
-//
-// Nothing is flushed on the way out, because `std/io` holds nothing back: a
-// `File` writes straight through to its descriptor. A buffered writer, when
-// there is one, will be the thing that has to be flushed before this is called
-// — by whoever made it.
+/// Stop with this status, now.
+///
+/// Nothing is flushed on the way out, because `std/io` holds nothing back: a
+/// `File` writes straight through to its descriptor. A buffered writer, when
+/// there is one, will be the thing that has to be flushed before this is called
+/// — by whoever made it.
 @public exit :: func (status: i32) -> never { sys.exit(status) }
 
 // ===< Running another program >===
 
-// How a process ended.
+/// How a process ended.
 @public Status :: enum {
   // It returned this status from `main`, or passed it to `exit`.
   exited(i32),
@@ -37,34 +37,34 @@ libc :: import "libc.nest"
 }
 
 impl Status {
-  // Whether it ended the way a program that worked ends.
+  /// Whether it ended the way a program that worked ends.
   @public ok :: func (self: Self) -> bool {
     return self.match { .exited(code) => code == 0, .signalled(_) => false }
   }
 
-  // The status to exit with when passing this one on: a signal has no status,
-  // so it becomes `128 + n`, which is what a shell reports.
+  /// The status to exit with when passing this one on: a signal has no status,
+  /// so it becomes `128 + n`, which is what a shell reports.
   @public code :: func (self: Self) -> i32 {
     return self.match { .exited(code) => code, .signalled(n) => 128 + n }
   }
 }
 
-// A process this one started, and has not yet waited for.
+/// A process this one started, and has not yet waited for.
 @public Child :: struct {
   pid: c.int,
 }
 
 impl Child {
-  // The process id, for a program calling something `std` does not wrap.
+  /// The process id, for a program calling something `std` does not wrap.
   @public pid_of :: #inline func (self: Self) -> c.int { return self.pid }
 
-  // Wait for it to end.
-  //
-  // The status word is decoded here rather than in `sys` because `WIFEXITED`
-  // and its friends are **macros**, so there is nothing to call: what they are
-  // macros over is the same arithmetic on every target this library names — the
-  // low seven bits are the signal that killed it, and the next eight are the
-  // status it exited with.
+  /// Wait for it to end.
+  ///
+  /// The status word is decoded here rather than in `sys` because `WIFEXITED`
+  /// and its friends are **macros**, so there is nothing to call: what they are
+  /// macros over is the same arithmetic on every target this library names — the
+  /// low seven bits are the signal that killed it, and the next eight are the
+  /// status it exited with.
   @public wait :: func (self: Self) -> Result.<Status, io.Error> {
     let r: sys.Res := sys.wait(self.pid)
     if r.failed() { return .err(io.error_of("wait", "", r)) }
@@ -75,16 +75,16 @@ impl Child {
   }
 }
 
-// Start `program` with `args`, searching `PATH` for it.
-//
-// `args` is what the program receives **after** its own name: `spawn("ls",
-// .{ "-l" })` runs `ls -l`, and `argv[0]` is filled in as `"ls"`. That is the
-// opposite of `execvp`'s own convention and the same as every other language's,
-// because the alternative is a list whose first element must be repeated.
-//
-// **A failed `exec` ends the child**, with status 127 — the status a shell uses
-// for "command not found". It has to end: the child is a copy of this process,
-// and returning from here would run the rest of this program a second time.
+/// Start `program` with `args`, searching `PATH` for it.
+///
+/// `args` is what the program receives **after** its own name: `spawn("ls",
+/// .{ "-l" })` runs `ls -l`, and `argv[0]` is filled in as `"ls"`. That is the
+/// opposite of `execvp`'s own convention and the same as every other language's,
+/// because the alternative is a list whose first element must be repeated.
+///
+/// **A failed `exec` ends the child**, with status 127 — the status a shell uses
+/// for "command not found". It has to end: the child is a copy of this process,
+/// and returning from here would run the rest of this program a second time.
 @public spawn :: func (program: str, args: []str) -> Result.<Child, io.Error> {
   let argv: c.ptr.<c.cstr> := build_argv(program, args)
   let forked: sys.Res := sys.fork()
@@ -96,19 +96,19 @@ impl Child {
   return .ok(Child { pid: cast.<c.int>(forked.n) })
 }
 
-// What `output` answers: how the program ended, and everything it wrote to
-// stdout.
+/// What `output` answers: how the program ended, and everything it wrote to
+/// stdout.
 @public(all) Output :: struct {
   status: Status,
   stdout: []u8,
 }
 
-// Run `program` with `args` and collect what it writes to **stdout**.
-//
-// Its stderr is this process's, not captured: reading two pipes needs a way to
-// wait on both at once, or a program that fills one while this reads the other
-// blocks both forever. Stderr is where a program tells a person what went wrong,
-// and a person is still on the other end of this process's.
+/// Run `program` with `args` and collect what it writes to **stdout**.
+///
+/// Its stderr is this process's, not captured: reading two pipes needs a way to
+/// wait on both at once, or a program that fills one while this reads the other
+/// blocks both forever. Stderr is where a program tells a person what went wrong,
+/// and a person is still on the other end of this process's.
 @public output :: func (program: str, args: []str) -> Result.<Output, io.Error> {
   let argv: c.ptr.<c.cstr> := build_argv(program, args)
   let p: sys.Res := sys.pipe()
@@ -148,7 +148,7 @@ close_quietly :: func (fd: c.int) -> void {
   let closed: sys.Res := sys.close(fd)
 }
 
-// Start it, wait for it, and answer how it ended.
+/// Start it, wait for it, and answer how it ended.
 @public run :: func (program: str, args: []str) -> Result.<Status, io.Error> {
   return spawn(program, args).?.wait()
 }

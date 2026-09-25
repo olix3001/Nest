@@ -11,7 +11,7 @@ unit mem:main {
     ptr: *u8                    // +0
     len: u64                    // +8
   }
-  type core.loc.Location = struct {           // was a struct; size 24, align 8
+  type core.rt.loc.Location = struct {           // was a struct; size 24, align 8
     file: []u8                    // +0
     line: u32                    // +16
     column: u32                    // +20
@@ -29,18 +29,18 @@ unit mem:main {
     let _4: bool
     let _5: []u8
     let _6: []u8
-    let _7: core.loc.Location
+    let _7: core.rt.loc.Location
     let _8: *i32
     let _9: *[3]i32
     let _10: bool
     let _11: []u8
     let _12: []u8
-    let _13: core.loc.Location
+    let _13: core.rt.loc.Location
     let _14: *i32
     let _15: (i32, bool)
     let _16: []u8
     let _17: []u8
-    let _18: core.loc.Location
+    let _18: core.rt.loc.Location
   bb0:                    // entry
     _3 := &s_0
     _4 := lt.u64 k_2, _3.*.len
@@ -48,8 +48,8 @@ unit mem:main {
   bb1:                    // out of bounds
     _5 := []u8(&const.str.2, 19)
     _6 := []u8(&const.str.3, 8)
-    _7 := core.loc.Location(_6, 1, 62)
-    call core.fail.panic(_5, _7)
+    _7 := core.rt.loc.Location(_6, 1, 62)
+    call core.rt.fail.panic(_5, _7)
       @safepoint { live: [_5, _7]
         _5 := reloc _5
         _7 := reloc _7
@@ -63,8 +63,8 @@ unit mem:main {
   bb3:                    // out of bounds
     _11 := []u8(&const.str.2, 19)
     _12 := []u8(&const.str.3, 8)
-    _13 := core.loc.Location(_12, 1, 69)
-    call core.fail.panic(_11, _13)
+    _13 := core.rt.loc.Location(_12, 1, 69)
+    call core.rt.fail.panic(_11, _13)
       @safepoint { live: [_11, _13]
         _11 := reloc _11
         _13 := reloc _13
@@ -77,8 +77,8 @@ unit mem:main {
   bb5:                    // overflow
     _16 := []u8(&const.str.4, 16)
     _17 := []u8(&const.str.3, 8)
-    _18 := core.loc.Location(_17, 1, 62)
-    call core.fail.panic(_16, _18)
+    _18 := core.rt.loc.Location(_17, 1, 62)
+    call core.rt.fail.panic(_16, _18)
       @safepoint { live: [_16, _18]
         _16 := reloc _16
         _18 := reloc _18
@@ -87,5 +87,5 @@ unit mem:main {
   bb6:
     return _15.0
 
-  declare func core.fail.panic(msg_0: []u8, loc_1: core.loc.Location) -> never @public  // _NC4core4fail5panic
+  declare func core.rt.fail.panic(msg_0: []u8, loc_1: core.rt.loc.Location) -> never @public  // _NC4core2rt4fail5panic
 }

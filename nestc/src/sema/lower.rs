@@ -444,6 +444,7 @@ impl Lowerer<'_> {
         let mut methods = Vec::new();
         let mut consts = Vec::new();
         for &m in members {
+            let m = self.ast.decl_item(m);
             let NodeKind::ConstBind { pattern, rhs } = self.ast.node(m).kind.clone() else {
                 continue;
             };

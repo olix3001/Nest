@@ -6,31 +6,31 @@ sys :: import "../os/sys.nest"
 
 // ===< A descriptor >===
 
-// An open file descriptor: a file, a pipe, a terminal — whatever the operating
-// system gave a number to.
-//
-// It is **not closed for you**. The language has no destructors (`Drop` is
-// still a decision, see `design/toolchain.md`), so a `File` that goes out of
-// scope leaks its descriptor until the process ends. `close` is written, and
-// `fs.read`-style whole-file operations close their own.
+/// An open file descriptor: a file, a pipe, a terminal — whatever the operating
+/// system gave a number to.
+///
+/// It is **not closed for you**. The language has no destructors (`Drop` is
+/// still a decision, see `design/toolchain.md`), so a `File` that goes out of
+/// scope leaks its descriptor until the process ends. `close` is written, and
+/// `fs.read`-style whole-file operations close their own.
 @public(fields: package) File :: struct {
   fd: c.int,
 }
 
 impl File {
-  // Wrap a descriptor this program got from somewhere else. The `File` does not
-  // become its owner — closing it is still whoever opened it's business.
+  /// Wrap a descriptor this program got from somewhere else. The `File` does not
+  /// become its owner — closing it is still whoever opened it's business.
   @public from_fd :: #inline func (fd: c.int) -> File { return File { fd: fd } }
 
-  // The descriptor, for a program calling something `std` does not wrap.
+  /// The descriptor, for a program calling something `std` does not wrap.
   @public fd_of :: #inline func (self: Self) -> c.int { return self.fd }
 
-  // Whether it is a terminal: what decides whether output meant for a person
-  // may carry colour.
+  /// Whether it is a terminal: what decides whether output meant for a person
+  /// may carry colour.
   @public is_terminal :: func (self: Self) -> bool { return sys.isatty(self.fd) }
 
-  // Close it. A descriptor closed twice is a descriptor another thread may have
-  // reopened, so this is called once and by whoever opened it.
+  /// Close it. A descriptor closed twice is a descriptor another thread may have
+  /// reopened, so this is called once and by whoever opened it.
   @public close :: func (self: *mut File) -> Result.<void, Error> {
     let r: sys.Res := sys.close(self.fd)
     if r.failed() { return .err(error_of("close", "", r)) }

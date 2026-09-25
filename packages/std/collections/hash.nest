@@ -8,23 +8,23 @@
 
 // ===< Hashing >===
 
-// A value that can be a key.
-//
-// One method answering 64 bits. Not "write yourself into a hasher", which is
-// the design that lets one algorithm serve every type — that needs a hasher
-// trait and a second type parameter on every container, and this library has
-// one algorithm.
+/// A value that can be a key.
+///
+/// One method answering 64 bits. Not "write yourself into a hasher", which is
+/// the design that lets one algorithm serve every type — that needs a hasher
+/// trait and a second type parameter on every container, and this library has
+/// one algorithm.
 @public Hash :: trait {
   hash :: func (self: Self) -> u64
 }
 
-// FNV-1a, 64-bit: the offset basis, then a multiply and an exclusive-or per
-// byte. It is chosen for being **four lines**, which is what a hash function
-// for map keys should be when the map probes linearly and the keys are short.
+/// FNV-1a, 64-bit: the offset basis, then a multiply and an exclusive-or per
+/// byte. It is chosen for being **four lines**, which is what a hash function
+/// for map keys should be when the map probes linearly and the keys are short.
 @public FNV_OFFSET: u64 :: 14695981039346656037
 @public FNV_PRIME:  u64 :: 1099511628211
 
-// The hash of a run of bytes. What every impl below comes down to.
+/// The hash of a run of bytes. What every impl below comes down to.
 @public hash_bytes :: func (bytes: []u8) -> u64 {
   let mut h: u64 := FNV_OFFSET
   for i in 0..<bytes.len() {
@@ -41,11 +41,11 @@ impl Hash for str {
   hash :: func (self: Self) -> u64 { return hash_bytes(self.as_bytes()) }
 }
 
-// An integer hashes as its own bits, mixed.
-//
-// Not the identity: a table with a power-of-two capacity takes the *low* bits
-// of a hash, so keys that differ only above that range would all land in one
-// bucket. One FNV round over the value spreads them.
+/// An integer hashes as its own bits, mixed.
+///
+/// Not the identity: a table with a power-of-two capacity takes the *low* bits
+/// of a hash, so keys that differ only above that range would all land in one
+/// bucket. One FNV round over the value spreads them.
 @public hash_u64 :: func (v: u64) -> u64 {
   return wrap_mul(FNV_OFFSET ^ v, FNV_PRIME)
 }

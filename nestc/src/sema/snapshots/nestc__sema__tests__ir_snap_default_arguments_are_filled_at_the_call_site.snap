@@ -8,18 +8,18 @@ struct Router {
 func g(x: i32, y: i32) -> i32 {
   return #builtin(Add) (core.ops.Add.add: *func(i32, i32) -> i32)(x: i32, y: i32): i32
 }
-func pad(s: core.str.str, width: usize, fill: char) -> usize {
+func pad(s: core.types.str.str, width: usize, fill: char) -> usize {
   return width: usize
 }
 func f(r: *Router) -> i32 {
   let a: i32 = (g: *func(i32, i32) -> i32)($cast(1: comptime_int): i32, $cast(0: comptime_int): i32): i32
   let b: i32 = (g: *func(i32, i32) -> i32)($cast(1: comptime_int): i32, $cast(2: comptime_int): i32): i32
   let c: i32 = (g: *func(i32, i32) -> i32)($cast(1: comptime_int): i32, $cast(5: comptime_int): i32): i32
-  let d: usize = (pad: *func(core.str.str, usize, char) -> usize)($cast("h": comptime_str): core.str.str, $cast(8: comptime_int): usize, 'x': char): usize
-  let e: usize = (pad: *func(core.str.str, usize, char) -> usize)($cast("h": comptime_str): core.str.str, $cast(8: comptime_int): usize, '-': char): usize
-  let m: i32 = (Router.listen: *func(*Router, core.str.str, i32) -> i32)(r: *Router, $cast("h": comptime_str): core.str.str, $cast(80: comptime_int): i32): i32
+  let d: usize = (pad: *func(core.types.str.str, usize, char) -> usize)($cast("h": comptime_str): core.types.str.str, $cast(8: comptime_int): usize, 'x': char): usize
+  let e: usize = (pad: *func(core.types.str.str, usize, char) -> usize)($cast("h": comptime_str): core.types.str.str, $cast(8: comptime_int): usize, '-': char): usize
+  let m: i32 = (Router.listen: *func(*Router, core.types.str.str, i32) -> i32)(r: *Router, $cast("h": comptime_str): core.types.str.str, $cast(80: comptime_int): i32): i32
   return #builtin(Add) (core.ops.Add.add: *func(i32, i32) -> i32)(#builtin(Add) (core.ops.Add.add: *func(i32, i32) -> i32)(#builtin(Add) (core.ops.Add.add: *func(i32, i32) -> i32)(a: i32, b: i32): i32, c: i32): i32, m: i32): i32
 }
-func listen(self: *Router, host: core.str.str, port: i32) -> i32 #self(*) {
+func listen(self: *Router, host: core.types.str.str, port: i32) -> i32 #self(*) {
   return port: i32
 }

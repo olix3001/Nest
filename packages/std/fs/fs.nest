@@ -32,9 +32,9 @@ collections :: import "../collections/collections.nest"
 @public path :: import "path.nest"
 { make } :: import <core/mem>
 
-// How a file is being opened. An enum rather than a set of flags, because the
-// four combinations below are every one a program actually wants, and the flag
-// bits that express them are the part that differs per target (`libc`).
+/// How a file is being opened. An enum rather than a set of flags, because the
+/// four combinations below are every one a program actually wants, and the flag
+/// bits that express them are the part that differs per target (`libc`).
 @public Mode :: enum {
   // Read what is there. The file must exist.
   read,
@@ -59,22 +59,22 @@ impl Mode {
   }
 }
 
-// Open `path`.
-//
-// The `File` that comes back is **not closed for you** — see `io.File`. The
-// whole-file functions below open, read and close in one call, which is what
-// most callers want and what leaves nothing to forget.
+/// Open `path`.
+///
+/// The `File` that comes back is **not closed for you** — see `io.File`. The
+/// whole-file functions below open, read and close in one call, which is what
+/// most callers want and what leaves nothing to forget.
 @public open :: func (path: str, mode: Mode) -> Result.<io.File, io.Error> {
   let r: sys.Res := sys.open(path, mode.flags(), libc.MODE_FILE)
   if r.failed() { return .err(io.error_of("open", path, r)) }
   return .ok(io.File.from_fd(cast.<c.int>(r.n)))
 }
 
-// Every byte of `path`.
-//
-// It closes the descriptor on the way out of **both** exits: a read that failed
-// still opened a file, and a library that leaks one per failed read is a
-// library that runs out of them in a loop.
+/// Every byte of `path`.
+///
+/// It closes the descriptor on the way out of **both** exits: a read that failed
+/// still opened a file, and a library that leaks one per failed read is a
+/// library that runs out of them in a loop.
 @public read :: func (path: str) -> Result.<[]u8, io.Error> {
   let mut f: io.File := open(path, .read).?
   return io.read_to_end(&mut f).match {
@@ -91,22 +91,22 @@ impl Mode {
   }
 }
 
-// The same, as text.
-//
-// **The bytes are not validated.** A `str` is UTF-8 by promise (§3), and this
-// is the one place `std` hands one out without checking — validating every file
-// read would cost a pass over it, and `str.from_utf8` is written for the caller
-// that needs the check. What this does guarantee is what the file held.
+/// The same, as text.
+///
+/// **The bytes are not validated.** A `str` is UTF-8 by promise (§3), and this
+/// is the one place `std` hands one out without checking — validating every file
+/// read would cost a pass over it, and `str.from_utf8` is written for the caller
+/// that needs the check. What this does guarantee is what the file held.
 @public read_to_string :: func (path: str) -> Result.<str, io.Error> {
   return .ok(cast.<str>(read(path).?))
 }
 
-// Replace `path`'s contents with `bytes`, creating it if it is not there.
+/// Replace `path`'s contents with `bytes`, creating it if it is not there.
 @public write :: func (path: str, bytes: []u8) -> Result.<void, io.Error> {
   return put(path, bytes, .write)
 }
 
-// Add `bytes` to the end of `path`, creating it if it is not there.
+/// Add `bytes` to the end of `path`, creating it if it is not there.
 @public append :: func (path: str, bytes: []u8) -> Result.<void, io.Error> {
   return put(path, bytes, .append)
 }
@@ -125,51 +125,51 @@ put :: func (path: str, bytes: []u8, mode: Mode) -> Result.<void, io.Error> {
 
 // ===< Paths, without opening anything >===
 
-// Whether something is at `path`. It answers `false` for a path the process
-// cannot reach as well as one that is not there — the two are the same answer
-// to "can I use this name", and `open` is what reports the difference.
+/// Whether something is at `path`. It answers `false` for a path the process
+/// cannot reach as well as one that is not there — the two are the same answer
+/// to "can I use this name", and `open` is what reports the difference.
 @public exists :: func (path: str) -> bool {
   return sys.access(path, libc.F_OK).failed() == false
 }
 
-// Remove a file. Removing one that is not there is an error, and
-// `not_found` on it is how a caller says it does not mind.
+/// Remove a file. Removing one that is not there is an error, and
+/// `not_found` on it is how a caller says it does not mind.
 @public remove :: func (path: str) -> Result.<void, io.Error> {
   let r: sys.Res := sys.unlink(path)
   if r.failed() { return .err(io.error_of("remove", path, r)) }
   return .ok(())
 }
 
-// Move `from` to `to`, replacing whatever was at `to`.
-//
-// It is one operation on one filesystem and **fails across two**, which is
-// POSIX's rule rather than this library's: a rename that crossed devices would
-// have to be a copy and a delete, which has a window in the middle where the
-// data is in two places and a failure leaves it in neither.
+/// Move `from` to `to`, replacing whatever was at `to`.
+///
+/// It is one operation on one filesystem and **fails across two**, which is
+/// POSIX's rule rather than this library's: a rename that crossed devices would
+/// have to be a copy and a delete, which has a window in the middle where the
+/// data is in two places and a failure leaves it in neither.
 @public rename :: func (from: str, to: str) -> Result.<void, io.Error> {
   let r: sys.Res := sys.rename(from, to)
   if r.failed() { return .err(io.error_of("rename", from, r)) }
   return .ok(())
 }
 
-// Make a directory. Its parent must already exist.
+/// Make a directory. Its parent must already exist.
 @public create_dir :: func (path: str) -> Result.<void, io.Error> {
   let r: sys.Res := sys.mkdir(path, libc.MODE_DIR)
   if r.failed() { return .err(io.error_of("create directory", path, r)) }
   return .ok(())
 }
 
-// Make a directory and every parent of it that is missing.
-//
-// Something already at one of those paths is **not** an error, which is the
-// point of asking for this rather than `create_dir`: a program making sure a
-// directory is there does not care who made it. A *file* in the way is still
-// an error, from the `mkdir` below it that fails with `ENOTDIR`.
-//
-// A failure is only reported when nothing is at the path afterwards, rather than
-// only on `EEXIST`: `mkdir` on a directory that exists answers `EROFS` or
-// `EACCES` instead on some filesystems, when the check it trips first is that
-// it could not create one.
+/// Make a directory and every parent of it that is missing.
+///
+/// Something already at one of those paths is **not** an error, which is the
+/// point of asking for this rather than `create_dir`: a program making sure a
+/// directory is there does not care who made it. A *file* in the way is still
+/// an error, from the `mkdir` below it that fails with `ENOTDIR`.
+///
+/// A failure is only reported when nothing is at the path afterwards, rather than
+/// only on `EEXIST`: `mkdir` on a directory that exists answers `EROFS` or
+/// `EACCES` instead on some filesystems, when the check it trips first is that
+/// it could not create one.
 @public create_dir_all :: func (path: str) -> Result.<void, io.Error> {
   let raw: []u8 := path.as_bytes()
   let mut i: usize := 1
@@ -188,9 +188,9 @@ put :: func (path: str, bytes: []u8, mode: Mode) -> Result.<void, io.Error> {
 
 SLASH: u8 :: 47
 
-// The names of what is in the directory `path` — files and directories both,
-// `.` and `..` left out — in byte order, so that two runs over the same
-// directory see the same list.
+/// The names of what is in the directory `path` — files and directories both,
+/// `.` and `..` left out — in byte order, so that two runs over the same
+/// directory see the same list.
 @public read_dir :: func (path: str) -> Result.<[]str, io.Error> {
   let mut names: Vec.<str> := collections.vec.new.<str>()
   let r: sys.Res := sys.read_dir(path, { n in names.push(n) })
@@ -223,18 +223,18 @@ before :: func (a: str, b: str) -> bool {
   return x.len() < y.len()
 }
 
-// Remove an empty directory.
+/// Remove an empty directory.
 @public remove_dir :: func (path: str) -> Result.<void, io.Error> {
   let r: sys.Res := sys.rmdir(path)
   if r.failed() { return .err(io.error_of("remove directory", path, r)) }
   return .ok(())
 }
 
-// How many bytes `path` holds.
-//
-// It opens the file and asks the **descriptor**, rather than asking the
-// filesystem through `stat`, for the reason at the top of this file. The answer
-// is the same one; what it costs is a descriptor for the length of the call.
+/// How many bytes `path` holds.
+///
+/// It opens the file and asks the **descriptor**, rather than asking the
+/// filesystem through `stat`, for the reason at the top of this file. The answer
+/// is the same one; what it costs is a descriptor for the length of the call.
 @public size :: func (path: str) -> Result.<usize, io.Error> {
   let mut f: io.File := open(path, .read).?
   let r: sys.Res := sys.seek(f.fd_of(), 0, libc.SEEK_END)

@@ -495,6 +495,7 @@ impl Collector<'_> {
     }
 
     fn collect_trait_member(&mut self, member: NodeId, trait_def: DefId) {
+        let member = self.ast.decl_item(member);
         if let NodeKind::ConstBind { pattern, rhs } = self.ast.node(member).kind.clone() {
             if let Some(name) = self.binding_name(pattern) {
                 let kind = match self.ast.node(rhs).kind {

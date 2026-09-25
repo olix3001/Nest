@@ -1290,6 +1290,7 @@ fn resolve_one(session: &mut Session, file: FileId) {
     let ns = session.files[&file].ns;
     let globs = session.prelude_globs.clone();
     let builtins = session.builtins;
+    let doc = session.lang_items.get("doc");
     let Session {
         asts,
         defs,
@@ -1298,7 +1299,7 @@ fn resolve_one(session: &mut Session, file: FileId) {
         ..
     } = &mut *session;
     let ast = &asts[&file];
-    resolve::resolve_file(defs, diagnostics, ast, file, ns, &globs, builtins, pkg_of);
+    resolve::resolve_file(defs, diagnostics, ast, file, ns, &globs, builtins, pkg_of, doc);
 }
 
 fn infer_one(session: &mut Session, impls: &impls::ImplTable, file: FileId) {

@@ -1057,6 +1057,15 @@ pub struct Ast {
 }
 
 impl Ast {
+    /// The item under a [`NodeKind::Decl`], or `id` itself: a trait member is
+    /// wrapped in one only when it carries attributes (a `///` doc).
+    pub fn decl_item(&self, id: NodeId) -> NodeId {
+        match &self.node(id).kind {
+            NodeKind::Decl { item, .. } => *item,
+            _ => id,
+        }
+    }
+
     /// An empty arena.
     pub fn new() -> Self {
         Self::default()
