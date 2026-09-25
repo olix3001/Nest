@@ -436,15 +436,21 @@ function pointer (`*func(...)`, §3.5) have in common is the prelude trait
 Func :: #lang("func") trait {
   Args :: type
   Output :: type
+  call :: func (self: *Self, args: Self.Args) -> Self.Output
 }
 ```
 
 `Func(A, B) -> R` is how a bound on it is written, and it is sugar for
 `Func.<Args = (A, B), Output = R>` — the arguments as one tuple, `()` for none,
 and a missing `-> R` is `-> void`. Nothing implements `Func` but the compiler:
-a closure implements it with its own signature, and so does a `*func`. The
-trait declares no method; calling a value whose type implements it is a call,
-and the compiler knows what code that reaches.
+a closure implements it with its own signature, and so does a `*func`.
+`call` is its one method, in Rust's shape: the arguments arrive as the `Args`
+tuple, so `f(x, y)` and `f.call((x, y))` are one call, and `f.call(())` calls a
+`f` that takes nothing. The compiler knows what code a call reaches — the
+closure's body, or the function a `*func` points at — and `f.call(t)` reaches
+the same code, reading the arguments out of `t`. Generic code that builds its
+arguments as data calls through it: `func <F: Func> (f: F, a: F.Args) ->
+F.Output { return f.call(a) }`.
 
 A value whose type implements `Func` is called like a function. Taking a
 closure is taking something that implements `Func`, and each closure passed

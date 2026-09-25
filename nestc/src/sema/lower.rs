@@ -49,7 +49,7 @@ use crate::parser::ast::{
 use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::{
-    ArgOrder, Coercion, DistinctRecv, DynCoerce, FuncCall, Generics, Instantiation, MethodDispatch,
+    ArgOrder, Coercion, DistinctRecv, DynCoerce, FuncCall, FuncCallMethod, Generics, Instantiation, MethodDispatch,
     MethodRes, RangeReported, RecvAdjust, SliceCoerce, Upcast,
 };
 use super::infer::{OpResolution, StaticTraitSelf};
@@ -1220,6 +1220,9 @@ impl Lowerer<'_> {
             NodeKind::GenericApply { base, .. } => base,
             _ => callee,
         };
+        if let Some(m) = self.ast.meta::<FuncCallMethod>(head) {
+            return self.lower_func_call_method(node, head, m, args, ty);
+        }
         if let Some(res) = self.ast.meta::<MethodRes>(head) {
             return self.lower_method_call(node, head, res, args, ty);
         }
@@ -1577,6 +1580,43 @@ impl Lowerer<'_> {
     /// whatever the `self` parameter asked for — a value, a `*Self`, a
     /// `*mut Self` — is spelled out here as an explicit `&` / `&mut` / `.*`, so
     /// nothing downstream has to re-derive an implicit adjustment.
+    /// `f.call(t)` (§5.5): a call of `f` itself, whose one argument is the
+    /// tuple the LIR spreads ([`crate::ir::SpreadArgs`]).
+    fn lower_func_call_method(
+        &mut self,
+        node: NodeId,
+        callee: NodeId,
+        m: FuncCallMethod,
+        args: &[NodeId],
+        ty: Ty,
+    ) -> Expr {
+        let NodeKind::FieldAccess { base, .. } = self.ast.node(callee).kind.clone() else {
+            return self.expr(node, ty, ExprKind::Error);
+        };
+        let mut value = self.lower_expr(base);
+        if m.deref {
+            value = self.autoderef(value);
+        }
+        let dispatch = match self.ty_of(&value) {
+            Ty::Func { .. } => Dispatch::Static,
+            self_ty => Dispatch::Func { self_ty },
+        };
+        let slots: Vec<Option<NodeId>> = args.iter().copied().map(Some).collect();
+        let args = self.lower_args(None, &slots, node);
+        let call = self.expr(
+            node,
+            ty,
+            ExprKind::Call {
+                callee: Box::new(value),
+                args,
+                builtin: None,
+                dispatch,
+            },
+        );
+        self.meta.set(call.id, crate::ir::SpreadArgs);
+        call
+    }
+
     fn lower_method_call(
         &mut self,
         node: NodeId,

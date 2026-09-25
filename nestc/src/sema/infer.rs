@@ -322,6 +322,15 @@ pub struct OpaqueTy(pub Ty);
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct FuncCall;
 
+/// Marks the callee of `f.call(t)` — `Func`'s one method (§5.5) — on a value
+/// that implements `Func`. It is the value's own call with the tuple spread, so
+/// lowering calls the receiver (through a pointer to it when `deref`) the way a
+/// [`FuncCall`] is, and marks the call [`crate::ir::SpreadArgs`].
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct FuncCallMethod {
+    pub deref: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DistinctRecv {
     pub repr: Ty,
@@ -4066,6 +4075,48 @@ impl Inferer<'_> {
         Some(Outcome::Solved)
     }
 
+    /// `f.call(t)` on a value that implements `Func` (§5.5), typed as the call
+    /// `f(t.0, t.1, ..)` it is. `None` when the receiver cannot be called, so the
+    /// ordinary method search runs — a type with a `call` of its own keeps it.
+    ///
+    /// A pointer to a callable value is called through, as a method's receiver
+    /// is; a `*dyn Func` is itself the callable value.
+    fn infer_func_call_method(&mut self, callee: NodeId, recv: &Ty, args: &[NodeId]) -> Option<Ty> {
+        let shallow = self.cx.shallow(recv);
+        let (sig, deref) = match self.func_value_sig(&shallow) {
+            Some(sig) => (sig, false),
+            None => match &shallow {
+                Ty::Ptr { inner, .. } => (self.func_value_sig(inner)?, true),
+                _ => return None,
+            },
+        };
+        let (params, ret) = sig;
+        self.reject_named_args(args, "`call` takes its arguments as one tuple");
+        if args.len() != 1 {
+            let msg = format!(
+                "`call` takes the arguments as one tuple, `f.call(({}))`, not {} arguments",
+                if params.len() == 1 { "x," } else { "x, y" },
+                args.len()
+            );
+            self.report(callee, msg);
+            self.infer_args_only(args);
+            return Some(Ty::Error);
+        }
+        let want = args_tuple(&params);
+        let got = self.infer_arg(args[0], Some(want.clone()));
+        self.expect(args[0], &got, &want);
+        self.ast.set_meta(callee, FuncCallMethod { deref });
+        self.types.insert(
+            callee,
+            Ty::Func {
+                params: vec![want],
+                ret: Box::new(ret.clone()),
+                c: false,
+            },
+        );
+        Some(ret)
+    }
+
     /// What a value of type `ty` takes and answers when it is called, if it can
     /// be: a function pointer's signature, and a generic parameter's `Func`
     /// bound — its arguments, and its `Output`.
@@ -4329,6 +4380,14 @@ impl Inferer<'_> {
                 // whole chain below would find nothing and say nothing.
                 let settled_lit = self.cx.var_kind(&recv);
                 let recv = self.pin_numeric(&recv);
+                // `Func`'s own method, before a closure's namespace is asked:
+                // the closure's lifted body is also called `call`, and it takes
+                // the arguments one by one rather than as the tuple.
+                if name.as_str() == "call"
+                    && let Some(ret) = self.infer_func_call_method(callee, &recv, args)
+                {
+                    return ret;
+                }
                 // Inherent (or trait-impl) method already collected into the
                 // receiver type's namespace: the fast path.
                 if let Some(m) = self.method_def(&recv, name.as_str()) {

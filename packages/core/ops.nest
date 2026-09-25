@@ -54,13 +54,16 @@
 // `Func.<Args = (i32, i32), Output = i32>` — the arguments as one tuple, `()`
 // for none.
 //
-// It has no method to implement, because a call is not one: `f(x)` on a value
-// whose type is `Func` is a call like any other, and the compiler is what knows
-// which code that reaches — the closure's own body, or the function a `*func`
-// points at. Nothing but the compiler implements it.
+// `call` is the one method, Rust's shape: the arguments arrive as the `Args`
+// tuple, so `f(x, y)` and `f.call((x, y))` are the same call — which is what
+// lets generic code hold arguments it built as data (`std/di` fills the tuple
+// by reflection) and still make the call. The compiler is what knows which code
+// it reaches — the closure's own body, or the function a `*func` points at — so
+// nothing but the compiler implements it.
 @public Func :: #lang("func") trait {
   Args :: type
   Output :: type
+  call :: func (self: *Self, args: Self.Args) -> Self.Output
 }
 
 // Every type whose size is known where it is used — which is every type but a

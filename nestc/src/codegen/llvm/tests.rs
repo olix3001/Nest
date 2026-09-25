@@ -3061,6 +3061,29 @@ fn a_closure_is_stored_as_a_dyn_func() {
     }
 }
 
+/// `Func.call` takes the arguments as the `Args` tuple (§5.5): on a closure, a
+/// `*func`, a `*dyn Func`, a pointer to a closure, and a generic `F: Func`, with
+/// a tuple written in place and one held in a local.
+#[test]
+fn func_call_takes_the_arguments_as_a_tuple() {
+    let src = "{ boxed } :: import <core/mem>\n\
+               apply :: func <F: Func(i32, i32) -> i32> (f: F, args: (i32, i32)) -> i32 { return f.call(args) }\n\
+               twice :: func (x: i32) -> i32 { return x * 2 }\n\
+               main :: func () -> i32 {\n\
+                   let n := 1\n\
+                   const add := { a: i32, b: i32 -> i32 in a + b + n }\n\
+                   const t: (i32, i32) := (2, 3)\n\
+                   const p: *func(i32) -> i32 := twice\n\
+                   const d: *dyn Func(i32) -> i32 := boxed({ x in x + 100 })\n\
+                   const unit := { in 7 }\n\
+                   const r := &add\n\
+                   return add.call((1, 1)) + add.call(t) + apply(add, (4, 4)) + p.call((5,)) + d.call((1,)) + unit.call(()) + r.call((0, 0))\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 3 + 6 + 9 + 10 + 101 + 7 + 1);
+    }
+}
+
 /// What an `impl Func` return type turned out to be is stored as a `*dyn Func`
 /// like any closure is.
 #[test]

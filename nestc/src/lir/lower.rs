@@ -2966,7 +2966,11 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             });
         }
 
-        let mut vals = self.passed(args);
+        let mut vals = if self.cx.meta.has::<crate::ir::SpreadArgs>(e.id) {
+            self.spread(args, span)
+        } else {
+            self.passed(args)
+        };
         let callee = match dispatch {
             // Which function a vtable slot holds is a property of the vtable,
             // not of the call. Reaching it is two ordinary projections and an
@@ -3112,6 +3116,37 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 vals.push(v);
             }
         }
+        vals
+    }
+
+    /// The arguments of `f.call(t)` (§5.5): `t`'s elements, each read from the
+    /// one place the tuple was evaluated into. The tuple is the **last**
+    /// argument — a closure's receiver goes before it once monomorphization has
+    /// made the call static.
+    fn spread(&mut self, args: &[Expr], span: Option<FileSpan>) -> Vec<Operand> {
+        let Some((tuple, before)) = args.split_last() else {
+            return Vec::new();
+        };
+        let mut vals = self.passed(before);
+        let ty = self.cx.ty_of(tuple.id);
+        let Ty::Tuple(elems) = &ty else {
+            // `()`, the arguments of a call that takes none: still evaluated.
+            let _ = self.eval(tuple);
+            return vals;
+        };
+        let place = match self.eval(tuple) {
+            Operand::Copy(p) => p,
+            other => match self.into_temp(Rvalue::Use(other), ty.clone(), span) {
+                Operand::Copy(p) => p,
+                _ => return vals,
+            },
+        };
+        vals.extend(elems.iter().enumerate().filter(|(_, t)| !is_void(t)).map(|(i, _)| {
+            Operand::Copy(place.clone().then(Projection::Field {
+                index: i as u32,
+                name: Symbol::new(&i.to_string()),
+            }))
+        }));
         vals
     }
 

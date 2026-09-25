@@ -57,14 +57,18 @@ function pointer (`*func(...)`) have in common is the prelude trait `Func`:
 Func :: #lang("func") trait {
     Args :: type
     Output :: type
+    call :: func (self: *Self, args: Self.Args) -> Self.Output
 }
 ```
 
 `Func(A, B) -> R` is sugar for `Func.<Args = (A, B), Output = R>` — the
 arguments as one tuple, `()` for none, a missing `-> R` meaning `-> void`.
-`Func` declares no method: nothing implements it but the compiler, and
-calling a value whose type implements it is a direct call to whatever code
-that instantiation reaches.
+Nothing implements `Func` but the compiler, and calling a value whose type
+implements it is a direct call to whatever code that instantiation reaches.
+`call` is the same call with the arguments as one tuple, the way Rust's
+`Fn::call` takes them: `f(1, 2)` is `f.call((1, 2))`, `f(x)` is
+`f.call((x,))`, and `f()` is `f.call(())`. It is what generic code uses when
+the arguments are data it built rather than expressions it wrote.
 
 ```nest
 apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }

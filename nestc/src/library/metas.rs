@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::common::meta::MetaStore;
 use crate::common::source::FileSpan;
 use crate::ir::const_eval::ConstValue;
-use crate::ir::{Boxed, DefaultValue, ImplicitCast};
+use crate::ir::{Boxed, DefaultValue, ImplicitCast, SpreadArgs};
 use crate::sema::def::Directive;
 use crate::sema::infer::{
-    ArgOrder, ClosureSig, Coercion, ConstSlotReported, DistinctRecv, DynCoerce, FuncCall, Generics,
+    ArgOrder, ClosureSig, Coercion, ConstSlotReported, DistinctRecv, DynCoerce, FuncCall, FuncCallMethod, Generics,
     IndexWrite, Instantiation, MethodRes, OpResolution, OpaqueTy, RangeReported, SliceCoerce,
     StaticTraitSelf, TyPathReported, Upcast, VariantTag,
 };
@@ -86,6 +86,7 @@ persisted! {
     ConstValue(ConstValue),
     DefaultValue(DefaultValue),
     ImplicitCast(ImplicitCast),
+    SpreadArgs(SpreadArgs),
     Generics(Generics),
     Instantiation(Instantiation),
     MethodRes(MethodRes),
@@ -102,6 +103,7 @@ persisted! {
     TyPathReported(TyPathReported),
     VariantTag(VariantTag),
     FuncCall(FuncCall),
+    FuncCallMethod(FuncCallMethod),
     ClosureSig(ClosureSig),
     ClosureDefs(ClosureDefs),
     Captures(Captures),

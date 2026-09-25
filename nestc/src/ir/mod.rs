@@ -137,6 +137,13 @@ pub struct DefaultValue(pub Expr);
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ImplicitCast;
 
+/// Marks a [`ExprKind::Call`] whose one argument is a **tuple of arguments**:
+/// `f.call(t)` on a `Func` value (§5.5). The callee is called with `t`'s
+/// elements, in order, as if they had been written one by one — which the LIR
+/// lowering does, once the tuple has a place to be read from.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct SpreadArgs;
+
 /// A whole lowered program: the type definitions it declares, the constants and
 /// static regions it declares, and every function that had a body.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

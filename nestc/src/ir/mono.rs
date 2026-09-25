@@ -727,7 +727,17 @@ impl Mono<'_> {
                         inner: Box::new(closure_ty),
                     };
                     let mut params = vec![recv_ty.clone()];
-                    params.extend(call_args_exprs.iter().map(|a| self.meta.ty_or_error(a.id)));
+                    // `f.call(t)` passes the tuple, and the closure's `call`
+                    // takes what is in it.
+                    if self.meta.has::<crate::ir::SpreadArgs>(call_id) {
+                        if let Some(Ty::Tuple(elems)) =
+                            call_args_exprs.first().map(|a| self.meta.ty_or_error(a.id))
+                        {
+                            params.extend(elems);
+                        }
+                    } else {
+                        params.extend(call_args_exprs.iter().map(|a| self.meta.ty_or_error(a.id)));
+                    }
                     let fn_ty = Ty::Func {
                         params,
                         ret: Box::new(self.meta.ty_or_error(call_id)),
@@ -1845,6 +1855,9 @@ impl Cloner<'_> {
         }
         if self.meta.has::<RangeReported>(old) {
             self.meta.set(new, RangeReported);
+        }
+        if self.meta.has::<crate::ir::SpreadArgs>(old) {
+            self.meta.set(new, crate::ir::SpreadArgs);
         }
         // Which locals live in cells is a fact about the body, and every
         // instantiation of it has the same ones.
