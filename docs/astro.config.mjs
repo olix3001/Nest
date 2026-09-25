@@ -45,7 +45,10 @@ export default defineConfig({
 			sidebar: [
 				{
 					label: 'Getting Started',
-					items: [{ label: 'Installation & first program', slug: 'getting-started' }],
+					items: [
+						{ label: 'Installation & first program', slug: 'getting-started' },
+						{ label: 'Building from source', slug: 'building-from-source' },
+					],
 				},
 				{
 					label: 'The Language',

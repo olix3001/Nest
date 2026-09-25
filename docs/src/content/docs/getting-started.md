@@ -1,6 +1,6 @@
 ---
 title: Installation & first program
-description: Install nestc and twig, and compile your first Nest program.
+description: Get nestc and twig, and compile your first Nest program.
 ---
 
 Nest is highly experimental — no syntax, IR format, manifest format, or CLI
@@ -9,16 +9,17 @@ flag here should be considered stable yet.
 ## Installing
 
 :::note
-For now, the only way to get `nestc` and `twig` is downloading prebuilt
-binaries from the GitHub release page. There is no installer and no package
-manager entry yet — this section will grow once one exists.
+For now, `nestc` and `twig` have to be **built from source**. A build records
+paths into the checkout it was built from: where `core` and `std` are, and
+where the runtime and the collector it links into every program are. So a
+built compiler can't simply be copied to another machine. There is no
+installer and no package manager entry yet.
 :::
 
-Download the binaries for your platform from
-[github.com/olix3001/Nest/releases](https://github.com/olix3001/Nest/releases),
-then put `nestc` and `twig` on your `PATH`. Officially tested targets are
-`x86_64 Linux` and `arm64 macOS`; other LLVM-supported targets with libc and
-Boehm GC should work but aren't CI-checked yet.
+Follow [Building from source](../building-from-source/), then put `nestc` and
+`twig` on your `PATH`. Officially tested targets are `x86_64 Linux` and
+`arm64 macOS`. Other LLVM-supported targets with libc and Boehm GC should work
+but aren't CI-checked yet.
 
 Check both are found:
 
