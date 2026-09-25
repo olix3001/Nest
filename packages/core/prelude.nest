@@ -22,15 +22,15 @@
 // the binding in `core.nest`, never by name or by path, so a `core` laid out
 // differently still works.
 
-@public { Option } :: import "option.nest"
-@public { Result } :: import "result.nest"
-@public { ControlFlow } :: import "control.nest"
-@public { str } :: import "str.nest"
+@public { Option } :: import "types/option.nest"
+@public { Result } :: import "types/result.nest"
+@public { ControlFlow } :: import "types/control.nest"
+@public { str } :: import "types/str.nest"
 
 // `usize` / `isize` are ordinary declarations in `num.nest` (§3.1), not compiler
 // primitives, so the prelude is what makes them nameable without an import — the
 // same way `str` is.
-@public { usize, isize } :: import "num.nest"
+@public { usize, isize } :: import "types/num.nest"
 
 // `Func` and `Sized` are the two bounds only the compiler implements, and they
 // are written in signatures everywhere: `impl Func(i32) -> i32`, `<Self: Sized>`.
@@ -40,9 +40,9 @@
 // written, `panic` wherever something must not happen, and `size_of` in enough
 // signatures and constants to earn its place; the rest of `core/mem` and all of
 // `core/gc` are an import away.
-@public { cast, size_of } :: import "mem.nest"
+@public { cast, size_of } :: import "mem/mem.nest"
 //
 // `assert` joins them: a run-time assertion is written in the same places a
 // `panic` is, and a program that has to import it before it can check anything
 // writes the import far more often than it writes anything else.
-@public { panic, assert } :: import "fail.nest"
+@public { panic, assert } :: import "rt/fail.nest"

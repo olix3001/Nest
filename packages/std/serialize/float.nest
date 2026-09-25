@@ -15,7 +15,7 @@
 // nothing in `std` calls `setlocale`.
 
 c    :: import <core/c>
-libc :: import "../libc.nest"
+libc :: import "../os/libc.nest"
 { make } :: import <core/mem>
 
 // Whether `v` is a number at all — neither NaN nor an infinity.

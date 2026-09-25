@@ -121,7 +121,7 @@ expression", which is a different thing, so it is refused.
 like everything else the compiler wires syntax to:
 
 ```nest
-// core/loc.nest
+// core/rt/loc.nest
 @public(all)
 Location :: #lang("location") struct { file: str, line: u32, column: u32 }
 ```

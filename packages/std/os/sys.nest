@@ -6,9 +6,9 @@
 // the same signatures, syscalls underneath — and `io`, `fs` and `process` do
 // not change. Only the libc backing is written today.
 //
-// It is not re-exported from `std.nest`, so `import <std/sys>` does not
+// It is not re-exported from `std.nest`, so `import <std/os/sys>` does not
 // resolve: the names here are `std`'s own business, and a program that wants
-// the raw surface has `<std/libc>`, which is exposed on purpose.
+// the raw surface has `<std/os/libc>`, which is exposed on purpose.
 //
 // ### What a function here returns
 //

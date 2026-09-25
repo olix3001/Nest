@@ -1,4 +1,4 @@
-{ PTR_BITS } :: import "target.nest"
+{ PTR_BITS } :: import "../target.nest"
 
 // The integer families, and the pointer-sized types defined over them.
 //

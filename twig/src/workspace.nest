@@ -16,10 +16,10 @@
 // but as `--indirect` rather than `--extern`.
 
 fs :: import <std/fs>
-s :: import <std/str>
+s :: import <std/text/str>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
-path :: import <std/path>
+path :: import <std/fs/path>
 manifest :: import "manifest.nest"
 { Manifest } :: import "manifest.nest"
 toolchain :: import "toolchain.nest"
@@ -68,7 +68,7 @@ impl Workspace {
   // so a shipped package depends on the ones before it, and any other package
   // depends on all of them.
   @public direct :: func (self: *Self, m: *Member) -> []str {
-    let mut out: Vec.<str> := collections.new.<str>()
+    let mut out: Vec.<str> := collections.vec.new.<str>()
     for name in self.shipped {
       if name == m.name { break }
       out.push(name)
@@ -80,8 +80,8 @@ impl Workspace {
   // What the packages in `direct` depend on, directly or not, that is not in
   // `direct` itself.
   @public indirect :: func (self: *Self, direct: []str) -> []str {
-    let mut seen: Vec.<str> := collections.from_slice.<str>(direct)
-    let mut out: Vec.<str> := collections.new.<str>()
+    let mut seen: Vec.<str> := collections.vec.from_slice.<str>(direct)
+    let mut out: Vec.<str> := collections.vec.new.<str>()
     // `seen` is the queue as well as the answer.
     let mut next: usize := 0
     while next < seen.len() {
@@ -114,7 +114,7 @@ impl Workspace {
 @public resolve :: func (root_dir: str) -> Result.<Workspace, str> {
   let root: Member := member(root_dir, manifest.load(root_dir).?)
   let ships: []Shipped := toolchain.packages().?
-  let mut all: Vec.<Member> := collections.new.<Member>()
+  let mut all: Vec.<Member> := collections.vec.new.<Member>()
   all.push(root)
 
   // Breadth first; `all` is the queue as well as the answer.
@@ -152,7 +152,7 @@ impl Workspace {
     }
   }
 
-  let mut names: Vec.<str> := collections.new.<str>()
+  let mut names: Vec.<str> := collections.vec.new.<str>()
   for p in ships {
     if p.name == root.name { break }
     all.push(shipped(p).?)
@@ -161,8 +161,8 @@ impl Workspace {
 
   let unordered: []Member := all.as_slice()[1..<all.len()]
   let ws: Workspace := Workspace { root: root, deps: unordered, shipped: names.as_slice() }
-  let mut visiting: Vec.<str> := collections.new.<str>()
-  let mut done: Vec.<Member> := collections.new.<Member>()
+  let mut visiting: Vec.<str> := collections.vec.new.<str>()
+  let mut done: Vec.<Member> := collections.vec.new.<Member>()
   order(&ws, root.name, &mut visiting, &mut done).?
   // The root is the last thing finished; everything before it is a dependency.
   let deps: []Member := done.as_slice()[0..<done.len() - 1]
@@ -225,7 +225,7 @@ contains :: func (names: []str, name: str) -> bool {
 @public tests :: #when(test) namespace {
     @public member_of :: func (name: str, deps: []str) -> Member {
         let mut d: collections.HashMap.<str, manifest.Dependency> :=
-            collections.map.<str, manifest.Dependency>()
+            collections.hash_map.new.<str, manifest.Dependency>()
         for n in deps { d.insert(n, manifest.Dependency { path: .some(f"../{n}") }) }
         return Member {
             name: name,

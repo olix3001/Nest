@@ -29,7 +29,7 @@
 // emits. Declaring is the whole of it, which is what a C library needs. `std`
 // still formats things itself (`core/fmt`) rather than going out to `printf`.
 
-{ C_LONG, C_ULONG, C_CHAR, C_VOID } :: import "target.nest"
+{ C_LONG, C_ULONG, C_CHAR, C_VOID } :: import "../target.nest"
 { transmute, size_of, make } :: import "mem.nest"
 
 // ===< The scalar types >===

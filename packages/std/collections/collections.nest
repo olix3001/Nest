@@ -1,0 +1,23 @@
+// The containers a program cannot get far without.
+//
+// `Vec.<T>` is a slice that grows; `HashMap.<K, V>` is a table keyed by
+// anything that can be hashed and compared. Both are ordinary Nest — a `make`,
+// a loop, and a growth rule — which is the point: they are what `core`'s
+// primitives are *for*, rather than something the compiler had to provide.
+//
+// The types are re-exported here; each one's constructors live in its own
+// namespace, the way Rust's `Vec::new` does:
+//
+//     collections :: import <std/collections>
+//     { Vec, HashMap } :: import <std/collections>
+//
+//     let mut v: Vec.<i32> := collections.vec.new.<i32>()
+//     let mut m: HashMap.<str, i32> := collections.hash_map.new.<str, i32>()
+
+@public vec :: import "vec.nest"
+@public hash :: import "hash.nest"
+@public hash_map :: import "hash_map.nest"
+
+@public { Vec } :: import "vec.nest"
+@public { Hash } :: import "hash.nest"
+@public { HashMap, MapIter, MapIterMut } :: import "hash_map.nest"

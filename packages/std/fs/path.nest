@@ -13,9 +13,9 @@
 //
 // The separator is `/`. Windows paths are not handled yet.
 
-s :: import "str.nest"
-collections :: import "collections.nest"
-{ Vec } :: import "collections.nest"
+s :: import "../text/str.nest"
+collections :: import "../collections/collections.nest"
+{ Vec } :: import "../collections/collections.nest"
 
 SLASH: u8 :: 47
 
@@ -39,7 +39,7 @@ SLASH: u8 :: 47
 // parent.
 @public normalize :: func (p: str) -> str {
   let absolute: bool := is_absolute(p)
-  let mut kept: Vec.<str> := collections.new.<str>()
+  let mut kept: Vec.<str> := collections.vec.new.<str>()
   for part in s.split(p, "/") {
     if part == "" || part == "." { continue }
     if part == ".." {

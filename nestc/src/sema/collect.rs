@@ -503,7 +503,17 @@ impl Collector<'_> {
                     NodeKind::OverloadSet { .. } => DefKind::Overload,
                     _ => DefKind::Const,
                 };
-                self.define(name, kind, Visibility::Public, trait_def, member, None);
+                let def = self.define(name, kind, Visibility::Public, trait_def, member, None);
+                // An abstract associated type is known to be one from its
+                // syntax alone. Its bounds are resolved with its file, which a
+                // file importing it cyclically may be resolved before; with no
+                // bounds there is nothing to wait for, so the answer is
+                // recorded now (see [`Def::assoc_bounds`]).
+                if let NodeKind::AssocType { bounds } = &self.ast.node(rhs).kind
+                    && bounds.is_empty()
+                {
+                    self.defs.get_mut(def).assoc_bounds = Some(Vec::new());
+                }
             }
         }
     }

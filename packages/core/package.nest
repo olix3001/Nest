@@ -20,32 +20,51 @@
 #lang("prelude")
 prelude :: import "prelude.nest"
 
+// The files are grouped in folders — `types/`, `iter/`, `fmt/`, `mem/`, `rt/` —
+// and the namespaces are not: a program writes `<core/option>`, not
+// `<core/types/option>`. The folders are how `core` is kept; this list is how
+// it is used.
+
+// Operators, comparison, defaults.
 @public ops     :: import "ops.nest"
 @public cmp     :: import "cmp.nest"
 @public default :: import "default.nest"
-@public control :: import "control.nest"
-@public option  :: import "option.nest"
-@public result  :: import "result.nest"
-@public iter    :: import "iter.nest"
-@public range   :: import "range.nest"
-@public slice   :: import "slice.nest"
-@public num     :: import "num.nest"
+
+// The types `.?` and friends are made of, and the integer aliases.
+@public control :: import "types/control.nest"
+@public option  :: import "types/option.nest"
+@public result  :: import "types/result.nest"
+@public num     :: import "types/num.nest"
+
+// Sequences: iteration, ranges, slices.
+@public iter    :: import "iter/iter.nest"
+@public range   :: import "iter/range.nest"
+@public slice   :: import "iter/slice.nest"
+
+// Memory: allocation, the collector, C's types.
+@public mem     :: import "mem/mem.nest"
+@public gc      :: import "mem/gc.nest"
+@public c       :: import "mem/c.nest"
+
+// Formatting.
+@public fmt     :: import "fmt/fmt.nest"
+
+// The run time: panics and where they happened.
+@public fail    :: import "rt/fail.nest"
+@public loc     :: import "rt/loc.nest"
+
+// The build: the generated `target.nest` and the enums it is written in.
 @public os      :: import "os.nest"
 @public target  :: import "target.nest"
-@public loc     :: import "loc.nest"
-@public mem     :: import "mem.nest"
-@public fmt     :: import "fmt.nest"
-@public fail    :: import "fail.nest"
-@public gc      :: import "gc.nest"
-@public c       :: import "c.nest"
+
 @public reflect :: import "reflect.nest"
 
-// `test.nest` is imported and **not** re-exported: it is how `nestc --test`
+// `rt/test.nest` is imported and **not** re-exported: it is how `nestc --test`
 // runs a package's tests, and nothing a program writes should be able to reach
 // it. The import is still here because a `#lang` tag is registered when the file
 // that claims it is loaded, and nothing else would load this one.
-test :: import "test.nest"
+test :: import "rt/test.nest"
 
-// `str.nest` gets no namespace re-export: its one public member is `str`, which
+// `types/str.nest` gets no namespace re-export: its one public member is `str`, which
 // the prelude already exports, and a `str` namespace sitting beside the `str`
 // type would read as the same name meaning two things.

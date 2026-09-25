@@ -6,7 +6,7 @@
 // are what *user* types implement to join in, and what the impls at the bottom
 // of this file let a *generic* function ask of a primitive.
 
-{ usize, isize } :: import "num.nest"
+{ usize, isize } :: import "types/num.nest"
 
 @public Ordering :: #lang("ordering") enum {
   less,

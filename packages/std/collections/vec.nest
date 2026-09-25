@@ -1,0 +1,196 @@
+// `Vec.<T>`: a slice that grows.
+//
+//     { Vec } :: import <std/collections>
+//     vec :: import <std/collections/vec>
+//
+//     let mut v: Vec.<i32> := vec.new.<i32>()
+//     v.push(1)
+
+{ make, copy_nonoverlapping, set_bytes } :: import <core/mem>
+{ Iterator, IntoIterator, FromIterator, SliceIter, SliceIterMut } :: import <core/iter>
+
+// ===< Vec >===
+
+// A sequence that grows.
+//
+// `data` is **room**, and `len` is how much of it holds anything — the same
+// split `core/fmt`'s `Buf` makes, for the same reason: the elements past `len`
+// are allocated and meaningless.
+@public(fields: package) Vec :: struct <T> {
+  data: []mut T,
+  // How many of `data`'s slots hold an element.
+  //
+  // Named `count` and not `len` because the method below is `len()`, and a
+  // field and an inherent method may not share a name (§4): `v.len` would have
+  // to mean one of the two. The method is what keeps its name, because
+  // `.len()` is what every other sequence in the language answers to.
+  count: usize,
+}
+
+// An empty one. A function rather than a `Default` impl because `Vec.<T>` needs
+// its `T` from somewhere, and a call site can say `new.<i32>()`.
+@public new :: func <T> () -> Vec.<T> {
+  return Vec.<T> { data: make.<[]T>(0), count: 0 }
+}
+
+// An empty one with room for `n` already allocated, for a caller that knows how
+// many are coming.
+@public with_capacity :: func <T> (n: usize) -> Vec.<T> {
+  return Vec.<T> { data: make.<[]T>(n), count: 0 }
+}
+
+// A `Vec` holding a copy of `xs`.
+@public from_slice :: func <T> (xs: []T) -> Vec.<T> {
+  let out: []mut T := make.<[]T>(xs.len())
+  copy_nonoverlapping.<T>(out, xs)
+  return Vec.<T> { data: out, count: xs.len() }
+}
+
+impl <T> Vec.<T> {
+  @public len :: #inline func (self: *Self) -> usize { return self.count }
+  @public is_empty :: #inline func (self: *Self) -> bool { return self.count == 0 }
+  @public capacity :: #inline func (self: *Self) -> usize { return self.data.len() }
+
+  // The elements, as a slice. A **view**: it stops being valid the moment a
+  // `push` grows the storage out from under it, which is the one rule a
+  // borrowed view of a growable container has in every language that has both.
+  @public as_slice :: #inline func (self: *Self) -> []T {
+    return cast.<[]T>(self.data[0..<self.count])
+  }
+
+  // The writable view, for a caller filling elements in place.
+  @public as_mut_slice :: #inline func (self: *mut Self) -> []mut T {
+    return self.data[0..<self.count]
+  }
+
+  // Make room for `extra` more.
+  //
+  // Doubling with a floor, which is what makes `n` pushes cost `O(n)` rather
+  // than `O(n²)`. The floor is there because doubling from zero never leaves
+  // zero.
+  @public reserve :: func (self: *mut Self, extra: usize) -> void {
+    let need: usize := self.count + extra
+    if need <= self.data.len() { return }
+    let mut cap: usize := self.data.len() * 2
+    if cap < 8 { cap = 8 }
+    while cap < need { cap = cap * 2 }
+    let fresh: []mut T := make.<[]T>(cap)
+    copy_nonoverlapping.<T>(fresh, cast.<[]T>(self.data[0..<self.count]))
+    self.data = fresh
+  }
+
+  // Add one to the end.
+  @public push :: func (self: *mut Self, value: T) -> void {
+    self.reserve(1)
+    self.data[self.count] = value
+    self.count = self.count + 1
+  }
+
+  // Take the last one off, or `.none` when there is none.
+  //
+  // The slot is **not** cleared. Nothing can read it — `len` is what says which
+  // slots hold anything — and under a collector an uncleared slot keeps one
+  // object alive until the next `push` overwrites it, which is a bounded amount
+  // of garbage and not a leak.
+  @public pop :: func (self: *mut Self) -> Option.<T> {
+    if self.count == 0 { return .none }
+    self.count = self.count - 1
+    return .some(self.data[self.count])
+  }
+
+  // Element `i`, or `.none` when there is no such element. The checked read;
+  // `v[i]` through `Index` is the unchecked one and panics.
+  @public get :: func (self: *Self, i: usize) -> Option.<T> {
+    if i >= self.count { return .none }
+    return .some(self.data[i])
+  }
+
+  // Overwrite element `i`.
+  @public set :: func (self: *mut Self, i: usize, value: T) -> void {
+    if i >= self.count { panic("a `Vec` index past the end") }
+    self.data[i] = value
+  }
+
+  // Add every element of `xs`.
+  @public extend :: func (self: *mut Self, xs: []T) -> void {
+    self.reserve(xs.len())
+    copy_nonoverlapping.<T>(self.data[self.count..<(self.count + xs.len())], xs)
+    self.count = self.count + xs.len()
+  }
+
+  // Set every element to `value`.
+  //
+  // The elements it *holds*, not the storage it has room for: a `Vec` of three
+  // in a buffer of eight has three elements to fill, and writing the other five
+  // would be writing slots `len` says are not there.
+  @public fill :: func (self: *mut Self, value: T) -> void {
+    for i in 0..<self.count { self.data[i] = value }
+  }
+
+  // Set every byte of every element it holds to zero — one fill instruction,
+  // whatever the element type. See `core/mem`'s `set_bytes`.
+  @public zero :: func (self: *mut Self) -> void {
+    set_bytes.<T>(self.data[0..<self.count], 0)
+  }
+
+  // Forget every element. The storage is kept, which is the whole difference
+  // between this and assigning a fresh `Vec`.
+  @public clear :: func (self: *mut Self) -> void { self.count = 0 }
+
+  // Remove element `i`, moving the last one into its place.
+  //
+  // **Order is not preserved**, and the name says so. It is `O(1)`, where
+  // removing in order is `O(n)` — a `Vec` used as a set or a work list wants
+  // this one, and one used as a sequence wants the other, which is not written
+  // until something needs it.
+  @public swap_remove :: func (self: *mut Self, i: usize) -> Option.<T> {
+    if i >= self.count { return .none }
+    let held: T := self.data[i]
+    self.count = self.count - 1
+    self.data[i] = self.data[self.count]
+    return .some(held)
+  }
+}
+
+// `v.iter()` — a cursor over the elements it holds now, to start a chain from.
+// `v.iter_mut()` — the same, handing out a pointer to each, so that writing
+// through one writes the element.
+impl <T> Vec.<T> {
+  @public iter :: func (self: *Self) -> SliceIter.<T> {
+    return SliceIter.<T> { data: self.as_slice(), pos: 0 }
+  }
+  @public iter_mut :: func (self: *mut Self) -> SliceIterMut.<T> {
+    return SliceIterMut.<T> { data: self.data[0..<self.count], pos: 0 }
+  }
+}
+
+// `xs.iter().map(f).collect.<Vec.<U>>()`.
+impl <T> FromIterator for Vec.<T> {
+  Item :: T
+  from_iter :: func <I: Iterator.<Item = T>> (it: I) -> Vec.<T> {
+    let mut v := new.<T>()
+    for x in it { v.push(x) }
+    return v
+  }
+}
+
+// `for x in v` — over a **copy of the view**, so the loop walks the elements
+// the `Vec` held when it started. Pushing during the loop grows fresh storage
+// and the loop does not see it.
+impl <T> IntoIterator for Vec.<T> {
+  Iter :: SliceIter.<T>
+  into_iter :: func (self: Vec.<T>) -> SliceIter.<T> {
+    return SliceIter.<T> { data: cast.<[]T>(self.data[0..<self.count]), pos: 0 }
+  }
+}
+
+tests :: #when(test) namespace {
+    @test
+    a_vec_is_written_through_iter_mut :: func () {
+        let mut v := new.<i32>()
+        v.push(1)
+        v.push(2)
+        for p in v.iter_mut() { p.* = p.* * 10 }
+        assert(v.iter().fold(0, { a, x in a + x }) == 30)
+    }
+}

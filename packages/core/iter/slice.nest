@@ -16,8 +16,8 @@
 // count at compile time, so the inlined call costs nothing; on a `[]T` it reads
 // the slice header's length.
 
-{ Index, IndexMut } :: import "ops.nest"
-{ transmute } :: import "mem.nest"
+{ Index, IndexMut } :: import "../ops.nest"
+{ transmute } :: import "../mem/mem.nest"
 
 // The element count of an array or slice. This is the second intrinsic whose
 // signature cannot state its own rule: `T` is unbounded here and the compiler

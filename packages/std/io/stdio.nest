@@ -1,0 +1,57 @@
+// The three descriptors a process starts with, and printing to two of them.
+
+libc :: import "../os/libc.nest"
+{ File } :: import "file.nest"
+{ write_all } :: import "io.nest"
+
+// ===< The three the process starts with >===
+//
+// Functions rather than constants because a `File` is a value and these are
+// three particular ones — and because a program is free to `close` a `File`,
+// which a shared constant would let it do to everyone's.
+
+@public stdin  :: #inline func () -> File { return File { fd: libc.STDIN } }
+@public stdout :: #inline func () -> File { return File { fd: libc.STDOUT } }
+@public stderr :: #inline func () -> File { return File { fd: libc.STDERR } }
+
+// ===< Printing >===
+//
+// Four functions, and what they are for is `f"..."`: `print(f"n is {n}")` is
+// the whole formatting story, because interpolation already produced a `str`.
+// There is no `print` taking a format string and arguments, and there will not
+// be — the language has interpolation, so a second way to say the same thing
+// would be a second set of rules to learn (§1.5).
+//
+// **A failed print is ignored.** Writing to a closed stdout is a real
+// condition, and it is not one a `print` call can do anything about: the caller
+// that wanted to know writes through `stdout()` and reads the `Result`. A
+// `print` that returned one would put a `.?` on every line of output in every
+// program.
+
+@public print :: func (s: str) -> void {
+  let mut out: File := stdout()
+  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
+}
+
+@public println :: func (s: str) -> void {
+  let mut out: File := stdout()
+  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
+  write_all(&mut out, NEWLINE.as_bytes()).match { .ok(_) => (), .err(_) => () }
+}
+
+@public eprint :: func (s: str) -> void {
+  let mut out: File := stderr()
+  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
+}
+
+@public eprintln :: func (s: str) -> void {
+  let mut out: File := stderr()
+  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
+  write_all(&mut out, NEWLINE.as_bytes()).match { .ok(_) => (), .err(_) => () }
+}
+
+// One byte, named, so that the four above do not each spell a literal for it.
+// A `str` rather than a `[]u8`: `as_bytes` is not `#const`, so the conversion
+// happens at each call — which is a cast between two views of the same bytes
+// and costs nothing.
+NEWLINE: str :: "\n"

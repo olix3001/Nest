@@ -1,12 +1,12 @@
 // The owned, growable string.
 //
-// `str` is a borrowed view (`core/str.nest`); this is the thing a view is taken
+// `str` is a borrowed view (`core/types/str.nest`); this is the thing a view is taken
 // of when the text is being built rather than read. It is a `Vec.<u8>` that
 // promises its bytes are UTF-8, in the same way `str` is a `[]u8` that does —
 // every way in below keeps that promise, and the one way to break it
 // (`from_utf8_unchecked`) says so.
 //
-// **There is no coercion from `str`.** `core/str.nest` reserves a `#lang` tag
+// **There is no coercion from `str`.** `core/types/str.nest` reserves a `#lang` tag
 // for one, and whether a `str` written where a `String` is wanted should
 // silently allocate is a language decision still to be made. Until then the
 // copy is spelled: `string.from("text")`.
@@ -15,9 +15,9 @@
 // not the bytes: two copies share storage until one of them grows. That is the
 // rule `Vec` already has.
 
-{ Vec } :: import "collections.nest"
-collections :: import "collections.nest"
-io :: import "io.nest"
+{ Vec } :: import "../collections/collections.nest"
+collections :: import "../collections/collections.nest"
+io :: import "../io/io.nest"
 { Buf, Display } :: import <core/fmt>
 { Eq } :: import <core/cmp>
 { Iterator, FromIterator } :: import <core/iter>
@@ -28,12 +28,12 @@ io :: import "io.nest"
 
 // An empty one.
 @public new :: func () -> String {
-  return String { bytes: collections.new.<u8>() }
+  return String { bytes: collections.vec.new.<u8>() }
 }
 
 // An empty one with room for `n` bytes.
 @public with_capacity :: func (n: usize) -> String {
-  return String { bytes: collections.with_capacity.<u8>(n) }
+  return String { bytes: collections.vec.with_capacity.<u8>(n) }
 }
 
 // A copy of `s`.
@@ -137,7 +137,7 @@ impl Eq for String {
 }
 
 impl collections.Hash for String {
-  hash :: func (self: Self) -> u64 { return collections.hash_bytes(self.as_bytes()) }
+  hash :: func (self: Self) -> u64 { return collections.hash.hash_bytes(self.as_bytes()) }
 }
 
 // A `String` is somewhere bytes can be written. It takes all of them, always.

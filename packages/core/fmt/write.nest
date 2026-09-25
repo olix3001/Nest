@@ -18,7 +18,7 @@
 // `panic`, which is how a report becomes the thing that failed. So there is no
 // buffer, no index and no sub-slice below.
 
-{ len } :: import "slice.nest"
+{ len } :: import "../iter/slice.nest"
 
 // The runtime's whole output surface for a failing program: it knows how to
 // reach stderr and nothing else, so what a report *looks like* is decided in

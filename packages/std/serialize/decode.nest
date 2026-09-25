@@ -15,10 +15,10 @@
 
 { Error, error } :: import "error.nest"
 { member_name, is_skipped, representation } :: import "encode.nest"
-string :: import "../string.nest"
-{ String } :: import "../string.nest"
-collections :: import "../collections.nest"
-{ Vec, HashMap } :: import "../collections.nest"
+string :: import "../text/string.nest"
+{ String } :: import "../text/string.nest"
+collections :: import "../collections/collections.nest"
+{ Vec, HashMap } :: import "../collections/collections.nest"
 { TypeInfo, Member, type_info } :: import <core/reflect>
 mem :: import <core/mem>
 { make, size_of } :: import <core/mem>
@@ -213,7 +213,7 @@ only_char :: func (b: []u8) -> Option.<char> {
 
 impl <T: Decode> Decode for Vec.<T> {
   decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
-    let mut out: Vec.<T> := collections.new.<T>()
+    let mut out: Vec.<T> := collections.vec.new.<T>()
     d.begin_seq().?
     while d.next_element().? {
       let slot: *mut T := mem.new.<T>()
@@ -257,7 +257,7 @@ impl <T: Decode> Decode for Option.<T> {
 
 impl <V: Decode> Decode for HashMap.<String, V> {
   decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
-    let mut out: HashMap.<String, V> := collections.map.<String, V>()
+    let mut out: HashMap.<String, V> := collections.hash_map.new.<String, V>()
     d.begin_map().?
     while true {
       let key: String := d.next_key().?.match {
@@ -275,7 +275,7 @@ impl <V: Decode> Decode for HashMap.<String, V> {
 
 impl <V: Decode> Decode for HashMap.<str, V> {
   decode :: func (self: *mut Self, d: *mut dyn Decoder) -> Result.<void, Error> {
-    let mut out: HashMap.<str, V> := collections.map.<str, V>()
+    let mut out: HashMap.<str, V> := collections.hash_map.new.<str, V>()
     d.begin_map().?
     while true {
       let key: String := d.next_key().?.match {

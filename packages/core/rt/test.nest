@@ -17,12 +17,12 @@
 // the test's name, the handler writes what went wrong, and the runner writes
 // the verdict, in that order.
 
-{ len } :: import "slice.nest"
-{ make } :: import "mem.nest"
-{ Buf, Debug, end, start } :: import "fmt.nest"
+{ len } :: import "../iter/slice.nest"
+{ make } :: import "../mem/mem.nest"
+{ Buf, Debug, end, start } :: import "../fmt/fmt.nest"
 { Location } :: import "loc.nest"
-{ color, put, put_usize } :: import "write.nest"
-c :: import "c.nest"
+{ color, put, put_usize } :: import "../fmt/write.nest"
+c :: import "../mem/c.nest"
 
 // One test: what it is called, and how to run it.
 //
@@ -60,7 +60,7 @@ nest_guard_run :: extern("c") func (run: *func () -> void) -> i32
 //
 // `E` is bound by `Debug` rather than `Display` because an error is being shown
 // to whoever is fixing the test, not to a user — and every type has a `Debug`,
-// so the bound rules nothing out (`core/fmt.nest`).
+// so the bound rules nothing out (`core/fmt/fmt.nest`).
 run_result :: #lang("test_result") func <E: Debug> (
     test: *func () -> Result.<void, E>,
     loc: Location,

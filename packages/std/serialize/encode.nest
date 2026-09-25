@@ -20,8 +20,8 @@
 
 { Error, error } :: import "error.nest"
 { rename, skip } :: import "attrs.nest"
-{ String } :: import "../string.nest"
-{ Vec, HashMap } :: import "../collections.nest"
+{ String } :: import "../text/string.nest"
+{ Vec, HashMap } :: import "../collections/collections.nest"
 { TypeInfo, Member, Attr, type_info, type_id, attr_of } :: import <core/reflect>
 { make } :: import <core/mem>
 

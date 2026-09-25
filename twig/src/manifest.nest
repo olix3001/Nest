@@ -36,7 +36,7 @@ toml :: import <std/serialize/toml>
 collections :: import <std/collections>
 { HashMap } :: import <std/collections>
 { make } :: import <core/mem>
-path :: import <std/path>
+path :: import <std/fs/path>
 
 @public FILE_NAME: str :: "nest.toml"
 
@@ -326,17 +326,17 @@ tests :: #when(test) namespace {
     @test
     a_dependency_is_not_the_package_itself_or_a_shipped_one :: func () {
         let mut m: Manifest := with_bins("app", .{ Bin { name: "app", path: "src/main.nest" } })
-        let mut d: HashMap.<str, Dependency> := collections.map.<str, Dependency>()
+        let mut d: HashMap.<str, Dependency> := collections.hash_map.new.<str, Dependency>()
         d.insert("core", Dependency { path: .some("../core") })
         m.dependencies = .some(d)
         assert(refused(&m), "`core` ships with the compiler")
 
-        let mut own: HashMap.<str, Dependency> := collections.map.<str, Dependency>()
+        let mut own: HashMap.<str, Dependency> := collections.hash_map.new.<str, Dependency>()
         own.insert("app", Dependency { path: .some("..") })
         m.dependencies = .some(own)
         assert(refused(&m), "a package cannot depend on itself")
 
-        let mut no_path: HashMap.<str, Dependency> := collections.map.<str, Dependency>()
+        let mut no_path: HashMap.<str, Dependency> := collections.hash_map.new.<str, Dependency>()
         no_path.insert("util", Dependency { path: .none })
         m.dependencies = .some(no_path)
         assert(refused(&m), "a `path` is the only kind of dependency there is yet")

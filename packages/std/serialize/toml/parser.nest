@@ -13,10 +13,10 @@
 
 { Error, error_at } :: import "../error.nest"
 float :: import "../float.nest"
-string :: import "../../string.nest"
-{ String } :: import "../../string.nest"
-collections :: import "../../collections.nest"
-{ Vec } :: import "../../collections.nest"
+string :: import "../../text/string.nest"
+{ String } :: import "../../text/string.nest"
+collections :: import "../../collections/collections.nest"
+{ Vec } :: import "../../collections/collections.nest"
 { Value, Array, Table, new_table, new_array } :: import "value.nest"
 
 Parser :: struct {
@@ -165,7 +165,7 @@ impl Parser {
 
   // `a.b."c"`, as its parts.
   dotted_key :: func (self: *mut Self) -> Result.<Vec.<String>, Error> {
-    let mut parts: Vec.<String> := collections.new.<String>()
+    let mut parts: Vec.<String> := collections.vec.new.<String>()
     self.skip_space()
     parts.push(self.simple_key().?)
     self.skip_space()

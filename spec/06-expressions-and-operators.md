@@ -129,7 +129,7 @@ it takes turbofish type arguments, it infers, it can be passed around, and it is
 documented where every other function is documented.
 
 ```nest
-// core/mem.nest
+// core/mem/mem.nest
 @public size_of  :: #intrinsic("size_of") func <T> () -> usize
 @public align_of :: #intrinsic("align_of") func <T> () -> usize
 @public cast     :: #intrinsic("cast") func <T, U> (x: U) -> T

@@ -11,10 +11,10 @@
 { Error, error } :: import "../error.nest"
 { Encoder } :: import "../encode.nest"
 float :: import "../float.nest"
-string :: import "../../string.nest"
-{ String } :: import "../../string.nest"
-collections :: import "../../collections.nest"
-{ Vec } :: import "../../collections.nest"
+string :: import "../../text/string.nest"
+{ String } :: import "../../text/string.nest"
+collections :: import "../../collections/collections.nest"
+{ Vec } :: import "../../collections/collections.nest"
 { Value, Array, Table, new_table, new_array, describe } :: import "value.nest"
 
 // One open sequence or map.
@@ -32,7 +32,7 @@ Frame :: struct {
 }
 
 @public builder :: func () -> Builder {
-  return Builder { root: .none, frames: collections.new.<Frame>() }
+  return Builder { root: .none, frames: collections.vec.new.<Frame>() }
 }
 
 impl Builder {

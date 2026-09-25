@@ -30,18 +30,18 @@
 // again.
 
 fs :: import <std/fs>
-process :: import <std/process>
+process :: import <std/os/process>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
-path :: import <std/path>
-strs :: import <std/str>
+path :: import <std/fs/path>
+strs :: import <std/text/str>
 { Bin, Build, Manifest, ProfileSettings } :: import "manifest.nest"
 manifest :: import "manifest.nest"
 { Workspace, Member } :: import "workspace.nest"
 toolchain :: import "toolchain.nest"
 term :: import "term.nest"
-string :: import <std/string>
-{ String } :: import <std/string>
+string :: import <std/text/string>
+{ String } :: import <std/text/string>
 { OS } :: import <core/target>
 
 // The settings one build is made with.
@@ -110,7 +110,7 @@ string :: import <std/string>
 // Every library the build makes, each after the ones it depends on: the
 // dependencies', then the root's own.
 @public libraries :: func (ws: *Workspace) -> []Target {
-  let mut out: Vec.<Target> := collections.new.<Target>()
+  let mut out: Vec.<Target> := collections.vec.new.<Target>()
   for d in ws.deps { out.push(library(&d)) }
   ws.root.lib_root().match {
     .some(_) => out.push(library(&ws.root)),
@@ -122,7 +122,7 @@ string :: import <std/string>
 // The root package's binaries.
 @public binaries :: func (ws: *Workspace) -> []Target {
   let root: *Member := &ws.root
-  let mut out: Vec.<Target> := collections.new.<Target>()
+  let mut out: Vec.<Target> := collections.vec.new.<Target>()
   for b in root.manifest.bins() {
     out.push(Target { name: b.name, entry: path.normalize(path.join(root.dir, b.path)), lib: false, test: false })
   }
@@ -166,7 +166,7 @@ library :: func (m: *Member) -> Target {
 @public integration_targets :: func (ws: *Workspace) -> Result.<[]Target, str> {
   let root: *Member := &ws.root
   let dir: str := path.join(root.dir, "tests")
-  let mut out: Vec.<Target> := collections.new.<Target>()
+  let mut out: Vec.<Target> := collections.vec.new.<Target>()
   if fs.exists(dir) == false { return .ok(out.as_slice()) }
   let names: []str := fs.read_dir(dir).match {
     .ok(ns) => ns,
@@ -257,7 +257,7 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
 
 // The `nestc` run that builds `t`.
 @public command :: func (ws: *Workspace, p: Profile, t: Target) -> Command {
-  let mut args: Vec.<str> := collections.new.<str>()
+  let mut args: Vec.<str> := collections.vec.new.<str>()
   args.push(t.entry)
   if t.lib {
     args.push("--package")
@@ -282,7 +282,7 @@ library_file :: func (ws: *Workspace, p: Profile, name: str) -> str {
 
   // A library may import what its package depends on. A binary may import
   // that too, and the root's own library as well, by name.
-  let mut direct: Vec.<str> := collections.new.<str>()
+  let mut direct: Vec.<str> := collections.vec.new.<str>()
   if t.lib == false {
     ws.root.lib_root().match {
       .some(_) => direct.push(ws.root.name),
@@ -350,7 +350,7 @@ setting :: func (args: *mut Vec.<str>, value: str) -> void {
 // is already there.
 @public fresh :: func (ws: *Workspace, p: Profile, t: Target) -> Result.<bool, str> {
   let c: Command := command(ws, p, t)
-  let mut args: Vec.<str> := collections.from_slice.<str>(c.args)
+  let mut args: Vec.<str> := collections.vec.from_slice.<str>(c.args)
   args.push("--up-to-date")
   if p.verbose { trace(c.program, args.as_slice()) }
   let status: process.Status := run(c.program, args.as_slice()).?
@@ -421,7 +421,7 @@ tests :: #when(test) namespace {
     // A package: a name, whether it has a `[lib]`, and what it depends on.
     member :: func (name: str, lib: bool, deps: []str, build: Option.<Build>) -> Member {
         let mut d: collections.HashMap.<str, manifest.Dependency> :=
-            collections.map.<str, manifest.Dependency>()
+            collections.hash_map.new.<str, manifest.Dependency>()
         for n in deps { d.insert(n, manifest.Dependency { path: .some(f"../{n}") }) }
         let l: Option.<manifest.Lib> := if lib {
             .some(manifest.Lib { path: "src/package.nest" })

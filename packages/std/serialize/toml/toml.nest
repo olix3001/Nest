@@ -12,7 +12,7 @@
 { Error } :: import "../error.nest"
 { Encode } :: import "../encode.nest"
 { Decode } :: import "../decode.nest"
-{ String } :: import "../../string.nest"
+{ String } :: import "../../text/string.nest"
 mem :: import <core/mem>
 
 @public { Value, Array, Table } :: import "value.nest"

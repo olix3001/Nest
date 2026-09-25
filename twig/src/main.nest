@@ -5,12 +5,13 @@
 
 io :: import <std/io>
 fs :: import <std/fs>
-s :: import <std/str>
-process :: import <std/process>
+s :: import <std/text/str>
+process :: import <std/os/process>
+env :: import <std/os/env>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
-{ String } :: import <std/string>
-path :: import <std/path>
+{ String } :: import <std/text/string>
+path :: import <std/fs/path>
 build :: import "build.nest"
 { Profile, Target } :: import "build.nest"
 workspace :: import "workspace.nest"
@@ -74,7 +75,7 @@ Options :: struct {
 }
 
 main :: func () -> i32 {
-  let opts: Options := parse(process.args()).match {
+  let opts: Options := parse(env.args()).match {
     .ok(o) => o,
     .err(why) => {
       term.error(why)
@@ -114,10 +115,10 @@ parse :: func (args: []str) -> Result.<Options, str> {
     bin: .none,
     lib: false,
     deps: false,
-    emit: collections.new.<str>(),
+    emit: collections.vec.new.<str>(),
     build_dir: .none,
-    nestc_args: collections.new.<str>(),
-    positional: collections.new.<str>(),
+    nestc_args: collections.vec.new.<str>(),
+    positional: collections.vec.new.<str>(),
     rest: args[args.len()..<args.len()],
   }
   let mut i: usize := 1
@@ -173,7 +174,7 @@ parse :: func (args: []str) -> Result.<Options, str> {
 }
 
 cwd :: func () -> Result.<str, str> {
-  return process.current_dir().match {
+  return env.current_dir().match {
     .ok(d) => .ok(d),
     .err(e) => .err(e.describe()),
   }
@@ -254,7 +255,7 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
       bins[0]
     },
   }
-  let one: Vec.<Target> := collections.from_slice.<Target>(.{ t })
+  let one: Vec.<Target> := collections.vec.from_slice.<Target>(.{ t })
   compile_all(&ws, p, one.as_slice()).?
 
   let exe: str := build.output(&ws, p, t)
@@ -283,7 +284,7 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
 run_test :: func (o: *Options) -> Result.<i32, str> {
   if o.positional.len() > 1 { return .err("`twig test` takes at most one filter; arguments for the test binary go after `--`") }
   if o.positional.len() == 1 {
-    process.set_env("NEST_TEST_FILTER", o.positional.as_slice()[0]).match {
+    env.set("NEST_TEST_FILTER", o.positional.as_slice()[0]).match {
       .ok(_) => (),
       .err(e) => { return .err(e.describe()) },
     }
@@ -370,8 +371,8 @@ compile_each :: func (ws: *Workspace, p: Profile, targets: []Target, from: usize
 // a dependency is already decided when the package that needs it is reached, and
 // asking the compiler about it would only be asking about a stale file.
 plan :: func (ws: *Workspace, p: Profile, with_root: bool) -> Result.<[]Target, str> {
-  let mut out: Vec.<Target> := collections.new.<Target>()
-  let mut again: Vec.<str> := collections.new.<str>()
+  let mut out: Vec.<Target> := collections.vec.new.<Target>()
+  let mut again: Vec.<str> := collections.vec.new.<str>()
   for t in build.libraries(ws) {
     if with_root == false && t.name == ws.root.name { continue }
     let m: Member := ws.member(t.name)
@@ -439,7 +440,7 @@ shown :: func (ws: *Workspace, p: str) -> str { return path.relative_to(p, ws.ro
 select :: func (all: []Target, name: str) -> Result.<[]Target, str> {
   for t in all {
     if t.name == name {
-      let one: Vec.<Target> := collections.from_slice.<Target>(.{ t })
+      let one: Vec.<Target> := collections.vec.from_slice.<Target>(.{ t })
       return .ok(one.as_slice())
     }
   }

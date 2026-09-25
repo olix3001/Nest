@@ -7,7 +7,7 @@
 // things. `str.nest` is left unexported for the same reason.
 
 { Location } :: import "loc.nest"
-{ put, put_usize } :: import "write.nest"
+{ put, put_usize } :: import "../fmt/write.nest"
 
 // Abort the program with a message (§8). The `loc` default is what makes the
 // report name the line that called `panic`, rather than this declaration: a

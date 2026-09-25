@@ -1,0 +1,275 @@
+// The adapters' iterators: what `map`, `filter`, `zip` and the rest of
+// `Iterator`'s lazy methods (`iter.nest`) wrap the iterator in. Each is an
+// iterator itself, so a chain is one nested type that compiles to the loop it
+// stands for.
+//
+// Their fields are the package's: the trait's default methods build them.
+
+* :: import "../types/option.nest"
+{ Iterator, IntoIterator } :: import "iter.nest"
+
+// ===< The adapters' iterators >===
+//
+// Each impl names the element type it hands out through its bounds, the way
+// the adapter method did: `Map`'s `B` is fixed by `F: Func(I.Item) -> B`, which
+// is how the closure's result type becomes the iterator's `Item`.
+
+@public(fields: package) Map :: struct <I, F> {
+  iter: I,
+  f: F,
+}
+
+impl <I: Iterator, B, F: Func(I.Item) -> B> Iterator for Map.<I, F> {
+  Item :: B
+  next :: func (self: *mut Map.<I, F>) -> Option.<B> {
+    return self.iter.next().match {
+      .some(x) => .some(self.f(x)),
+      .none => .none,
+    }
+  }
+}
+
+@public(fields: package) Filter :: struct <I, P> {
+  iter: I,
+  keep: P,
+}
+
+impl <I: Iterator, P: Func(I.Item) -> bool> Iterator for Filter.<I, P> {
+  Item :: I.Item
+  next :: func (self: *mut Filter.<I, P>) -> Option.<I.Item> {
+    loop {
+      self.iter.next().match {
+        .some(x) => { if self.keep(x) { return .some(x) } },
+        .none => { return .none },
+      }
+    }
+  }
+}
+
+@public(fields: package) Enumerate :: struct <I> {
+  iter: I,
+  count: usize,
+}
+
+impl <I: Iterator> Iterator for Enumerate.<I> {
+  Item :: (usize, I.Item)
+  next :: func (self: *mut Enumerate.<I>) -> Option.<(usize, I.Item)> {
+    return self.iter.next().match {
+      .some(x) => {
+        const i := self.count
+        self.count = i + 1
+        return .some((i, x))
+      },
+      .none => .none,
+    }
+  }
+}
+
+@public(fields: package) Zip :: struct <A, B> {
+  a: A,
+  b: B,
+}
+
+impl <A: Iterator, B: Iterator> Iterator for Zip.<A, B> {
+  Item :: (A.Item, B.Item)
+  next :: func (self: *mut Zip.<A, B>) -> Option.<(A.Item, B.Item)> {
+    return self.a.next().match {
+      .some(x) => self.b.next().match {
+        .some(y) => .some((x, y)),
+        .none => .none,
+      },
+      .none => .none,
+    }
+  }
+}
+
+@public(fields: package) Chain :: struct <A, B> {
+  a: A,
+  b: B,
+  a_done: bool,
+}
+
+impl <A: Iterator, B: Iterator.<Item = A.Item>> Iterator for Chain.<A, B> {
+  Item :: A.Item
+  next :: func (self: *mut Chain.<A, B>) -> Option.<A.Item> {
+    if not self.a_done {
+      self.a.next().match {
+        .some(x) => { return .some(x) },
+        .none => { self.a_done = true },
+      }
+    }
+    return self.b.next()
+  }
+}
+
+@public(fields: package) Take :: struct <I> {
+  iter: I,
+  left: usize,
+}
+
+impl <I: Iterator> Iterator for Take.<I> {
+  Item :: I.Item
+  next :: func (self: *mut Take.<I>) -> Option.<I.Item> {
+    if self.left == 0 { return .none }
+    self.left = self.left - 1
+    return self.iter.next()
+  }
+}
+
+@public(fields: package) Skip :: struct <I> {
+  iter: I,
+  left: usize,
+}
+
+impl <I: Iterator> Iterator for Skip.<I> {
+  Item :: I.Item
+  next :: func (self: *mut Skip.<I>) -> Option.<I.Item> {
+    while self.left > 0 {
+      self.left = self.left - 1
+      self.iter.next().match {
+        .some(x) => {},
+        .none => { return .none },
+      }
+    }
+    return self.iter.next()
+  }
+}
+
+@public(fields: package) StepBy :: struct <I> {
+  iter: I,
+  n: usize,
+  first: bool,
+}
+
+impl <I: Iterator> Iterator for StepBy.<I> {
+  Item :: I.Item
+  next :: func (self: *mut StepBy.<I>) -> Option.<I.Item> {
+    if self.first {
+      self.first = false
+      return self.iter.next()
+    }
+    let mut skip := self.n - 1
+    while skip > 0 {
+      skip = skip - 1
+      self.iter.next().match {
+        .some(x) => {},
+        .none => { return .none },
+      }
+    }
+    return self.iter.next()
+  }
+}
+
+@public(fields: package) TakeWhile :: struct <I, P> {
+  iter: I,
+  keep: P,
+  done: bool,
+}
+
+impl <I: Iterator, P: Func(I.Item) -> bool> Iterator for TakeWhile.<I, P> {
+  Item :: I.Item
+  next :: func (self: *mut TakeWhile.<I, P>) -> Option.<I.Item> {
+    if self.done { return .none }
+    return self.iter.next().match {
+      .some(x) => {
+        if self.keep(x) { return .some(x) }
+        self.done = true
+        return .none
+      },
+      .none => .none,
+    }
+  }
+}
+
+@public(fields: package) SkipWhile :: struct <I, P> {
+  iter: I,
+  pred: P,
+  started: bool,
+}
+
+impl <I: Iterator, P: Func(I.Item) -> bool> Iterator for SkipWhile.<I, P> {
+  Item :: I.Item
+  next :: func (self: *mut SkipWhile.<I, P>) -> Option.<I.Item> {
+    if self.started { return self.iter.next() }
+    loop {
+      self.iter.next().match {
+        .some(x) => {
+          if not self.pred(x) {
+            self.started = true
+            return .some(x)
+          }
+        },
+        .none => { return .none },
+      }
+    }
+  }
+}
+
+// `cur` is the inner iterator being walked, `.none` between two of them.
+@public(fields: package) Flatten :: struct <I, J> {
+  iter: I,
+  cur: Option.<J>,
+}
+
+impl <J: Iterator, U: IntoIterator.<Iter = J>, I: Iterator.<Item = U>> Iterator for Flatten.<I, J> {
+  Item :: J.Item
+  next :: func (self: *mut Flatten.<I, J>) -> Option.<J.Item> {
+    loop {
+      self.cur.match {
+        .some(j) => {
+          let mut inner := j
+          const x := inner.next()
+          self.cur = .some(inner)
+          x.match {
+            .some(v) => { return .some(v) },
+            .none => { self.cur = .none },
+          }
+        },
+        .none => {},
+      }
+      self.iter.next().match {
+        .some(u) => { self.cur = .some(u.into_iter()) },
+        .none => { return .none },
+      }
+    }
+  }
+}
+
+// `peeked` is what `peek` took from `iter` and `next` has not handed out yet
+// — itself an `Option`, since `peek` may have seen the end.
+@public(fields: package) Peekable :: struct <I, T> {
+  iter: I,
+  peeked: Option.<Option.<T>>,
+}
+
+impl <T, I: Iterator.<Item = T>> Iterator for Peekable.<I, T> {
+  Item :: T
+  next :: func (self: *mut Peekable.<I, T>) -> Option.<T> {
+    return self.peeked.match {
+      .some(p) => {
+        self.peeked = .none
+        return p
+      },
+      .none => self.iter.next(),
+    }
+  }
+}
+
+impl <T, I: Iterator.<Item = T>> Peekable.<I, T> {
+  // What `next` will answer, without taking it.
+  @public peek :: func (self: *mut Self) -> Option.<T> {
+    return self.peeked.match {
+      .some(p) => p,
+      .none => {
+        const p := self.iter.next()
+        self.peeked = .some(p)
+        return p
+      },
+    }
+  }
+}
+
+// A pointer to an iterator is one: `next` advances what it points at. This is
+// what puts the adapters within reach of a trait object — `it.map(f)` on a
+// `*mut dyn Iterator.<Item = T>` maps the pointer, whose size is known, and
+// every `next` it makes goes through the vtable.

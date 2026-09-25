@@ -1,0 +1,78 @@
+// What a key has to be: `Hash`, and the one algorithm behind every impl.
+//
+// It is `std`'s trait, not `core`'s, because nothing in `core` hashes anything.
+// That also settles coherence: the impls below are for `core`'s types (`str`,
+// the integer families), and an impl may be written where **either** the trait
+// or the type belongs (§4.9) — the trait is this package's, so they are allowed
+// here and a third package's would not be.
+
+// ===< Hashing >===
+
+// A value that can be a key.
+//
+// One method answering 64 bits. Not "write yourself into a hasher", which is
+// the design that lets one algorithm serve every type — that needs a hasher
+// trait and a second type parameter on every container, and this library has
+// one algorithm.
+@public Hash :: trait {
+  hash :: func (self: Self) -> u64
+}
+
+// FNV-1a, 64-bit: the offset basis, then a multiply and an exclusive-or per
+// byte. It is chosen for being **four lines**, which is what a hash function
+// for map keys should be when the map probes linearly and the keys are short.
+@public FNV_OFFSET: u64 :: 14695981039346656037
+@public FNV_PRIME:  u64 :: 1099511628211
+
+// The hash of a run of bytes. What every impl below comes down to.
+@public hash_bytes :: func (bytes: []u8) -> u64 {
+  let mut h: u64 := FNV_OFFSET
+  for i in 0..<bytes.len() {
+    h = wrap_mul(h ^ cast.<u64>(bytes[i]), FNV_PRIME)
+  }
+  return h
+}
+
+// FNV's multiply **wraps**, which is the whole of how it mixes: `-C
+// overflow=trap` would otherwise stop the program on the second byte.
+wrap_mul :: #inline func (a: u64, b: u64) -> u64 { return a.wrapping_mul(b) }
+
+impl Hash for str {
+  hash :: func (self: Self) -> u64 { return hash_bytes(self.as_bytes()) }
+}
+
+// An integer hashes as its own bits, mixed.
+//
+// Not the identity: a table with a power-of-two capacity takes the *low* bits
+// of a hash, so keys that differ only above that range would all land in one
+// bucket. One FNV round over the value spreads them.
+@public hash_u64 :: func (v: u64) -> u64 {
+  return wrap_mul(FNV_OFFSET ^ v, FNV_PRIME)
+}
+
+impl <const N: u16> Hash for uint.<N> {
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(self)) }
+}
+
+impl <const N: u16> Hash for int.<N> {
+  // Through `u64` by **reinterpreting** rather than converting: a negative
+  // number's bits are what is being hashed, and a conversion of `-1` to `u64`
+  // is a different question with a different answer per width.
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(cast.<uint.<N>>(self))) }
+}
+
+impl Hash for usize {
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(self)) }
+}
+
+impl Hash for isize {
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(cast.<usize>(self))) }
+}
+
+impl Hash for bool {
+  hash :: func (self: Self) -> u64 { return if self { hash_u64(1) } else { hash_u64(0) } }
+}
+
+impl Hash for char {
+  hash :: func (self: Self) -> u64 { return hash_u64(cast.<u64>(cast.<u32>(self))) }
+}

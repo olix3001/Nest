@@ -221,7 +221,7 @@ pub struct TyPathReported;
 ///
 /// For a user container the two are different traits and the resolution says
 /// which. For the built-in sequences they are the same impl (`core` gives them
-/// `Index` only — see `core/slice.nest`), so the distinction has to be recorded:
+/// `Index` only — see `core/iter/slice.nest`), so the distinction has to be recorded:
 /// an array's element pointer is `*mut T` when it is about to be written and
 /// `*T` when it is only read, and only the statement knows which.
 ///
@@ -1067,7 +1067,7 @@ fn str_lang_ty(defs: &DefTable, lang: &LangItems) -> Option<Ty> {
 /// The `#lang("usize")` and `#lang("isize")` types, or `None` when `core`
 /// declares neither.
 ///
-/// Both or nothing: they are declared together in `core/num.nest` and a `core`
+/// Both or nothing: they are declared together in `core/types/num.nest` and a `core`
 /// with one and not the other is malformed in a way this pass has no useful
 /// answer for.
 fn ptr_int_lang_tys(defs: &DefTable, lang: &LangItems) -> Option<(Ty, Ty)> {
@@ -2128,7 +2128,7 @@ impl Inferer<'_> {
                 // An **array** is the one that does not inherit: `[N]T` has no
                 // mutability in its type, because the permission over an
                 // array's elements belongs to whatever holds the array
-                // (`core/slice.nest`). A sub-slice of one is read-only, which
+                // (`core/iter/slice.nest`). A sub-slice of one is read-only, which
                 // is the conservative half of that rule and the only one this
                 // expression can decide on its own.
                 match self.autoderef(&bty) {
@@ -2567,7 +2567,7 @@ impl Inferer<'_> {
         // that is a fact about `core` rather than a case in the compiler: a
         // sequence's write permission is in its type, not in its receiver, so
         // `IndexMut`'s `*mut Self` asks the wrong question of it (§2.3, §3.2 —
-        // and `core/slice.nest` says the same at length). A write therefore goes
+        // and `core/iter/slice.nest` says the same at length). A write therefore goes
         // through the same impl a read does, and what the element pointer
         // permits is decided when the call is lowered.
         if matches!(head, Ty::Slice { .. } | Ty::Array { .. }) {
@@ -8604,7 +8604,7 @@ impl Inferer<'_> {
             // function that is not the one with the error in it.
             //
             // The common way to get here is a *shadowed* prelude type:
-            // `str :: import <std/str>` binds the namespace over the type, and
+            // `str :: import <std/text/str>` binds the namespace over the type, and
             // then `-> str` names the import. That is what the note is for.
             //
             // [`DefKind::External`] is the exception and stays silent: it is a
@@ -8625,7 +8625,7 @@ impl Inferer<'_> {
                     let msg = format!("`{name}` is a {}, not a type", kind.label());
                     // A one-word namespace is nearly always an `import`
                     // binding, and an `import` binding shadows: `str :: import
-                    // <std/str>` hides the `str` the prelude gives every file,
+                    // <std/text/str>` hides the `str` the prelude gives every file,
                     // so the signature under the caret looks right and names
                     // the wrong thing. Say so, because nothing else in the
                     // message hints that the name used to mean something.
@@ -8651,7 +8651,7 @@ impl Inferer<'_> {
     /// The path as the program **wrote** it — `"str"`, `"c.int"` — for a
     /// message about a name in type position.
     ///
-    /// Not the def's own name: `str :: import <std/str>` resolves to a namespace
+    /// Not the def's own name: `str :: import <std/text/str>` resolves to a namespace
     /// called `std`, and naming that in the diagnostic points at a package the
     /// program never wrote instead of the word under the caret.
     ///

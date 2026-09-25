@@ -91,7 +91,7 @@ pub fn default_std_path() -> String {
 /// with the width as an argument instead of as spelling.
 ///
 /// `usize` / `isize` are **not** here: they are `distinct` types declared in
-/// `core/num.nest` over `uint.<PTR_BITS>` / `int.<PTR_BITS>`, found by `#lang`
+/// `core/types/num.nest` over `uint.<PTR_BITS>` / `int.<PTR_BITS>`, found by `#lang`
 /// tag like every other core type the compiler wires to.
 /// The one file of `core` the compiler **writes** rather than reads: the build's
 /// own settings (see [`Session::target_module_source`]). It is a member of
@@ -722,17 +722,22 @@ impl Session {
     /// Whether `from` is a file of the `core` package, so a `target.nest` beside
     /// it is *the* generated one rather than some other package's file of the
     /// same name.
-    fn is_core_sibling(&self, from: &str) -> bool {
+    ///
+    /// `spec` is the import as written, so a file in one of `core`'s folders
+    /// reaches it as `"../target.nest"`: what matters is that it lands in the
+    /// package's root directory.
+    fn core_target_dir(&self, from: &str, spec: &str) -> Option<String> {
         // Through `package`, not the map: a `-L` core has a different parent
         // directory from the compiled-in one, and it is the one being read.
-        let Some(core) = self.package("core") else {
-            return false;
-        };
+        let core = self.package("core")?;
         let root = normalize(std::path::Path::new(&core.root_path));
-        match (parent_of(&root.to_string_lossy()), parent_of(from)) {
-            (Some(a), Some(b)) => a == b,
-            _ => false,
-        }
+        let root = root.to_string_lossy();
+        let root_dir = parent_of(&root)?;
+        let from_dir = parent_of(from)?;
+        let at = normalize(&std::path::Path::new(from_dir).join(spec));
+        let named = at.file_name().and_then(|n| n.to_str()) == Some(TARGET_FILE);
+        let dir = at.parent()?.to_string_lossy().into_owned();
+        (named && dir == root_dir).then_some(dir)
     }
 
     /// The source of the generated `target` file.
@@ -786,16 +791,13 @@ impl Session {
         // which lives in `Options` and not on disk. It is intercepted here, at
         // the sibling-import hop, so that everything else about it is ordinary —
         // it parses, collects, resolves and type-checks like any core file.
-        if spec == TARGET_FILE && self.is_core_sibling(from) {
+        if let Some(dir) = self.core_target_dir(from, spec) {
             let key = format!("gen:{TARGET_FILE}");
             let src = self.target_module_source();
             // Named with `core`'s real directory, not a placeholder: the file's
             // name is what its own relative imports resolve against, and it
             // imports `os.nest` beside it.
-            let name = match parent_of(from) {
-                Some(dir) => format!("{dir}/{TARGET_FILE}"),
-                None => TARGET_FILE.to_string(),
-            };
+            let name = format!("{dir}/{TARGET_FILE}");
             let file = self.parse_cached(&key, &name, &src);
             self.pkg_of.insert(file, "core".to_string());
             return Some(file);

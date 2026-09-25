@@ -751,7 +751,7 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
                 // package is a directory, so every file it reaches relatively is
                 // its own. This is what gives `core`'s topic files the canonical
                 // path `core` — and what lets the coherence rules recognize
-                // `impl []T` in `core/slice.nest` as living in the package that
+                // `impl []T` in `core/iter/slice.nest` as living in the package that
                 // owns the structural types (§4.9).
                 //
                 // A *package* import is not transitive: importing `<std>` from

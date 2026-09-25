@@ -26,8 +26,8 @@
 // `f"{e}"` the shorter and worse of the two.
 
 c :: import <core/c>
-sys :: import "sys.nest"
-libc :: import "libc.nest"
+sys :: import "../os/sys.nest"
+libc :: import "../os/libc.nest"
 { Buf, start, end, Display } :: import <core/fmt>
 { make } :: import <core/mem>
 
@@ -144,110 +144,7 @@ impl Error {
   }
 }
 
-// ===< A descriptor >===
+// ===< Files and the standard streams >===
 
-// An open file descriptor: a file, a pipe, a terminal — whatever the operating
-// system gave a number to.
-//
-// It is **not closed for you**. The language has no destructors (`Drop` is
-// still a decision, see `design/toolchain.md`), so a `File` that goes out of
-// scope leaks its descriptor until the process ends. `close` is written, and
-// `fs.read`-style whole-file operations close their own.
-@public File :: struct {
-  fd: c.int,
-}
-
-impl File {
-  // Wrap a descriptor this program got from somewhere else. The `File` does not
-  // become its owner — closing it is still whoever opened it's business.
-  @public from_fd :: #inline func (fd: c.int) -> File { return File { fd: fd } }
-
-  // The descriptor, for a program calling something `std` does not wrap.
-  @public fd_of :: #inline func (self: Self) -> c.int { return self.fd }
-
-  // Whether it is a terminal: what decides whether output meant for a person
-  // may carry colour.
-  @public is_terminal :: func (self: Self) -> bool { return sys.isatty(self.fd) }
-
-  // Close it. A descriptor closed twice is a descriptor another thread may have
-  // reopened, so this is called once and by whoever opened it.
-  @public close :: func (self: *mut File) -> Result.<void, Error> {
-    let r: sys.Res := sys.close(self.fd)
-    if r.failed() { return .err(error_of("close", "", r)) }
-    return .ok(())
-  }
-}
-
-impl Write for File {
-  write :: func (self: *mut File, bytes: []u8) -> Result.<usize, Error> {
-    loop {
-      let r: sys.Res := sys.write(self.fd, bytes)
-      if r.failed() == false { return .ok(cast.<usize>(r.n)) }
-      // A signal arriving mid-call is not a failed write, and retrying is what
-      // every program that does not install signal handlers wants.
-      if r.interrupted() == false { return .err(error_of("write", "", r)) }
-    }
-  }
-}
-
-impl Read for File {
-  read :: func (self: *mut File, into: []mut u8) -> Result.<usize, Error> {
-    loop {
-      let r: sys.Res := sys.read(self.fd, into)
-      if r.failed() == false { return .ok(cast.<usize>(r.n)) }
-      if r.interrupted() == false { return .err(error_of("read", "", r)) }
-    }
-  }
-}
-
-// ===< The three the process starts with >===
-//
-// Functions rather than constants because a `File` is a value and these are
-// three particular ones — and because a program is free to `close` a `File`,
-// which a shared constant would let it do to everyone's.
-
-@public stdin  :: #inline func () -> File { return File { fd: libc.STDIN } }
-@public stdout :: #inline func () -> File { return File { fd: libc.STDOUT } }
-@public stderr :: #inline func () -> File { return File { fd: libc.STDERR } }
-
-// ===< Printing >===
-//
-// Four functions, and what they are for is `f"..."`: `print(f"n is {n}")` is
-// the whole formatting story, because interpolation already produced a `str`.
-// There is no `print` taking a format string and arguments, and there will not
-// be — the language has interpolation, so a second way to say the same thing
-// would be a second set of rules to learn (§1.5).
-//
-// **A failed print is ignored.** Writing to a closed stdout is a real
-// condition, and it is not one a `print` call can do anything about: the caller
-// that wanted to know writes through `stdout()` and reads the `Result`. A
-// `print` that returned one would put a `.?` on every line of output in every
-// program.
-
-@public print :: func (s: str) -> void {
-  let mut out: File := stdout()
-  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
-}
-
-@public println :: func (s: str) -> void {
-  let mut out: File := stdout()
-  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
-  write_all(&mut out, NEWLINE.as_bytes()).match { .ok(_) => (), .err(_) => () }
-}
-
-@public eprint :: func (s: str) -> void {
-  let mut out: File := stderr()
-  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
-}
-
-@public eprintln :: func (s: str) -> void {
-  let mut out: File := stderr()
-  write_all(&mut out, s.as_bytes()).match { .ok(_) => (), .err(_) => () }
-  write_all(&mut out, NEWLINE.as_bytes()).match { .ok(_) => (), .err(_) => () }
-}
-
-// One byte, named, so that the four above do not each spell a literal for it.
-// A `str` rather than a `[]u8`: `as_bytes` is not `#const`, so the conversion
-// happens at each call — which is a cast between two views of the same bytes
-// and costs nothing.
-NEWLINE: str :: "\n"
+@public { File } :: import "file.nest"
+@public { stdin, stdout, stderr, print, println, eprint, eprintln } :: import "stdio.nest"

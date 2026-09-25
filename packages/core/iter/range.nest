@@ -1,8 +1,8 @@
 // Range types, and what walking one does.
 
-{ usize, isize } :: import "num.nest"
-{ Ordering } :: import "cmp.nest"
-* :: import "option.nest"
+{ usize, isize } :: import "../types/num.nest"
+{ Ordering } :: import "../cmp.nest"
+* :: import "../types/option.nest"
 * :: import "iter.nest"
 
 // Every surface range form, one variant each, so lowering keeps the bound

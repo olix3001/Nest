@@ -17,25 +17,13 @@
 // names the `io` namespace below. The layout is `core`'s, for the same reason —
 // a root that is a table of contents rather than a pile of members.
 
-@public libc        :: import "libc.nest"
-@public io          :: import "io.nest"
-@public fs          :: import "fs.nest"
-@public process     :: import "process.nest"
+@public io          :: import "io/io.nest"
+@public fs          :: import "fs/fs.nest"
+@public os          :: import "os/os.nest"
+@public text        :: import "text/text.nest"
+@public collections :: import "collections/collections.nest"
 @public mem         :: import "mem.nest"
-@public str         :: import "str.nest"
-@public path        :: import "path.nest"
-@public collections :: import "collections.nest"
-@public string      :: import "string.nest"
 @public serialize   :: import "serialize/serialize.nest"
 
-// `sys.nest` gets **no re-export**, and that is what makes it internal: without
-// a binding here, `import <std/sys>` does not resolve, so the backing every
-// other file goes through is not something a program can reach around this
-// library to call. What it wants instead is `<std/libc>`, which is exposed on
-// purpose — see the note there.
-//
-// The name is also why it could not be re-exported as it is: a `str` namespace
-// sits above, and `core.nest` leaves `str.nest` unexported for exactly that
-// reason. Here the namespace wins, because `std/str` is a file of functions
-// taking a `str` rather than the declaration of the type — the prelude is what
-// gives a program the type, and this is what gives it the operations.
+// `os/sys.nest` gets **no re-export**, and that is what makes it internal (see
+// `os/os.nest`).

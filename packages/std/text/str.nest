@@ -1,6 +1,6 @@
 // Text: what `core`'s `str` does not carry.
 //
-// `core/str.nest` declares the type and two things about it — that it is
+// `core/types/str.nest` declares the type and two things about it — that it is
 // `distinct []u8`, and that it compares by its bytes — and says the rest
 // belongs to `std`. This is the rest.
 //
@@ -14,7 +14,7 @@
 //
 // ### There is no owned `String`
 //
-// `core/str.nest` says the growable, owned string belongs here. It is not
+// `core/types/str.nest` says the growable, owned string belongs here. It is not
 // written, and deliberately: `core/fmt`'s `Buf` is already a byte buffer that
 // grows and hands back a `str`, and `std/collections`'s `Vec.<u8>` is the same
 // shape again. A third would be a third spelling of one thing, and the `#lang`
@@ -25,7 +25,7 @@
 // ### The indices are byte indices
 //
 // `find` answers where a byte is, and `slice` cuts at bytes. That is what a
-// `str`'s own `len()` already counts (`core/str.nest`), and it is the only
+// `str`'s own `len()` already counts (`core/types/str.nest`), and it is the only
 // index that is O(1). A cut in the middle of a multi-byte character produces a
 // `str` that is not valid UTF-8, which `from_utf8` is the check for — none of
 // these validate, because validating on every operation is what having the

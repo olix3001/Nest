@@ -9,10 +9,10 @@
 // Tables keep their keys in the order they were added, so a document written
 // from a struct lists its members in declaration order.
 
-string :: import "../../string.nest"
-{ String } :: import "../../string.nest"
-collections :: import "../../collections.nest"
-{ Vec } :: import "../../collections.nest"
+string :: import "../../text/string.nest"
+{ String } :: import "../../text/string.nest"
+collections :: import "../../collections/collections.nest"
+{ Vec } :: import "../../collections/collections.nest"
 mem :: import <core/mem>
 
 @public Value :: enum {
@@ -45,8 +45,8 @@ mem :: import <core/mem>
 @public new_table :: func () -> *mut Table {
   let t: *mut Table := mem.new.<Table>()
   t.* = Table {
-    keys: collections.new.<String>(),
-    values: collections.new.<Value>(),
+    keys: collections.vec.new.<String>(),
+    values: collections.vec.new.<Value>(),
     header: false,
     dotted: false,
     inline: false,
@@ -56,7 +56,7 @@ mem :: import <core/mem>
 
 @public new_array :: func (of_tables: bool) -> *mut Array {
   let a: *mut Array := mem.new.<Array>()
-  a.* = Array { items: collections.new.<Value>(), of_tables: of_tables }
+  a.* = Array { items: collections.vec.new.<Value>(), of_tables: of_tables }
   return a
 }
 

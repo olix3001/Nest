@@ -1,0 +1,14 @@
+// Text: `String`, the growable buffer, and the functions over a `str`.
+//
+//     { String } :: import <std/text>
+//     string :: import <std/text/string>
+//     str :: import <std/text/str>
+//
+// `str` itself is the prelude's; `<std/text/str>` is a file of functions taking
+// one, which is why the namespace may share the type's name — the prelude gives
+// a program the type, and this gives it the operations.
+
+@public str    :: import "str.nest"
+@public string :: import "string.nest"
+
+@public { String } :: import "string.nest"

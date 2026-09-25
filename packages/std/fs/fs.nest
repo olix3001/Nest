@@ -21,11 +21,15 @@
 // out and hands over only that (`libc.nest_dir_next`).
 
 c :: import <core/c>
-io :: import "io.nest"
-sys :: import "sys.nest"
-libc :: import "libc.nest"
-collections :: import "collections.nest"
-{ Vec } :: import "collections.nest"
+io :: import "../io/io.nest"
+sys :: import "../os/sys.nest"
+libc :: import "../os/libc.nest"
+collections :: import "../collections/collections.nest"
+{ Vec } :: import "../collections/collections.nest"
+
+// Paths are strings, and what is done to one without asking the file system is
+// `path`'s: `<std/fs/path>`.
+@public path :: import "path.nest"
 { make } :: import <core/mem>
 
 // How a file is being opened. An enum rather than a set of flags, because the
@@ -188,7 +192,7 @@ SLASH: u8 :: 47
 // `.` and `..` left out — in byte order, so that two runs over the same
 // directory see the same list.
 @public read_dir :: func (path: str) -> Result.<[]str, io.Error> {
-  let mut names: Vec.<str> := collections.new.<str>()
+  let mut names: Vec.<str> := collections.vec.new.<str>()
   let r: sys.Res := sys.read_dir(path, { n in names.push(n) })
   if r.failed() { return .err(io.error_of("read directory", path, r)) }
   let out: []mut str := make.<[]str>(names.len())

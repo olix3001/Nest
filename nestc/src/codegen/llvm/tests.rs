@@ -1128,13 +1128,13 @@ fn a_program_links_and_runs() {
              m :: import <std/mem>\n\
              { make } :: import <core/mem>\n\
              main :: func () -> i32 {\n\
-            \x20 let mut v := c.from_slice.<i32>(.{ 1, 2, 3 })\n\
+            \x20 let mut v := c.vec.from_slice.<i32>(.{ 1, 2, 3 })\n\
             \x20 v.push(4)\n\
             \x20 v.extend(.{ 5, 6 })\n\
             \x20 let dst: []mut i32 := make.<[]i32>(3)\n\
             \x20 let n := m.copy.<i32>(dst, v.as_slice())\n\
             \x20 v.fill(2)\n\
-            \x20 let mut z := c.from_slice.<i32>(.{ 9, 9 })\n\
+            \x20 let mut z := c.vec.from_slice.<i32>(.{ 9, 9 })\n\
             \x20 z.zero()\n\
             \x20 return dst[2] + cast.<i32>(n) + v.as_slice()[5] + z.as_slice()[1]\n\
              }\n",
@@ -1292,8 +1292,9 @@ fn the_std_floor_reads_writes_spawns_and_reads_its_arguments() {
         "\
 io :: import <std/io>
 fs :: import <std/fs>
-process :: import <std/process>
-s :: import <std/str>
+process :: import <std/os/process>
+env :: import <std/os/env>
+s :: import <std/text/str>
 col :: import <std/collections>
 
 PATH_OF: str :: \"{path}\"
@@ -1316,17 +1317,17 @@ main :: func () -> i32 {{
   }}
 
   // Arguments: `argv[0]` plus the two this test passes.
-  let args: []str := process.args()
+  let args: []str := env.args()
   if args.len() != 3 {{ return 11 }}
   if args[1] != \"first\" {{ return 12 }}
   if args[2] != \"second\" {{ return 13 }}
 
   // The environment, read whole and by name.
-  process.set_env(\"NEST_FLOOR\", \"set\").match {{ .ok(_) => (), .err(_) => {{ return 14 }} }}
-  if process.env(\"NEST_FLOOR\").match {{ .some(v) => v, .none => \"\" }} != \"set\" {{ return 15 }}
-  if process.env(\"NEST_DEFINITELY_UNSET\").match {{ .some(_) => true, .none => false }} {{ return 16 }}
-  let mut seen: col.HashMap.<str, str> := col.map.<str, str>()
-  for v in process.env_vars() {{ seen.insert(v.name, v.value).match {{ .some(_) => (), .none => () }} }}
+  env.set(\"NEST_FLOOR\", \"set\").match {{ .ok(_) => (), .err(_) => {{ return 14 }} }}
+  if env.get(\"NEST_FLOOR\").match {{ .some(v) => v, .none => \"\" }} != \"set\" {{ return 15 }}
+  if env.get(\"NEST_DEFINITELY_UNSET\").match {{ .some(_) => true, .none => false }} {{ return 16 }}
+  let mut seen: col.HashMap.<str, str> := col.hash_map.new.<str, str>()
+  for v in env.vars() {{ seen.insert(v.name, v.value).match {{ .some(_) => (), .none => () }} }}
   if seen.contains(\"NEST_FLOOR\") == false {{ return 17 }}
 
   // A child process, run to completion, and one that does not exist.
@@ -1821,7 +1822,7 @@ fn every_opt_level_runs_the_same_program() {
         return;
     };
     let src = "io :: import <std/io>\n\
-               process :: import <std/process>\n\
+               env :: import <std/os/env>\n\
                sum :: func (n: i32) -> i32 {\n\
                \x20 let mut t: i32 := 0\n\
                \x20 for i in 0..<n { t = t + i }\n\
@@ -1829,7 +1830,7 @@ fn every_opt_level_runs_the_same_program() {
                }\n\
                main :: func () -> i32 {\n\
                \x20 io.println(f\"sum={sum(10)}\")\n\
-               \x20 let big: i32 := 2147483600 + cast.<i32>(process.args().len()) * 100\n\
+               \x20 let big: i32 := 2147483600 + cast.<i32>(env.args().len()) * 100\n\
                \x20 io.println(f\"big={big}\")\n\
                \x20 return 0\n\
                }\n";
@@ -1851,8 +1852,8 @@ fn every_opt_level_runs_the_same_program() {
 /// impl walks by reflection, and every concrete impl beside it.
 const SERIALIZE_TYPES: &str = r##"
 io :: import <std/io>
-string :: import <std/string>
-{ String } :: import <std/string>
+string :: import <std/text/string>
+{ String } :: import <std/text/string>
 col :: import <std/collections>
 { Vec } :: import <std/collections>
 { rename, skip } :: import <std/serialize>
@@ -1877,10 +1878,10 @@ Config :: struct {
 }
 
 sample :: func () -> Config {
-  let mut tags: Vec.<str> := col.new.<str>()
+  let mut tags: Vec.<str> := col.vec.new.<str>()
   tags.push("a")
   tags.push("b \"c\"\n")
-  let mut deps: Vec.<Dep> := col.new.<Dep>()
+  let mut deps: Vec.<Dep> := col.vec.new.<Dep>()
   deps.push(Dep { name: string.from("core"), optional: false })
   deps.push(Dep { name: string.from("é☃"), optional: true })
   return Config {

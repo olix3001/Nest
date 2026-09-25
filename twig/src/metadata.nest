@@ -8,7 +8,7 @@
 
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
-{ String } :: import <std/string>
+{ String } :: import <std/text/string>
 json :: import <std/serialize/json>
 build :: import "build.nest"
 { Profile, Target, Command } :: import "build.nest"
@@ -40,16 +40,16 @@ build :: import "build.nest"
 
 // The workspace `ws`, built with `p`, as JSON.
 @public describe :: func (ws: *Workspace, p: Profile) -> Result.<String, str> {
-  let mut packages: Vec.<Package> := collections.new.<Package>()
+  let mut packages: Vec.<Package> := collections.vec.new.<Package>()
   let libs: []Target := build.libraries(ws)
   for d in ws.deps {
-    let mut targets: Vec.<TargetInfo> := collections.new.<TargetInfo>()
+    let mut targets: Vec.<TargetInfo> := collections.vec.new.<TargetInfo>()
     for t in libs {
       if t.name == d.name { targets.push(target(ws, p, t)) }
     }
     packages.push(Package { name: d.name, dir: d.dir, targets: targets.as_slice() })
   }
-  let mut own: Vec.<TargetInfo> := collections.new.<TargetInfo>()
+  let mut own: Vec.<TargetInfo> := collections.vec.new.<TargetInfo>()
   for t in libs {
     if t.name == ws.root.name { own.push(target(ws, p, t)) }
   }

@@ -1880,7 +1880,7 @@ impl Lowerer<'_> {
         let base_node = base;
         let base = self.lower_expr(base);
         // A built-in sequence goes through `Index` whether it is being read or
-        // written (`core/slice.nest` says why), so the declared `-> *Self.Output`
+        // written (`core/iter/slice.nest` says why), so the declared `-> *Self.Output`
         // is not the whole answer: what the element pointer **permits** follows
         // the receiver, which is the one thing no signature in the language can
         // state. It is the same gap `make.<[]T>(n)` has, and it is filled the

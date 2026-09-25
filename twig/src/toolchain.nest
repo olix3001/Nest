@@ -7,15 +7,17 @@
 // which is what makes a build say, on its own command line, exactly what it was
 // built against.
 
-process :: import <std/process>
-s :: import <std/str>
+process :: import <std/os/process>
+
+env :: import <std/os/env>
+s :: import <std/text/str>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
-path :: import <std/path>
+path :: import <std/fs/path>
 
 // The compiler: `$NESTC` when it is set, otherwise `nestc` from `PATH`.
 @public nestc :: func () -> str {
-  return process.env("NESTC").match {
+  return env.get("NESTC").match {
     .some(p) => if p.len() > 0 { p } else { "nestc" },
     .none => "nestc",
   }
@@ -48,7 +50,7 @@ path :: import <std/path>
   }
   if failed { return .err(f"`{program} -C print=packages` failed") }
 
-  let mut found: Vec.<Shipped> := collections.new.<Shipped>()
+  let mut found: Vec.<Shipped> := collections.vec.new.<Shipped>()
   for line in s.lines(cast.<str>(out.stdout)) {
     s.find(line, "=").match {
       .some(at) => found.push(Shipped {

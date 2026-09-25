@@ -207,6 +207,33 @@ main :: func () { const x := mp.triple(3) }
     assert!(matches!(resolution(&session, file, fa), Resolution::Def(_)));
 }
 
+/// A trait's associated type is projectable from a file that imports the trait
+/// **cyclically** and is resolved first — `core/iter`'s adapters and the
+/// `Iterator` trait whose methods build them are two such files. The bound's
+/// associated types were recorded only when the trait's own file resolved, so
+/// `I.Item` did not resolve in the other.
+#[test]
+fn a_projection_resolves_across_a_file_cycle() {
+    let mainsrc = "\
+{ Wrap } :: import \"b\"
+@public Source :: trait {
+    Item :: type
+    wrap :: func (self: Self) -> Wrap.<Self> { return Wrap.<Self> { inner: self } }
+}
+main :: func () { }
+";
+    let bsrc = "\
+{ Source } :: import \"main\"
+@public(all) Wrap :: struct <S> { inner: S }
+first :: func <S: Source> (w: Wrap.<S>) -> Option.<S.Item> { return .none }
+";
+    let mut session =
+        Session::with_loader(Box::new(MemLoader::new().with("main", mainsrc).with("b", bsrc)));
+    let file = session.load_entry("main").unwrap();
+    analyze(&mut session, file);
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+}
+
 #[test]
 fn core_is_an_ordinary_multi_file_package() {
     // `core` gets no special loading path: it is registered by the path of its
@@ -5483,7 +5510,7 @@ fn caller_location_is_only_a_default_argument() {
 fn panic_reports_the_line_that_called_it() {
     // The reason the feature exists. `panic` is declared in `core` with a
     // `#caller_location` default, so the location it carries is the program's
-    // line, not the declaration's in `core/fail.nest`.
+    // line, not the declaration's in `core/rt/fail.nest`.
     let s = analyze_clean("main :: func () {\n  panic(\"boom\")\n}\n");
     let file = entry_file(&s);
     let ir = crate::ir::pretty::program_to_string(&s.defs, &s.ir_meta, &s.ir[&file]);
@@ -7387,7 +7414,7 @@ fn assigning_to_something_that_is_not_a_place_is_refused() {
 /// *called* the one with the mistake in it.
 ///
 /// The way to get here by accident is shadowing. An `import` binding is an
-/// ordinary name, so `str :: import <std/str>` hides the `str` every file gets
+/// ordinary name, so `str :: import <std/text/str>` hides the `str` every file gets
 /// from the prelude, and `-> str` then names the namespace.
 #[test]
 fn a_name_that_is_not_a_type_is_reported_where_it_is_written() {
@@ -9649,13 +9676,17 @@ fn an_explicit_registration_beats_a_search_path() {
 #[test]
 fn every_std_namespace_analyzes() {
     let src = "\
-libc :: import <std/libc>
+libc :: import <std/os/libc>
 io :: import <std/io>
 fs :: import <std/fs>
-process :: import <std/process>
+process :: import <std/os/process>
 mem :: import <std/mem>
-str :: import <std/str>
+str :: import <std/text/str>
 collections :: import <std/collections>
+env :: import <std/os/env>
+path :: import <std/fs/path>
+text :: import <std/text>
+json :: import <std/serialize/json>
 main :: func () { }
 ";
     let session = crate::sema::analyze_source("std-all", src, &[]);
@@ -9705,8 +9736,8 @@ main :: func () {
 /// this is what says so.
 #[test]
 fn std_sys_is_not_reachable_from_outside() {
-    let session = crate::sema::analyze_source("std-sys", "sys :: import <std/sys>\n", &[]);
-    assert!(session.has_errors(), "`<std/sys>` resolved");
+    let session = crate::sema::analyze_source("std-sys", "sys :: import <std/os/sys>\n", &[]);
+    assert!(session.has_errors(), "`<std/os/sys>` resolved");
 }
 
 /// A bare `self` is `self: Self` — in an inherent impl, a generic one, a trait

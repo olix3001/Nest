@@ -8,10 +8,10 @@
 { Error, error } :: import "../error.nest"
 { Encoder } :: import "../encode.nest"
 float :: import "../float.nest"
-string :: import "../../string.nest"
-{ String } :: import "../../string.nest"
-collections :: import "../../collections.nest"
-{ Vec } :: import "../../collections.nest"
+string :: import "../../text/string.nest"
+{ String } :: import "../../text/string.nest"
+collections :: import "../../collections/collections.nest"
+{ Vec } :: import "../../collections/collections.nest"
 
 // One open `[` or `{`.
 Frame :: struct {
@@ -29,7 +29,7 @@ Frame :: struct {
 // A writer with nothing written; `pretty` puts each element on its own line,
 // indented two spaces per level.
 @public writer :: func (pretty: bool) -> Writer {
-  return Writer { out: string.new(), pretty: pretty, stack: collections.new.<Frame>() }
+  return Writer { out: string.new(), pretty: pretty, stack: collections.vec.new.<Frame>() }
 }
 
 impl Writer {

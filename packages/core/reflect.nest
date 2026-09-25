@@ -20,7 +20,7 @@
 // one is not.
 
 { Eq } :: import "cmp.nest"
-{ transmute } :: import "mem.nest"
+{ transmute } :: import "mem/mem.nest"
 
 // ===< Identity >===
 

@@ -124,7 +124,7 @@ pub const INTRINSICS: &[IntrinsicRow] = &[
     // handler like every other failure. The name here says which is which.
     plain("comptime_assert"),
     // Integer arithmetic with a stated overflow behaviour (§6.6). These are the
-    // inherent methods on the two integer families in `core/num.nest`, and they
+    // inherent methods on the two integer families in `core/types/num.nest`, and they
     // need no `Special`: `func (self: Self, rhs: Self) -> Self` inside
     // `impl <const N: usize> int.<N>` says everything — same family, same width,
     // no widening — because `Self` is the family member being implemented.

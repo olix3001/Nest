@@ -138,7 +138,7 @@ test-grammar:
     fi
 
 # `core`'s own tests, run the way any package's are. Its runner is its own —
-# `core/test.nest` — so a test *of the runner* could not report its own
+# `core/rt/test.nest` — so a test *of the runner* could not report its own
 # failure; everything else in `core` can be tested like any package.
 [doc("`core`'s own tests, through `twig test`.")]
 test-core:

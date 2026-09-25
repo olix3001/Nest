@@ -9,10 +9,10 @@
 { Error, error_at } :: import "../error.nest"
 { Token, Decoder } :: import "../decode.nest"
 float :: import "../float.nest"
-string :: import "../../string.nest"
-{ String } :: import "../../string.nest"
-collections :: import "../../collections.nest"
-{ Vec } :: import "../../collections.nest"
+string :: import "../../text/string.nest"
+{ String } :: import "../../text/string.nest"
+collections :: import "../../collections/collections.nest"
+{ Vec } :: import "../../collections/collections.nest"
 
 @public Reader :: struct {
   text: []u8,
@@ -29,7 +29,7 @@ collections :: import "../../collections.nest"
     pos: 0,
     line: 1,
     column: 1,
-    first: collections.new.<bool>(),
+    first: collections.vec.new.<bool>(),
   }
 }
 

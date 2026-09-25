@@ -8,10 +8,10 @@
 
 { Error, error } :: import "../error.nest"
 { Token, Decoder } :: import "../decode.nest"
-string :: import "../../string.nest"
-{ String } :: import "../../string.nest"
-collections :: import "../../collections.nest"
-{ Vec } :: import "../../collections.nest"
+string :: import "../../text/string.nest"
+{ String } :: import "../../text/string.nest"
+collections :: import "../../collections/collections.nest"
+{ Vec } :: import "../../collections/collections.nest"
 { Value, Array, Table, new_table, new_array, describe } :: import "value.nest"
 
 // One open array or table, and how far through it the reads are.
@@ -32,8 +32,8 @@ Cursor :: struct {
 @public tree_decoder :: func (root: *mut Table) -> TreeDecoder {
   return TreeDecoder {
     current: .table(root),
-    cursors: collections.new.<Cursor>(),
-    path: collections.new.<String>(),
+    cursors: collections.vec.new.<Cursor>(),
+    path: collections.vec.new.<String>(),
   }
 }
 

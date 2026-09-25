@@ -1,0 +1,15 @@
+// The operating system: this process, other processes, and the C library
+// underneath both.
+//
+//     env :: import <std/os/env>
+//     process :: import <std/os/process>
+//
+// `sys.nest` is imported by `std`'s own files and **not** re-exported, which is
+// what makes it internal: without a binding here, `import <std/os/sys>` does not
+// resolve, so the backing every other file goes through is not something a
+// program can reach around this library to call. What it wants instead is
+// `<std/os/libc>`, which is exposed on purpose — see the note there.
+
+@public env     :: import "env.nest"
+@public process :: import "process.nest"
+@public libc    :: import "libc.nest"

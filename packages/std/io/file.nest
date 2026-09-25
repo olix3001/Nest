@@ -1,0 +1,61 @@
+// `File`: an open descriptor, and the `Read` / `Write` it answers.
+
+c :: import <core/c>
+sys :: import "../os/sys.nest"
+{ Error, error_of, Read, Write } :: import "io.nest"
+
+// ===< A descriptor >===
+
+// An open file descriptor: a file, a pipe, a terminal — whatever the operating
+// system gave a number to.
+//
+// It is **not closed for you**. The language has no destructors (`Drop` is
+// still a decision, see `design/toolchain.md`), so a `File` that goes out of
+// scope leaks its descriptor until the process ends. `close` is written, and
+// `fs.read`-style whole-file operations close their own.
+@public(fields: package) File :: struct {
+  fd: c.int,
+}
+
+impl File {
+  // Wrap a descriptor this program got from somewhere else. The `File` does not
+  // become its owner — closing it is still whoever opened it's business.
+  @public from_fd :: #inline func (fd: c.int) -> File { return File { fd: fd } }
+
+  // The descriptor, for a program calling something `std` does not wrap.
+  @public fd_of :: #inline func (self: Self) -> c.int { return self.fd }
+
+  // Whether it is a terminal: what decides whether output meant for a person
+  // may carry colour.
+  @public is_terminal :: func (self: Self) -> bool { return sys.isatty(self.fd) }
+
+  // Close it. A descriptor closed twice is a descriptor another thread may have
+  // reopened, so this is called once and by whoever opened it.
+  @public close :: func (self: *mut File) -> Result.<void, Error> {
+    let r: sys.Res := sys.close(self.fd)
+    if r.failed() { return .err(error_of("close", "", r)) }
+    return .ok(())
+  }
+}
+
+impl Write for File {
+  write :: func (self: *mut File, bytes: []u8) -> Result.<usize, Error> {
+    loop {
+      let r: sys.Res := sys.write(self.fd, bytes)
+      if r.failed() == false { return .ok(cast.<usize>(r.n)) }
+      // A signal arriving mid-call is not a failed write, and retrying is what
+      // every program that does not install signal handlers wants.
+      if r.interrupted() == false { return .err(error_of("write", "", r)) }
+    }
+  }
+}
+
+impl Read for File {
+  read :: func (self: *mut File, into: []mut u8) -> Result.<usize, Error> {
+    loop {
+      let r: sys.Res := sys.read(self.fd, into)
+      if r.failed() == false { return .ok(cast.<usize>(r.n)) }
+      if r.interrupted() == false { return .err(error_of("read", "", r)) }
+    }
+  }
+}

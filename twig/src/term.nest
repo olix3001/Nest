@@ -5,15 +5,16 @@
 // the same stderr, so the two agree without twig passing anything on.
 
 io :: import <std/io>
-process :: import <std/process>
-s :: import <std/str>
+process :: import <std/os/process>
+env :: import <std/os/env>
+s :: import <std/text/str>
 
 RED: str :: "\u{1B}[1;31m"
 GREEN: str :: "\u{1B}[1;32m"
 RESET: str :: "\u{1B}[0m"
 
 color :: func () -> bool {
-  let off: bool := process.env("NO_COLOR").match { .some(v) => v.len() > 0, .none => false }
+  let off: bool := env.get("NO_COLOR").match { .some(v) => v.len() > 0, .none => false }
   return off == false && io.stderr().is_terminal()
 }
 

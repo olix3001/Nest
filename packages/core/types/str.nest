@@ -25,8 +25,8 @@
 // `std`, built on top of this one, and will carry its own `#lang` tag so that a
 // `str` coerces into it implicitly.
 
-{ Eq } :: import "cmp.nest"
-{ bytes_eq } :: import "slice.nest"
+{ Eq } :: import "../cmp.nest"
+{ bytes_eq } :: import "../iter/slice.nest"
 
 @public str :: #lang("str") distinct []u8
 
