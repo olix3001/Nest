@@ -10492,6 +10492,23 @@ f :: func (a: *dyn Func, b: *mut dyn Iterator, c: *dyn Func(i32) -> i32, d: *mut
 /// a field, a variant, a trait member — found by `#lang("doc")`, so a program's
 /// own `doc` does not get in the way; one inside a body is a plain comment.
 #[test]
+fn a_doc_comment_on_an_import_binding_documents_it() {
+    // The binding is the only thing a namespace a file is can be documented
+    // on, so its `///` has to reach the alias def.
+    let session = analyze_mem(
+        &[
+            ("math", "@public add :: func () {}\n"),
+            ("main", "/// Arithmetic.\n@public math :: import \"math.nest\"\n"),
+        ],
+        "main",
+    );
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+    let ns = session.files[&entry_file(&session)].ns;
+    let math = session.defs.get(ns).ns.members[&crate::common::symbol::Symbol::new("math")];
+    assert_eq!(session.doc_of(math).as_deref(), Some("Arithmetic."));
+}
+
+#[test]
 fn doc_comments_are_doc_attributes() {
     let src = "\
 /// A point.

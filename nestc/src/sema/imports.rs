@@ -15,6 +15,7 @@ use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
 use super::def::{DefId, DefKind, DefTable, Namespace, Visibility};
+use super::DefMeta;
 use super::session::Session;
 
 /// A target as written, before loading: the operand of `import`.
@@ -31,6 +32,8 @@ pub enum RawTarget {
 pub struct RawImport {
     /// The binding pattern on the left of `::`.
     pub pattern: NodeId,
+    /// The `::` binding itself, which the attributes written on it hang off.
+    pub bind: NodeId,
     /// The namespace the binding populates (the enclosing scope of the `import`).
     pub scope: DefId,
     /// Whether the binding is `@public` (re-exports what it brings in).
@@ -63,6 +66,7 @@ pub enum ImportTarget {
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
     pub pattern: NodeId,
+    pub bind: NodeId,
     pub scope: DefId,
     pub reexport: bool,
     pub target: ImportTarget,
@@ -138,6 +142,16 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
             &mut missing,
             &at,
         );
+        // `name :: import ...` binds one def, and the `::` node is where its
+        // attributes are found — `///` on it documents the namespace.
+        if let NodeKind::BindingPat { name, .. } = &ast.node(imp.pattern).kind
+            && let ns = &defs.get(imp.scope).ns
+            && let Some(d) = ns.members.get(name).or(ns.imported.get(name)).copied()
+            && defs.get(d).kind == DefKind::Import
+            && ast.meta::<DefMeta>(imp.bind).is_none()
+        {
+            ast.set_meta(imp.bind, DefMeta(d));
+        }
         for (at, msg) in missing {
             let span = session.asts[&file].node(at).span;
             session.error(file, span, msg);

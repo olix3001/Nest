@@ -658,6 +658,7 @@ impl Collector<'_> {
         });
         self.imports.push(RawImport {
             pattern,
+            bind,
             scope,
             reexport: !matches!(vis.level(), Visibility::Private),
             target,

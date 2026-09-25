@@ -69,7 +69,10 @@ export default defineConfig({
 				},
 				{
 					label: 'Toolchain',
-					items: [{ label: 'nestc and twig', slug: 'toolchain' }],
+					items: [
+						{ label: 'nestc and twig', slug: 'toolchain' },
+						{ label: 'Metadata format', slug: 'toolchain/metadata' },
+					],
 				},
 			],
 		}),

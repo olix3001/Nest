@@ -763,6 +763,7 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
             }
             decls.push(ImportDecl {
                 pattern: raw.pattern,
+                bind: raw.bind,
                 scope: raw.scope,
                 reexport: raw.reexport,
                 target,

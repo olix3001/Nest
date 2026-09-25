@@ -122,23 +122,7 @@ registry.
 
 `nestc --emit metadata` (or `twig build --emit metadata --emit-only`, which
 writes `build/<profile>/obj/lib/<name>/<name>.json`) describes a package as
-JSON: every public item reachable from its root, walked through its public
-namespaces in declaration order. It is the input a documentation site is
-generated from, so every entry carries what such a page needs:
-
-- `name`, `path` (the public path it is described under), `kind`
-  (`namespace`, `struct`, `enum`, `trait`, `type`, `func`, `const`,
-  `overload`, and `assoc`/`assoc_type`/`assoc_const` inside a trait),
-  `visibility`, and `defined_at` when the canonical path differs;
-- `doc` — the item's `@doc`, which is what its `///` comment is — and
-  `summary`, the doc's first paragraph on one line;
-- `declaration` (the source up to the body), `location` (`file`, `line`,
-  `column`), and the other `attributes` written on it;
-- per kind: `members` (a namespace's, a trait's), `fields` and `variants` with
-  their types and docs, `methods` and `impls` (the traits a type
-  implements), `params`/`returns`/`generics`/`method` for a function.
-
-A name re-exported in several places is described once, where the walk first
-meets it, and elsewhere as `{ "name", "path", "reexport": "<first path>" }`.
-The top level is `{ "format": 1, "package": "<name>", "root": { ... } }`;
-`format` is bumped when a field changes meaning or goes away.
+JSON: every public item reachable from its root, with its `///` docs,
+signature, generics and bounds, fields, variants, methods and impls. It is the
+input a documentation site is generated from. The format is documented field
+by field in [Metadata format](../toolchain/metadata/).
