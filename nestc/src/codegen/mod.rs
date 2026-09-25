@@ -49,7 +49,7 @@ pub mod text;
 /// codegen* reads — the layout engine asks how wide a pointer is, and `core`'s
 /// generated `target.nest` names the OS and the architecture so a program can
 /// branch on them. Facts only the backend needs (the ABI's register
-/// classification, the alignment of an `f80`) are not here, because the backend
+/// classification, a float's alignment) are not here, because the backend
 /// already has them and a copy in the middle would be a copy able to be wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetInfo {

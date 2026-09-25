@@ -96,13 +96,16 @@ fn primitive_resolves_to_builtin() {
 fn arbitrary_width_and_alias_primitives_resolve() {
     // A non-power-of-two width, an alias (`u1` == `bool`), and a float width all
     // synthesize / resolve without error; `i1` and a bad float width do not.
-    let session = analyze_mem(&[("main", "a :: func (x: u7, y: f80, z: u1) {}")], "main");
+    let session = analyze_mem(&[("main", "a :: func (x: u7, y: f128, z: u1) {}")], "main");
     assert!(!session.has_errors(), "{:#?}", session.diagnostics);
 
     let bad = analyze_mem(&[("main", "a :: func (x: i1) {}")], "main");
     assert!(bad.has_errors(), "`i1` should not resolve");
     let bad = analyze_mem(&[("main", "a :: func (x: f100) {}")], "main");
     assert!(bad.has_errors(), "`f100` should not resolve");
+    // x87's extended format is not one of the language's widths.
+    let bad = analyze_mem(&[("main", "a :: func (x: f80) {}")], "main");
+    assert!(bad.has_errors(), "`f80` should not resolve");
 }
 
 #[test]

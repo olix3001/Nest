@@ -511,7 +511,7 @@ fn lex_int(lex: &mut logos::Lexer<TokenKind>) -> Result<BigInt, LexErrorKind> {
 /// A float literal is `comptime_float` — conceptually `f128` — and collapses to
 /// `f64` when nothing in its use pins a width. [`wide`](FloatLit::wide) marks the
 /// literals for which that collapse would lose the value, so inference can
-/// reject them unless the use site really is an `f80` / `f128`.
+/// reject them unless the use site really is an `f128`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FloatLit {
     /// The value as an `f64` — infinite when the text overflows the format.

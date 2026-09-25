@@ -1886,17 +1886,17 @@ impl Inferer<'_> {
     /// A float literal is a `comptime_float` — an `f128` — and collapses to
     /// `f64` when nothing pins its width. That collapse is silent and lossless
     /// for ordinary literals; for these it is neither, so the use site has to
-    /// ask for an `f80` / `f128` explicitly.
+    /// ask for an `f128` explicitly.
     fn check_float_width(&mut self, node: NodeId, resolved: &Ty) {
         if self.ast.meta::<WideFloat>(node).is_none() {
             return;
         }
         let Ty::Float(w) = resolved else { return };
-        if matches!(w, FloatWidth::F80 | FloatWidth::F128) {
+        if matches!(w, FloatWidth::F128) {
             return;
         }
         let msg = format!(
-            "float literal is too large or too precise for `{}`; annotate it as `f80` or `f128`",
+            "float literal is too large or too precise for `{}`; annotate it as `f128`",
             resolved.display(self.defs)
         );
         self.report(node, msg);

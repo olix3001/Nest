@@ -731,7 +731,7 @@ impl Resolver<'_> {
             // 65535 is legal.
             'i' if width == 1 => return None,
             'i' | 'u' if (1..=65535).contains(&width) => {}
-            'f' if matches!(width, 16 | 32 | 64 | 80 | 128) => {}
+            'f' if matches!(width, 16 | 32 | 64 | 128) => {}
             _ => return None,
         }
         // Intern once: a second use of `i32` must resolve to the same def so the

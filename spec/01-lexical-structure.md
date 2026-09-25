@@ -145,7 +145,7 @@ narrows the way the machine does. `let y: u8 := 300` is an error and
 ```
 
 Has the type `comptime_float` until context assigns a concrete float type
-(`f16`/`f32`/`f64`/`f80`/`f128`); defaults to `f64`. The width it settles on must
+(`f16`/`f32`/`f64`/`f128`); defaults to `f64`. The width it settles on must
 be able to hold it: a literal that would overflow to infinity, or a non-zero one
 that would underflow to zero, is a compile error. Rounding is not — no decimal
 fraction is exactly a binary float — and a written `cast` may lose either way

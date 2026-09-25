@@ -56,7 +56,7 @@ pub struct SliceRest {
 
 /// Marks a float-literal node whose source text needs more than an `f64`: the
 /// `comptime_float` → `f64` collapse would lose it, so it types only as an
-/// explicit `f80` / `f128`. Attached by the parser, enforced by inference.
+/// explicit `f128`. Attached by the parser, enforced by inference.
 #[derive(Debug, Clone, Copy)]
 pub struct WideFloat;
 

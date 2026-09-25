@@ -596,9 +596,9 @@ would be almost all zeroes. The three values that are not numbers are `NaN`,
 `Display` is written **once, over a trait**: `core`'s `Float` names each float
 type's width through an associated type (`Bits :: type`, the unsigned integer of
 the same width), and `impl <T: Float> Display for T` covers `f16`, `f32` and
-`f64` together. `f80` and `f128` are not among them, and neither absence is a
-formatting gap — the backend has no 80-bit float type at all, and an `f128`
-cannot be arithmetic on the targets built today.
+`f64` together. `f128` has impls of its own — its digits do not fit through an
+`f64` — and writes the same shortest round-tripping text, found exactly by the
+runtime.
 
 ## 6.12 Ranges
 

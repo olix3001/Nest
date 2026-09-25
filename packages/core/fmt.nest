@@ -34,19 +34,12 @@
 //
 // ### What is not here
 //
-// **`f80` and `f128`.** Neither is a formatting gap. The backend has no 80-bit
-// float type at all — `no float type of 80 bits`, x87 being an x86 thing — so
-// an `f80` value cannot be held, let alone written; and an `f128` cannot be
-// arithmetic on this target, because the soft-float builtins it lowers to are
-// not in the C runtime. `f16`, `f32` and `f64` are all here, through one impl
-// written over the `Float` trait.
-//
 // **An owned string type.** `Buf` is the formatter's scratch space, not a
 // `String`: it grows, it is written into once, and `end` hands back a `str` view
 // of what was written. The growable, owned string belongs to `std` and will
 // carry its own `#lang` tag, exactly as `str.nest` says.
 
-{ make } :: import "mem.nest"
+{ make, transmute } :: import "mem.nest"
 c :: import "c.nest"
 { PTR_BITS } :: import "target.nest"
 { Attr, Member, TypeInfo, Variant, type_id, type_info, variant_of } :: import "reflect.nest"
@@ -283,10 +276,8 @@ impl Display for char {
 // handing a bounded parameter to another generic asks a question the compiler
 // only answers at monomorphization.
 //
-// `f80` and `f128` are **not** here, and neither absence is a formatting gap:
-// the backend has no 80-bit float type at all (`no float type of 80 bits`, x87
-// being an x86 thing), and an `f128` cannot be arithmetic on this target
-// because the soft-float builtins it lowers to are not in the C runtime.
+// `f128` is **not** one: its digits do not fit through an `f64`, so it has
+// impls of its own at the end of this file.
 @public Float :: trait {
     // How many bits wide this type is.
     BITS: u16
@@ -1065,3 +1056,46 @@ DOT: u8 :: 46
 OPEN: u8 :: 40
 CLOSE: u8 :: 41
 ANGLE: u8 :: 60
+
+// ===< f128 >===
+//
+// Not a `Float`: that trait finds its digits by way of an `f64`, and an `f128`
+// has more of them than an `f64` can hold. Its digits come from the runtime
+// instead, which finds them exactly (`nest_f128_format`, beside the `f128`
+// arithmetic), and in the layout the rest of this file uses — so an `f128`
+// prints the way every other float does.
+
+extern("c") {
+    nest_f128_format :: func (bits: u128, precision: i32, out: c.ptr.<c.uchar>, cap: c.size_t) -> c.size_t
+}
+
+// `v`'s text, straight into the buffer — shortest when `precision` is
+// negative, to that many places otherwise. The runtime answers the length it
+// needed whether or not it fitted, as `snprintf` does, so one more `reserve`
+// is always enough.
+write_f128 :: func (out: *mut Buf, v: f128, precision: i32) -> void {
+    const bits: u128 := transmute.<u128>(v)
+    out.reserve(SCRATCH)
+    let mut room: usize := out.data.len() - out.len
+    let mut n: usize := cast.<usize>(nest_f128_format(bits, precision, c.from_ptr(&mut out.data[out.len]), room))
+    if n > room {
+        out.reserve(n)
+        room = out.data.len() - out.len
+        n = cast.<usize>(nest_f128_format(bits, precision, c.from_ptr(&mut out.data[out.len]), room))
+    }
+    out.len = out.len + n
+}
+
+impl Display for f128 {
+    display :: func (self: Self, out: *mut Buf) -> void { write_f128(out, self, NO_PRECISION) }
+}
+
+impl Debug for f128 {
+    debug :: func (self: *Self, out: *mut Buf) -> void { write_f128(out, self.*, NO_PRECISION) }
+}
+
+impl f128 {
+    with_precision :: func (self: Self, out: *mut Buf, digits: usize) -> void {
+        write_f128(out, self, cast.<i32>(digits))
+    }
+}

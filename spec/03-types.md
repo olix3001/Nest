@@ -12,7 +12,7 @@ in `::` constants, and inspected by reflection (planned; see
 Signed integers:   i8  i16  i32  i64   iN    (arbitrary width N in 2..=65535; i1 is not a type)
 Unsigned integers: u8  u16  u32  u64   uN    (arbitrary width N in 1..=65535; u1 is bool)
 Pointer-sized:     isize usize                (signed / unsigned integer wide enough to hold any address or index)
-Floating point:    f16  f32  f64  f80  f128   (exactly these widths; there is no bare `float`)
+Floating point:    f16  f32  f64  f128        (exactly these widths; there is no bare `float`)
 Boolean:           bool   (an alias for u1)
 Text:              char   (Unicode scalar, 32-bit)   str      (UTF-8, borrowed — see below)
 Unit:              void   (the empty tuple; a function with no `-> T` returns void)
@@ -33,7 +33,10 @@ u8    == uint.<8>
 `i24` and `u4096` are equally legal — a width `N` up to `65535`. `i1` is **not** a
 type; `u1` is spelled `bool`, and `uint.<1>` is the same type as `bool` rather
 than a second one-bit integer. Floats exist only at the widths
-`f16`/`f32`/`f64`/`f80`/`f128`.
+`f16`/`f32`/`f64`/`f128`: the IEEE-754 binary formats. There is no x87 80-bit
+float — it exists on one architecture only — and `f128` is the same type on every
+target: where the machine has no quad-precision arithmetic, the runtime supplies
+it in software.
 
 A width is a `u16` because `65535` is the largest legal one, and it is always a
 compile-time number: any constant that fits converts into one implicitly, and one

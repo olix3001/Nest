@@ -79,7 +79,7 @@ pub fn default_std_path() -> String {
 ///
 /// The width-parameterized *spellings* are **not** listed here: the signed /
 /// unsigned integers `i<N>` / `u<N>` (arbitrary `N` in `1..=65535`, `i1`
-/// excluded, `u1` an alias of `bool`) and the floats `f16`/`f32`/`f64`/`f80`/
+/// excluded, `u1` an alias of `bool`) and the floats `f16`/`f32`/`f64`/
 /// `f128`. There are far too many to pre-register, so the resolver synthesizes
 /// each on first use and interns it into the builtins scope (see
 /// `sema::resolve`). `isize`/`usize` are the only pointer-sized integers; there

@@ -13,7 +13,7 @@ page.
 Signed integers:   i8  i16  i32  i64   iN    (arbitrary width N in 2..=65535)
 Unsigned integers: u8  u16  u32  u64   uN    (arbitrary width N in 1..=65535; u1 is bool)
 Pointer-sized:     isize usize
-Floating point:    f16  f32  f64  f80  f128  (exactly these widths)
+Floating point:    f16  f32  f64  f128  (exactly these widths)
 Boolean:           bool   (an alias for u1)
 Text:              char   (Unicode scalar, 32-bit)   str   (UTF-8, borrowed)
 Unit:              void   (the empty tuple; a function with no `-> T` returns void)

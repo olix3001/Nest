@@ -16,7 +16,7 @@
 //! `comptime_float` collapse of §1: a float literal *is* a `comptime_float`,
 //! i.e. `f128`, but collapses to `f64` when nothing pins its width — a literal
 //! too big or too precise to survive that collapse is an error unless its use
-//! really is an `f80` / `f128`). A string literal gets the same treatment with
+//! really is an `f128`). A string literal gets the same treatment with
 //! kind [`TyVarKind::Str`]: it is a `comptime_str` that becomes `str`, `[]u8`
 //! or `[]char` depending on its use site, and defaults to `str`. A general
 //! variable that is never solved is a "type annotations needed" error.
@@ -30,13 +30,12 @@ use crate::parser::ast::NodeId;
 
 use super::def::DefId;
 
-/// The five legal float widths (§3.1).
+/// The four legal float widths (§3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FloatWidth {
     F16,
     F32,
     F64,
-    F80,
     F128,
 }
 
@@ -628,7 +627,6 @@ impl Ty {
                 FloatWidth::F16 => "f16",
                 FloatWidth::F32 => "f32",
                 FloatWidth::F64 => "f64",
-                FloatWidth::F80 => "f80",
                 FloatWidth::F128 => "f128",
             }
             .to_string(),
@@ -1777,8 +1775,8 @@ pub fn int_fits(value: &BigInt, signed: bool, bits: u32) -> bool {
 /// the written number at all, and where silently continuing would make the
 /// program mean something the source never said.
 ///
-/// `f16` is range-checked against its extremes rather than rounded, and `f80` /
-/// `f128` accept whatever an `f64` already holds: the compiler's own storage for
+/// `f16` is range-checked against its extremes rather than rounded, and
+/// `f128` accepts whatever an `f64` already holds: the compiler's own storage for
 /// a compile-time float is an `f64` (see [`crate::parser::ast::Lit::Float`]), so
 /// a literal needing more than that is caught earlier, by `WideFloat`.
 pub fn float_fits(value: f64, width: FloatWidth) -> bool {
@@ -1797,7 +1795,7 @@ pub fn float_fits(value: f64, width: FloatWidth) -> bool {
         }
         // The largest finite `f16` and the smallest positive subnormal one.
         FloatWidth::F16 => value.abs() <= F16_MAX && value.abs() >= F16_MIN_SUBNORMAL,
-        FloatWidth::F64 | FloatWidth::F80 | FloatWidth::F128 => true,
+        FloatWidth::F64 | FloatWidth::F128 => true,
     }
 }
 
@@ -1883,7 +1881,6 @@ pub fn primitive_ty(name: &str) -> Option<Ty> {
             16 => Some(Ty::Float(FloatWidth::F16)),
             32 => Some(Ty::Float(FloatWidth::F32)),
             64 => Some(Ty::Float(FloatWidth::F64)),
-            80 => Some(Ty::Float(FloatWidth::F80)),
             128 => Some(Ty::Float(FloatWidth::F128)),
             _ => None,
         },
@@ -2014,7 +2011,7 @@ mod tests {
         // `core` (§3.1), reached by name through the prelude like `str`.
         assert_eq!(primitive_ty("usize"), None);
         assert_eq!(primitive_ty("isize"), None);
-        assert_eq!(primitive_ty("f80"), Some(Ty::Float(FloatWidth::F80)));
+        assert_eq!(primitive_ty("f80"), None);
         assert_eq!(primitive_ty("u1"), Some(Ty::Bool));
         assert_eq!(primitive_ty("i1"), None);
         assert_eq!(primitive_ty("f100"), None);

@@ -386,3 +386,745 @@ void nest_guard_fail(void) {
         longjmp(nest_guard_buf, 1);
     }
 }
+
+/* ===< f128 >===
+ *
+ * IEEE-754 binary128 in software, on every target.
+ *
+ * LLVM lowers `fp128` arithmetic to libcalls (`__addtf3`, `__lttf2`, ...), and
+ * whether those exist is the platform's business: glibc's libgcc has them, and
+ * macOS on arm64 does not — its `long double` is a `double`, so nothing there
+ * ever needed one. And they cannot be written here in C for such a target,
+ * because they take their arguments in float registers and C has no type that
+ * is passed like an `fp128` on it.
+ *
+ * So the compiler does not emit them. Every `f128` operation is lowered to a
+ * call to one of the functions below, handing the value's **bits** as an
+ * `i128`, which every target passes the same way C's `unsigned __int128` is.
+ * The format: 1 sign bit, 15 exponent bits (bias 16383), 112 fraction bits.
+ *
+ * Rounding is to nearest, ties to even, throughout. A NaN that comes out is the
+ * quiet NaN; one that goes in comes back quieted. */
+
+typedef unsigned __int128 nest_u128;
+typedef __int128 nest_i128;
+
+#define Q_SIG_BITS 112
+#define Q_EXP_MAX 0x7fff
+#define Q_BIAS 16383
+#define Q_IMPLICIT ((nest_u128)1 << Q_SIG_BITS)
+#define Q_SIG_MASK (Q_IMPLICIT - 1)
+#define Q_SIGN ((nest_u128)1 << 127)
+#define Q_ABS_MASK (Q_SIGN - 1)
+#define Q_INF ((nest_u128)Q_EXP_MAX << Q_SIG_BITS)
+#define Q_QUIET ((nest_u128)1 << (Q_SIG_BITS - 1))
+#define Q_NAN (Q_INF | Q_QUIET)
+
+static int q_clz(nest_u128 x) {
+    uint64_t hi = (uint64_t)(x >> 64);
+    if (hi != 0) {
+        return __builtin_clzll(hi);
+    }
+    uint64_t lo = (uint64_t)x;
+    return lo == 0 ? 128 : 64 + __builtin_clzll(lo);
+}
+
+/* `x >> n`, with every bit shifted out folded into the lowest bit — the
+ * sticky bit rounding reads. */
+static nest_u128 q_shr_sticky(nest_u128 x, int n) {
+    if (n <= 0) {
+        return x;
+    }
+    if (n >= 128) {
+        return x != 0;
+    }
+    return (x >> n) | ((x << (128 - n)) != 0);
+}
+
+/* A subnormal's significand, shifted up until its leading bit is where the
+ * implicit bit of a normal one is; answers the exponent that makes up for it. */
+static int q_normalize(nest_u128 *sig) {
+    int shift = q_clz(*sig) - q_clz(Q_IMPLICIT);
+    *sig <<= shift;
+    return 1 - shift;
+}
+
+/* Round and pack. `sig` carries the implicit bit at bit 115 and three more
+ * below the fraction — guard, round, sticky — and `exp` is the biased exponent
+ * it would have as a normal number. */
+static nest_u128 q_round_pack(nest_u128 sign, int exp, nest_u128 sig) {
+    if (exp >= Q_EXP_MAX) {
+        return sign | Q_INF;
+    }
+    if (exp <= 0) {
+        sig = q_shr_sticky(sig, 1 - exp);
+        exp = 0;
+    }
+    int grs = (int)(sig & 7);
+    nest_u128 r = ((sig >> 3) & Q_SIG_MASK) | ((nest_u128)exp << Q_SIG_BITS) | sign;
+    /* A carry out of the fraction lands in the exponent, which is right: a
+     * subnormal becomes the least normal, and the greatest finite value
+     * becomes infinity. */
+    if (grs > 4 || (grs == 4 && (r & 1))) {
+        r += 1;
+    }
+    return r;
+}
+
+/* Split a finite, nonzero value into its biased exponent and a significand
+ * with the implicit bit at bit 112. */
+static int q_unpack(nest_u128 x, nest_u128 *sig) {
+    int exp = (int)((x >> Q_SIG_BITS) & Q_EXP_MAX);
+    *sig = x & Q_SIG_MASK;
+    if (exp == 0) {
+        return q_normalize(sig);
+    }
+    *sig |= Q_IMPLICIT;
+    return exp;
+}
+
+static nest_u128 q_add(nest_u128 a, nest_u128 b) {
+    nest_u128 a_abs = a & Q_ABS_MASK;
+    nest_u128 b_abs = b & Q_ABS_MASK;
+    if (a_abs > Q_INF || b_abs > Q_INF) {
+        return Q_NAN;
+    }
+    if (a_abs == Q_INF) {
+        return (b_abs == Q_INF && ((a ^ b) & Q_SIGN)) ? Q_NAN : a;
+    }
+    if (b_abs == Q_INF) {
+        return b;
+    }
+    if (a_abs == 0) {
+        return b_abs == 0 ? (a & b) : b;
+    }
+    if (b_abs == 0) {
+        return a;
+    }
+    if (b_abs > a_abs) {
+        nest_u128 t = a;
+        a = b;
+        b = t;
+    }
+    nest_u128 a_sig, b_sig;
+    int a_exp = q_unpack(a, &a_sig);
+    int b_exp = q_unpack(b, &b_sig);
+    nest_u128 sign = a & Q_SIGN;
+    a_sig <<= 3;
+    b_sig = q_shr_sticky(b_sig << 3, a_exp - b_exp);
+    if ((a ^ b) & Q_SIGN) {
+        a_sig -= b_sig;
+        if (a_sig == 0) {
+            return 0;
+        }
+        int shift = q_clz(a_sig) - q_clz(Q_IMPLICIT << 3);
+        if (shift > 0) {
+            a_sig <<= shift;
+            a_exp -= shift;
+        }
+    } else {
+        a_sig += b_sig;
+        if (a_sig & (Q_IMPLICIT << 4)) {
+            a_sig = q_shr_sticky(a_sig, 1);
+            a_exp += 1;
+        }
+    }
+    return q_round_pack(sign, a_exp, a_sig);
+}
+
+static nest_u128 q_mul(nest_u128 a, nest_u128 b) {
+    nest_u128 sign = (a ^ b) & Q_SIGN;
+    nest_u128 a_abs = a & Q_ABS_MASK;
+    nest_u128 b_abs = b & Q_ABS_MASK;
+    if (a_abs > Q_INF || b_abs > Q_INF) {
+        return Q_NAN;
+    }
+    if (a_abs == Q_INF || b_abs == Q_INF) {
+        return (a_abs == 0 || b_abs == 0) ? Q_NAN : (sign | Q_INF);
+    }
+    if (a_abs == 0 || b_abs == 0) {
+        return sign;
+    }
+    nest_u128 a_sig, b_sig;
+    int exp = q_unpack(a, &a_sig) + q_unpack(b, &b_sig) - Q_BIAS;
+    /* The 226-bit product, as `hi:lo`. */
+    uint64_t a0 = (uint64_t)a_sig, a1 = (uint64_t)(a_sig >> 64);
+    uint64_t b0 = (uint64_t)b_sig, b1 = (uint64_t)(b_sig >> 64);
+    nest_u128 p00 = (nest_u128)a0 * b0, p01 = (nest_u128)a0 * b1;
+    nest_u128 p10 = (nest_u128)a1 * b0, p11 = (nest_u128)a1 * b1;
+    nest_u128 mid = (p00 >> 64) + (uint64_t)p01 + (uint64_t)p10;
+    nest_u128 lo = (mid << 64) | (uint64_t)p00;
+    nest_u128 hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64);
+    /* The leading bit is 224 or 225; bring it to 115, folding the rest in. */
+    int top = (hi >> (225 - 128)) & 1 ? 225 : 224;
+    exp += top - 224;
+    int shift = top - 115;
+    nest_u128 sticky = (lo << (128 - shift)) != 0;
+    nest_u128 sig = (hi << (128 - shift)) | (lo >> shift) | sticky;
+    return q_round_pack(sign, exp, sig);
+}
+
+static nest_u128 q_div(nest_u128 a, nest_u128 b) {
+    nest_u128 sign = (a ^ b) & Q_SIGN;
+    nest_u128 a_abs = a & Q_ABS_MASK;
+    nest_u128 b_abs = b & Q_ABS_MASK;
+    if (a_abs > Q_INF || b_abs > Q_INF) {
+        return Q_NAN;
+    }
+    if (a_abs == Q_INF) {
+        return b_abs == Q_INF ? Q_NAN : (sign | Q_INF);
+    }
+    if (b_abs == Q_INF) {
+        return sign;
+    }
+    if (b_abs == 0) {
+        return a_abs == 0 ? Q_NAN : (sign | Q_INF);
+    }
+    if (a_abs == 0) {
+        return sign;
+    }
+    nest_u128 a_sig, b_sig;
+    int exp = q_unpack(a, &a_sig) - q_unpack(b, &b_sig) + Q_BIAS;
+    if (a_sig < b_sig) {
+        a_sig <<= 1;
+        exp -= 1;
+    }
+    /* Long division, one quotient bit at a time: 113 bits and two more. */
+    nest_u128 rem = a_sig;
+    nest_u128 quo = 0;
+    for (int i = 0; i < 115; i++) {
+        quo <<= 1;
+        if (rem >= b_sig) {
+            rem -= b_sig;
+            quo |= 1;
+        }
+        rem <<= 1;
+    }
+    return q_round_pack(sign, exp, (quo << 1) | (rem != 0));
+}
+
+/* `fmod`: the remainder whose sign is the dividend's, which is exact. */
+static nest_u128 q_rem(nest_u128 a, nest_u128 b) {
+    nest_u128 a_abs = a & Q_ABS_MASK;
+    nest_u128 b_abs = b & Q_ABS_MASK;
+    if (a_abs >= Q_INF || b_abs > Q_INF || b_abs == 0) {
+        return Q_NAN;
+    }
+    if (b_abs == Q_INF || a_abs < b_abs) {
+        return a;
+    }
+    nest_u128 sign = a & Q_SIGN;
+    nest_u128 r, d;
+    int a_exp = q_unpack(a, &r);
+    int b_exp = q_unpack(b, &d);
+    for (int e = a_exp; e > b_exp; e--) {
+        if (r >= d) {
+            r -= d;
+        }
+        r <<= 1;
+    }
+    if (r >= d) {
+        r -= d;
+    }
+    if (r == 0) {
+        return sign;
+    }
+    int exp = b_exp;
+    while (r < Q_IMPLICIT) {
+        r <<= 1;
+        exp -= 1;
+    }
+    if (exp <= 0) {
+        r >>= 1 - exp;
+        exp = 0;
+    }
+    return sign | ((nest_u128)exp << Q_SIG_BITS) | (r & Q_SIG_MASK);
+}
+
+/* Order `a` against `b`: -1, 0 or 1, and 2 when either is a NaN. */
+static int q_cmp(nest_u128 a, nest_u128 b) {
+    nest_u128 a_abs = a & Q_ABS_MASK;
+    nest_u128 b_abs = b & Q_ABS_MASK;
+    if (a_abs > Q_INF || b_abs > Q_INF) {
+        return 2;
+    }
+    if ((a_abs | b_abs) == 0) {
+        return 0;
+    }
+    nest_i128 ai = (nest_i128)a;
+    nest_i128 bi = (nest_i128)b;
+    /* Sign and magnitude: as integers, the positives order themselves, and the
+     * negatives order backwards. */
+    if ((ai & bi) >= 0) {
+        return ai < bi ? -1 : ai == bi ? 0 : 1;
+    }
+    return ai > bi ? -1 : ai == bi ? 0 : 1;
+}
+
+/* A `double` (so also an `f32` or an `f16`, which widen to one exactly),
+ * widened. Exact. */
+static nest_u128 q_from_f64(double v) {
+    uint64_t x;
+    memcpy(&x, &v, sizeof x);
+    nest_u128 sign = (nest_u128)(x >> 63) << 127;
+    int exp = (int)((x >> 52) & 0x7ff);
+    nest_u128 frac = x & ((1ULL << 52) - 1);
+    if (exp == 0x7ff) {
+        return sign | (frac ? Q_NAN : Q_INF);
+    }
+    if (exp == 0) {
+        if (frac == 0) {
+            return sign;
+        }
+        int shift = q_clz(frac) - q_clz((nest_u128)1 << 52);
+        frac = (frac << shift) & ((1ULL << 52) - 1);
+        exp = 1 - shift;
+    }
+    return sign | ((nest_u128)(exp - 1023 + Q_BIAS) << Q_SIG_BITS) | (frac << (Q_SIG_BITS - 52));
+}
+
+/* Narrowed to the binary format of `e` exponent and `m` fraction bits,
+ * rounding once: the bits of an `f64`, `f32` or `f16`. */
+static uint64_t q_narrow(nest_u128 x, int e, int m) {
+    uint64_t sign = (uint64_t)(x >> 127) << (e + m);
+    int dst_max = (1 << e) - 1;
+    int exp = (int)((x >> Q_SIG_BITS) & Q_EXP_MAX);
+    nest_u128 frac = x & Q_SIG_MASK;
+    if (exp == Q_EXP_MAX) {
+        uint64_t nan = frac ? ((uint64_t)1 << (m - 1)) : 0;
+        return sign | ((uint64_t)dst_max << m) | nan;
+    }
+    if (exp == 0 && frac == 0) {
+        return sign;
+    }
+    int dst_exp = exp - Q_BIAS + (dst_max >> 1);
+    nest_u128 sig = frac | (exp ? Q_IMPLICIT : 0);
+    if (dst_exp >= dst_max) {
+        return sign | ((uint64_t)dst_max << m);
+    }
+    int shift = Q_SIG_BITS - m - 3;
+    if (dst_exp <= 0) {
+        shift += 1 - dst_exp;
+        dst_exp = 0;
+    }
+    nest_u128 s3 = q_shr_sticky(sig, shift);
+    int grs = (int)(s3 & 7);
+    uint64_t r = (uint64_t)((s3 >> 3) & (((nest_u128)1 << m) - 1));
+    r |= (uint64_t)dst_exp << m;
+    if (grs > 4 || (grs == 4 && (r & 1))) {
+        r += 1;
+    }
+    return sign | r;
+}
+
+static nest_u128 q_from_u128(nest_u128 v, nest_u128 sign) {
+    if (v == 0) {
+        return sign;
+    }
+    int msb = 127 - q_clz(v);
+    nest_u128 sig = msb > 115 ? q_shr_sticky(v, msb - 115) : v << (115 - msb);
+    return q_round_pack(sign, msb + Q_BIAS, sig);
+}
+
+/* Toward zero, saturating at the ends of `u128`/`i128`; a NaN is zero. */
+static nest_u128 q_to_magnitude(nest_u128 x, int limit, int *over) {
+    int exp = (int)((x >> Q_SIG_BITS) & Q_EXP_MAX);
+    *over = 0;
+    if (exp == Q_EXP_MAX && (x & Q_SIG_MASK)) {
+        return 0;
+    }
+    if (exp < Q_BIAS) {
+        return 0;
+    }
+    int e = exp - Q_BIAS;
+    if (e >= limit) {
+        *over = 1;
+        return 0;
+    }
+    nest_u128 sig = (x & Q_SIG_MASK) | Q_IMPLICIT;
+    return e >= Q_SIG_BITS ? sig << (e - Q_SIG_BITS) : sig >> (Q_SIG_BITS - e);
+}
+
+nest_u128 nest_f128_add(nest_u128 a, nest_u128 b) { return q_add(a, b); }
+nest_u128 nest_f128_sub(nest_u128 a, nest_u128 b) { return q_add(a, b ^ Q_SIGN); }
+nest_u128 nest_f128_mul(nest_u128 a, nest_u128 b) { return q_mul(a, b); }
+nest_u128 nest_f128_div(nest_u128 a, nest_u128 b) { return q_div(a, b); }
+nest_u128 nest_f128_rem(nest_u128 a, nest_u128 b) { return q_rem(a, b); }
+int32_t nest_f128_cmp(nest_u128 a, nest_u128 b) { return q_cmp(a, b); }
+
+nest_u128 nest_f128_from_f64(double v) { return q_from_f64(v); }
+double nest_f128_to_f64(nest_u128 x) {
+    uint64_t bits = q_narrow(x, 11, 52);
+    double d;
+    memcpy(&d, &bits, sizeof d);
+    return d;
+}
+uint32_t nest_f128_to_f32_bits(nest_u128 x) { return (uint32_t)q_narrow(x, 8, 23); }
+uint16_t nest_f128_to_f16_bits(nest_u128 x) { return (uint16_t)q_narrow(x, 5, 10); }
+
+nest_u128 nest_f128_from_u128(nest_u128 v) { return q_from_u128(v, 0); }
+nest_u128 nest_f128_from_i128(nest_i128 v) {
+    return v < 0 ? q_from_u128((nest_u128)0 - (nest_u128)v, Q_SIGN) : q_from_u128((nest_u128)v, 0);
+}
+nest_u128 nest_f128_to_u128(nest_u128 x) {
+    if (x & Q_SIGN) {
+        return 0;
+    }
+    int over;
+    nest_u128 m = q_to_magnitude(x, 128, &over);
+    return over ? ~(nest_u128)0 : m;
+}
+nest_i128 nest_f128_to_i128(nest_u128 x) {
+    int over;
+    nest_u128 m = q_to_magnitude(x, 127, &over);
+    nest_u128 max = ((nest_u128)1 << 127) - 1;
+    if (x & Q_SIGN) {
+        /* -2^127 is the one magnitude past `max` that still fits. */
+        return over ? (nest_i128)((nest_u128)1 << 127) : -(nest_i128)m;
+    }
+    return over ? (nest_i128)max : (nest_i128)m;
+}
+
+/* ===< Writing an f128 in decimal >===
+ *
+ * `f64`'s `Display` asks `snprintf` for its digits; nothing in C writes a
+ * binary128, so its digits are found here, exactly, with Steele & White's
+ * digit generation over big integers (Dragon4, in Burger & Dybvig's form): the
+ * value is `r / s`, each digit is how many `s` fit in `10 r`, and the shortest
+ * text is the first one that lies within half an ulp of the value on either
+ * side. The layout — positional between `1e-5` and `1e17`, `1.5e7` outside
+ * them, `NaN`, `inf` — is `core/fmt.nest`'s, so an `f128` prints the way every
+ * other float does. */
+
+/* Enough for 2^16384 times 10^4966, the largest either side ever gets.
+ *
+ * The working numbers are `static`: a few kilobytes each is more than a stack
+ * frame should hold, and a Nest program formats on one thread. */
+#define BIG_WORDS 1200
+
+typedef struct {
+    uint32_t w[BIG_WORDS];
+    int n; /* words in use; w[n-1] != 0 unless n == 0 */
+} Big;
+
+static void big_trim(Big *a) {
+    while (a->n > 0 && a->w[a->n - 1] == 0) {
+        a->n--;
+    }
+}
+
+static void big_set(Big *a, nest_u128 v) {
+    a->n = 0;
+    while (v != 0) {
+        a->w[a->n++] = (uint32_t)v;
+        v >>= 32;
+    }
+}
+
+static void big_shl(Big *a, int bits) {
+    if (a->n == 0 || bits == 0) {
+        return;
+    }
+    int words = bits / 32;
+    int rest = bits % 32;
+    int n = a->n + words + 1;
+    for (int i = n - 1; i >= 0; i--) {
+        int src = i - words;
+        uint64_t hi = (src >= 0 && src < a->n) ? a->w[src] : 0;
+        uint64_t lo = (src - 1 >= 0 && src - 1 < a->n) ? a->w[src - 1] : 0;
+        a->w[i] = rest ? (uint32_t)((hi << rest) | (lo >> (32 - rest))) : (uint32_t)hi;
+    }
+    a->n = n;
+    big_trim(a);
+}
+
+static void big_mul_small(Big *a, uint32_t m) {
+    uint64_t carry = 0;
+    for (int i = 0; i < a->n; i++) {
+        uint64_t p = (uint64_t)a->w[i] * m + carry;
+        a->w[i] = (uint32_t)p;
+        carry = p >> 32;
+    }
+    if (carry) {
+        a->w[a->n++] = (uint32_t)carry;
+    }
+}
+
+static void big_pow10(Big *a, int k) {
+    for (; k >= 9; k -= 9) {
+        big_mul_small(a, 1000000000u);
+    }
+    static const uint32_t small[] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000};
+    big_mul_small(a, small[k]);
+}
+
+static int big_cmp(const Big *a, const Big *b) {
+    if (a->n != b->n) {
+        return a->n < b->n ? -1 : 1;
+    }
+    for (int i = a->n - 1; i >= 0; i--) {
+        if (a->w[i] != b->w[i]) {
+            return a->w[i] < b->w[i] ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+/* `a + b` compared against `c`, without building the sum anywhere. */
+static int big_cmp_sum(const Big *a, const Big *b, const Big *c) {
+    static Big t;
+    uint64_t carry = 0;
+    int n = a->n > b->n ? a->n : b->n;
+    for (int i = 0; i < n; i++) {
+        uint64_t s = carry + (i < a->n ? a->w[i] : 0) + (i < b->n ? b->w[i] : 0);
+        t.w[i] = (uint32_t)s;
+        carry = s >> 32;
+    }
+    t.n = n;
+    if (carry) {
+        t.w[t.n++] = (uint32_t)carry;
+    }
+    return big_cmp(&t, c);
+}
+
+static void big_sub(Big *a, const Big *b) {
+    int64_t borrow = 0;
+    for (int i = 0; i < a->n; i++) {
+        int64_t d = (int64_t)a->w[i] - (i < b->n ? b->w[i] : 0) - borrow;
+        borrow = d < 0;
+        a->w[i] = (uint32_t)(d + (borrow << 32));
+    }
+    big_trim(a);
+}
+
+/* How many `s` fit in `r` — never ten, by construction — leaving `r` the rest. */
+static int big_digit(Big *r, const Big *s) {
+    int d = 0;
+    while (big_cmp(r, s) >= 0) {
+        big_sub(r, s);
+        d++;
+    }
+    return d;
+}
+
+/* The digits of `x` (finite, nonzero, sign ignored) and the decimal exponent
+ * `k` that makes the value `0.DIGITS × 10^k`.
+ *
+ * `fixed < 0`: the shortest digits that read back as `x`. `fixed >= 0`: every
+ * digit up to `fixed` places after the point, rounded half to even on the exact
+ * value, as `%.*f` does — which may be none at all, when the value is too small
+ * to reach them (answered as zero digits and `k` standing where they would go).
+ * Answers how many digits were written into `digits`. */
+static int q_digits(nest_u128 x, int fixed, char *digits, int cap, int *k_out) {
+    static Big r, s, mp, mm;
+    int exp = (int)((x >> Q_SIG_BITS) & Q_EXP_MAX);
+    nest_u128 f = x & Q_SIG_MASK;
+    int e;
+    if (exp == 0) {
+        e = 1 - Q_BIAS - Q_SIG_BITS;
+    } else {
+        f |= Q_IMPLICIT;
+        e = exp - Q_BIAS - Q_SIG_BITS;
+    }
+    /* The gap to the next value down is half the one up when `f` is the
+     * least significand of its binade: `r`, `s` and both margins are doubled
+     * so that the smaller half-gap is still a whole number. */
+    int uneven = exp > 1 && f == Q_IMPLICIT;
+    big_set(&r, f);
+    big_set(&s, 1);
+    big_set(&mp, 1);
+    big_set(&mm, 1);
+    big_shl(&r, 1 + uneven);
+    big_shl(&s, 1 + uneven);
+    big_shl(&mp, uneven);
+    if (e >= 0) {
+        big_shl(&r, e);
+        big_shl(&mp, e);
+        big_shl(&mm, e);
+    } else {
+        big_shl(&s, -e);
+    }
+    /* `k`, estimated from the bit length and then corrected. */
+    int bits = 128 - q_clz(f);
+    double estimate = (double)(e + bits - 1) * 0.30102999566398119521 - 1e-10;
+    int k = (int)estimate;
+    if ((double)k < estimate) {
+        k++;
+    }
+    if (k >= 0) {
+        big_pow10(&s, k);
+    } else {
+        big_pow10(&r, -k);
+        big_pow10(&mp, -k);
+        big_pow10(&mm, -k);
+    }
+    int even = (int)(f & 1) == 0;
+    /* The value (plus its upper margin, in the shortest case) must be below
+     * `s`, so that the first digit is the first of the value's own. */
+    for (;;) {
+        int c = fixed < 0 ? big_cmp_sum(&r, &mp, &s) : big_cmp(&r, &s);
+        if (c > 0 || (c == 0 && (fixed >= 0 || even))) {
+            big_mul_small(&s, 10);
+            k++;
+        } else {
+            break;
+        }
+    }
+    int n = 0;
+    if (fixed >= 0) {
+        int want = k + fixed; /* digits before the rounding point */
+        for (int i = 0; i < want && n < cap; i++) {
+            big_mul_small(&r, 10);
+            digits[n++] = (char)('0' + big_digit(&r, &s));
+        }
+        if (want < 0) {
+            *k_out = k;
+            return 0;
+        }
+        /* Round on what is left, `r / s` of one unit in the last place. */
+        big_shl(&r, 1);
+        int c = big_cmp(&r, &s);
+        int up = c > 0 || (c == 0 && (n == 0 ? 0 : (digits[n - 1] - '0') & 1));
+        if (want == 0) {
+            /* No digit reached: the value rounds to zero or to one unit. */
+            up = c > 0;
+            if (up) {
+                digits[n++] = '1';
+                k++;
+            }
+            *k_out = k;
+            return n;
+        }
+        if (up) {
+            int i = n - 1;
+            while (i >= 0 && digits[i] == '9') {
+                digits[i--] = '0';
+            }
+            if (i >= 0) {
+                digits[i]++;
+            } else {
+                memmove(digits + 1, digits, (size_t)(n < cap ? n : cap - 1));
+                digits[0] = '1';
+                if (n < cap) {
+                    n++;
+                }
+                k++;
+            }
+        }
+        *k_out = k;
+        return n;
+    }
+    for (;;) {
+        big_mul_small(&r, 10);
+        big_mul_small(&mp, 10);
+        big_mul_small(&mm, 10);
+        int d = big_digit(&r, &s);
+        int c1 = big_cmp(&r, &mm);
+        int low = c1 < 0 || (c1 == 0 && even);
+        int c2 = big_cmp_sum(&r, &mp, &s);
+        int high = c2 > 0 || (c2 == 0 && even);
+        if (!low && !high) {
+            digits[n++] = (char)('0' + d);
+            continue;
+        }
+        if (low && high) {
+            big_shl(&r, 1);
+            int c = big_cmp(&r, &s);
+            if (c > 0 || (c == 0 && (d & 1))) {
+                d++;
+            }
+        } else if (high) {
+            d++;
+        }
+        digits[n++] = (char)('0' + d);
+        break;
+    }
+    *k_out = k;
+    return n;
+}
+
+/* Append `c` to `out` if there is room; count it either way. */
+#define PUT(c)                   \
+    do {                         \
+        if (len < cap) {         \
+            out[len] = (c);      \
+        }                        \
+        len++;                   \
+    } while (0)
+
+/* `x` as `core/fmt.nest` writes a float: the shortest text that reads back
+ * as it when `precision` is negative, and that many places after the point
+ * otherwise. Writes at most `cap` bytes and answers the length the whole text
+ * has — `snprintf`'s contract, so the caller can make room and ask again. */
+size_t nest_f128_format(nest_u128 x, int32_t precision, uint8_t *out, size_t cap) {
+    static char digits[20000];
+    size_t len = 0;
+    nest_u128 abs = x & Q_ABS_MASK;
+    if (abs > Q_INF) {
+        const char *t = "NaN";
+        for (; *t; t++) PUT(*t);
+        return len;
+    }
+    if (x & Q_SIGN) {
+        PUT('-');
+    }
+    if (abs == Q_INF) {
+        const char *t = "inf";
+        for (; *t; t++) PUT(*t);
+        return len;
+    }
+    int k = 1;
+    int n = 0;
+    if (abs != 0) {
+        n = q_digits(abs, precision, digits, (int)sizeof digits, &k);
+    }
+    if (precision >= 0) {
+        /* Positional, `precision` places: the integer part is the digits
+         * before `k`, a zero if there are none. */
+        if (k <= 0 || n == 0) {
+            PUT('0');
+        } else {
+            for (int i = 0; i < k; i++) PUT(i < n ? digits[i] : '0');
+        }
+        if (precision > 0) {
+            PUT('.');
+            for (int i = 0; i < precision; i++) {
+                int at = k + i;
+                PUT(at >= 0 && at < n ? digits[at] : '0');
+            }
+        }
+        return len;
+    }
+    if (n == 0) {
+        PUT('0');
+        return len;
+    }
+    int e = k - 1; /* the exponent scientific notation would write */
+    if (e >= -5 && e < 17) {
+        if (e >= 0) {
+            for (int i = 0; i <= e; i++) PUT(i < n ? digits[i] : '0');
+            if (n > e + 1) {
+                PUT('.');
+                for (int i = e + 1; i < n; i++) PUT(digits[i]);
+            }
+        } else {
+            PUT('0');
+            PUT('.');
+            for (int i = 0; i < -e - 1; i++) PUT('0');
+            for (int i = 0; i < n; i++) PUT(digits[i]);
+        }
+        return len;
+    }
+    PUT(digits[0]);
+    if (n > 1) {
+        PUT('.');
+        for (int i = 1; i < n; i++) PUT(digits[i]);
+    }
+    PUT('e');
+    char ebuf[8];
+    int en = snprintf(ebuf, sizeof ebuf, "%d", e);
+    for (int i = 0; i < en; i++) PUT(ebuf[i]);
+    return len;
+}
+
+#undef PUT

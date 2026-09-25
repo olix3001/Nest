@@ -3664,3 +3664,49 @@ main :: func () -> i32 {
         assert_eq!(code, 5 + 10 + 100 + 18);
     }
 }
+
+
+// ===< f128 >===
+
+/// `f128` works on every target: its arithmetic, comparisons (a NaN unordered)
+/// and conversions are the runtime's software binary128, so nothing depends on
+/// libcalls a platform may not have (`__addtf3` is not on macOS), and it
+/// prints its own exact shortest digits.
+#[test]
+fn f128_computes_compares_converts_and_prints() {
+    let src = r#"
+{ Buf, start, end, Display } :: import <core/fmt>
+
+show :: func (v: f128) -> str {
+    let mut b: Buf := start()
+    v.display(&mut b)
+    return end(&mut b)
+}
+
+main :: func () -> i32 {
+    let mut fails := 0
+    const a: f128 := 1.5
+    const b: f128 := 2.25
+    if a + b != 3.75 { fails = fails + 1 }
+    if b - a != 0.75 { fails = fails + 1 }
+    if a * b != 3.375 { fails = fails + 1 }
+    if b / a != 1.5 { fails = fails + 1 }
+    if not (a < b) || a >= b || not (a <= a) || a > b { fails = fails + 1 }
+    const third := cast.<f128>(1) / cast.<f128>(3)
+    if show(third) != "0.3333333333333333333333333333333333" { fails = fails + 1 }
+    if cast.<f64>(third) != 1.0 / 3.0 { fails = fails + 1 }
+    if cast.<i32>(cast.<f128>(-7.9)) != -7 { fails = fails + 1 }
+    if cast.<f32>(cast.<f128>(0.1)) != cast.<f32>(0.1) { fails = fails + 1 }
+    if cast.<f128>(10) % cast.<f128>(4) != 2.0 { fails = fails + 1 }
+    if show(0.0 - a) != "-1.5" { fails = fails + 1 }
+    if show(cast.<f128>(1e20)) != "1e20" { fails = fails + 1 }
+    const nan := cast.<f128>(0) / cast.<f128>(0)
+    if nan == nan || not (nan != nan) { fails = fails + 1 }
+    if f"{third:.3}" != "0.333" { fails = fails + 1 }
+    return fails
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 0);
+    }
+}

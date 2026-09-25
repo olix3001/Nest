@@ -5607,15 +5607,13 @@ fn yields_value(ty: &Ty) -> bool {
     !matches!(ty, Ty::Void | Ty::Never)
 }
 
-/// A float's width in bits. `f80` is ten bytes of data in a sixteen-byte slot
-/// (see the layout engine); the *type* is still eighty bits wide.
+/// A float's width in bits.
 fn float_bits(w: crate::sema::ty::FloatWidth) -> u16 {
     use crate::sema::ty::FloatWidth::*;
     match w {
         F16 => 16,
         F32 => 32,
         F64 => 64,
-        F80 => 80,
         F128 => 128,
     }
 }

@@ -2062,6 +2062,189 @@ impl<'ctx> Cx<'ctx, '_> {
 
 impl<'ctx> Cx<'ctx, '_> {
     /// Widen the `i1` a comparison produces into the byte a `bool` is.
+    // ===< f128 >===
+    //
+    // An `f128` is an `fp128` in memory and across calls, and nothing else: its
+    // arithmetic, comparisons and conversions are calls into the runtime's
+    // software binary128, on the value's bits as an `i128`
+    // (`runtime/nest_runtime.c`). LLVM would otherwise lower each to a libcall
+    // (`__addtf3`, …) only some platforms have, taking its arguments in float
+    // registers C cannot describe on the ones that lack it.
+
+    /// `v`'s bits.
+    fn f128_bits(&self, v: BasicValueEnum<'ctx>) -> Result<IntValue<'ctx>> {
+        Ok(self
+            .builder
+            .build_bit_cast(v, self.context.i128_type(), "")
+            .map_err(failed)?
+            .into_int_value())
+    }
+
+    /// The `f128` whose bits `v` are.
+    fn f128_of(&self, v: BasicValueEnum<'ctx>) -> Result<BasicValueEnum<'ctx>> {
+        self.builder
+            .build_bit_cast(v, self.context.f128_type(), "")
+            .map_err(failed)
+    }
+
+    /// Call the runtime's `name` with `args`, answering its result.
+    fn f128_call(
+        &self,
+        name: &str,
+        args: &[BasicValueEnum<'ctx>],
+        ret: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+            args.iter().map(|a| a.get_type().into()).collect();
+        let decl = self.runtime(name, &params, Some(ret));
+        let args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            args.iter().map(|&a| a.into()).collect();
+        self.builder
+            .build_call(decl, &args, "")
+            .map_err(failed)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| failed(format!("`{name}` returned nothing")))
+    }
+
+    fn f128_op(
+        &self,
+        f: &Function,
+        op: Op,
+        vals: &[BasicValueEnum<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let i128 = self.context.i128_type().into();
+        let arith = |name: &str| -> Result<BasicValueEnum<'ctx>> {
+            let a = self.f128_bits(vals[0])?.into();
+            let b = self.f128_bits(vals[1])?.into();
+            self.f128_of(self.f128_call(name, &[a, b], i128)?)
+        };
+        // `nest_f128_cmp` answers -1, 0 or 1, and 2 for an unordered pair; each
+        // comparison is which of those it accepts, so a NaN compares false
+        // everywhere but `!=`, as the other widths' do.
+        let cmp = |accept: &[i64]| -> Result<BasicValueEnum<'ctx>> {
+            let a = self.f128_bits(vals[0])?.into();
+            let b = self.f128_bits(vals[1])?.into();
+            let r = self
+                .f128_call("nest_f128_cmp", &[a, b], self.context.i32_type().into())?
+                .into_int_value();
+            let mut hit = self.context.bool_type().const_zero();
+            for &k in accept {
+                let is = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        r,
+                        self.context.i32_type().const_int(k as u64, true),
+                        "",
+                    )
+                    .map_err(failed)?;
+                hit = self.builder.build_or(hit, is, "").map_err(failed)?;
+            }
+            self.as_bool(hit)
+        };
+        match op {
+            Op::Add => arith("nest_f128_add"),
+            Op::Sub => arith("nest_f128_sub"),
+            Op::Mul => arith("nest_f128_mul"),
+            Op::Div => arith("nest_f128_div"),
+            Op::Rem => arith("nest_f128_rem"),
+            // The sign bit, flipped: exact, and needs no call.
+            Op::Neg => Ok(self
+                .builder
+                .build_float_neg(vals[0].into_float_value(), "")
+                .map_err(failed)?
+                .into()),
+            Op::Eq => cmp(&[0]),
+            Op::Ne => cmp(&[-1, 1, 2]),
+            Op::Lt => cmp(&[-1]),
+            Op::Le => cmp(&[-1, 0]),
+            Op::Gt => cmp(&[1]),
+            Op::Ge => cmp(&[1, 0]),
+            other => Err(failed(format!(
+                "{}: {} is not an operation on floats",
+                f.name,
+                other.name()
+            ))),
+        }
+    }
+
+    /// A conversion with an `f128` on either side, or `None` when neither
+    /// side is one.
+    fn f128_cast(
+        &self,
+        v: BasicValueEnum<'ctx>,
+        kind: CastKind,
+        target: BasicTypeEnum<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>> {
+        let q = self.context.f128_type();
+        let i128 = self.context.i128_type();
+        let f64t = self.context.f64_type();
+        let b = &self.builder;
+        let from_q = matches!(v, BasicValueEnum::FloatValue(x) if x.get_type() == q);
+        let to_q = matches!(target, BasicTypeEnum::FloatType(t) if t == q);
+        if !from_q && !to_q {
+            return Ok(None);
+        }
+        Ok(Some(match kind {
+            // Every narrower float widens to an `f64` exactly, and the runtime
+            // widens that.
+            CastKind::FloatExtend => {
+                let x = if v.into_float_value().get_type() == f64t {
+                    v
+                } else {
+                    b.build_float_ext(v.into_float_value(), f64t, "")
+                        .map_err(failed)?
+                        .into()
+                };
+                self.f128_of(self.f128_call("nest_f128_from_f64", &[x], i128.into())?)?
+            }
+            // Narrowing rounds **once**, straight to the target's format:
+            // through an `f64` first would round twice.
+            CastKind::FloatTruncate => {
+                let bits = self.f128_bits(v)?.into();
+                let t = target.into_float_type();
+                if t == f64t {
+                    self.f128_call("nest_f128_to_f64", &[bits], f64t.into())?
+                } else {
+                    let (name, width) = if t == self.context.f32_type() {
+                        ("nest_f128_to_f32_bits", self.context.i32_type())
+                    } else {
+                        ("nest_f128_to_f16_bits", self.context.i16_type())
+                    };
+                    let r = self.f128_call(name, &[bits], width.into())?;
+                    b.build_bit_cast(r, t, "").map_err(failed)?
+                }
+            }
+            // Through a 128-bit integer, which every narrower one converts to
+            // and from exactly (saturating at its ends, and a NaN is zero).
+            CastKind::FloatToInt { signed } => {
+                let bits = self.f128_bits(v)?.into();
+                let name = if signed { "nest_f128_to_i128" } else { "nest_f128_to_u128" };
+                let wide = self.f128_call(name, &[bits], i128.into())?.into_int_value();
+                let t = target.into_int_type();
+                if t.get_bit_width() < 128 {
+                    b.build_int_truncate(wide, t, "").map_err(failed)?.into()
+                } else {
+                    wide.into()
+                }
+            }
+            CastKind::IntToFloat { signed } => {
+                let x = v.into_int_value();
+                let wide = if x.get_type().get_bit_width() >= 128 {
+                    x
+                } else if signed {
+                    b.build_int_s_extend(x, i128, "").map_err(failed)?
+                } else {
+                    b.build_int_z_extend(x, i128, "").map_err(failed)?
+                };
+                let name = if signed { "nest_f128_from_i128" } else { "nest_f128_from_u128" };
+                self.f128_of(self.f128_call(name, &[wide.into()], i128.into())?)?
+            }
+            _ => return Ok(None),
+        }))
+    }
+
     fn as_bool(&self, v: IntValue<'ctx>) -> Result<BasicValueEnum<'ctx>> {
         Ok(self
             .builder
@@ -2096,6 +2279,9 @@ impl<'ctx> Cx<'ctx, '_> {
         let float = matches!(at, Ty::Float { .. });
         let b = &self.builder;
 
+        if float && vals[0].into_float_value().get_type() == self.context.f128_type() {
+            return self.f128_op(f, op, &vals);
+        }
         if float {
             let x = vals[0].into_float_value();
             let y = || vals[1].into_float_value();
@@ -2295,6 +2481,9 @@ impl<'ctx> Cx<'ctx, '_> {
     ) -> Result<BasicValueEnum<'ctx>> {
         let v = self.operand(fx, f, value, from)?;
         let target = self.llty(to)?;
+        if let Some(r) = self.f128_cast(v, kind, target)? {
+            return Ok(r);
+        }
         let b = &self.builder;
         Ok(match kind {
             CastKind::Truncate

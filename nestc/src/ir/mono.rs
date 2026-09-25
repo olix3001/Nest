@@ -2193,7 +2193,6 @@ fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
                 FloatWidth::F16 => "16",
                 FloatWidth::F32 => "32",
                 FloatWidth::F64 => "64",
-                FloatWidth::F80 => "80",
                 FloatWidth::F128 => "128",
             });
         }

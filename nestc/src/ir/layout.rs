@@ -373,14 +373,11 @@ impl<'a> Layouts<'a> {
                 Some(bits) => Ok(Layout::scalar((bits as u64).div_ceil(8))),
                 None => Err(LayoutError::Generic(self.show(ty))),
             },
-            // `f80` is the x87 extended format: ten bytes of data, and every ABI
-            // that has it pads the slot to its alignment. Saying 16 here is
-            // saying what the slot costs, which is what a layout is.
             Ty::Float(w) => Ok(match w {
                 FloatWidth::F16 => Layout { size: 2, align: 2 },
                 FloatWidth::F32 => Layout { size: 4, align: 4 },
                 FloatWidth::F64 => Layout { size: 8, align: 8 },
-                FloatWidth::F80 | FloatWidth::F128 => Layout {
+                FloatWidth::F128 => Layout {
                     size: 16,
                     align: 16,
                 },
