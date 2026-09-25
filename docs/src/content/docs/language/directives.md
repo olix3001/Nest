@@ -211,8 +211,7 @@ once inside `core` and once outside it, the outside claim wins with no
 diagnostic. This is what lets a program replace the panic handler:
 
 ```nest
-#lang("panic_handler")
-my_handler :: func (msg: str, loc: Location) -> never { ... }
+my_handler :: #lang("panic_handler") func (msg: str, loc: Location) -> never { ... }
 ```
 
 See [Operators](../operators/) for the full `#lang` registry.

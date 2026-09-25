@@ -197,8 +197,7 @@ functions and intrinsics. Such a function may run at compile time *or* at
 run time, which is what lets a call sit on the right of `::`:
 
 ```nest
-#const
-to_port :: func (n: u16) -> HttpPort {
+to_port :: #const func (n: u16) -> HttpPort {
     assert(n > 0, "port must be non-zero")
     return cast.<HttpPort>(n)
 }

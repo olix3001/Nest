@@ -229,8 +229,7 @@ claiming the tag, which wins over `core`'s (see
 [09-directives-and-attributes.md](09-directives-and-attributes.md) §9.3):
 
 ```nest
-#lang("panic_handler")
-my_handler :: func (msg: str, loc: Location) -> never {
+my_handler :: #lang("panic_handler") func (msg: str, loc: Location) -> never {
   write_line(msg)
   os.abort()
 }

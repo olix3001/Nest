@@ -157,8 +157,7 @@ I/O, so its default just stops. A program claims `#lang("panic_handler")`
 itself to replace it, and that claim wins over `core`'s:
 
 ```nest
-#lang("panic_handler")
-my_handler :: func (msg: str, loc: Location) -> never {
+my_handler :: #lang("panic_handler") func (msg: str, loc: Location) -> never {
     write_line(msg)
     os.abort()
 }

@@ -2479,6 +2479,23 @@ fn a_const_function_may_only_call_const_functions() {
 }
 
 #[test]
+fn const_written_on_the_func_is_the_same_directive() {
+    // `name :: #const func` is the documented spelling; it must be checked
+    // and callable from a constant exactly as `#const` above the name is.
+    let bad = format!("{CONST_PRELUDE}bad :: #const func () -> i32 {{ return runtime() }}\n");
+    let msgs = messages(&bad);
+    assert_eq!(msgs.len(), 1, "{msgs:#?}");
+    assert!(
+        msgs[0].contains("is `#const`, but calls `runtime`"),
+        "{}",
+        msgs[0]
+    );
+    let good = "twice :: #const func (n: i32) -> i32 { return n * 2 }\nN :: twice(21)\n\
+f :: func (a: i32 := twice(1)) -> i32 { return a + N }\n";
+    assert!(messages(good).is_empty(), "{:#?}", messages(good));
+}
+
+#[test]
 fn a_const_function_may_use_ordinary_control_flow() {
     // §5.1 restricts *calls* and run-time effects, not the language. Locals,
     // branches, loops and arithmetic are all evaluable at compile time, and a

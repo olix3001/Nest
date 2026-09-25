@@ -38,8 +38,7 @@ whole-program value tracking — enforcement is purely "is every construct
 const-safe?". This is what lets a call sit on the right-hand side of `::`:
 
 ```
-#const
-to_port :: func (n: uint16) -> HttpPort {
+to_port :: #const func (n: uint16) -> HttpPort {
   assert(n > 0, "port must be non-zero")
   return cast.<HttpPort>(n)
 }

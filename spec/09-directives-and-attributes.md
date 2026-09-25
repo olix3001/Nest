@@ -337,8 +337,7 @@ ignored:
 
 ```
 @public
-#section(".init_array")
-register :: func () { ... }
+register :: #section(".init_array") func () { ... }
 
 #offset(0x0000)
 RESET_VECTOR :: reset_handler
@@ -391,8 +390,7 @@ the process and a program that wants a message printed or a reset vector jumped
 to declares its own.
 
 ```nest
-#lang("panic_handler")
-my_handler :: func (msg: str, loc: Location) -> never { ... }
+my_handler :: #lang("panic_handler") func (msg: str, loc: Location) -> never { ... }
 ```
 
 ### Compiler-supplied bodies (`#intrinsic`)

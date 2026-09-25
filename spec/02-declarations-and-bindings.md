@@ -73,7 +73,7 @@ it may only name other constants, `const` generic parameters, and calls to
 `#const` functions (§5.1) — the last being the point of `#const`:
 
 ```
-#const next_pow2 :: func (n: u32) -> u32 { ... }
+next_pow2 :: #const func (n: u32) -> u32 { ... }
 CAPACITY: u32 :: next_pow2(1000)
 ```
 

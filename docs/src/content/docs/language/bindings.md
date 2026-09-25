@@ -67,7 +67,7 @@ computed at. Its right-hand side may therefore only name other constants,
 `const` generic parameters, and calls to `#const` functions:
 
 ```nest
-#const next_pow2 :: func (n: u32) -> u32 { ... }
+next_pow2 :: #const func (n: u32) -> u32 { ... }
 CAPACITY: u32 :: next_pow2(1000)
 ```
 
