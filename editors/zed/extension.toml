@@ -8,7 +8,7 @@ repository = "https://github.com/olix3001/Nest"
 
 [grammars.nest]
 repository = "https://github.com/olix3001/Nest"
-rev = "dbe4ffc00b9f80a8be6571babcb0488ef42f0b1b"
+rev = "e98874947722813411d782fa2c93342d46e49325"
 path = "editors/tree-sitter-nest"
 
 [language_servers.nest-lsp]
