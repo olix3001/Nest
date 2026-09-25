@@ -60,7 +60,7 @@ impl Context {
     }
 
     /// Call `f` with its parameters resolved from this request's scope.
-    @public invoke :: func <F: Func> (self: *Self, f: F) -> Result.<F.Output, di.Error> {
+    @public invoke :: func <R, F: Func.<Output = R>> (self: *Self, f: F) -> Result.<R, di.Error> {
         return self.sp.invoke(f)
     }
 

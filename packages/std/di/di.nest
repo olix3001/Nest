@@ -261,7 +261,10 @@ impl Scope {
     ///
     /// A parameter is a service the way an `@inject` member is: `*T` to read
     /// it, `*mut T` to write it, or `T` for a copy of a scoped or transient one.
-    @public invoke :: func <F: Func> (self: *mut Self, f: F) -> Result.<F.Output, Error> {
+    ///
+    /// `R` is what `f` returns. It is inferred, or written to require one:
+    /// `root.invoke.<i32>(f)` does not compile unless `f` returns an `i32`.
+    @public invoke :: func <R, F: Func.<Output = R>> (self: *mut Self, f: F) -> Result.<R, Error> {
         // On the stack: an `invoke` per request must not allocate for the
         // arguments it only passes on.
         let args: F.Args := zeroed.<F.Args>()
@@ -491,6 +494,8 @@ tests :: #when(test) namespace {
         const root := setup()
         const n: i32 := root.invoke({ c: *Clock, r: *Repo in c.now + r.hits.n }).?
         assert(n == 12)
+        const m := root.invoke.<i32>({ c: *Clock in c.now })
+        assert(m.match { .ok(v) => v == 5, .err(_) => false }, "`R` written")
         return .ok(())
     }
 
