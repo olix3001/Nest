@@ -248,7 +248,13 @@ impl Parser {
                         // `app.use { ctx, next in … }`: a call whose only
                         // argument is the trailing closure, with no `()`.
                         let span = self.node_span(e);
-                        let call = self.alloc(span, NodeKind::Call { callee: e, args: Vec::new() });
+                        let call = self.alloc(
+                            span,
+                            NodeKind::Call {
+                                callee: e,
+                                args: Vec::new(),
+                            },
+                        );
                         self.attach_trailing_closure(call)
                     } else if self.node_is_pathlike(e) {
                         self.parse_typed_composite(e)

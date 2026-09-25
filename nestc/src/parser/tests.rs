@@ -560,7 +560,9 @@ fn a_bare_trailing_closure_is_told_from_a_struct_literal() {
         let t = tree(src);
         t.contains("Call") && t.contains("Closure")
     };
-    assert!(closure("f :: func () { app.use { ctx, next in next(ctx) } }\n"));
+    assert!(closure(
+        "f :: func () { app.use { ctx, next in next(ctx) } }\n"
+    ));
     assert!(closure("f :: func () { app.get { x: i32 in x } }\n"));
     assert!(closure("f :: func () { run { in 1 } }\n"));
     assert!(closure("f :: func () { run { [n] x in x + n } }\n"));
