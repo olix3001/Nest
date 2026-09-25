@@ -15,16 +15,18 @@
 // rather than failing to compile. So `size` below asks a descriptor instead of
 // asking the filesystem, and modification times are absent.
 //
-// **Directory listing.** `readdir` returns a `struct dirent` with the same
-// problem, and worse: `d_name`'s offset is 19 bytes into the struct on Linux
-// and 21 on macOS. `create_dir` and `remove_dir` are here because those take a
-// path and nothing else; walking a directory waits for `#when`, or for the one
-// declaration to be generated the way `core`'s `C_LONG` is.
+// **Directory listing** is here, but not through `readdir` directly: its
+// `struct dirent` has the same problem, and worse — `d_name`'s offset is 19
+// bytes into the struct on Linux and 21 on macOS. The runtime reads the name
+// out and hands over only that (`libc.nest_dir_next`).
 
 c :: import <core/c>
 io :: import "io.nest"
 sys :: import "sys.nest"
 libc :: import "libc.nest"
+collections :: import "collections.nest"
+{ Vec } :: import "collections.nest"
+{ make } :: import <core/mem>
 
 // How a file is being opened. An enum rather than a set of flags, because the
 // four combinations below are every one a program actually wants, and the flag
@@ -182,6 +184,41 @@ put :: func (path: str, bytes: []u8, mode: Mode) -> Result.<void, io.Error> {
 
 SLASH: u8 :: 47
 
+// The names of what is in the directory `path` — files and directories both,
+// `.` and `..` left out — in byte order, so that two runs over the same
+// directory see the same list.
+@public read_dir :: func (path: str) -> Result.<[]str, io.Error> {
+  let mut names: Vec.<str> := collections.new.<str>()
+  let r: sys.Res := sys.read_dir(path, { n in names.push(n) })
+  if r.failed() { return .err(io.error_of("read directory", path, r)) }
+  let out: []mut str := make.<[]str>(names.len())
+  for i in 0..<names.len() { out[i] = names.as_slice()[i] }
+  // Insertion sort: a directory listing is short, and this needs no order on
+  // `str` beyond its bytes.
+  for i in 1..<out.len() {
+    let mut j: usize := i
+    while j > 0 && before(out[j], out[j - 1]) {
+      const t: str := out[j]
+      out[j] = out[j - 1]
+      out[j - 1] = t
+      j = j - 1
+    }
+  }
+  return .ok(cast.<[]str>(out))
+}
+
+// Whether `a` sorts before `b`, byte by byte.
+before :: func (a: str, b: str) -> bool {
+  let x: []u8 := a.as_bytes()
+  let y: []u8 := b.as_bytes()
+  let mut i: usize := 0
+  while i < x.len() && i < y.len() {
+    if x[i] != y[i] { return x[i] < y[i] }
+    i = i + 1
+  }
+  return x.len() < y.len()
+}
+
 // Remove an empty directory.
 @public remove_dir :: func (path: str) -> Result.<void, io.Error> {
   let r: sys.Res := sys.rmdir(path)
@@ -200,4 +237,24 @@ SLASH: u8 :: 47
   f.close().match { .ok(_) => (), .err(_) => () }
   if r.failed() { return .err(io.error_of("size", path, r)) }
   return .ok(cast.<usize>(r.n))
+}
+
+tests :: #when(test) namespace {
+    @test
+    a_directory_is_listed_in_name_order :: func () -> Result.<void, io.Error> {
+        const dir := "/tmp/nest-std-read-dir-test"
+        create_dir_all(f"{dir}/sub").?
+        write(f"{dir}/b.txt", "b".as_bytes()).?
+        write(f"{dir}/a.txt", "a".as_bytes()).?
+        const names := read_dir(dir).?
+        remove(f"{dir}/a.txt").?
+        remove(f"{dir}/b.txt").?
+        remove_dir(f"{dir}/sub").?
+        remove_dir(dir).?
+        assert(names.len() == 3)
+        assert(names[0] == "a.txt")
+        assert(names[1] == "b.txt")
+        assert(names[2] == "sub")
+        return .ok(())
+    }
 }

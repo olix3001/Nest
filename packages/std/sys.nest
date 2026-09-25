@@ -159,6 +159,26 @@ impl Res {
   return ok(0)
 }
 
+// The names in the directory `path`, `.` and `..` left out, each passed to
+// `each` as it is read — a copy, since the runtime reuses the storage it reads
+// a name into.
+@public read_dir :: func <F: Func(str)> (path: str, each: F) -> Res {
+  let dir: c.ptr.<c.anyopaque> := libc.nest_dir_open(c.to_cstr(path))
+  if dir.is_null() { return failed() }
+  loop {
+    let name: c.cstr := libc.nest_dir_next(dir)
+    if name.is_null() { break }
+    let s: str := c.from_cstr(name)
+    if s != "." && s != ".." {
+      let copy: []mut u8 := make.<[]u8>(s.len())
+      for i in 0..<s.len() { copy[i] = s.as_bytes()[i] }
+      each(cast.<str>(copy))
+    }
+  }
+  libc.nest_dir_close(dir)
+  return ok(0)
+}
+
 // Whether the process may reach `path` in the way `mode` asks.
 @public access :: func (path: str, mode: c.int) -> Res {
   if libc.access(c.to_cstr(path), mode) < 0 { return failed() }

@@ -34,6 +34,7 @@ process :: import <std/process>
 collections :: import <std/collections>
 { Vec } :: import <std/collections>
 path :: import <std/path>
+strs :: import <std/str>
 { Bin, Build, Manifest, ProfileSettings } :: import "manifest.nest"
 manifest :: import "manifest.nest"
 { Workspace, Member } :: import "workspace.nest"
@@ -155,6 +156,33 @@ library :: func (m: *Member) -> Target {
       })
     },
   }
+}
+
+// The root package's integration tests: one test binary per `.nest` file
+// directly in its `tests/`, in name order, each named after its file.
+//
+// Only the files at the top: a subdirectory is where several of them share
+// code, which each imports by path, and is not itself a test.
+@public integration_targets :: func (ws: *Workspace) -> Result.<[]Target, str> {
+  let root: *Member := &ws.root
+  let dir: str := path.join(root.dir, "tests")
+  let mut out: Vec.<Target> := collections.new.<Target>()
+  if fs.exists(dir) == false { return .ok(out.as_slice()) }
+  let names: []str := fs.read_dir(dir).match {
+    .ok(ns) => ns,
+    .err(e) => { return .err(e.describe()) },
+  }
+  for name in names {
+    if strs.ends_with(name, ".nest") == false { continue }
+    const stem: str := strs.slice(name, 0, name.len() - 5)
+    out.push(Target {
+      name: f"{root.name}-{stem}",
+      entry: path.normalize(path.join(dir, name)),
+      lib: false,
+      test: true,
+    })
+  }
+  return .ok(out.as_slice())
 }
 
 // Where a build with `p` writes: the root package's `build/`, or what

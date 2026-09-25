@@ -113,7 +113,7 @@ build-twig: build-nestc
 # anything" is one question. Each part is also its own recipe, for the times it
 # is not.
 [doc("Every suite: the compiler, the server, the grammar, `std` and twig.")]
-test: test-nestc test-lsp test-grammar test-std test-twig
+test: test-nestc test-lsp test-grammar test-core test-std test-twig
     @just _step "All suites passed"
 
 # The compiler: inference, lowering, codegen, and its test corpus (src/testdata).
@@ -137,9 +137,19 @@ test-grammar:
         echo "npx not found — skipping the grammar corpus"; \
     fi
 
-# `std`'s own tests, run the way any package's are. `core` has none yet: its
-# test runner is the thing under test, so a failing one there has nowhere to be
-# reported from.
+# `core`'s own tests, run the way any package's are. Its runner is its own —
+# `core/test.nest` — so a test *of the runner* could not report its own
+# failure; everything else in `core` can be tested like any package.
+[doc("`core`'s own tests, through `twig test`.")]
+test-core:
+    @just _step "Testing core"
+    @if [ -x "{{ twig }}" ]; then \
+        cd {{ root }}/packages/core && {{ twig }} test --build-dir {{ root }}/twig/build/tests/core; \
+    else \
+        echo "twig is not built — skipping core's tests"; \
+    fi
+
+# `std`'s own tests, run the way any package's are.
 #
 # `--build-dir` keeps the build out of `packages/std`: `std` ships with the
 # compiler, and a build has no business writing into a package it only reads.

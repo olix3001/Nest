@@ -51,6 +51,15 @@ extern("c") {
   // it directly. `argc` and `argv` are not here — the entry point hands those
   // to `#lang("start")`, which is `sys.start`.
   @public nest_envp :: func () -> c.ptr.<c.cstr>
+
+  // A directory's entries, one name at a time. `struct dirent` is one of the
+  // layouts that differ between Linux and macOS (see above), so the runtime
+  // reads `d_name` out of it and hands over only that: `nest_dir_open` is
+  // `opendir`, `nest_dir_next` the next name or null at the end, and
+  // `nest_dir_close` is `closedir`.
+  @public nest_dir_open :: func (path: c.cstr) -> c.ptr.<c.anyopaque>
+  @public nest_dir_next :: func (dir: c.ptr.<c.anyopaque>) -> c.cstr
+  @public nest_dir_close :: func (dir: c.ptr.<c.anyopaque>) -> c.int
 }
 
 // ===< Files and descriptors >===

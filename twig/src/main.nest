@@ -28,7 +28,10 @@ usage :: func () -> str {
     "  init             create a package in the current directory",
     "  build            compile the package's targets",
     "  run [-- <args>]  build a binary, then run it with <args>",
-    "  test             build the package's `@test` functions and run them",
+    "  test [filter]    build the package's `@test` functions and run them —",
+    "                   the ones beside its code, then each file in tests/",
+    "                   against its library. With a filter, only the tests",
+    "                   whose names contain it",
     "  metadata         how each package is compiled, as JSON, for tools",
     "",
     "options:",
@@ -269,8 +272,22 @@ run_run :: func (o: *Options) -> Result.<i32, str> {
 // compiled a second way (`build.tests`), so what is built here is the
 // dependencies and then it — the root's own `.nlib` is not in the way, because
 // the tests are compiled *as* the package rather than against it.
+//
+// Then the **integration tests**: each file in the package's `tests/` is a
+// program of its own, compiled with `--test` against the package's library —
+// so it sees only what the library makes `@public`, which is the point of
+// writing a test there rather than beside the code.
+//
+// A filter is handed to every test binary through `NEST_TEST_FILTER`, which the
+// runner in `core` reads; the binaries' own arguments are not the runner's.
 run_test :: func (o: *Options) -> Result.<i32, str> {
-  if o.positional.len() != 0 { return .err("arguments for the test binary go after `--`") }
+  if o.positional.len() > 1 { return .err("`twig test` takes at most one filter; arguments for the test binary go after `--`") }
+  if o.positional.len() == 1 {
+    process.set_env("NEST_TEST_FILTER", o.positional.as_slice()[0]).match {
+      .ok(_) => (),
+      .err(e) => { return .err(e.describe()) },
+    }
+  }
   let ws: Workspace := open().?
   let mut p: Profile := build.profile(&ws.root.manifest, o.release)
   p.emit = o.emit.as_slice()
@@ -278,15 +295,34 @@ run_test :: func (o: *Options) -> Result.<i32, str> {
   p.verbose = o.verbose
   p.build_dir = build_dir(o).?
   let t: Target := build.test_target(&ws).?
-  let libs: []Target := plan(&ws, p, false).?
-  let total: usize := libs.len() + 1
-  let n: usize := compile_each(&ws, p, libs, 0, total).?
-  compiling(&ws.root, n + 1, total)
+  let integration: []Target := build.integration_targets(&ws).?
+  // The integration tests import the package's library, so it is compiled
+  // too when there are any.
+  let libs: []Target := plan(&ws, p, integration.len() > 0).?
+  let total: usize := libs.len() + 1 + integration.len()
+  let mut n: usize := compile_each(&ws, p, libs, 0, total).?
+  n = n + 1
+  compiling(&ws.root, n, total)
   build.compile(&ws, p, t).?
+  for it in integration {
+    n = n + 1
+    compiling(&ws.root, n, total)
+    build.compile(&ws, p, it).?
+  }
 
-  let exe: str := build.output(&ws, p, t)
-  term.status("Running", f"`{shown(&ws, exe)}`")
-  let status: process.Status := process.run(exe, o.rest).match {
+  let mut worst: i32 := run_one(&ws, p, t, o.rest).?
+  for it in integration {
+    const code: i32 := run_one(&ws, p, it, o.rest).?
+    if worst == 0 { worst = code }
+  }
+  return .ok(worst)
+}
+
+// Run one test binary, and answer its status.
+run_one :: func (ws: *Workspace, p: Profile, t: Target, args: []str) -> Result.<i32, str> {
+  let exe: str := build.output(ws, p, t)
+  term.status("Running", f"`{shown(ws, exe)}`")
+  let status: process.Status := process.run(exe, args).match {
     .ok(s) => s,
     .err(e) => { return .err(f"could not run `{exe}`: {e.describe()}") },
   }

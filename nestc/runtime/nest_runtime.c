@@ -50,6 +50,7 @@
  * how the escape analysis is tested (`design/lir.md` §5).
  */
 
+#include <dirent.h>
 #include <errno.h>
 #include <setjmp.h>
 #include <unistd.h>
@@ -385,6 +386,26 @@ void nest_guard_fail(void) {
         nest_guard_armed = 0;
         longjmp(nest_guard_buf, 1);
     }
+}
+
+/* ===< Directories >===
+ *
+ * `std/fs`'s `read_dir`, one name at a time. `struct dirent` is laid out
+ * differently on Linux and macOS — `d_name` is 19 bytes in on one and 21 on the
+ * other — so the name is read out of it here, in C, and nothing else about it
+ * crosses. The name's storage is `readdir`'s, reused by the next call; `std`
+ * copies it. */
+void *nest_dir_open(const char *path) {
+    return opendir(path);
+}
+
+const char *nest_dir_next(void *dir) {
+    struct dirent *e = readdir((DIR *)dir);
+    return e ? e->d_name : NULL;
+}
+
+int nest_dir_close(void *dir) {
+    return closedir((DIR *)dir);
 }
 
 /* ===< f128 >===

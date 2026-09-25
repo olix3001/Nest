@@ -22,6 +22,7 @@
 { Buf, Debug, end, start } :: import "fmt.nest"
 { Location } :: import "loc.nest"
 { color, put, put_usize } :: import "write.nest"
+c :: import "c.nest"
 
 // One test: what it is called, and how to run it.
 //
@@ -85,9 +86,49 @@ fail_err :: #lang("test_failed") func () -> void {
     panic("the test returned an error")
 }
 
-// Run every test, report as it goes, and answer with the process's status.
-run :: #lang("test_runner") func (cases: []Case) -> i32 {
+// The test filter: `NEST_TEST_FILTER`, which `twig test <filter>` sets. A test
+// runs when its name contains the filter, as `cargo test`'s do.
+//
+// An environment variable rather than an argument because the arguments are
+// not the runner's to read: a program built against `std` hands `argv` to
+// `std`'s `#lang("start")`, and one built against `core` alone keeps it
+// nowhere. The environment is where `getenv` finds it either way.
+
+extern("c") {
+    getenv :: func (name: c.cstr) -> c.cstr
+}
+
+// Whether `name` is selected by `filter`: it contains it, byte for byte.
+selected :: func (name: str, filter: str) -> bool {
+    let n: []u8 := name.as_bytes()
+    let f: []u8 := filter.as_bytes()
+    if f.len() > n.len() { return false }
+    for start in 0..=(n.len() - f.len()) {
+        let mut i: usize := 0
+        while i < f.len() && n[start + i] == f[i] {
+            i = i + 1
+        }
+        if i == f.len() { return true }
+    }
+    return false
+}
+
+// Run every test the filter selects, report as it goes, and answer with the
+// process's status.
+run :: #lang("test_runner") func (all: []Case) -> i32 {
     colored = color()
+    let raw: c.cstr := getenv(c"NEST_TEST_FILTER")
+    let filter: str := if raw.is_null() { "" } else { c.from_cstr(raw) }
+    let chosen: []mut Case := make.<[]Case>(all.len())
+    let mut kept: usize := 0
+    for i in 0..<all.len() {
+        if selected(all[i].name, filter) {
+            chosen[kept] = all[i]
+            kept = kept + 1
+        }
+    }
+    const cases: []Case := chosen[0..<kept]
+    const filtered: usize := all.len() - kept
     let total: usize := cases.len()
     // Which ones failed, so the summary can list them without running anything
     // a second time. A test binary may allocate — it is the failing *report*
@@ -142,7 +183,13 @@ run :: #lang("test_runner") func (cases: []Case) -> i32 {
     put_usize(total - failed)
     put(" passed; ")
     put_usize(failed)
-    put(" failed\n\n")
+    put(" failed")
+    if filtered > 0 {
+        put("; ")
+        put_usize(filtered)
+        put(" filtered out")
+    }
+    put("\n\n")
 
     if failed == 0 { return 0 }
     return 1

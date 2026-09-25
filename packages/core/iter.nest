@@ -572,3 +572,65 @@ impl <T> Iterator for SliceIterMut.<T> {
     return .some(&mut self.data[at])
   }
 }
+
+// Tests run against `core` alone, through its own runner: `just test-core`.
+tests :: #when(test) namespace {
+  { assert } :: import "fail.nest"
+  { make } :: import "mem.nest"
+
+  xs :: func () -> []i32 {
+    let out: []mut i32 := make.<[]i32>(5)
+    out[0] = 3
+    out[1] = 1
+    out[2] = 4
+    out[3] = 1
+    out[4] = 5
+    return cast.<[]i32>(out)
+  }
+
+  some :: func (o: Option.<i32>, want: i32) -> bool {
+    return o.match {
+      .some(v) => v == want,
+      .none => false,
+    }
+  }
+
+  @test
+  adapters_chain :: func () {
+    const n := xs().iter().filter({ x in x > 1 }).map({ x in x * 2 }).fold(0, { a, x in a + x })
+    assert(n == 24)
+    assert(xs().iter().enumerate().count() == 5)
+    assert(xs().iter().skip(1).take(2).fold(0, { a, x in a + x }) == 5)
+    assert(xs().iter().step(2).count() == 3)
+    assert(xs().iter().zip(xs().iter()).all({ p in p.0 == p.1 }))
+    assert(xs().iter().chain(xs().iter()).count() == 10)
+  }
+
+  @test
+  consumers_answer :: func () {
+    assert(some(xs().iter().reduce({ a, b in a + b }), 14))
+    assert(some(xs().iter().max(), 5))
+    assert(some(xs().iter().min(), 1))
+    assert(some(xs().iter().last(), 5))
+    assert(some(xs().iter().find({ x in x > 3 }), 4))
+    assert(xs().iter().any({ x in x == 4 }))
+    assert(not xs().iter().all({ x in x > 1 }))
+  }
+
+  @test
+  look_ahead_and_nesting :: func () {
+    let mut p := xs().iter().peekable()
+    assert(some(p.peek(), 3))
+    assert(some(p.next(), 3))
+    assert(xs().iter().take_while({ x in x != 4 }).count() == 2)
+    assert(xs().iter().skip_while({ x in x != 4 }).count() == 3)
+    assert(xs().iter().flat_map({ x in xs() }).count() == 25)
+  }
+
+  @test
+  writing_through_iter_mut :: func () {
+    let ys: []mut i32 := make.<[]i32>(3)
+    for p in ys.iter_mut() { p.* = 7 }
+    assert(ys[0] + ys[1] + ys[2] == 21)
+  }
+}
