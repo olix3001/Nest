@@ -1087,8 +1087,13 @@ impl<'ctx> Cx<'ctx, '_> {
                 .build_alloca(self.llty(ty)?, "")
                 .map_err(failed),
             Operand::Const(Constant::Zero) => {
-                let slot = self.builder.build_alloca(self.llty(ty)?, "").map_err(failed)?;
-                self.builder.build_store(slot, self.zeroed(ty)?).map_err(failed)?;
+                let slot = self
+                    .builder
+                    .build_alloca(self.llty(ty)?, "")
+                    .map_err(failed)?;
+                self.builder
+                    .build_store(slot, self.zeroed(ty)?)
+                    .map_err(failed)?;
                 Ok(slot)
             }
             Operand::Const(_) => Err(failed(format!(

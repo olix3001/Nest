@@ -40,10 +40,11 @@ pub fn describe(session: &Session, entry: FileId) -> Value {
         return json!({ "format": FORMAT, "package": null, "root": null });
     };
     let package = session.pkg_of.get(&entry).cloned();
-    let entry_dir = session
-        .sources
-        .file(entry)
-        .and_then(|f| std::path::Path::new(&f.name).parent().map(|p| p.to_path_buf()));
+    let entry_dir = session.sources.file(entry).and_then(|f| {
+        std::path::Path::new(&f.name)
+            .parent()
+            .map(|p| p.to_path_buf())
+    });
     let mut w = Walker {
         s: session,
         decls: Decls::new(&session.defs, &session.asts, &session.decls),
@@ -108,9 +109,11 @@ fn pins_by_base(s: &Session) -> HashMap<DefId, Vec<(DefId, String, DefId)>> {
     let mut out: HashMap<DefId, Vec<_>> = HashMap::new();
     for (i, d) in s.defs.iter().enumerate() {
         if let Some(p) = &d.projection {
-            out.entry(p.base)
-                .or_default()
-                .push((p.trait_def, p.assoc.to_string(), DefId(i as u32)));
+            out.entry(p.base).or_default().push((
+                p.trait_def,
+                p.assoc.to_string(),
+                DefId(i as u32),
+            ));
         }
     }
     out
@@ -452,7 +455,11 @@ impl Walker<'_> {
         if let Some(typed) = &imp.typed {
             i.insert("for".into(), self.show(&typed.self_ty).into());
             if !typed.trait_args.is_empty() {
-                let args: Vec<Value> = typed.trait_args.iter().map(|t| self.show(t).into()).collect();
+                let args: Vec<Value> = typed
+                    .trait_args
+                    .iter()
+                    .map(|t| self.show(t).into())
+                    .collect();
                 i.insert("trait_args".into(), Value::Array(args));
             }
             if !typed.assoc.is_empty() {
@@ -462,7 +469,8 @@ impl Walker<'_> {
                     .map(|(n, t)| (n.to_string(), self.show(t)))
                     .collect();
                 assoc.sort();
-                let assoc: Map<String, Value> = assoc.into_iter().map(|(n, t)| (n, t.into())).collect();
+                let assoc: Map<String, Value> =
+                    assoc.into_iter().map(|(n, t)| (n, t.into())).collect();
                 i.insert("assoc".into(), Value::Object(assoc));
             }
         }
@@ -475,7 +483,10 @@ impl Walker<'_> {
         if !generics.is_empty() {
             i.insert("generics".into(), Value::Array(generics));
         }
-        i.insert("package".into(), self.s.pkg_of.get(&imp.file).cloned().into());
+        i.insert(
+            "package".into(),
+            self.s.pkg_of.get(&imp.file).cloned().into(),
+        );
         // Where the `for` target is written: an impl has no span of its own.
         let start = imp
             .syntax
@@ -564,7 +575,8 @@ impl Walker<'_> {
             let mut self_bounds: Vec<Value> = Vec::new();
             if f.sized_self {
                 let sized = self.s.lang_items.get("sized");
-                let bound = sized.map_or_else(|| "Sized".to_string(), |d| self.s.defs.canonical_string(d));
+                let bound =
+                    sized.map_or_else(|| "Sized".to_string(), |d| self.s.defs.canonical_string(d));
                 self_bounds.push(json!({ "on": "Self", "bound": bound }));
             }
             for (assoc, t) in &f.self_assoc_bounds {
@@ -710,7 +722,11 @@ impl Walker<'_> {
         };
         let path = std::path::Path::new(&src.name);
         let name = dir
-            .and_then(|d| path.strip_prefix(d).ok().map(|p| p.to_string_lossy().into_owned()))
+            .and_then(|d| {
+                path.strip_prefix(d)
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
             .unwrap_or_else(|| src.name.clone());
         Some(json!({ "package": package, "file": name, "line": at.line, "column": at.column }))
     }
@@ -888,21 +904,36 @@ impl <T: Default> Show for T {
 
         let bx = named("Box");
         let fields = bx["fields"].as_array().unwrap();
-        assert_eq!(fields.len(), 1, "a package field is not documented: {fields:#?}");
+        assert_eq!(
+            fields.len(),
+            1,
+            "a package field is not documented: {fields:#?}"
+        );
         assert_eq!(bx["methods"][0]["receiver"], "*mut Box");
 
         let apply = named("apply");
         assert_eq!(apply["directives"][0]["name"], "inline");
         assert_eq!(apply["generics"][0], json!({ "name": "A" }));
         let bound = apply["generics"][1]["bounds"][0].as_str().unwrap();
-        assert!(bound.ends_with("Func.<Args = (A), Output = i32>"), "{bound}");
+        assert!(
+            bound.ends_with("Func.<Args = (A), Output = i32>"),
+            "{bound}"
+        );
 
         assert_eq!(named("things")["doc"], "Things.");
 
         let impls = v["impls"].as_array().unwrap();
-        let blanket = impls.iter().find(|i| i["for"] == "T").expect("the blanket impl");
+        let blanket = impls
+            .iter()
+            .find(|i| i["for"] == "T")
+            .expect("the blanket impl");
         assert!(blanket["trait"].as_str().unwrap().ends_with("Show"));
-        assert!(blanket["generics"][0]["bounds"][0].as_str().unwrap().ends_with("Default"));
+        assert!(
+            blanket["generics"][0]["bounds"][0]
+                .as_str()
+                .unwrap()
+                .ends_with("Default")
+        );
         assert_eq!(blanket["location"]["line"], 24);
     }
 }

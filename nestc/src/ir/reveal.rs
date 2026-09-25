@@ -142,11 +142,9 @@ fn visit(ty: &Ty, f: &mut impl FnMut(&Ty)) {
     match ty {
         Ty::Nominal { args, .. } | Ty::Tuple(args) => args.iter().for_each(|a| visit(a, f)),
         Ty::Ptr { inner, .. }
-            | Ty::Slice { inner, .. }
-            | Ty::Array { inner, .. }
-            | Ty::Spread(inner) => {
-            visit(inner, f)
-        }
+        | Ty::Slice { inner, .. }
+        | Ty::Array { inner, .. }
+        | Ty::Spread(inner) => visit(inner, f),
         Ty::Struct(fields) => fields.iter().for_each(|(_, t)| visit(t, f)),
         Ty::Func { params, ret, .. } => {
             params.iter().for_each(|p| visit(p, f));

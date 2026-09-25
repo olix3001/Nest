@@ -14,8 +14,8 @@ use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, NodeId, NodeKind};
 
-use super::def::{DefId, DefKind, DefTable, Namespace, Visibility};
 use super::DefMeta;
+use super::def::{DefId, DefKind, DefTable, Namespace, Visibility};
 use super::session::Session;
 
 /// A target as written, before loading: the operand of `import`.

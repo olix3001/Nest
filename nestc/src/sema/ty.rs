@@ -542,9 +542,7 @@ impl Ty {
             Ty::Ptr { inner, .. }
             | Ty::Slice { inner, .. }
             | Ty::Array { inner, .. }
-            | Ty::Spread(inner) => {
-                inner.mentions_error()
-            }
+            | Ty::Spread(inner) => inner.mentions_error(),
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_error),
             Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| (Ty::mentions_error)(t)),
             Ty::Struct(fields) => fields.iter().any(|(_, t)| t.mentions_error()),
@@ -568,7 +566,9 @@ impl Ty {
         match self {
             Ty::Var(_) => true,
             Ty::Int { width, .. } => width.mentions_var(),
-            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Spread(inner) => inner.mentions_var(),
+            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Spread(inner) => {
+                inner.mentions_var()
+            }
             Ty::Array { len, inner, .. } => len.mentions_var() || inner.mentions_var(),
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_var),
             Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| (Ty::mentions_var)(t)),
@@ -586,7 +586,9 @@ impl Ty {
     pub fn mentions_const_param(&self) -> bool {
         match self {
             Ty::Int { width, .. } => width.is_param(),
-            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Spread(inner) => inner.mentions_const_param(),
+            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Spread(inner) => {
+                inner.mentions_const_param()
+            }
             Ty::Array { len, inner, .. } => len.is_param() || inner.mentions_const_param(),
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_const_param),
             Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| t.mentions_const_param()),
@@ -1435,7 +1437,11 @@ impl InferCtxt {
             return Err((a, b));
         }
         let pair = |cx: &mut Self, p: &Ty, f: &Ty| {
-            if flipped { cx.unify(f, p) } else { cx.unify(p, f) }
+            if flipped {
+                cx.unify(f, p)
+            } else {
+                cx.unify(p, f)
+            }
         };
         for i in 0..k {
             pair(self, &pat[i], &flat[i]).map_err(|_| (a.clone(), b.clone()))?;
@@ -1716,9 +1722,7 @@ impl InferCtxt {
             Ty::Ptr { inner, .. }
             | Ty::Slice { inner, .. }
             | Ty::Array { inner, .. }
-            | Ty::Spread(inner) => {
-                self.occurs(v, &inner)
-            }
+            | Ty::Spread(inner) => self.occurs(v, &inner),
             Ty::Tuple(elems) => elems.iter().any(|e| self.occurs(v, e)),
             Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| (|e| self.occurs(v, e))(t)),
             Ty::Struct(fields) => fields.iter().any(|(_, t)| self.occurs(v, t)),

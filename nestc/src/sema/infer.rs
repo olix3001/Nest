@@ -8318,8 +8318,7 @@ impl Inferer<'_> {
         match ty {
             Ty::Tuple(_) | Ty::Void | Ty::Var(_) | Ty::Error => true,
             Ty::Nominal { def, args } => {
-                args.is_empty()
-                    && matches!(self.defs.get(*def).kind, DefKind::TypeParam)
+                args.is_empty() && matches!(self.defs.get(*def).kind, DefKind::TypeParam)
             }
             _ => false,
         }
@@ -8390,7 +8389,8 @@ impl Inferer<'_> {
             NodeKind::TupleType { elems } => {
                 let mut out = Vec::with_capacity(elems.len());
                 for e in elems {
-                    let NodeKind::SpreadType { inner } = self.asts[&file].node(e).kind.clone() else {
+                    let NodeKind::SpreadType { inner } = self.asts[&file].node(e).kind.clone()
+                    else {
                         out.push(self.ty_from_node_in(file, e));
                         continue;
                     };

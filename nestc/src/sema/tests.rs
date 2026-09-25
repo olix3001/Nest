@@ -10498,7 +10498,10 @@ fn a_doc_comment_on_an_import_binding_documents_it() {
     let session = analyze_mem(
         &[
             ("math", "@public add :: func () {}\n"),
-            ("main", "/// Arithmetic.\n@public math :: import \"math.nest\"\n"),
+            (
+                "main",
+                "/// Arithmetic.\n@public math :: import \"math.nest\"\n",
+            ),
         ],
         "main",
     );
@@ -10636,5 +10639,7 @@ fn a_spread_is_only_of_a_tuple_and_only_in_one() {
         messages("f :: func <T> (x: ..T) {}\n")
     );
     // A known tuple is spliced where it is written.
-    assert!(messages("f :: func (x: (i32, ..(u8, bool))) -> (i32, u8, bool) { return x }\n").is_empty());
+    assert!(
+        messages("f :: func (x: (i32, ..(u8, bool))) -> (i32, u8, bool) { return x }\n").is_empty()
+    );
 }
