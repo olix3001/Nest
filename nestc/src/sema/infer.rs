@@ -538,6 +538,8 @@ pub fn resolve_impl_targets(
             const_stack: Vec::new(),
             int_values: HashMap::new(),
             float_values: HashMap::new(),
+
+        assumed: HashMap::new(),
         };
         let Some(sx) = imp.syntax.clone() else {
             out.push(ImplTarget {
@@ -634,6 +636,8 @@ pub fn resolve_param_decls(
         const_stack: Vec::new(),
         int_values: HashMap::new(),
         float_values: HashMap::new(),
+
+        assumed: HashMap::new(),
     };
     let mut out = Vec::new();
     for d in defs.iter() {
@@ -742,6 +746,8 @@ pub fn fold_const_values(
         const_stack: Vec::new(),
         int_values: HashMap::new(),
         float_values: HashMap::new(),
+
+        assumed: HashMap::new(),
     };
     let mut out = Vec::new();
     for d in defs.iter() {
@@ -810,6 +816,8 @@ pub(crate) fn signature_from_tree(
         const_stack: Vec::new(),
         int_values: HashMap::new(),
         float_values: HashMap::new(),
+
+        assumed: HashMap::new(),
     };
     let ty = cx.func_def_ty(def);
     cx.cx.resolve(&ty)
@@ -921,6 +929,8 @@ pub fn infer_file(
                 const_stack: Vec::new(),
                 int_values: HashMap::new(),
                 float_values: HashMap::new(),
+
+                assumed: HashMap::new(),
             }
         };
     }
@@ -1423,6 +1433,12 @@ struct Inferer<'a> {
     /// The same, for a `comptime_float`: the value behind a float literal or a
     /// use of a constant that is one, so the width it settles on can be checked.
     float_values: HashMap<NodeId, f64>,
+    /// What the body being inferred may assume of its trait's associated
+    /// types: a default method written `<Self.Item: Ord>` compares its items
+    /// (§3.4). Keyed by the associated type's declaration, which is the type
+    /// `Self.Item` is inside the trait. Replaced at each function, not
+    /// restored, so the solver's drain after a body still sees it.
+    assumed: HashMap<DefId, Vec<DefId>>,
 }
 
 impl Inferer<'_> {
@@ -1442,8 +1458,21 @@ impl Inferer<'_> {
         // from the namespace that declares its struct and from anything nested
         // in it, and a method of that struct is exactly such a place.
         let outer = self.ctx;
-        if let Some(def) = self.func_owner(func) {
+        let owner = self.func_owner(func);
+        if let Some(def) = owner {
             self.ctx = Some(def);
+        }
+        self.assumed.clear();
+        if let Some(def) = owner
+            && let Some(t) = self.defs.get(def).parent
+            && self.defs.get(t).kind == DefKind::Trait
+        {
+            for (member, bound) in self.decls().self_assoc_bounds(def) {
+                if let Some(&adef) = self.defs.get(t).ns.members.get(&member) {
+                    let adef = self.defs.resolve_alias(adef);
+                    self.assumed.entry(adef).or_default().push(bound);
+                }
+            }
         }
         let outer_func = self.func.replace(func);
         // A defaulted parameter must trail the required ones (§5.2): a call
@@ -5454,10 +5483,23 @@ impl Inferer<'_> {
         let Ty::Nominal { def, .. } = s else {
             return None;
         };
+        let sym = crate::common::symbol::Symbol::new(name);
+        // `Self.Item` inside a default method bounded `<Self.Item: Ord>`.
+        if let Some(bounds) = self.assumed.get(&def).cloned() {
+            for t in bounds {
+                if !self.in_scope_traits.contains(&t) && !self.lang_traits.contains(&t) {
+                    continue;
+                }
+                if let Some(&m) = self.defs.get(t).ns.members.get(&sym)
+                    && self.defs.get(m).kind == DefKind::Func
+                {
+                    return Some((m, Vec::new()));
+                }
+            }
+        }
         if self.defs.get(def).kind != DefKind::TypeParam {
             return None;
         }
-        let sym = crate::common::symbol::Symbol::new(name);
         // The bound's own arguments — the `f64` of `T: Add.<f64>` — travel with
         // the method, because they are half of *which* impl this bound stands
         // for and the impl is picked long after this (see
@@ -5609,6 +5651,9 @@ impl Inferer<'_> {
         let Ty::Nominal { def, .. } = s else {
             return false;
         };
+        if self.assumed.get(&def).is_some_and(|b| b.contains(&trait_def)) {
+            return true;
+        }
         if self.defs.get(def).kind != DefKind::TypeParam {
             return false;
         }
@@ -6092,6 +6137,27 @@ impl Inferer<'_> {
         let self_subst = self
             .trait_self_subst(callee, method, recv)
             .unwrap_or_default();
+        // `<Self.Item: Ord>` (§3.4): what the receiver's `Item` is has to be
+        // `Ord`, which is an obligation like any bound's.
+        if let Some(t) = self.defs.get(method).parent
+            && self.defs.get(t).kind == DefKind::Trait
+        {
+            for (member, bound) in self.decls().self_assoc_bounds(method) {
+                let Some(&adef) = self.defs.get(t).ns.members.get(&member) else {
+                    continue;
+                };
+                let adef = self.defs.resolve_alias(adef);
+                if let Some(ty) = self_subst.tys.get(&adef).cloned() {
+                    self.cx.register(Obligation::Trait {
+                        self_ty: ty,
+                        trait_def: bound,
+                        args: Vec::new(),
+                        origin: callee,
+                        stamp: None,
+                    });
+                }
+            }
+        }
         let inst = self
             .instantiate_parts(callee, &sig, method, targs, self_subst)
             .0;

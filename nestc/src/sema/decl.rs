@@ -129,6 +129,10 @@ pub struct FuncDecl {
     /// implementing types only, with no vtable slot and not callable on a
     /// `dyn` receiver.
     pub sized_self: bool,
+    /// Each `Self.Assoc: Trait` its generic list wrote (§3.4): the associated
+    /// type's name and the trait, once per trait. A call proves them of the
+    /// receiver's associated type; the body assumes them.
+    pub self_assoc_bounds: Vec<(Symbol, DefId)>,
     /// Its signature, generics left standing: the `Ty::Func` a call site
     /// instantiates and unifies its arguments against.
     ///
@@ -716,6 +720,49 @@ impl<'a> Decls<'a> {
         })
     }
 
+    /// The `Self.Assoc: Trait` bounds of `def` — see
+    /// [`FuncDecl::self_assoc_bounds`].
+    pub fn self_assoc_bounds(&self, def: DefId) -> Vec<(Symbol, DefId)> {
+        if let Some(f) = self.func_decl(def) {
+            return f.self_assoc_bounds.clone();
+        }
+        let Some((file, func)) = self.func(def) else {
+            return Vec::new();
+        };
+        let ast = &self.asts[&file];
+        let NodeKind::FuncExpr {
+            self_assoc_bounds, ..
+        } = &ast.node(func).kind
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (member, b) in self_assoc_bounds {
+            let bounds = match &ast.node(*b).kind {
+                NodeKind::Bounds { bounds } => bounds.clone(),
+                _ => vec![*b],
+            };
+            for t in bounds {
+                // The head of `Add.<f64>` as well as of a bare `Ord`.
+                let head = match &ast.node(t).kind {
+                    NodeKind::TypePath { path, .. } => *path,
+                    NodeKind::GenericApply { base, .. } => *base,
+                    _ => t,
+                };
+                let def = [t, head].into_iter().find_map(|n| match ast.meta::<Resolution>(n) {
+                    Some(Resolution::Def(d)) => Some(self.defs.resolve_alias(d)),
+                    _ => None,
+                });
+                if let Some(d) = def
+                    && self.defs.get(d).kind == DefKind::Trait
+                {
+                    out.push((member.clone(), d));
+                }
+            }
+        }
+        out
+    }
+
     /// What `def` **requires** of an impl, when it is a trait member that
     /// requires anything.
     ///
@@ -1034,6 +1081,7 @@ pub fn record(defs: &DefTable, asts: &HashMap<FileId, Ast>, table: &mut DeclTabl
                 has_body: q.has_body(d.id),
                 recv: q.takes_receiver(d.id),
                 sized_self: q.sized_self(d.id),
+                self_assoc_bounds: q.self_assoc_bounds(d.id),
                 sig: None,
             }),
             DefKind::Struct | DefKind::Enum | DefKind::Trait => Decl::Type(TypeDecl {
@@ -1089,6 +1137,11 @@ mod tests {
             );
             assert_eq!(table.has_body(d.id), tree.has_body(d.id), "{what}");
             assert_eq!(table.sized_self(d.id), tree.sized_self(d.id), "{what}");
+            assert_eq!(
+                table.self_assoc_bounds(d.id),
+                tree.self_assoc_bounds(d.id),
+                "{what}"
+            );
             assert_eq!(table.requirement(d.id), tree.requirement(d.id), "{what}");
             assert_eq!(
                 table.generic_arity(d.id),

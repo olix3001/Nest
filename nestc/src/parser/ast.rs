@@ -557,6 +557,9 @@ pub enum NodeKind {
         /// implementing type must also be for the method to exist. Kept out of
         /// `generics` so nothing counting parameters sees it.
         self_bounds: Option<NodeId>,
+        /// Each `Self.Assoc: Bounds` in the same list — Rust's `where
+        /// Self::Item: Ord` — as the associated type's name and its bounds.
+        self_assoc_bounds: Vec<(Symbol, NodeId)>,
         params: Vec<NodeId>,
         ret: Option<NodeId>,
         body: Option<NodeId>,
@@ -900,6 +903,7 @@ impl NodeKind {
                 directives,
                 generics,
                 self_bounds,
+                self_assoc_bounds,
                 params,
                 ret,
                 body,
@@ -908,6 +912,7 @@ impl NodeKind {
                 out.extend_from_slice(directives);
                 out.extend_from_slice(generics);
                 push_opt(out, self_bounds);
+                out.extend(self_assoc_bounds.iter().map(|(_, b)| *b));
                 out.extend_from_slice(params);
                 push_opt(out, ret);
                 push_opt(out, body);

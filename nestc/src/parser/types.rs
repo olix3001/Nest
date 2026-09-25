@@ -343,7 +343,13 @@ impl Parser {
             let span = start.to(self.node_span(ty));
             return self.alloc(span, NodeKind::GenericConstParam { name, ty });
         }
-        let name = self.expect_ident();
+        let mut name = self.expect_ident();
+        // `Self.Item: Ord` — a bound on the trait's associated type, which
+        // `split_self_bounds` takes out of the list again.
+        if name.as_str() == "Self" && self.eat(&TokenKind::Dot) {
+            let member = self.expect_ident();
+            name = Symbol::new(&format!("Self.{member}"));
+        }
         let mut span = start;
         let constraint = if self.eat(&TokenKind::Colon) {
             let bounds = self.parse_bounds();
@@ -355,15 +361,34 @@ impl Parser {
         self.alloc(span, NodeKind::GenericTypeParam { name, constraint })
     }
 
-    /// Take a `Self: Bounds` out of a generic list (§3.4). `Self` is not a
-    /// parameter — it is the trait's — so what is left is the bounds, which
-    /// resolution checks are written on a trait's method. Written twice, the
-    /// second is refused here: one list of bounds says it all.
-    fn split_self_bounds(&mut self, generics: Vec<NodeId>) -> (Vec<NodeId>, Option<NodeId>) {
+    /// Take a `Self: Bounds` and each `Self.Assoc: Bounds` out of a generic
+    /// list (§3.4). `Self` is not a parameter — it is the trait's — so what is
+    /// left is the bounds, which resolution checks are written on a trait's
+    /// method. `Self` bounded twice is refused here: one list says it all.
+    #[allow(clippy::type_complexity)]
+    fn split_self_bounds(
+        &mut self,
+        generics: Vec<NodeId>,
+    ) -> (Vec<NodeId>, Option<NodeId>, Vec<(Symbol, NodeId)>) {
         let mut out = Vec::with_capacity(generics.len());
         let mut bounds = None;
+        let mut assoc = Vec::new();
         for g in generics {
             match self.clone_kind(g) {
+                NodeKind::GenericTypeParam { name, constraint } if name.as_str().starts_with("Self.") => {
+                    let span = self.node_span(g);
+                    let member = Symbol::new(&name.as_str()["Self.".len()..]);
+                    match constraint {
+                        Some(c) => assoc.push((member, c)),
+                        None => self.error(
+                            span,
+                            format!(
+                                "`Self.{member}` is not a generic parameter: write \
+                                 `Self.{member}: Bound` to bound it"
+                            ),
+                        ),
+                    }
+                }
                 NodeKind::GenericTypeParam { name, constraint } if name.as_str() == "Self" => {
                     let span = self.node_span(g);
                     match (constraint, bounds) {
@@ -375,7 +400,7 @@ impl Parser {
                 _ => out.push(g),
             }
         }
-        (out, bounds)
+        (out, bounds, assoc)
     }
 
     /// Turn each parameter written `impl Bounds` into an anonymous generic
@@ -925,7 +950,7 @@ impl Parser {
             return self.parse_overload_set(start);
         }
         let generics = self.parse_generics();
-        let (generics, self_bounds) = self.split_self_bounds(generics);
+        let (generics, self_bounds, self_assoc_bounds) = self.split_self_bounds(generics);
         let params = self.parse_params();
         let generics = self.lift_impl_params(generics, &params);
         let mut end = self.cur_span();
@@ -950,6 +975,7 @@ impl Parser {
                 extern_abi,
                 generics,
                 self_bounds,
+                self_assoc_bounds,
                 params,
                 ret,
                 body,

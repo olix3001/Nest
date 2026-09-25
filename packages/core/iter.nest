@@ -4,7 +4,7 @@
 // `Iterator.next` (§10).
 
 * :: import "option.nest"
-{ Ordering } :: import "cmp.nest"
+{ Ord, Ordering } :: import "cmp.nest"
 
 // An iterator writes `next`; everything else below comes with it (§10.4).
 //
@@ -189,6 +189,17 @@
         _ => b,
       }
     })
+  }
+
+  // The greatest element; of equals, the last. Only for elements with an
+  // order of their own (`Ord`) — a float's goes through `max_by`.
+  max :: func <Self: Sized, Self.Item: Ord> (self: Self) -> Option.<Self.Item> {
+    return self.max_by({ a, b in a.cmp(b) })
+  }
+
+  // The least element; of equals, the first.
+  min :: func <Self: Sized, Self.Item: Ord> (self: Self) -> Option.<Self.Item> {
+    return self.min_by({ a, b in a.cmp(b) })
   }
 
   // The least element by `cmp`; of equals, the first.

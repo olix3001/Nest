@@ -3620,3 +3620,47 @@ main :: func () -> i32 {
         assert_eq!(code, 0);
     }
 }
+
+/// `<Self.Item: Ord>` (§3.4): `max`/`min` take the order from the elements,
+/// a receiver whose `Item` is a bounded parameter proves it through its bound,
+/// and a user trait may bound its own associated type the same way.
+#[test]
+fn a_bound_on_an_associated_type_of_self() {
+    let src = r#"
+{ Iterator } :: import <core/iter>
+{ Ord } :: import <core/cmp>
+
+top :: func <T: Ord, I: Iterator.<Item = T>> (it: I) -> Option.<T> {
+    return it.max()
+}
+
+Pick :: trait {
+    Out :: type
+    two :: func (self: *Self) -> (Self.Out, Self.Out)
+    larger :: func <Self.Out: Ord> (self: *Self) -> Self.Out {
+        const p := self.two()
+        return p.0.cmp(p.1).match {
+            .less => p.1,
+            _ => p.0,
+        }
+    }
+}
+P :: struct { a: i32, b: i32 }
+impl Pick for P {
+    Out :: i32
+    two :: func (self: *P) -> (i32, i32) { return (self.a, self.b) }
+}
+
+main :: func () -> i32 {
+    const xs := [_]i32 { 3, 1, 4, 1, 5 }
+    const hi := xs[..].iter().max().match { .some(v) => v, .none => 100 }
+    const lo := xs[..].iter().min().match { .some(v) => v, .none => 100 }
+    const t := top(xs[..].iter()).match { .some(v) => v, .none => 100 }
+    const p := P { a: 2, b: 9 }
+    return hi + lo * 10 + t * 20 + p.larger() * 2
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 5 + 10 + 100 + 18);
+    }
+}

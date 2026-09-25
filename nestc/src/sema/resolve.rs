@@ -252,6 +252,7 @@ impl Resolver<'_> {
             NodeKind::FuncExpr {
                 generics,
                 self_bounds,
+                self_assoc_bounds,
                 params,
                 ret,
                 body,
@@ -286,6 +287,40 @@ impl Resolver<'_> {
                              is one known type",
                         );
                     }
+                }
+                // `<Self.Item: Ord>`: a bound on one of the trait's own
+                // associated types, which calls must satisfy and the body may
+                // assume (§3.4).
+                for (member, b) in &self_assoc_bounds {
+                    let trait_def = self.current_ns();
+                    if !self.boundaries.is_empty()
+                        || self.defs.get(trait_def).kind != DefKind::Trait
+                    {
+                        self.report(
+                            *b,
+                            "only a trait's method may bound `Self`; everywhere else `Self` \
+                             is one known type",
+                        );
+                        continue;
+                    }
+                    let is_assoc = self
+                        .defs
+                        .get(trait_def)
+                        .ns
+                        .members
+                        .get(member)
+                        .is_some_and(|&d| {
+                            self.defs.get(self.defs.resolve_alias(d)).kind == DefKind::TypeAlias
+                        });
+                    if !is_assoc {
+                        let msg = format!(
+                            "`{member}` is not an associated type of `{}`",
+                            self.defs.get(trait_def).name
+                        );
+                        self.report(*b, &msg);
+                        continue;
+                    }
+                    self.resolve_node(*b);
                 }
                 self.boundaries.push(Boundary {
                     depth: self.scopes.len(),

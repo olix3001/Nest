@@ -3284,6 +3284,26 @@ g :: func <Self: Sized> () {}
     assert!(errs.iter().any(|m| m.contains("only a trait's method may bound `Self`")), "{errs:?}");
 }
 
+/// A call proves `<Self.Item: Ord>` of its receiver, and the bound names one
+/// of the trait's own associated types.
+#[test]
+fn a_bound_on_self_item_is_checked() {
+    let src = "\
+{ Iterator } :: import <core/iter>
+T :: trait {
+    Out :: type
+    m :: func <Self.Nope: Ord> (self: *Self) {}
+}
+f :: func () {
+    const fs := [_]f64 { 1.0, 2.0 }
+    const m := fs[..].iter().max()
+}
+";
+    let errs = messages(src);
+    assert!(errs.iter().any(|m| m.contains("`Nope` is not an associated type of `T`")), "{errs:?}");
+    assert!(errs.iter().any(|m| m.contains("`f64` does not implement `core.cmp.Ord`")), "{errs:?}");
+}
+
 #[test]
 fn the_ir_records_a_traits_methods_in_slot_order() {
     // Declaration order *is* the vtable's layout, so a slot index means nothing
