@@ -3361,8 +3361,8 @@ impl Inferer<'_> {
         }
 
         // Track the best (highest specificity) match, flagging a tie as
-        // ambiguous. Concrete impls (and builtins) score 2; a blanket impl for
-        // one of its own generics scores 1.
+        // ambiguous. Concrete impls (and builtins) score 3, a bounded blanket
+        // impl 2 and a bare one 1 ([`ImplInfo::specificity`]).
         let mut best: Option<(u8, Choice)> = None;
         let mut ambiguous = false;
         let consider =
@@ -3381,7 +3381,7 @@ impl Inferer<'_> {
             .builtin_row_for_trait(trait_def)
             .filter(|r| self.builtin_matches(r, &s))
         {
-            consider(2, Choice::Builtin(row), &mut best, &mut ambiguous);
+            consider(3, Choice::Builtin(row), &mut best, &mut ambiguous);
         }
         // `Func(A) -> R` is only spelling for `Func.<Args = …, Output = …>`, but
         // no impl stands behind it: the compiler implements `Func` for every
@@ -3413,9 +3413,8 @@ impl Inferer<'_> {
             .filter(|&i| self.impls.impls[i].trait_def == Some(trait_def))
             .collect();
         for i in candidates {
-            let generic = self.impls.impls[i].self_is_generic();
+            let score = self.impls.impls[i].specificity(self.defs);
             if self.trial_impl(i, &s, args) {
-                let score = if generic { 1 } else { 2 };
                 consider(score, Choice::User(i), &mut best, &mut ambiguous);
             }
         }
@@ -3444,15 +3443,14 @@ impl Inferer<'_> {
                     // for anything that reaches a builtin, so a mismatched `Rhs`
                     // has been reported once already. Re-checking it would make
                     // `Meters + f64` report twice where `i32 + f64` reports once.
-                    consider(2, Choice::Builtin(row), &mut best, &mut ambiguous);
+                    consider(3, Choice::Builtin(row), &mut best, &mut ambiguous);
                 }
                 let inherited: Vec<usize> = (0..self.impls.impls.len())
                     .filter(|&i| self.impls.impls[i].trait_def == Some(trait_def))
                     .collect();
                 for i in inherited {
-                    let generic = self.impls.impls[i].self_is_generic();
+                    let score = self.impls.impls[i].specificity(self.defs);
                     if self.trial_impl(i, &repr, args) {
-                        let score = if generic { 1 } else { 2 };
                         consider(score, Choice::User(i), &mut best, &mut ambiguous);
                     }
                 }
@@ -4008,7 +4006,16 @@ impl Inferer<'_> {
                         && self.cx.shallow(&self_ty) == v
                     {
                         match assoc.as_str() {
-                            "Args" => params = Some(tuple_elems(&self.cx.shallow(&out))),
+                            // An `Args` nothing has pinned is still a variable,
+                            // and says nothing about how many parameters there
+                            // are: read as a list it is one parameter of the
+                            // whole tuple's type (`Func.<Output = R>`).
+                            "Args" => {
+                                let args = self.cx.shallow(&out);
+                                if !is_var(&args) {
+                                    params = Some(tuple_elems(&args));
+                                }
+                            }
                             "Output" => ret = Some(out),
                             _ => {}
                         }
@@ -4066,7 +4073,7 @@ impl Inferer<'_> {
         // `Func` obligation is met by having one.
         if let (Some(out), Obligation::Projection { assoc, .. }) = (out, ob) {
             let have = match assoc.as_str() {
-                "Args" => args_tuple(&params),
+                "Args" => self.unpinned_args(&s).unwrap_or_else(|| args_tuple(&params)),
                 _ => ret,
             };
             self.expect(origin, &have, out);
@@ -4102,7 +4109,13 @@ impl Inferer<'_> {
             self.infer_args_only(args);
             return Some(Ty::Error);
         }
-        let want = args_tuple(&params);
+        let callee_ty = match (&shallow, deref) {
+            (Ty::Ptr { inner, .. }, true) => (**inner).clone(),
+            (other, _) => other.clone(),
+        };
+        let want = self
+            .unpinned_args(&callee_ty)
+            .unwrap_or_else(|| args_tuple(&params));
         let got = self.infer_arg(args[0], Some(want.clone()));
         self.expect(args[0], &got, &want);
         self.ast.set_meta(callee, FuncCallMethod { deref });
@@ -4115,6 +4128,21 @@ impl Inferer<'_> {
             },
         );
         Some(ret)
+    }
+
+    /// A type parameter bounded by a bare `Func` has an `Args` nothing has
+    /// pinned: the argument tuple is that projection itself, which
+    /// monomorphization makes a tuple — not a one-element tuple *of* it, which
+    /// is what reading it as a list of parameters would give.
+    fn unpinned_args(&mut self, ty: &Ty) -> Option<Ty> {
+        let Ty::Nominal { def, .. } = self.cx.shallow(ty) else {
+            return None;
+        };
+        if self.defs.get(def).kind != DefKind::TypeParam {
+            return None;
+        }
+        let synth = *self.defs.get(def).ns.members.get(&Symbol::new("Args"))?;
+        Some(self.param_ty(synth)).filter(|t| !matches!(t, Ty::Tuple(_) | Ty::Void))
     }
 
     /// What a value of type `ty` takes and answers when it is called, if it can
@@ -4465,6 +4493,17 @@ impl Inferer<'_> {
                 // receiver (`[]T`, `[N]T`, a range), whose impl parks its
                 // members outside any nominal namespace.
                 if let Some(m) = self.impl_method_def(&recv, name.as_str()) {
+                    // On a type parameter, a **blanket** impl is only the one
+                    // that applies to every `T`: a more specific impl may apply
+                    // to the type `T` turns out to be (§4.8), so which one runs
+                    // is monomorphization's to say, as it is for a bound.
+                    if let Some((trait_def, decl)) = self.blanket_on_param(&recv, m, name.as_str()) {
+                        let d = MethodDispatch::Generic {
+                            trait_def,
+                            args: Vec::new(),
+                        };
+                        return self.infer_method_call(callee, &recv, decl, d, args, &targs);
+                    }
                     // The impl was selected right here, so this is a direct
                     // call even though the method came from a trait.
                     return self.infer_method_call(
@@ -5314,6 +5353,43 @@ impl Inferer<'_> {
     /// a type's own method is not something a trait can take over — and a
     /// concrete target beats a blanket one. A tie is treated as unresolved: two
     /// equally specific candidates is a question the program has to answer.
+    /// When `method` was found for a receiver that is a type parameter through
+    /// a blanket trait impl (`impl <T> Trait for T`): the trait, and the
+    /// trait's own declaration of the method.
+    fn blanket_on_param(&mut self, recv: &Ty, method: DefId, name: &str) -> Option<(DefId, DefId)> {
+        let s = self.cx.shallow(recv);
+        let s = self.autoderef(&s);
+        let Ty::Nominal { def, .. } = s else {
+            return None;
+        };
+        if self.defs.get(def).kind != DefKind::TypeParam {
+            return None;
+        }
+        let sym = Symbol::new(name);
+        let imp = self.impls.impls.iter().find(|imp| {
+            imp.members.values().any(|&m| m == method) && imp.trait_def.is_some()
+        })?;
+        if !imp.self_is_generic() {
+            return None;
+        }
+        let trait_def = imp.trait_def?;
+        // A trait with associated types answers them through the impl, and
+        // this impl is the one that says what they are for every `T`: deferring
+        // would leave `IntoIterator.Iter` unanswered where `for` needs it.
+        let has_assoc = self
+            .defs
+            .get(trait_def)
+            .ns
+            .members
+            .values()
+            .any(|&m| self.defs.get(m).kind != DefKind::Func);
+        if has_assoc {
+            return None;
+        }
+        let decl = *self.defs.get(trait_def).ns.members.get(&sym)?;
+        Some((trait_def, decl))
+    }
+
     fn impl_method_def(&mut self, recv: &Ty, name: &str) -> Option<DefId> {
         let s = self.cx.shallow(recv);
         let s = self.autoderef(&s);

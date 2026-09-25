@@ -1269,7 +1269,16 @@ impl Mono<'_> {
                     continue;
                 }
             }
-            let score = if imp.self_is_generic() { 1 } else { 2 };
+            // A bounded blanket impl beats a bare one — but only where its
+            // bounds hold for the type in hand, which inference never had to
+            // ask about an impl it reached through a vtable (`member_dyn`).
+            // A bound it cannot see an impl for drops it below every other
+            // candidate rather than out of the running: a bound a builtin row
+            // answers has no impl here to find.
+            let mut score = imp.specificity(self.defs);
+            if score == 2 && !self.bounds_hold(linked, i, &bindings) {
+                score = 0;
+            }
             if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
                 best = Some((score, i, bindings));
             }
@@ -1277,6 +1286,24 @@ impl Mono<'_> {
         let (_, i, mut b) = best?;
         self.complete_impl_bindings(linked, i, &mut b);
         Some((i, b))
+    }
+
+    /// Whether the self parameter of the blanket impl `i`, bound as `bindings`
+    /// says, has an impl of each trait that bounds it.
+    fn bounds_hold(&self, linked: &Linked, i: usize, bindings: &Subst) -> bool {
+        let imp = &self.impls.impls[i];
+        let Some(head) = imp.self_head else {
+            return true;
+        };
+        let Some(ty) = bindings.tys.get(&head) else {
+            return true;
+        };
+        let bounds = self.defs.get(head).param_bounds.clone().unwrap_or_default();
+        bounds.iter().all(|&t| {
+            let lang = self.defs.get(t).lang.as_ref().map(|l| l.as_str().to_string());
+            matches!(lang.as_deref(), Some("func" | "sized"))
+                || self.match_impl(linked, t, ty, &[]).is_some()
+        })
     }
 
     /// Bind what matching the target could not: the impl parameters its **bounds**
@@ -2270,10 +2297,20 @@ fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
             s.push('E');
             push_ty(s, defs, ret);
         }
-        Ty::Dyn { def: d, .. } => {
+        Ty::Dyn { def: d, assoc } => {
             s.push('D');
             for seg in &defs.get(*d).canonical {
                 push_len(s, seg.as_str());
+            }
+            // The pins are part of the type: `dyn Func(i32) -> i32` and `dyn
+            // Func(str)` are two object types with two vtable layouts, and a
+            // key that left them out gave both one.
+            let mut pins: Vec<_> = assoc.iter().collect();
+            pins.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+            for (name, ty) in pins {
+                s.push('A');
+                push_len(s, name.as_str());
+                push_ty(s, defs, ty);
             }
             s.push('E');
         }

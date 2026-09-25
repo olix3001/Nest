@@ -3085,6 +3085,90 @@ fn func_call_takes_the_arguments_as_a_tuple() {
     }
 }
 
+/// `==` and `!=` on two pointers compare the addresses.
+#[test]
+fn pointers_compare_by_address() {
+    let src = "{ new } :: import <core/mem>\n\
+               P :: struct { n: i32 }\n\
+               main :: func () -> i32 {\n\
+                   const a: *mut P := new.<P>()\n\
+                   const b: *mut P := a\n\
+                   const c: *mut P := new.<P>()\n\
+                   let mut r := 0\n\
+                   if a == b { r = r + 1 }\n\
+                   if a != c { r = r + 2 }\n\
+                   if a == c { r = r + 4 }\n\
+                   return r\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 3);
+    }
+}
+
+/// Specialization (§4.8) reaches through generic code: a method on a type
+/// parameter found in a blanket impl is re-selected per instantiation, so a
+/// type's own impl runs; and a **bounded** blanket impl beats a bare one where
+/// its bound holds — here, chosen through a vtable, as `std/di` chooses one.
+#[test]
+fn a_more_specific_impl_wins_in_generic_code() {
+    let src = "{ Default } :: import <core/default>\n\
+               { transmute } :: import <core/mem>\n\
+               Hook :: trait { hook :: func (self: *Self) -> i32 }\n\
+               impl <T> Hook for T { hook :: func (self: *Self) -> i32 { return 1 } }\n\
+               A :: struct { n: i32 }\n\
+               impl Hook for A { hook :: func (self: *A) -> i32 { return 10 } }\n\
+               run :: func <T> (v: *T) -> i32 { return v.hook() }\n\
+               Fill :: trait { fill :: func (self: *Self) -> i32 }\n\
+               impl <T> Fill for T { fill :: func (self: *Self) -> i32 { return 100 } }\n\
+               impl <T: Default> Fill for T { fill :: func (self: *Self) -> i32 { return 1000 } }\n\
+               D :: struct { n: i32 }\n\
+               impl Default for D { default :: func () -> D { return D { n: 0 } } }\n\
+               main :: func () -> i32 {\n\
+                   const a := A { n: 0 }\n\
+                   const b := D { n: 0 }\n\
+                   const x: *dyn Fill := &b\n\
+                   const y: *dyn Fill := &a\n\
+                   return run(&a) + run(&b) + (x.fill() + y.fill()) / 100\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 10 + 1 + 11);
+    }
+}
+
+/// Two `*dyn Func` types with different signatures are two object types: each
+/// gets its own vtable layout. Keyed without their pins, both calls went
+/// through whichever signature was laid out first.
+#[test]
+fn dyn_funcs_of_different_signatures_do_not_share_a_vtable() {
+    let src = "{ boxed } :: import <core/mem>\n\
+               Big :: struct { a: i64, b: i64, c: i64 }\n\
+               main :: func () -> i32 {\n\
+                   const f: *dyn Func(i64) -> Big := boxed({ x: i64 -> Big in Big { a: x, b: 2, c: 3 } })\n\
+                   const g: *dyn Func(i32, i32) -> i32 := boxed({ x: i32, y: i32 -> i32 in x * y })\n\
+                   const r := f(1)\n\
+                   return cast.<i32>(r.a + r.b + r.c) + g(4, 5)\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 6 + 20);
+    }
+}
+
+/// `F.Args` of a bare `Func` bound passes through generic code as itself — not
+/// a one-element tuple of it — and `f.call(a)` spreads it at the end.
+#[test]
+fn unpinned_func_args_forward_through_generics() {
+    let src = "inner :: func <F: Func> (f: F, a: F.Args) -> F.Output { return f.call(a) }\n\
+               outer :: func <F: Func> (f: F, a: F.Args) -> F.Output { return inner(f, a) }\n\
+               main :: func () -> i32 {\n\
+                   const n := 1\n\
+                   const g := { in outer({ x: i32, y: i32 -> i32 in x + y + n }, (2, 3)) }\n\
+                   return inner({ x: i32, y: i32 -> i32 in x * y }, (2, 3)) + g()\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 12);
+    }
+}
+
 /// What an `impl Func` return type turned out to be is stored as a `*dyn Func`
 /// like any closure is.
 #[test]

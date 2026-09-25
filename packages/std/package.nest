@@ -23,6 +23,7 @@
 @public text        :: import "text/text.nest"
 @public collections :: import "collections/collections.nest"
 @public net         :: import "net/net.nest"
+@public di          :: import "di/di.nest"
 @public mem         :: import "mem.nest"
 @public serialize   :: import "serialize/serialize.nest"
 

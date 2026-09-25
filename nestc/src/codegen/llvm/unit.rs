@@ -2279,10 +2279,26 @@ impl<'ctx> Cx<'ctx, '_> {
                 args.len()
             )));
         }
-        let vals: Vec<BasicValueEnum<'ctx>> = args
+        let mut vals: Vec<BasicValueEnum<'ctx>> = args
             .iter()
             .map(|a| self.operand(fx, f, a, at))
             .collect::<Result<_>>()?;
+        // A comparison of two pointers compares the addresses: LLVM's `icmp`
+        // takes pointers too, but every integer path below reads its operands
+        // as integers, so they are made one — the pointer's width, whatever it
+        // is on this target.
+        if vals.iter().any(|v| v.is_pointer_value()) {
+            let word = self.word();
+            for v in &mut vals {
+                if v.is_pointer_value() {
+                    *v = self
+                        .builder
+                        .build_ptr_to_int(v.into_pointer_value(), word, "")
+                        .map_err(failed)?
+                        .into();
+                }
+            }
+        }
         let signed = matches!(at, Ty::Int { signed: true, .. });
         let float = matches!(at, Ty::Float { .. });
         let b = &self.builder;

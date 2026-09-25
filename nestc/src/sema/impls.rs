@@ -104,6 +104,24 @@ impl ImplInfo {
     pub fn self_is_generic(&self) -> bool {
         self.self_head.is_some_and(|h| self.generics.contains(&h))
     }
+
+    /// How specific the impl is, for choosing among several that apply (§4.8):
+    /// `3` for a named self type, `2` for a blanket impl whose parameter is
+    /// **bounded** (`impl <T: Default> Fill for T` — it matches fewer types),
+    /// `1` for a bare blanket impl.
+    pub fn specificity(&self, defs: &super::def::DefTable) -> u8 {
+        match self.self_head {
+            Some(h) if self.generics.contains(&h) => {
+                let bounded = defs
+                    .get(h)
+                    .param_bounds
+                    .as_ref()
+                    .is_some_and(|b| !b.is_empty());
+                if bounded { 2 } else { 1 }
+            }
+            _ => 3,
+        }
+    }
 }
 
 /// The whole-program impl index: every impl this compilation wrote, and every

@@ -1,0 +1,439 @@
+// Dependency injection, in .NET's shape: services are registered with a
+// lifetime, a provider builds them on demand, and what a service needs is
+// handed to it rather than looked up by it.
+//
+//     di :: import <std/di>
+//     { inject } :: import <std/di>
+//
+//     Db :: struct { url: str }
+//     Repo :: struct {
+//         @inject db: *Db,   // filled from the provider
+//         hits: i32,         // not injected: its `Default`, or zero
+//     }
+//
+//     let mut services: di.Services := di.services()
+//     services.add_singleton({ sp in Db { url: "app.db" } })
+//     services.add_scoped_auto.<Repo>()
+//     let root: *mut di.Scope := services.build()
+//
+//     let repo: *Repo := root.get.<Repo>().!
+//     const n: i32 := root.invoke({ db: *Db, r: *Repo in r.hits }).!
+//
+// ### Pointers that read
+//
+// Services are handed out as `*T` — `get`, and a member or parameter written
+// `*T` — because one service is shared by everything that asks for it, and a
+// pointer that can write is a claim to be the only one doing so. `*mut T` is
+// resolved too (`get_mut`, a `*mut T` member or parameter), for the code that
+// really does own what it asks for.
+//
+// ### Built on reflection, not on the compiler
+//
+// Nothing here is special to the language. A registration is a closure stored
+// as a `*dyn Func`, keyed by the service's `TypeId` (`core/reflect`). An
+// **autowired** service (`add_*_auto`) is built by walking its members'
+// descriptions: a member written `@inject` must be a pointer, and it is set to
+// the service its pointee names; `invoke` does the same to a closure's
+// parameters, building its `Args` tuple member by member and then making the
+// call through `Func.call`.
+//
+// ### What a member that is not `@inject` gets
+//
+// Its type's `Default` when it has one, and zero otherwise — the value
+// `mem.new` gives every member. A service that has to do more once its
+// dependencies are in writes an `Init` impl, which runs last:
+//
+//     impl di.Init for Repo {
+//         init :: func (self: *mut Repo, sp: *mut di.Scope) -> Result.<void, di.Error> {
+//             self.hits = 100
+//             return .ok(())
+//         }
+//     }
+//
+// ### Lifetimes
+//
+// A **singleton** is built once, by the root, and shared by every scope. A
+// **scoped** service is built once per scope — `std/http` opens a scope per
+// request. A **transient** one is built at every request for it. A singleton's
+// own dependencies are resolved from the root, so a scoped service it asks for
+// lives as long as the singleton does, the way .NET's root provider behaves.
+
+collections :: import "../collections/collections.nest"
+{ Vec, HashMap } :: import "../collections/collections.nest"
+{ TypeId, Member, Kind, type_id, type_info, member_ptr, attr_of } :: import <core/reflect>
+{ new, boxed, transmute } :: import <core/mem>
+{ Default } :: import <core/default>
+
+/// Marks a member an autowired service gets from the provider. The member must
+/// be a pointer — `*T` or `*mut T` — to a registered service `T`.
+@public(all) @attribute inject :: struct {}
+
+/// How long a built service lives.
+@public Lifetime :: enum {
+    /// One for the whole provider.
+    Singleton,
+    /// One per scope.
+    Scoped,
+    /// A new one for every request.
+    Transient,
+}
+
+/// What went wrong resolving a service: which one, and why.
+@public(all) Error :: struct {
+    message: str,
+}
+
+/// The registrations a provider is built from.
+@public(fields: package) Services :: struct {
+    // Each registration's position in `entries`, by the `TypeId` of the service,
+    // of a `*` to it and of a `*mut` to it — so a member or parameter typed as
+    // either pointer finds it.
+    index: HashMap.<u128, usize>,
+    entries: Vec.<Entry>,
+}
+
+// One registration.
+Entry :: struct {
+    name: str,
+    lifetime: Lifetime,
+    make: *dyn Func(*mut Scope) -> Result.<*mut void, Error>,
+}
+
+/// No registrations yet.
+@public services :: func () -> Services {
+    return Services {
+        index: collections.hash_map.new.<u128, usize>(),
+        entries: collections.vec.new.<Entry>(),
+    }
+}
+
+impl Services {
+    /// A singleton `T`, made by `make` the first time anything asks for one.
+    @public add_singleton :: func <T, F: Func(*mut Scope) -> T> (self: *mut Self, make: F) -> void {
+        self.add.<T, F>(.Singleton, make)
+    }
+
+    /// A scoped `T`, made by `make` once per scope.
+    @public add_scoped :: func <T, F: Func(*mut Scope) -> T> (self: *mut Self, make: F) -> void {
+        self.add.<T, F>(.Scoped, make)
+    }
+
+    /// A transient `T`, made by `make` every time it is asked for.
+    @public add_transient :: func <T, F: Func(*mut Scope) -> T> (self: *mut Self, make: F) -> void {
+        self.add.<T, F>(.Transient, make)
+    }
+
+    /// `value`, as a singleton that is already built.
+    @public add_instance :: func <T> (self: *mut Self, value: T) -> void {
+        const made: *mut T := boxed(value)
+        self.register.<T>(.Singleton, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in
+            .ok(transmute.<*mut void>(made))
+        }))
+    }
+
+    /// A singleton `T`, autowired: its `@inject` members from the provider.
+    @public add_singleton_auto :: func <T> (self: *mut Self) -> void {
+        self.register.<T>(.Singleton, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in autowire.<T>(sp) }))
+    }
+
+    /// A scoped `T`, autowired.
+    @public add_scoped_auto :: func <T> (self: *mut Self) -> void {
+        self.register.<T>(.Scoped, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in autowire.<T>(sp) }))
+    }
+
+    /// A transient `T`, autowired.
+    @public add_transient_auto :: func <T> (self: *mut Self) -> void {
+        self.register.<T>(.Transient, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in autowire.<T>(sp) }))
+    }
+
+    /// Whether a `T` is registered.
+    @public has :: func <T> (self: *Self) -> bool {
+        return self.index.get(cast.<u128>(type_id.<T>())).match { .some(_) => true, .none => false }
+    }
+
+    /// The root scope, which owns the singletons. The registrations are copied
+    /// into it: registering more on `self` afterwards changes nothing it sees.
+    @public build :: func (self: *Self) -> *mut Scope {
+        const root: *mut Scope := new.<Scope>()
+        root.* = Scope {
+            services: boxed(self.*),
+            root: root,
+            cache: collections.hash_map.new.<usize, *mut void>(),
+            provided: collections.hash_map.new.<u128, *mut void>(),
+            resolving: collections.vec.new.<usize>(),
+        }
+        return root
+    }
+
+    add :: func <T, F: Func(*mut Scope) -> T> (self: *mut Self, lifetime: Lifetime, make: F) -> void {
+        self.register.<T>(lifetime, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in
+            .ok(transmute.<*mut void>(boxed.<T>(make(sp))))
+        }))
+    }
+
+    // The latest registration of a type wins, as it does in .NET.
+    register :: func <T> (self: *mut Self, lifetime: Lifetime, make: *dyn Func(*mut Scope) -> Result.<*mut void, Error>) -> void {
+        const at: usize := self.entries.len()
+        self.entries.push(Entry { name: type_info.<T>().name, lifetime: lifetime, make: make })
+        self.index.insert(cast.<u128>(type_id.<T>()), at).match { .some(_) => (), .none => () }
+        self.index.insert(cast.<u128>(type_id.<*T>()), at).match { .some(_) => (), .none => () }
+        self.index.insert(cast.<u128>(type_id.<*mut T>()), at).match { .some(_) => (), .none => () }
+    }
+}
+
+/// Where services are resolved: the root one `Services.build` makes, or a child
+/// of it (`scope()`) with scoped services of its own.
+@public(fields: package) Scope :: struct {
+    services: *Services,
+    // The scope that owns the singletons; itself, for the root.
+    root: *mut Scope,
+    // What this scope has built, by registration.
+    cache: HashMap.<usize, *mut void>,
+    // What was handed to this scope ready-made (`provide`), by the `TypeId` of
+    // the value, of a `*` and of a `*mut` to it — asked before any registration.
+    provided: HashMap.<u128, *mut void>,
+    // What is being built right now, innermost last, to report a cycle rather
+    // than recurse until the stack runs out.
+    resolving: Vec.<usize>,
+}
+
+impl Scope {
+    /// The `T` this scope provides, to read. A singleton is shared by
+    /// everything that asks for it, so what is handed out by default is a
+    /// pointer that cannot write — `get_mut` is the deliberate other case.
+    @public get :: func <T> (self: *mut Self) -> Result.<*T, Error> {
+        const p: *mut void := self.resolve(cast.<u128>(type_id.<T>()), type_info.<T>().name).?
+        return .ok(transmute.<*T>(p))
+    }
+
+    /// The `T` this scope provides, to write: for a service the caller owns — a
+    /// transient one, or a scoped one within its scope.
+    @public get_mut :: func <T> (self: *mut Self) -> Result.<*mut T, Error> {
+        const p: *mut void := self.resolve(cast.<u128>(type_id.<T>()), type_info.<T>().name).?
+        return .ok(transmute.<*mut T>(p))
+    }
+
+    /// Whether a `T` could be resolved here.
+    @public has :: func <T> (self: *Self) -> bool {
+        return self.services.has.<T>()
+    }
+
+    /// Make `value` what this scope answers for `T` (and for `*T`, `*mut T`),
+    /// ahead of any registration: how a framework hands a handler the values
+    /// that belong to one request — `std/http` provides its `Context`.
+    @public provide :: func <T> (self: *mut Self, value: *mut T) -> void {
+        const p: *mut void := transmute.<*mut void>(value)
+        self.provided.insert(cast.<u128>(type_id.<T>()), p).match { .some(_) => (), .none => () }
+        self.provided.insert(cast.<u128>(type_id.<*T>()), p).match { .some(_) => (), .none => () }
+        self.provided.insert(cast.<u128>(type_id.<*mut T>()), p).match { .some(_) => (), .none => () }
+    }
+
+    /// A child scope: the same singletons, scoped services of its own.
+    @public scope :: func (self: *mut Self) -> *mut Scope {
+        const child: *mut Scope := new.<Scope>()
+        child.* = Scope {
+            services: self.services,
+            root: self.root,
+            cache: collections.hash_map.new.<usize, *mut void>(),
+            provided: collections.hash_map.new.<u128, *mut void>(),
+            resolving: collections.vec.new.<usize>(),
+        }
+        return child
+    }
+
+    /// Call `f` with every parameter resolved from this scope. Each parameter
+    /// must be a pointer to a registered service:
+    ///
+    /// ```nest
+    /// root.invoke({ db: *Db, log: *Log in log.write(db.url) }).!
+    /// ```
+    @public invoke :: func <F: Func> (self: *mut Self, f: F) -> Result.<F.Output, Error> {
+        const args: *mut F.Args := new.<F.Args>()
+        for m in type_info.<F.Args>().members {
+            const p: *mut void := self.member(m, "a parameter").?
+            transmute.<*mut *mut void>(member_ptr.<F.Args>(args, m)).* = p
+        }
+        return .ok(f.call(args.*))
+    }
+
+    // The service a member or a parameter asks for.
+    member :: func (self: *mut Self, m: Member, what: str) -> Result.<*mut void, Error> {
+        return m.kind.match {
+            .Ptr(pointee) => self.resolve(cast.<u128>(m.id), pointee.name),
+            _ => .err(Error { message: f"{what} `{m.name}` is not a pointer to a service" }),
+        }
+    }
+
+    // The service registered under `key`, built if this scope has not yet.
+    resolve :: func (self: *mut Self, key: u128, name: str) -> Result.<*mut void, Error> {
+        self.provided.get(key).match {
+            .some(p) => { return .ok(p) },
+            .none => (),
+        }
+        const at: usize := self.services.index.get(key).match {
+            .some(i) => i,
+            .none => { return .err(Error { message: f"no service `{name}` is registered" }) },
+        }
+        const e: Entry := self.services.entries.get(at).match {
+            .some(e) => e,
+            .none => { return .err(Error { message: f"no service `{name}` is registered" }) },
+        }
+        return e.lifetime.match {
+            .Singleton => self.root.build(at, e),
+            .Scoped => self.build(at, e),
+            .Transient => self.make(at, e),
+        }
+    }
+
+    // `e`, cached in this scope.
+    build :: func (self: *mut Self, at: usize, e: Entry) -> Result.<*mut void, Error> {
+        const cached: Option.<*mut void> := self.cache.get(at)
+        cached.match {
+            .some(p) => { return .ok(p) },
+            .none => (),
+        }
+        const p: *mut void := self.make(at, e).?
+        self.cache.insert(at, p).match { .some(_) => (), .none => () }
+        return .ok(p)
+    }
+
+    // `e`, built now, with a cycle reported rather than followed.
+    make :: func (self: *mut Self, at: usize, e: Entry) -> Result.<*mut void, Error> {
+        for r in self.root.resolving.iter() {
+            if r == at { return .err(Error { message: f"`{e.name}` depends on itself" }) }
+        }
+        self.root.resolving.push(at)
+        const made: Result.<*mut void, Error> := e.make(self)
+        self.root.resolving.pop().match { .some(_) => (), .none => () }
+        return made
+    }
+}
+
+// ===< Autowiring >===
+
+/// What an autowired service does once its members are set: nothing, unless its
+/// type says otherwise with an impl of its own — which is more specific than
+/// this one, so it is the one that runs.
+@public Init :: trait {
+    init :: func (self: *mut Self, sp: *mut Scope) -> Result.<void, Error>
+}
+
+impl <T> Init for T {
+    init :: func (self: *mut Self, sp: *mut Scope) -> Result.<void, Error> { return .ok(()) }
+}
+
+// A `T` with its `@inject` members resolved from `sp`, every other member its
+// `Default` or zero, and then its `Init`.
+autowire :: func <T> (sp: *mut Scope) -> Result.<*mut void, Error> {
+    const v: *mut T := new.<T>()
+    for m in type_info.<T>().members {
+        attr_of.<inject>(m.attrs).match {
+            .some(_) => {
+                const p: *mut void := sp.member(m, f"`@inject` member of `{type_info.<T>().name}`").?
+                transmute.<*mut *mut void>(member_ptr.<T>(v, m)).* = p
+            },
+            .none => member_fill.<T>(v, m).fill(),
+        }
+    }
+    v.init(sp).?
+    return .ok(transmute.<*mut void>(v))
+}
+
+// Member `m` of `v`, as its own `Fill` impl.
+member_fill :: #intrinsic("member_dyn") func <T> (v: *T, m: Member) -> *dyn Fill
+
+// Put a member's starting value in place: its `Default`, when its type has one.
+Fill :: trait {
+    fill :: func (self: *Self) -> void
+}
+
+impl <T> Fill for T {
+    fill :: func (self: *Self) -> void { }
+}
+
+impl <T: Default> Fill for T {
+    fill :: func (self: *Self) -> void {
+        const v: T := Default.default()
+        transmute.<*mut T>(self).* = v
+    }
+}
+
+tests :: #when(test) namespace {
+    strs :: import "../text/str.nest"
+
+    Clock :: struct { now: i32 }
+    Db :: struct { url: str }
+    Counter :: struct { n: i32 }
+    impl Default for Counter { default :: func () -> Counter { return Counter { n: 7 } } }
+    Repo :: struct {
+        @inject db: *Db,
+        @inject clock: *Clock,
+        hits: Counter,
+        ready: bool,
+    }
+    impl Init for Repo {
+        init :: func (self: *mut Repo, sp: *mut Scope) -> Result.<void, Error> {
+            self.ready = true
+            return .ok(())
+        }
+    }
+    Loop :: struct { @inject other: *Other }
+    Other :: struct { @inject back: *Loop }
+    Bad :: struct { @inject db: Db }
+
+    setup :: func () -> *mut Scope {
+        let mut s: Services := services()
+        s.add_instance(Clock { now: 5 })
+        s.add_singleton({ sp in Db { url: "app.db" } })
+        s.add_scoped_auto.<Repo>()
+        s.add_transient({ sp in Counter { n: 1 } })
+        return s.build()
+    }
+
+    @test
+    an_autowired_service_gets_its_dependencies :: func () -> Result.<void, Error> {
+        const root := setup()
+        const r: *Repo := root.get.<Repo>().?
+        assert(r.db.url == "app.db")
+        assert(r.clock.now == 5)
+        assert(r.hits.n == 7, "a member that is not `@inject` gets its `Default`")
+        assert(r.ready, "`Init` runs last")
+        return .ok(())
+    }
+
+    @test
+    lifetimes :: func () -> Result.<void, Error> {
+        const root := setup()
+        const a: *Repo := root.get.<Repo>().?
+        const b: *Repo := root.get.<Repo>().?
+        assert(a == b, "one scoped service per scope")
+        const child := root.scope()
+        const c: *Repo := child.get.<Repo>().?
+        assert(a != c, "a new scope builds its own")
+        assert(a.db == c.db, "and shares the singletons")
+        const t1: *mut Counter := root.get_mut.<Counter>().?
+        const t2: *mut Counter := root.get_mut.<Counter>().?
+        assert(t1 != t2, "a transient service is built each time")
+        return .ok(())
+    }
+
+    @test
+    invoke_resolves_parameters :: func () -> Result.<void, Error> {
+        const root := setup()
+        const n: i32 := root.invoke({ c: *Clock, r: *Repo in c.now + r.hits.n }).?
+        assert(n == 12)
+        return .ok(())
+    }
+
+    @test
+    failures_are_reported :: func () {
+        let mut s: Services := services()
+        s.add_scoped_auto.<Loop>()
+        s.add_scoped_auto.<Other>()
+        s.add_scoped_auto.<Bad>()
+        const root := s.build()
+        assert(root.get.<Clock>().match { .ok(_) => false, .err(e) => strs.ends_with(e.message, "Clock` is registered") })
+        assert(root.get.<Loop>().match { .ok(_) => false, .err(e) => strs.ends_with(e.message, "Loop` depends on itself") })
+        assert(root.get.<Bad>().match { .ok(_) => false, .err(_) => true })
+    }
+}
