@@ -573,3 +573,10 @@ fn a_bare_trailing_closure_is_told_from_a_struct_literal() {
         assert!(!t.lines().any(|l| l.trim() == "Call"), "{t}");
     }
 }
+
+/// A `///` above an `impl` or `extern` block is a comment: neither declares
+/// anything an `@doc` could be recorded on, and an attribute there is an error.
+#[test]
+fn a_doc_comment_above_an_impl_is_a_comment() {
+    tree("/// Methods.\nimpl P { f :: func () { } }\n/// C.\nextern(\"c\") { g :: func () }\n");
+}

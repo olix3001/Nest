@@ -1,0 +1,124 @@
+// Every feature of `std/di`, one at a time.
+//
+//     nestc examples/di.nest -o di && ./di
+
+io :: import <std/io>
+di :: import <std/di>
+{ inject } :: import <std/di>
+{ Default } :: import <core/default>
+
+// ===< The services >===
+
+/// Configuration, built once and handed around: registered as an instance.
+Config :: struct { url: str, retries: i32 }
+
+/// A connection pool: a singleton made by a factory closure that reads another
+/// service from the scope it is given.
+Db :: struct { url: str, opened: i32 }
+
+/// Something with a starting value of its own: a member of this type that is
+/// not `@inject` gets its `Default` rather than zero.
+Stats :: struct { hits: i32 }
+impl Default for Stats { default :: func () -> Stats { return Stats { hits: 100 } } }
+
+/// A clock: transient, so every request for one builds a new one.
+Clock :: struct { now: i32 }
+
+/// A request's identity: scoped, so there is one per scope.
+RequestId :: struct { id: i32 }
+
+/// A repository, autowired from its members:
+Repo :: struct {
+    @inject db: *Db,            // a pointer that reads — the default
+    @inject clock: *mut Clock,  // a pointer that may write (a transient is ours)
+    @inject request: RequestId, // a copy of the scoped value
+    stats: Stats,               // not injected: `Stats.default()`
+    ready: bool,                // not injected, no `Default`: zero
+}
+
+/// …and finished by an `Init` impl, which runs after the members are in.
+impl di.Init for Repo {
+    init :: func (self: *mut Repo, sp: *mut di.Scope) -> Result.<void, di.Error> {
+        self.ready = true
+        return .ok(())
+    }
+}
+
+/// Two services that need each other: a cycle, reported rather than followed.
+Chicken :: struct { @inject egg: *Egg }
+Egg :: struct { @inject chicken: *Chicken }
+
+/// Something nobody registers.
+Missing :: struct { n: i32 }
+
+/// A value handed to one scope ready-made, the way `std/http` hands every
+/// handler its request.
+Caller :: struct { name: str }
+
+main :: func () -> i32 {
+    // ===< Registering >===
+    let mut services: di.Services := di.services()
+    let mut next_id := 0
+    let mut opened := 0
+    services.add_instance(Config { url: "postgres://app", retries: 3 })
+    services.add_singleton({ sp in
+        const cfg: *Config := sp.get.<Config>().!
+        opened = opened + 1
+        Db { url: cfg.url, opened: opened }
+    })
+    services.add_transient({ sp in Clock { now: 42 } })
+    services.add_scoped({ sp in
+        next_id = next_id + 1
+        RequestId { id: next_id }
+    })
+    services.add_scoped_auto.<Repo>()
+    services.add_scoped_auto.<Chicken>()
+    services.add_scoped_auto.<Egg>()
+    io.println(f"registered: Repo {services.has.<Repo>()}, Missing {services.has.<Missing>()}")
+
+    const root: *mut di.Scope := services.build()
+
+    // ===< Resolving: by pointer, writable pointer, value >===
+    const repo: *Repo := root.get.<Repo>().!
+    io.println(f"repo: db={repo.db.url} clock={repo.clock.now} request={repo.request.id} stats={repo.stats.hits} ready={repo.ready}")
+
+    const clock: *mut Clock := root.get_mut.<Clock>().!
+    clock.now = 7
+    const again: *mut Clock := root.get_mut.<Clock>().!
+    io.println(f"transient: a new clock each time ({clock.now} vs {again.now})")
+
+    const id: RequestId := root.get_value.<RequestId>().!
+    io.println(f"by value: request {id.id}")
+
+    // ===< Lifetimes across scopes >===
+    const a: *mut di.Scope := root.scope()
+    const b: *mut di.Scope := root.scope()
+    const ra: *Repo := a.get.<Repo>().!
+    const ra2: *Repo := a.get.<Repo>().!
+    const rb: *Repo := b.get.<Repo>().!
+    io.println(f"scoped: same in one scope {ra == ra2}, new in another {ra != rb}, ids {ra.request.id} and {rb.request.id}")
+    io.println(f"singleton: one Db for all {ra.db == rb.db}, opened {opened} time(s)")
+
+    // ===< Calling a function with its parameters supplied >===
+    const total: i32 := root.invoke({ db: *Db, cfg: *Config, now: Clock, r: *Repo in
+        cfg.retries + now.now + r.stats.hits + db.opened
+    }).!
+    io.println(f"invoke: {total}")
+
+    // ===< A value a scope is given rather than builds >===
+    const request_scope: *mut di.Scope := root.scope()
+    let caller: Caller := Caller { name: "ada" }
+    request_scope.provide.<Caller>(&mut caller)
+    const greeting: str := request_scope.invoke({ who: *Caller, r: *Repo in
+        f"hello {who.name}, you are request {r.request.id}"
+    }).!
+    io.println(f"provide: {greeting}")
+
+    // ===< What goes wrong, as errors >===
+    const report := { what: str, e: di.Error in io.println(f"{what}: {e.message}") }
+    root.get.<Missing>().match { .ok(_) => (), .err(e) => report("missing", e) }
+    root.get.<Chicken>().match { .ok(_) => (), .err(e) => report("cycle", e) }
+    root.get_value.<Db>().match { .ok(_) => (), .err(e) => report("singleton by value", e) }
+    root.invoke({ m: *Missing in m.n }).match { .ok(_) => (), .err(e) => report("invoke", e) }
+    return 0
+}

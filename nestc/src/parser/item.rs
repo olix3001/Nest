@@ -54,7 +54,12 @@ impl Parser {
     /// block expands to several bindings, hence the `out` sink.
     fn parse_file_item(&mut self, out: &mut Vec<NodeId>) {
         let start = self.cur_span();
-        let attrs = self.parse_documented_attributes();
+        let mut attrs = self.parse_documented_attributes();
+        // An `impl` or `extern` block declares nothing a doc could be recorded
+        // on, so a `///` above one is the comment it looks like.
+        if matches!(self.peek(), Some(TokenKind::ImplKw | TokenKind::ExternKw)) {
+            attrs.retain(|&a| !matches!(&self.node_kind(a), NodeKind::Attribute { name, .. } if name.as_str() == "doc"));
+        }
         let directives = self.parse_directives();
         let decorated = !attrs.is_empty() || !directives.is_empty();
 
