@@ -25,7 +25,9 @@
 // `*T` — because one service is shared by everything that asks for it, and a
 // pointer that can write is a claim to be the only one doing so. `*mut T` is
 // resolved too (`get_mut`, a `*mut T` member or parameter), for the code that
-// really does own what it asks for.
+// really does own what it asks for, and a plain `T` is a **copy** of a scoped
+// or transient service (`get_value`, a `T` member or parameter). A singleton is
+// never copied: a copy would stop being the one everything shares.
 //
 // ### Built on reflection, not on the compiler
 //
@@ -64,8 +66,9 @@ collections :: import "../collections/collections.nest"
 { new, boxed, transmute } :: import <core/mem>
 { Default } :: import <core/default>
 
-/// Marks a member an autowired service gets from the provider. The member must
-/// be a pointer — `*T` or `*mut T` — to a registered service `T`.
+/// Marks a member an autowired service gets from the provider: `*T` to read a
+/// registered service `T`, `*mut T` to write it, or `T` for a copy of a scoped
+/// or transient one.
 @public(all) @attribute inject :: struct {}
 
 /// How long a built service lives.
@@ -241,27 +244,63 @@ impl Scope {
         return child
     }
 
-    /// Call `f` with every parameter resolved from this scope. Each parameter
-    /// must be a pointer to a registered service:
+    /// The `T` this scope provides, **by value**: a copy of a scoped service or
+    /// a new transient one. A singleton is refused — a copy of it would stop
+    /// being the one everything else shares.
+    @public get_value :: func <T> (self: *mut Self) -> Result.<T, Error> {
+        const found: (*mut void, bool) := self.lookup(cast.<u128>(type_id.<T>()), type_info.<T>().name).?
+        if found.1 { return .err(by_value_singleton(type_info.<T>().name)) }
+        return .ok(transmute.<*T>(found.0).*)
+    }
+
+    /// Call `f` with every parameter resolved from this scope:
     ///
     /// ```nest
     /// root.invoke({ db: *Db, log: *Log in log.write(db.url) }).!
     /// ```
+    ///
+    /// A parameter is a service the way an `@inject` member is: `*T` to read
+    /// it, `*mut T` to write it, or `T` for a copy of a scoped or transient one.
     @public invoke :: func <F: Func> (self: *mut Self, f: F) -> Result.<F.Output, Error> {
         const args: *mut F.Args := new.<F.Args>()
         for m in type_info.<F.Args>().members {
-            const p: *mut void := self.member(m, "a parameter").?
-            transmute.<*mut *mut void>(member_ptr.<F.Args>(args, m)).* = p
+            self.supply(member_ptr.<F.Args>(args, m), m, "parameter").?
         }
         return .ok(f.call(args.*))
     }
 
-    // The service a member or a parameter asks for.
-    member :: func (self: *mut Self, m: Member, what: str) -> Result.<*mut void, Error> {
+    // Fill the slot `into` — a member or a parameter, described by `m` — with
+    // the service it asks for: the address for a pointer, a copy for a value.
+    supply :: func (self: *mut Self, into: *mut void, m: Member, what: str) -> Result.<void, Error> {
         return m.kind.match {
-            .Ptr(pointee) => self.resolve(cast.<u128>(m.id), pointee.name),
-            _ => .err(Error { message: f"{what} `{m.name}` is not a pointer to a service" }),
+            .Ptr(pointee) => {
+                const found: (*mut void, bool) := self.lookup(cast.<u128>(m.id), pointee.name).?
+                transmute.<*mut *mut void>(into).* = found.0
+                return .ok(())
+            },
+            _ => {
+                const found: (*mut void, bool) := self.lookup(cast.<u128>(m.id), f"{what} `{m.name}`").?
+                if found.1 {
+                    return .err(Error { message: f"{what} `{m.name}` takes a singleton by value; take a pointer to it" })
+                }
+                copy_bytes(into, found.0, m.size)
+                return .ok(())
+            },
         }
+    }
+
+    // The service registered under `key` and whether it is a singleton.
+    lookup :: func (self: *mut Self, key: u128, name: str) -> Result.<(*mut void, bool), Error> {
+        const singleton: bool := self.services.index.get(key).match {
+            .some(i) => self.services.entries.get(i).match {
+                .some(e) => e.lifetime.match { .Singleton => true, _ => false },
+                .none => false,
+            },
+            .none => false,
+        }
+        const p: *mut void := self.resolve(key, name).?
+        const provided: bool := self.provided.get(key).match { .some(_) => true, .none => false }
+        return .ok((p, singleton && provided == false))
     }
 
     // The service registered under `key`, built if this scope has not yet.
@@ -328,15 +367,27 @@ autowire :: func <T> (sp: *mut Scope) -> Result.<*mut void, Error> {
     const v: *mut T := new.<T>()
     for m in type_info.<T>().members {
         attr_of.<inject>(m.attrs).match {
-            .some(_) => {
-                const p: *mut void := sp.member(m, f"`@inject` member of `{type_info.<T>().name}`").?
-                transmute.<*mut *mut void>(member_ptr.<T>(v, m)).* = p
-            },
+            .some(_) => sp.supply(member_ptr.<T>(v, m), m, f"`@inject` member of `{type_info.<T>().name}`").?,
             .none => member_fill.<T>(v, m).fill(),
         }
     }
     v.init(sp).?
     return .ok(transmute.<*mut void>(v))
+}
+
+// `n` bytes from `from` to `to`: a value whose type is known only by its
+// description, copied the way `mem.copy` copies a typed one.
+copy_bytes :: func (to: *mut void, from: *mut void, n: usize) -> void {
+    const dst: []mut u8 := transmute.<[]mut u8>(Bytes { ptr: to, len: n })
+    const src: []u8 := transmute.<[]u8>(Bytes { ptr: from, len: n })
+    for i in 0..<n { dst[i] = src[i] }
+}
+
+// The two words a slice is, for `copy_bytes` to make one of.
+Bytes :: struct { ptr: *mut void, len: usize }
+
+by_value_singleton :: func (name: str) -> Error {
+    return Error { message: f"`{name}` is a singleton; take a pointer to it, not a copy" }
 }
 
 // Member `m` of `v`, as its own `Fill` impl.
@@ -422,6 +473,33 @@ tests :: #when(test) namespace {
         const root := setup()
         const n: i32 := root.invoke({ c: *Clock, r: *Repo in c.now + r.hits.n }).?
         assert(n == 12)
+        return .ok(())
+    }
+
+    Stamp :: struct { n: i32 }
+    Holder :: struct {
+        @inject stamp: Stamp,
+        @inject counter: Counter,
+    }
+    Greedy :: struct { @inject db: Db }
+
+    @test
+    services_are_copied_by_value :: func () -> Result.<void, Error> {
+        let mut s: Services := services()
+        s.add_scoped({ sp in Stamp { n: 3 } })
+        s.add_transient({ sp in Counter { n: 4 } })
+        s.add_singleton({ sp in Db { url: "x" } })
+        s.add_scoped_auto.<Holder>()
+        s.add_scoped_auto.<Greedy>()
+        const root := s.build()
+        const h: *Holder := root.get.<Holder>().?
+        assert(h.stamp.n == 3 && h.counter.n == 4, "a `T` member is a copy")
+        const st: Stamp := root.get_value.<Stamp>().?
+        assert(st.n == 3)
+        const sum: i32 := root.invoke({ a: Stamp, b: *Counter in a.n + b.n }).?
+        assert(sum == 7, "a `T` parameter too")
+        assert(root.get_value.<Db>().match { .ok(_) => false, .err(_) => true }, "a singleton is not copied")
+        assert(root.get.<Greedy>().match { .ok(_) => false, .err(_) => true })
         return .ok(())
     }
 
