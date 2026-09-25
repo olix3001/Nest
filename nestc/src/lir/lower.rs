@@ -641,7 +641,7 @@ impl Cx<'_> {
                 signed: false,
             }),
             // A program that did not type-check is not emitted.
-            Ty::Var(_) | Ty::Error => LirTy::Void,
+            Ty::Var(_) | Ty::Error | Ty::Spread(_) => LirTy::Void,
         }
     }
 

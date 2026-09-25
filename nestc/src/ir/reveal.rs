@@ -141,7 +141,10 @@ fn visit(ty: &Ty, f: &mut impl FnMut(&Ty)) {
     f(ty);
     match ty {
         Ty::Nominal { args, .. } | Ty::Tuple(args) => args.iter().for_each(|a| visit(a, f)),
-        Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Array { inner, .. } => {
+        Ty::Ptr { inner, .. }
+            | Ty::Slice { inner, .. }
+            | Ty::Array { inner, .. }
+            | Ty::Spread(inner) => {
             visit(inner, f)
         }
         Ty::Struct(fields) => fields.iter().for_each(|(_, t)| visit(t, f)),
@@ -164,7 +167,8 @@ fn map(ty: &Ty, f: &mut impl FnMut(&Ty) -> Option<Ty>) -> Ty {
             def: *def,
             args: args.iter().map(|a| map(a, f)).collect(),
         },
-        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| map(e, f)).collect()),
+        Ty::Tuple(elems) => Ty::tuple(elems.iter().map(|e| map(e, f)).collect()),
+        Ty::Spread(inner) => Ty::Spread(Box::new(map(inner, f))),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
             assoc: assoc

@@ -1712,7 +1712,8 @@ pub(crate) fn subst_ty(subst: &Subst, ty: &Ty) -> Ty {
             mutable: *mutable,
             inner: Box::new(subst_ty(subst, inner)),
         },
-        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_ty(subst, e)).collect()),
+        Ty::Tuple(elems) => Ty::tuple(elems.iter().map(|e| subst_ty(subst, e)).collect()),
+        Ty::Spread(inner) => Ty::Spread(Box::new(subst_ty(subst, inner))),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
             assoc: assoc
@@ -2386,6 +2387,11 @@ fn push_ty(s: &mut String, defs: &DefTable, ty: &Ty) {
         Ty::ComptimeInt => s.push_str("Ci"),
         Ty::ComptimeFloat => s.push_str("Cf"),
         Ty::ComptimeStr => s.push_str("Cs"),
+        // A spread outlives mono only inside a signature nothing instantiated.
+        Ty::Spread(inner) => {
+            s.push('S');
+            push_ty(s, defs, inner);
+        }
         Ty::Var(_) | Ty::Error => s.push('Z'),
     }
 }

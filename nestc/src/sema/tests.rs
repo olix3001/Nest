@@ -10570,3 +10570,71 @@ doc :: func () -> i32 {
     assert_eq!(doc_of("unused"), None);
     assert_eq!(doc_of("by_hand").as_deref(), Some("By hand."));
 }
+
+// ===< Spreads in tuple types >===
+
+const SPREAD_PRELUDE: &str = "\
+Ctx :: struct { id: i32 }
+{ zeroed } :: import <core/mem>
+handle :: func <Rest, F: Func.<Args = (*Ctx, ..Rest), Output = i32>> (c: *Ctx, f: F) -> i32 {
+    return f.call(zeroed.<F.Args>())
+}
+with :: func <P, Rest, R, F: Func.<Args = (..P, ..Rest), Output = R>> (pre: P, f: F) -> R {
+    return f.call(zeroed.<F.Args>())
+}
+";
+
+#[test]
+fn a_spread_types_the_parameters_before_it() {
+    // `ctx` has no annotation: the bound's `*Ctx` is what types it, and `..Rest`
+    // takes whatever the closure has after it, annotated.
+    let src = format!(
+        "{SPREAD_PRELUDE}\
+main :: func () {{
+    const c := Ctx {{ id: 1 }}
+    const a: i32 := handle(&c, {{ ctx in ctx.id }})
+    const b: i32 := handle(&c, {{ ctx, n: i64, ok: bool in ctx.id }})
+    const d: i32 := with((1, true), {{ x, y, s: str in x }})
+    const e: bool := with((false,), {{ x in x }})
+    const f: i32 := with((), {{ n: i32 in n }})
+}}
+"
+    );
+    assert!(messages(&src).is_empty(), "{:#?}", messages(&src));
+}
+
+#[test]
+fn a_spread_still_checks_what_it_does_not_cover() {
+    for (body, needle) in [
+        // The fixed element is still a type the closure must match.
+        ("handle(&c, { ctx: *i32 in 1 })", "type mismatch"),
+        // And it must be there at all.
+        ("handle(&c, { in 1 })", "type mismatch"),
+    ] {
+        let src = format!(
+            "{SPREAD_PRELUDE}main :: func () {{\n    const c := Ctx {{ id: 1 }}\n    const x := {body}\n}}\n"
+        );
+        let msgs = messages(&src);
+        assert!(msgs.iter().any(|m| m.contains(needle)), "{body}: {msgs:#?}");
+    }
+}
+
+#[test]
+fn a_spread_is_only_of_a_tuple_and_only_in_one() {
+    assert!(
+        messages("f :: func (x: (i32, ..i32)) {}\n")
+            .iter()
+            .any(|m| m.contains("`..` spreads a tuple, and `i32` is not one")),
+        "{:#?}",
+        messages("f :: func (x: (i32, ..i32)) {}\n")
+    );
+    assert!(
+        messages("f :: func <T> (x: ..T) {}\n")
+            .iter()
+            .any(|m| m.contains("`..` is written inside a tuple type")),
+        "{:#?}",
+        messages("f :: func <T> (x: ..T) {}\n")
+    );
+    // A known tuple is spliced where it is written.
+    assert!(messages("f :: func (x: (i32, ..(u8, bool))) -> (i32, u8, bool) { return x }\n").is_empty());
+}

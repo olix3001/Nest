@@ -136,6 +136,7 @@ pub fn summary(ast: &Ast, id: NodeId) -> String {
         ArrayType { mutable, .. } => format!("ArrayType [N]{}", mut_tag(*mutable)),
         TupleType { .. } => "TupleType".into(),
         DynType { .. } => "DynType dyn".into(),
+        SpreadType { .. } => "SpreadType ..".into(),
         DistinctType { .. } => "DistinctType distinct".into(),
         FuncType { .. } => "FuncType".into(),
         StructType { kind, .. } => {

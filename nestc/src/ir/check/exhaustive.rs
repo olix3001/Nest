@@ -1129,7 +1129,8 @@ fn subst(ty: &Ty, params: &[crate::sema::def::DefId], args: &[Ty]) -> Ty {
             mutable: *mutable,
             inner: Box::new(subst(inner, params, args)),
         },
-        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| subst(t, params, args)).collect()),
+        Ty::Tuple(elems) => Ty::tuple(elems.iter().map(|t| subst(t, params, args)).collect()),
+        Ty::Spread(inner) => Ty::Spread(Box::new(subst(inner, params, args))),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
             assoc: assoc

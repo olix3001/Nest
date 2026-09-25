@@ -1287,7 +1287,8 @@ fn rigid_self_in(ty: &Ty, trait_def: DefId, params: &[Ty]) -> Ty {
             mutable: *mutable,
             inner: Box::new(go(inner)),
         },
-        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(go).collect()),
+        Ty::Tuple(elems) => Ty::tuple(elems.iter().map(go).collect()),
+        Ty::Spread(inner) => Ty::Spread(Box::new(go(inner))),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
             assoc: assoc.iter().map(|(n, t)| (n.clone(), (go)(t))).collect(),
@@ -4011,7 +4012,7 @@ impl Inferer<'_> {
                             // are: read as a list it is one parameter of the
                             // whole tuple's type (`Func.<Output = R>`).
                             "Args" => {
-                                let args = self.cx.shallow(&out);
+                                let args = self.cx.resolve(&out);
                                 if !is_var(&args) {
                                     params = Some(tuple_elems(&args));
                                 }
@@ -4021,8 +4022,36 @@ impl Inferer<'_> {
                         }
                     }
                 }
-                let params = params.filter(|p| p.len() == arity)?;
+                let params = params.and_then(|p| self.spread_hint(p, arity))?;
                 Some((params, ret))
+            }
+            _ => None,
+        }
+    }
+
+    /// The parameter types a closure of `arity` parameters is hinted with, from
+    /// the elements of its `Args`. A `..R` in them stands for however many
+    /// parameters the closure has beyond the ones around it, each hinted with
+    /// a fresh variable its annotation (or its use) settles — `Func(*Context,
+    /// ..R)` types a closure's first parameter and leaves the rest to it.
+    fn spread_hint(&mut self, params: Vec<Ty>, arity: usize) -> Option<Vec<Ty>> {
+        let spreads: Vec<usize> = params
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(t, Ty::Spread(_)))
+            .map(|(i, _)| i)
+            .collect();
+        match spreads.as_slice() {
+            [] => (params.len() == arity).then_some(params),
+            &[k] => {
+                let after = params.len() - k - 1;
+                if arity < k + after {
+                    return None;
+                }
+                let mut out = params[..k].to_vec();
+                out.extend((0..arity - k - after).map(|_| self.cx.fresh()));
+                out.extend_from_slice(&params[k + 1..]);
+                Some(out)
             }
             _ => None,
         }
@@ -6753,12 +6782,13 @@ impl Inferer<'_> {
                 signed: *signed,
                 width: subst_const(width, map),
             },
-            Ty::Tuple(elems) => Ty::Tuple(
+            Ty::Tuple(elems) => Ty::tuple(
                 elems
                     .iter()
                     .map(|e| self.subst_type_params(e, map))
                     .collect(),
             ),
+            Ty::Spread(inner) => Ty::Spread(Box::new(self.subst_type_params(inner, map))),
             Ty::Func { params, ret, c } => Ty::Func {
                 c: *c,
                 params: params
@@ -8281,6 +8311,20 @@ impl Inferer<'_> {
         }
     }
 
+    /// Whether `..ty` can stand in a tuple type: a tuple or `void`, or a type
+    /// not known yet — a generic parameter, an inference variable — that has
+    /// to be one where it is used.
+    fn spreadable(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Tuple(_) | Ty::Void | Ty::Var(_) | Ty::Error => true,
+            Ty::Nominal { def, args } => {
+                args.is_empty()
+                    && matches!(self.defs.get(*def).kind, DefKind::TypeParam)
+            }
+            _ => false,
+        }
+    }
+
     fn ty_from_node_in(&mut self, file: FileId, node: NodeId) -> Ty {
         let ast = &self.asts[&file];
         match ast.node(node).kind.clone() {
@@ -8344,16 +8388,34 @@ impl Inferer<'_> {
                 }
             }
             NodeKind::TupleType { elems } => {
-                if elems.is_empty() {
-                    Ty::Void
-                } else {
-                    Ty::Tuple(
-                        elems
-                            .iter()
-                            .map(|e| self.ty_from_node_in(file, *e))
-                            .collect(),
-                    )
+                let mut out = Vec::with_capacity(elems.len());
+                for e in elems {
+                    let NodeKind::SpreadType { inner } = self.asts[&file].node(e).kind.clone() else {
+                        out.push(self.ty_from_node_in(file, e));
+                        continue;
+                    };
+                    let inner_ty = self.ty_from_node_in(file, inner);
+                    if !self.spreadable(&inner_ty) {
+                        let shown = inner_ty.display(self.defs);
+                        self.report_in(
+                            file,
+                            e,
+                            format!("`..` spreads a tuple, and `{shown}` is not one"),
+                        );
+                        out.push(Ty::Error);
+                        continue;
+                    }
+                    out.push(Ty::Spread(Box::new(inner_ty)));
                 }
+                Ty::tuple(out)
+            }
+            NodeKind::SpreadType { .. } => {
+                self.report_in(
+                    file,
+                    node,
+                    "`..` is written inside a tuple type: `(A, ..R)`",
+                );
+                Ty::Error
             }
             NodeKind::FuncType {
                 params,
@@ -10040,7 +10102,8 @@ fn rebind_ty(ty: &Ty, from: &Ty, to: &Ty) -> Ty {
             mutable: *mutable,
             inner: Box::new(rebind_ty(inner, from, to)),
         },
-        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| rebind_ty(e, from, to)).collect()),
+        Ty::Tuple(elems) => Ty::tuple(elems.iter().map(|e| rebind_ty(e, from, to)).collect()),
+        Ty::Spread(inner) => Ty::Spread(Box::new(rebind_ty(inner, from, to))),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
             assoc: assoc

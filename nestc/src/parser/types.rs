@@ -60,6 +60,12 @@ impl Parser {
                 self.reject_directives(&directives, "tuple type");
                 self.parse_tuple_type(start)
             }
+            // `..R` belongs inside a tuple type; one anywhere else is parsed so
+            // that the checker can say so once, rather than the parser many times.
+            Some(TokenKind::DotDot) => {
+                self.reject_directives(&directives, "spread");
+                self.parse_tuple_elem()
+            }
             // `impl Bound + Bound` — a type the program leaves unnamed (§5.4).
             Some(TokenKind::ImplKw) => {
                 self.reject_directives(&directives, "`impl` type");
@@ -125,13 +131,13 @@ impl Parser {
         )
     }
 
-    /// `( [type {, type}] )` — a tuple type; `()` is `void`.
+    /// `( [elem {, elem}] )` — a tuple type; `()` is `void`.
     fn parse_tuple_type(&mut self, start: Span) -> NodeId {
         self.expect(&TokenKind::LParen);
         let mut elems = Vec::new();
         self.skip_newlines();
         while !self.at(&TokenKind::RParen) && !self.at_eof() {
-            elems.push(self.parse_type());
+            elems.push(self.parse_tuple_elem());
             self.skip_newlines();
             if !self.eat(&TokenKind::Comma) {
                 break;
@@ -141,6 +147,19 @@ impl Parser {
         let end = self.cur_span();
         self.expect(&TokenKind::RParen);
         self.alloc(start.to(end), NodeKind::TupleType { elems })
+    }
+
+    /// `type | '..' type` — one element of a tuple type, or of `Func(...)`'s
+    /// argument list: `..R` stands for every element of the tuple `R`.
+    fn parse_tuple_elem(&mut self) -> NodeId {
+        if !self.at(&TokenKind::DotDot) {
+            return self.parse_type();
+        }
+        let start = self.cur_span();
+        self.bump();
+        let inner = self.parse_type();
+        let span = start.to(self.node_span(inner));
+        self.alloc(span, NodeKind::SpreadType { inner })
     }
 
     /// `qualified_name [ generic_args ]` — a named (possibly instantiated) type.
@@ -182,7 +201,7 @@ impl Parser {
         let mut elems = Vec::new();
         self.skip_newlines();
         while !self.at(&TokenKind::RParen) && !self.at_eof() {
-            elems.push(self.parse_type());
+            elems.push(self.parse_tuple_elem());
             self.skip_newlines();
             if !self.eat(&TokenKind::Comma) {
                 break;

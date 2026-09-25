@@ -444,7 +444,7 @@ impl<'a> Layouts<'a> {
             Ty::ComptimeInt | Ty::ComptimeFloat | Ty::ComptimeStr => {
                 Err(LayoutError::Comptime(self.show(ty)))
             }
-            Ty::Var(_) | Ty::Error => Err(LayoutError::Unknown(self.show(ty))),
+            Ty::Var(_) | Ty::Error | Ty::Spread(_) => Err(LayoutError::Unknown(self.show(ty))),
         }
     }
 
@@ -836,7 +836,8 @@ pub(crate) fn subst_ty(map: &HashMap<DefId, Ty>, ty: &Ty) -> Ty {
             mutable: *mutable,
             inner: Box::new(subst_ty(map, inner)),
         },
-        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_ty(map, e)).collect()),
+        Ty::Tuple(elems) => Ty::tuple(elems.iter().map(|e| subst_ty(map, e)).collect()),
+        Ty::Spread(inner) => Ty::Spread(Box::new(subst_ty(map, inner))),
         Ty::Dyn { def, assoc } => Ty::Dyn {
             def: *def,
             assoc: assoc

@@ -156,7 +156,10 @@ fn is_generic(defs: &DefTable, ty: &Ty) -> bool {
             (args.is_empty() && defs.get(*def).kind == DefKind::TypeParam)
                 || args.iter().any(|a| is_generic(defs, a))
         }
-        Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Array { inner, .. } => {
+        Ty::Ptr { inner, .. }
+            | Ty::Slice { inner, .. }
+            | Ty::Array { inner, .. }
+            | Ty::Spread(inner) => {
             is_generic(defs, inner)
         }
         Ty::Tuple(elems) => elems.iter().any(|e| is_generic(defs, e)),

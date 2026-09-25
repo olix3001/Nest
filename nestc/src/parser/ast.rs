@@ -461,6 +461,9 @@ pub enum NodeKind {
     },
     /// `(T, U, ...)` — tuple type; empty is the `void`/unit type.
     TupleType { elems: Vec<NodeId> },
+    /// `..R` — an element of a tuple type that stands for all of `R`'s: `(A,
+    /// ..R)` with `R = (B, C)` is `(A, B, C)`. Only inside a `TupleType`.
+    SpreadType { inner: NodeId },
     /// `dyn T` — a trait object type.
     DynType { inner: NodeId },
     /// `distinct T` — a fresh nominal type over `T`.
@@ -821,7 +824,7 @@ impl NodeKind {
                 out.extend_from_slice(generic_args);
             }
             AssocBinding { ty, .. } => out.push(*ty),
-            PtrType { inner, .. } | DynType { inner } => out.push(*inner),
+            PtrType { inner, .. } | DynType { inner } | SpreadType { inner } => out.push(*inner),
             DistinctType { directives, inner } => {
                 out.extend_from_slice(directives);
                 out.push(*inner);

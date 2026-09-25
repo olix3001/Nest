@@ -405,6 +405,11 @@ pub enum Ty {
     },
     /// `(A, B, ...)` — a tuple. The empty tuple is spelled [`Ty::Void`].
     Tuple(Vec<Ty>),
+    /// `..R`, an element of a [`Ty::Tuple`] standing for every element of the
+    /// tuple `R`. It survives only while `R` is not known — a generic
+    /// parameter, an inference variable; [`Ty::tuple`] splices a known one in,
+    /// so `(A, ..(B, C))` is never built.
+    Spread(Box<Ty>),
     /// An anonymous `struct { a: A, b: B }` — a **structural** type (§3.8): two
     /// of them are the same type when their field name→type sets match, and a
     /// named struct with the same fields is a different type.
@@ -473,6 +478,36 @@ impl Ty {
         }
     }
 
+    /// A tuple from its elements, each `..R` whose `R` is a known tuple spliced
+    /// in and each `..void` dropped. No elements is `void`, as `()` is.
+    ///
+    /// Every place that rebuilds a tuple after substituting into it goes
+    /// through here, so that a `(..P, ..Rest)` becomes the flat tuple its
+    /// parameters say once they are known.
+    pub fn tuple(elems: Vec<Ty>) -> Ty {
+        let mut out = Vec::with_capacity(elems.len());
+        for e in elems {
+            match e {
+                Ty::Spread(inner) => match *inner {
+                    Ty::Tuple(xs) => out.extend(xs),
+                    Ty::Void => {}
+                    other => out.push(Ty::Spread(Box::new(other))),
+                },
+                e => out.push(e),
+            }
+        }
+        if out.is_empty() {
+            Ty::Void
+        } else {
+            Ty::Tuple(out)
+        }
+    }
+
+    /// Whether this is a tuple with a `..R` still in it.
+    pub fn has_spread(&self) -> bool {
+        matches!(self, Ty::Tuple(xs) if xs.iter().any(|x| matches!(x, Ty::Spread(_))))
+    }
+
     /// An anonymous `struct { ... }` from its fields, in whatever order they
     /// were written. The order is **not** part of the type (§3.8 makes the
     /// identity the field set), so the fields are sorted by name here and
@@ -504,7 +539,10 @@ impl Ty {
     pub fn mentions_error(&self) -> bool {
         match self {
             Ty::Error => true,
-            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Array { inner, .. } => {
+            Ty::Ptr { inner, .. }
+            | Ty::Slice { inner, .. }
+            | Ty::Array { inner, .. }
+            | Ty::Spread(inner) => {
                 inner.mentions_error()
             }
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_error),
@@ -530,7 +568,7 @@ impl Ty {
         match self {
             Ty::Var(_) => true,
             Ty::Int { width, .. } => width.mentions_var(),
-            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } => inner.mentions_var(),
+            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Spread(inner) => inner.mentions_var(),
             Ty::Array { len, inner, .. } => len.mentions_var() || inner.mentions_var(),
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_var),
             Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| (Ty::mentions_var)(t)),
@@ -548,7 +586,7 @@ impl Ty {
     pub fn mentions_const_param(&self) -> bool {
         match self {
             Ty::Int { width, .. } => width.is_param(),
-            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } => inner.mentions_const_param(),
+            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Spread(inner) => inner.mentions_const_param(),
             Ty::Array { len, inner, .. } => len.is_param() || inner.mentions_const_param(),
             Ty::Tuple(elems) => elems.iter().any(Ty::mentions_const_param),
             Ty::Dyn { assoc, .. } => assoc.iter().any(|(_, t)| t.mentions_const_param()),
@@ -707,6 +745,7 @@ impl Ty {
                     .join(", ");
                 format!("({inner})")
             }
+            Ty::Spread(inner) => format!("..{}", inner.display_with(defs, pinned)),
             Ty::Struct(fields) => {
                 let inner = fields
                     .iter()
@@ -1058,7 +1097,8 @@ impl InferCtxt {
                 mutable,
                 inner: Box::new(self.name_literals(&inner)),
             },
-            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.name_literals(e)).collect()),
+            Ty::Tuple(elems) => Ty::tuple(elems.iter().map(|e| self.name_literals(e)).collect()),
+            Ty::Spread(inner) => Ty::Spread(Box::new(self.name_literals(&inner))),
             Ty::Dyn { def, assoc } => Ty::Dyn {
                 def,
                 assoc: assoc
@@ -1320,7 +1360,8 @@ impl InferCtxt {
                 signed,
                 width: self.shallow_const(&width),
             },
-            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.resolve(e)).collect()),
+            Ty::Tuple(elems) => Ty::tuple(elems.iter().map(|e| self.resolve(e)).collect()),
+            Ty::Spread(inner) => Ty::Spread(Box::new(self.resolve(&inner))),
             Ty::Dyn { def, assoc } => Ty::Dyn {
                 def,
                 assoc: assoc
@@ -1347,6 +1388,81 @@ impl InferCtxt {
                 args: args.iter().map(|a| self.resolve(a)).collect(),
             },
             other => other,
+        }
+    }
+
+    /// Unify two tuples at least one of which has a `..R` in it.
+    ///
+    /// A spread whose tuple is known by now is spliced in first. What is left
+    /// is solved when one side has exactly one spread and the other none: the
+    /// elements before and after it pair up with the other side's ends, and
+    /// `R` is the tuple of what lies between — `(i32, ..R)` against `(i32, u8,
+    /// bool)` makes `R` `(u8, bool)`, and against `(i32)` makes it `void`.
+    /// Two unknown spreads cannot be split without knowing one of them, so a
+    /// signature that has two, like `(..P, ..Rest)`, relies on `P` being
+    /// solved first — by an argument that comes before the closure.
+    fn unify_spread(&mut self, a: &Ty, b: &Ty) -> UnifyResult {
+        let a = self.spliced(a);
+        let b = self.spliced(b);
+        let elems = |t: &Ty| match t {
+            Ty::Tuple(xs) => xs.clone(),
+            _ => Vec::new(),
+        };
+        let (xs, ys) = (elems(&a), elems(&b));
+        let spreads = |v: &[Ty]| {
+            v.iter()
+                .enumerate()
+                .filter(|(_, t)| matches!(t, Ty::Spread(_)))
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
+        };
+        let (sx, sy) = (spreads(&xs), spreads(&ys));
+        let (pat, k, flat, flipped) = match (sx.as_slice(), sy.as_slice()) {
+            (&[k], &[]) => (&xs, k, &ys, false),
+            (&[], &[k]) => (&ys, k, &xs, true),
+            // No spread left, or the same shape on both sides: position by
+            // position, a spread against a spread.
+            _ if xs.len() == ys.len() && sx == sy => {
+                for (x, y) in xs.iter().zip(&ys) {
+                    self.unify(x, y)?;
+                }
+                return Ok(());
+            }
+            _ => return Err((a, b)),
+        };
+        let after = pat.len() - k - 1;
+        if flat.len() < k + after {
+            return Err((a, b));
+        }
+        let pair = |cx: &mut Self, p: &Ty, f: &Ty| {
+            if flipped { cx.unify(f, p) } else { cx.unify(p, f) }
+        };
+        for i in 0..k {
+            pair(self, &pat[i], &flat[i]).map_err(|_| (a.clone(), b.clone()))?;
+        }
+        for i in 0..after {
+            let (p, f) = (&pat[k + 1 + i], &flat[flat.len() - after + i]);
+            pair(self, p, f).map_err(|_| (a.clone(), b.clone()))?;
+        }
+        let Ty::Spread(rest) = &pat[k] else {
+            unreachable!("`k` is a spread's position")
+        };
+        let middle = Ty::tuple(flat[k..flat.len() - after].to_vec());
+        pair(self, rest, &middle).map_err(|_| (a.clone(), b.clone()))
+    }
+
+    /// `ty` with every spread whose tuple is solved spliced in.
+    fn spliced(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::Tuple(xs) => Ty::tuple(
+                xs.iter()
+                    .map(|x| match x {
+                        Ty::Spread(inner) => Ty::Spread(Box::new(self.resolve(inner))),
+                        x => x.clone(),
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
         }
     }
 
@@ -1469,12 +1585,19 @@ impl InferCtxt {
                 }
                 self.unify(i1, i2)
             }
+            // A tuple with a `..R` in it: see `unify_spread`.
+            (Ty::Tuple(_), Ty::Tuple(_) | Ty::Void) | (Ty::Void, Ty::Tuple(_))
+                if a.has_spread() || b.has_spread() =>
+            {
+                self.unify_spread(&a, &b)
+            }
             (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => {
                 for (x, y) in xs.iter().zip(ys) {
                     self.unify(x, y)?;
                 }
                 Ok(())
             }
+            (Ty::Spread(x), Ty::Spread(y)) => self.unify(x, y),
             // Both sides are sorted by name, so equal field *sets* line up
             // position by position and a single zip decides it.
             (Ty::Struct(xs), Ty::Struct(ys))
@@ -1590,7 +1713,10 @@ impl InferCtxt {
     fn occurs(&self, v: TyVar, ty: &Ty) -> bool {
         match self.shallow(ty) {
             Ty::Var(w) => w == v,
-            Ty::Ptr { inner, .. } | Ty::Slice { inner, .. } | Ty::Array { inner, .. } => {
+            Ty::Ptr { inner, .. }
+            | Ty::Slice { inner, .. }
+            | Ty::Array { inner, .. }
+            | Ty::Spread(inner) => {
                 self.occurs(v, &inner)
             }
             Ty::Tuple(elems) => elems.iter().any(|e| self.occurs(v, e)),
@@ -1673,12 +1799,13 @@ impl InferCtxt {
                 signed,
                 width: self.finalize_const(&width, on_ambiguous),
             },
-            Ty::Tuple(elems) => Ty::Tuple(
+            Ty::Tuple(elems) => Ty::tuple(
                 elems
                     .iter()
                     .map(|e| self.finalize(e, on_ambiguous))
                     .collect(),
             ),
+            Ty::Spread(inner) => Ty::Spread(Box::new(self.finalize(&inner, on_ambiguous))),
             Ty::Struct(fields) => Ty::Struct(
                 fields
                     .iter()
