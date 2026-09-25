@@ -3267,7 +3267,8 @@ f :: func (d: *dyn Shape) -> i32 { return d.scaled({ x in x * 2 }) }
 ";
     let errs = messages(src);
     assert!(
-        errs.iter().any(|m| m.contains("`scaled` cannot be called on `*dyn Shape`")),
+        errs.iter()
+            .any(|m| m.contains("`scaled` cannot be called on `*dyn Shape`")),
         "{errs:?}"
     );
 }
@@ -3283,8 +3284,16 @@ Copy :: trait {}
 g :: func <Self: Sized> () {}
 ";
     let errs = messages(src);
-    assert!(errs.iter().any(|m| m.contains("`Self` may only be bounded by `Sized`")), "{errs:?}");
-    assert!(errs.iter().any(|m| m.contains("only a trait's method may bound `Self`")), "{errs:?}");
+    assert!(
+        errs.iter()
+            .any(|m| m.contains("`Self` may only be bounded by `Sized`")),
+        "{errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|m| m.contains("only a trait's method may bound `Self`")),
+        "{errs:?}"
+    );
 }
 
 /// A call proves `<Self.Item: Ord>` of its receiver, and the bound names one
@@ -3303,8 +3312,16 @@ f :: func () {
 }
 ";
     let errs = messages(src);
-    assert!(errs.iter().any(|m| m.contains("`Nope` is not an associated type of `T`")), "{errs:?}");
-    assert!(errs.iter().any(|m| m.contains("`f64` does not implement `core.cmp.Ord`")), "{errs:?}");
+    assert!(
+        errs.iter()
+            .any(|m| m.contains("`Nope` is not an associated type of `T`")),
+        "{errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|m| m.contains("`f64` does not implement `core.cmp.Ord`")),
+        "{errs:?}"
+    );
 }
 
 #[test]
@@ -10364,10 +10381,26 @@ Wide :: #align(8) distinct u32
 main :: func () {}
 ";
     let errs = messages(src);
-    assert!(errs.iter().any(|m| m.contains("`Small` is `#repr(\"C\")`, and the enum `E8`")), "{errs:?}");
-    assert!(errs.iter().any(|m| m.contains("`Bytes` is `#repr(\"C\")`")), "{errs:?}");
-    assert!(errs.iter().any(|m| m.contains("`#align` does not apply to a `distinct` type")), "{errs:?}");
-    assert!(!errs.iter().any(|m| m.contains("`Code`") || m.contains("`Area`")), "{errs:?}");
+    assert!(
+        errs.iter()
+            .any(|m| m.contains("`Small` is `#repr(\"C\")`, and the enum `E8`")),
+        "{errs:?}"
+    );
+    assert!(
+        errs.iter().any(|m| m.contains("`Bytes` is `#repr(\"C\")`")),
+        "{errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|m| m.contains("`#align` does not apply to a `distinct` type")),
+        "{errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|m| m.contains("`Code`") || m.contains("`Area`")),
+        "{errs:?}"
+    );
 }
 
 /// A trait object pins every associated type its trait declares; `dyn Func`
@@ -10380,6 +10413,13 @@ f :: func (a: *dyn Func, b: *mut dyn Iterator, c: *dyn Func(i32) -> i32, d: *mut
 ";
     let errs = messages(src);
     assert_eq!(errs.len(), 2, "{errs:?}");
-    assert!(errs.iter().any(|m| m.contains("`dyn Func` must say what it is called with")), "{errs:?}");
-    assert!(errs.iter().any(|m| m.contains("`Item` is missing")), "{errs:?}");
+    assert!(
+        errs.iter()
+            .any(|m| m.contains("`dyn Func` must say what it is called with")),
+        "{errs:?}"
+    );
+    assert!(
+        errs.iter().any(|m| m.contains("`Item` is missing")),
+        "{errs:?}"
+    );
 }

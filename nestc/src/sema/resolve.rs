@@ -274,7 +274,11 @@ impl Resolver<'_> {
                         };
                         for t in bounds {
                             let sized = self.bound_trait_def(t).is_some_and(|d| {
-                                self.defs.get(d).lang.as_ref().is_some_and(|l| l.as_str() == "sized")
+                                self.defs
+                                    .get(d)
+                                    .lang
+                                    .as_ref()
+                                    .is_some_and(|l| l.as_str() == "sized")
                             });
                             if !sized {
                                 self.report(t, "`Self` may only be bounded by `Sized`");
@@ -303,15 +307,15 @@ impl Resolver<'_> {
                         );
                         continue;
                     }
-                    let is_assoc = self
-                        .defs
-                        .get(trait_def)
-                        .ns
-                        .members
-                        .get(member)
-                        .is_some_and(|&d| {
-                            self.defs.get(self.defs.resolve_alias(d)).kind == DefKind::TypeAlias
-                        });
+                    let is_assoc =
+                        self.defs
+                            .get(trait_def)
+                            .ns
+                            .members
+                            .get(member)
+                            .is_some_and(|&d| {
+                                self.defs.get(self.defs.resolve_alias(d)).kind == DefKind::TypeAlias
+                            });
                     if !is_assoc {
                         let msg = format!(
                             "`{member}` is not an associated type of `{}`",

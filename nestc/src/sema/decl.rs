@@ -749,10 +749,12 @@ impl<'a> Decls<'a> {
                     NodeKind::GenericApply { base, .. } => *base,
                     _ => t,
                 };
-                let def = [t, head].into_iter().find_map(|n| match ast.meta::<Resolution>(n) {
-                    Some(Resolution::Def(d)) => Some(self.defs.resolve_alias(d)),
-                    _ => None,
-                });
+                let def = [t, head]
+                    .into_iter()
+                    .find_map(|n| match ast.meta::<Resolution>(n) {
+                        Some(Resolution::Def(d)) => Some(self.defs.resolve_alias(d)),
+                        _ => None,
+                    });
                 if let Some(d) = def
                     && self.defs.get(d).kind == DefKind::Trait
                 {

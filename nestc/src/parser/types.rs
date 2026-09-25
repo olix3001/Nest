@@ -375,7 +375,9 @@ impl Parser {
         let mut assoc = Vec::new();
         for g in generics {
             match self.clone_kind(g) {
-                NodeKind::GenericTypeParam { name, constraint } if name.as_str().starts_with("Self.") => {
+                NodeKind::GenericTypeParam { name, constraint }
+                    if name.as_str().starts_with("Self.") =>
+                {
                     let span = self.node_span(g);
                     let member = Symbol::new(&name.as_str()["Self.".len()..]);
                     match constraint {
@@ -392,8 +394,13 @@ impl Parser {
                 NodeKind::GenericTypeParam { name, constraint } if name.as_str() == "Self" => {
                     let span = self.node_span(g);
                     match (constraint, bounds) {
-                        (None, _) => self.error(span, "`Self` is not a generic parameter: write `Self: Bound` to bound it"),
-                        (Some(_), Some(_)) => self.error(span, "`Self` is bounded twice; join the bounds with `+`"),
+                        (None, _) => self.error(
+                            span,
+                            "`Self` is not a generic parameter: write `Self: Bound` to bound it",
+                        ),
+                        (Some(_), Some(_)) => {
+                            self.error(span, "`Self` is bounded twice; join the bounds with `+`")
+                        }
                         (Some(c), None) => bounds = Some(c),
                     }
                 }

@@ -539,7 +539,7 @@ pub fn resolve_impl_targets(
             int_values: HashMap::new(),
             float_values: HashMap::new(),
 
-        assumed: HashMap::new(),
+            assumed: HashMap::new(),
         };
         let Some(sx) = imp.syntax.clone() else {
             out.push(ImplTarget {
@@ -5045,9 +5045,7 @@ impl Inferer<'_> {
         let arg_tys: Vec<Option<Ty>> = args
             .iter()
             .enumerate()
-            .map(|(i, a)| {
-                a.map(|n| self.infer_arg(n, wanted.get(i).cloned()))
-            })
+            .map(|(i, a)| a.map(|n| self.infer_arg(n, wanted.get(i).cloned())))
             .collect();
         match self.cx.shallow(callee_ty) {
             Ty::Func { params, ret, .. } => {
@@ -5674,7 +5672,11 @@ impl Inferer<'_> {
         let Ty::Nominal { def, .. } = s else {
             return false;
         };
-        if self.assumed.get(&def).is_some_and(|b| b.contains(&trait_def)) {
+        if self
+            .assumed
+            .get(&def)
+            .is_some_and(|b| b.contains(&trait_def))
+        {
             return true;
         }
         if self.defs.get(def).kind != DefKind::TypeParam {
@@ -6249,9 +6251,7 @@ impl Inferer<'_> {
         let arg_tys: Vec<Option<Ty>> = args
             .iter()
             .enumerate()
-            .map(|(i, a)| {
-                a.map(|n| self.infer_arg(n, value_params.get(i).cloned()))
-            })
+            .map(|(i, a)| a.map(|n| self.infer_arg(n, value_params.get(i).cloned())))
             .collect();
         if value_params.len() == arg_tys.len() {
             for (p, (arg_node, aty)) in value_params.iter().zip(args.iter().zip(&arg_tys)) {

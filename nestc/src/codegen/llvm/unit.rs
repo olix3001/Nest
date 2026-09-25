@@ -2220,7 +2220,11 @@ impl<'ctx> Cx<'ctx, '_> {
             // and from exactly (saturating at its ends, and a NaN is zero).
             CastKind::FloatToInt { signed } => {
                 let bits = self.f128_bits(v)?.into();
-                let name = if signed { "nest_f128_to_i128" } else { "nest_f128_to_u128" };
+                let name = if signed {
+                    "nest_f128_to_i128"
+                } else {
+                    "nest_f128_to_u128"
+                };
                 let wide = self.f128_call(name, &[bits], i128.into())?.into_int_value();
                 let t = target.into_int_type();
                 if t.get_bit_width() < 128 {
@@ -2238,7 +2242,11 @@ impl<'ctx> Cx<'ctx, '_> {
                 } else {
                     b.build_int_z_extend(x, i128, "").map_err(failed)?
                 };
-                let name = if signed { "nest_f128_from_i128" } else { "nest_f128_from_u128" };
+                let name = if signed {
+                    "nest_f128_from_i128"
+                } else {
+                    "nest_f128_from_u128"
+                };
                 self.f128_of(self.f128_call(name, &[wide.into()], i128.into())?)?
             }
             _ => return Ok(None),

@@ -3571,7 +3571,6 @@ main :: func () -> i32 {
     }
 }
 
-
 // ===< More adapters and consumers >===
 
 /// `reduce`, `last`, `max_by`/`min_by`, `take_while`/`skip_while`,
@@ -3664,7 +3663,6 @@ main :: func () -> i32 {
         assert_eq!(code, 5 + 10 + 100 + 18);
     }
 }
-
 
 // ===< f128 >===
 

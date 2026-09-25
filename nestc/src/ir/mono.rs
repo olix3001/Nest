@@ -793,10 +793,9 @@ impl Mono<'_> {
                 // once an instantiation said what that is.
                 if let Some(trait_def) = self.default_body_of(target) {
                     let recv = match linked.ty(trait_def).map(|t| &t.kind) {
-                        Some(super::TypeDefKind::Trait { methods, .. }) => methods
-                            .iter()
-                            .find(|m| m.def == target)
-                            .map(|m| m.recv),
+                        Some(super::TypeDefKind::Trait { methods, .. }) => {
+                            methods.iter().find(|m| m.def == target).map(|m| m.recv)
+                        }
                         _ => None,
                     };
                     let has_receiver = recv.is_some_and(|r| r != super::Recv::None);
@@ -1106,7 +1105,11 @@ impl Mono<'_> {
         // A `self: Self` method's receiver *is* `Self`, even when that is a
         // pointer: `impl Iterator for *mut I` maps the pointer.
         if target == method && self.default_body_of(target).is_some() {
-            let self_ty = if by_ptr { strip_ptr(self_ty) } else { self_ty.clone() };
+            let self_ty = if by_ptr {
+                strip_ptr(self_ty)
+            } else {
+                self_ty.clone()
+            };
             args.push(GenericArg::Ty(self_ty));
         }
         Some((target, args))
@@ -1338,7 +1341,10 @@ impl Mono<'_> {
         if let Ty::Dyn { def, assoc: pins } = base
             && self.defs.resolve_alias(*def) == trait_def
         {
-            return pins.iter().find(|(n, _)| n == assoc).map(|(_, t)| t.clone());
+            return pins
+                .iter()
+                .find(|(n, _)| n == assoc)
+                .map(|(_, t)| t.clone());
         }
         let is_func = self
             .defs

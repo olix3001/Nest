@@ -1027,7 +1027,12 @@ impl Cx<'_> {
     /// The vtable type of a trait object that pins associated types —
     /// `dyn Iterator.<Item = i32>` — one per object type: a slot's signature
     /// may say `Self.Item`, and only the object's type says what that is.
-    fn pinned_vtable_type(&mut self, object: &Ty, trait_def: DefId, pins: &[(Symbol, Ty)]) -> TypeId {
+    fn pinned_vtable_type(
+        &mut self,
+        object: &Ty,
+        trait_def: DefId,
+        pins: &[(Symbol, Ty)],
+    ) -> TypeId {
         let key = format!("$vtobj{}", self.key(object));
         if let Some(id) = self.type_index.get(&key) {
             return *id;
