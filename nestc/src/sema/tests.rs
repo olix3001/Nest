@@ -10330,3 +10330,56 @@ fn a_qualified_constant_is_a_constant() {
     );
     assert!(msg.contains("does not fit in `u8`"), "{msg}");
 }
+
+// ===< Found-and-fixed: targets, `#repr` on `distinct`, unpinned `dyn` >===
+
+/// A freestanding build (`-C os=none`) generates `core/target.nest` naming a
+/// variant `core/os.nest` has: `.Bare`.
+#[test]
+fn a_freestanding_target_names_a_variant_core_has() {
+    let src = "main :: func () {}\n";
+    let msgs = messages_for(
+        src,
+        Target {
+            os: "none",
+            ..Target::HOST_64
+        },
+    );
+    assert!(msgs.is_empty(), "{msgs:#?}");
+}
+
+/// `#repr("C")` reaches a `distinct` type, and there it promises what the type
+/// is distinct from: an enum that is not itself `#repr("C")` is refused.
+#[test]
+fn repr_c_on_a_distinct_type_is_checked() {
+    let src = "\
+Errno :: #repr(\"C\") enum { ok = 0, perm = 1 }
+E8 :: enum { a, b }
+Rect :: #repr(\"C\") struct { x: i32, y: i32 }
+Code :: #repr(\"C\") distinct Errno
+Area :: #repr(\"C\") distinct Rect
+Small :: #repr(\"C\") distinct E8
+Bytes :: #repr(\"C\") distinct []u8
+Wide :: #align(8) distinct u32
+main :: func () {}
+";
+    let errs = messages(src);
+    assert!(errs.iter().any(|m| m.contains("`Small` is `#repr(\"C\")`, and the enum `E8`")), "{errs:?}");
+    assert!(errs.iter().any(|m| m.contains("`Bytes` is `#repr(\"C\")`")), "{errs:?}");
+    assert!(errs.iter().any(|m| m.contains("`#align` does not apply to a `distinct` type")), "{errs:?}");
+    assert!(!errs.iter().any(|m| m.contains("`Code`") || m.contains("`Area`")), "{errs:?}");
+}
+
+/// A trait object pins every associated type its trait declares; `dyn Func`
+/// is written with its signature.
+#[test]
+fn a_trait_object_pins_every_associated_type() {
+    let src = "\
+{ Iterator } :: import <core/iter>
+f :: func (a: *dyn Func, b: *mut dyn Iterator, c: *dyn Func(i32) -> i32, d: *mut dyn Iterator.<Item = u8>) {}
+";
+    let errs = messages(src);
+    assert_eq!(errs.len(), 2, "{errs:?}");
+    assert!(errs.iter().any(|m| m.contains("`dyn Func` must say what it is called with")), "{errs:?}");
+    assert!(errs.iter().any(|m| m.contains("`Item` is missing")), "{errs:?}");
+}

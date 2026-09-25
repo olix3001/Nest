@@ -5093,8 +5093,10 @@ impl Inferer<'_> {
                 *ret
             }
             // Unknown callee type: don't cascade (and don't dangle a variable).
+            // A type with an error inside it — `*<error>`, where the pointee
+            // was already refused — is as unknown.
             Ty::Error => Ty::Error,
-            other if is_var(&other) => Ty::Error,
+            other if is_var(&other) || other.mentions_error() => Ty::Error,
             // A value that is not a function, which nothing else reports.
             other => {
                 self.report(
@@ -8251,6 +8253,50 @@ impl Inferer<'_> {
                         }
                     }
                     assoc.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                    // Every associated type the trait declares is part of the
+                    // object's type (§3.4): a call through the vtable returns
+                    // `Self.Item`, and nothing but this type can say what that
+                    // is. One left out would be a type no call can answer in.
+                    let trait_def = self.defs.resolve_alias(def);
+                    let mut missing: Vec<Symbol> = self
+                        .defs
+                        .get(trait_def)
+                        .ns
+                        .members
+                        .iter()
+                        .filter(|&(_, &m)| {
+                            self.defs.get(self.defs.resolve_alias(m)).kind == DefKind::TypeAlias
+                        })
+                        .map(|(n, _)| n.clone())
+                        .filter(|n| !assoc.iter().any(|(a, _)| a == n))
+                        .collect();
+                    if !missing.is_empty() {
+                        missing.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                        let name = self.defs.get(trait_def).name.clone();
+                        let msg = if self.is_func_trait(trait_def) {
+                            format!(
+                                "`dyn {name}` must say what it is called with: write its \
+                                 signature, `dyn {name}(A) -> R`"
+                            )
+                        } else {
+                            let list = missing
+                                .iter()
+                                .map(|m| format!("`{m}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let example = missing
+                                .iter()
+                                .map(|m| format!("{m} = …"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!(
+                                "`dyn {name}` must pin every associated type the trait \
+                                 declares; {list} is missing: `dyn {name}.<{example}>`"
+                            )
+                        };
+                        self.report_in(file, node, msg);
+                        return Ty::Error;
+                    }
                     Ty::Dyn { def, assoc }
                 }
                 None => Ty::Error,

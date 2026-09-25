@@ -192,12 +192,20 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
             let ok = match name {
                 // Layout directives apply to a type with fields to lay out.
                 "packed" | "soa" => matches!(t.kind, TypeDefKind::Struct { .. }),
-                // `#repr` promises a representation a C declaration can name, so
-                // it applies to the two kinds of type C has: a struct and an
-                // enumeration.
-                "align" | "repr" => matches!(
+                "align" => matches!(
                     t.kind,
                     TypeDefKind::Struct { .. } | TypeDefKind::Enum { .. }
+                ),
+                // `#repr` promises a representation a C declaration can name, so
+                // it applies to the two kinds of type C has — a struct and an
+                // enumeration — and to a `distinct` one, which *is* its
+                // representation: there it promises that what it is distinct
+                // from is C's (checked in `c_representable`).
+                "repr" => matches!(
+                    t.kind,
+                    TypeDefKind::Struct { .. }
+                        | TypeDefKind::Enum { .. }
+                        | TypeDefKind::Distinct { .. }
                 ),
                 // A convention is how a *function* is called. On a function type
                 // it is legal and meaningful (§9), but that is a directive on a
@@ -366,14 +374,29 @@ fn directive_legality(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut V
 /// a trait object, and `str`, which is a slice under its name.
 fn c_representable(meta: &Meta, linked: &Linked, defs: &DefTable, out: &mut Vec<Diagnostic>) {
     for t in linked.types() {
-        if !meta.directives(t.id).iter().any(|d| {
-            d.is("repr")
-                && matches!(
-                    d.args.first(),
-                    Some(DirectiveArg::Str(s) | DirectiveArg::Name(s))
-                        if s.as_str().eq_ignore_ascii_case("c")
-                )
-        }) {
+        if !is_repr_c(meta, t) {
+            continue;
+        }
+        // A `distinct` over an enum is C's only if that enum is: its tag is
+        // C's `int` because *it* says `#repr("C")`, and nothing this
+        // declaration writes changes the enum's layout.
+        if let TypeDefKind::Distinct { repr } = &t.kind
+            && let Some(Ty::Nominal { def, .. }) = meta.ty(repr.id)
+            && let Some(inner) = linked.ty(def)
+            && matches!(inner.kind, TypeDefKind::Enum { .. })
+            && !is_repr_c(meta, inner)
+        {
+            let mut diag = Diagnostic::error(format!(
+                "`{}` is `#repr(\"C\")`, and the enum `{}` it is distinct from is not",
+                t.name, inner.name
+            ));
+            if let Some(span) = meta.span(t.id) {
+                diag = diag.with_primary(span, "");
+            }
+            out.push(diag.with_note(
+                "an enum's tag is C's `int` only when the enum itself is `#repr(\"C\")`; \
+                 write it there",
+            ));
             continue;
         }
         for m in members_of(t) {
@@ -394,6 +417,18 @@ fn c_representable(meta: &Meta, linked: &Linked, defs: &DefTable, out: &mut Vec<
             ));
         }
     }
+}
+
+/// Whether `t` is written `#repr("C")`.
+fn is_repr_c(meta: &Meta, t: &TypeDef) -> bool {
+    meta.directives(t.id).iter().any(|d| {
+        d.is("repr")
+            && matches!(
+                d.args.first(),
+                Some(DirectiveArg::Str(s) | DirectiveArg::Name(s))
+                    if s.as_str().eq_ignore_ascii_case("c")
+            )
+    })
 }
 
 /// What makes `ty` un-nameable in C, or `None` when a C declaration can state it.

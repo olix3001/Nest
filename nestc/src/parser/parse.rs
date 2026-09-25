@@ -54,6 +54,21 @@ pub struct Parser {
     no_struct_lit: bool,
 }
 
+/// An empty literal of the kind whose text starts at `span`, when it is a
+/// string literal of some kind.
+fn literal_stand_in(source: &str, span: Span) -> Option<TokenKind> {
+    let text = source.get(span.start..)?;
+    if text.starts_with("b\"") {
+        Some(TokenKind::Bytes(Vec::new()))
+    } else if text.starts_with("c\"") {
+        Some(TokenKind::CStr(String::new()))
+    } else if text.starts_with('"') || text.starts_with("f\"") {
+        Some(TokenKind::Str(String::new()))
+    } else {
+        None
+    }
+}
+
 impl Parser {
     /// Tokenize and newline-filter `source`, ready to parse as `file`.
     pub fn new(source: &str, file: FileId) -> Self {
@@ -63,10 +78,19 @@ impl Parser {
         for entry in lexer.as_slice() {
             match entry {
                 Ok(token) => raw.push(token.clone()),
-                Err(err) => errors.push(ParseError {
-                    span: err.span,
-                    message: err.kind.to_string(),
-                }),
+                Err(err) => {
+                    errors.push(ParseError {
+                        span: err.span,
+                        message: err.kind.to_string(),
+                    });
+                    // A string literal that failed to lex is still a string
+                    // literal where it stands: an empty one of its kind keeps
+                    // the statement around it whole, rather than every parse
+                    // error after it being the same mistake again.
+                    if let Some(kind) = literal_stand_in(source, err.span) {
+                        raw.push(Token::new(kind, err.span));
+                    }
+                }
             }
         }
         Self {

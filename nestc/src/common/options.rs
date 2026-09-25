@@ -65,7 +65,15 @@ pub const PROFILES: &[&str] = &["debug", "release"];
 /// It lives here, beside the lists, because two things read it and they must
 /// agree: the generated `core/target.nest`, which writes one of these, and
 /// `#when(os = .Windows)`, which is written by hand against the same enum.
+///
+/// One setting is the exception: `-C os=none` is spelled as a target triple
+/// spells a freestanding target, and the variant is `Bare`, which is what it
+/// means to a program — `.None` beside `Option`'s `.none` would read as
+/// "no value" rather than "no operating system".
 pub fn variant_name(setting: &str) -> String {
+    if setting == "none" {
+        return "Bare".to_string();
+    }
     setting
         .split('_')
         .map(|w| {

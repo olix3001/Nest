@@ -45,7 +45,7 @@ pub enum TokenKind {
     #[regex(r"[0-9][0-9_]*[eE][+-]?[0-9_]+", lex_float)]
     Float(FloatLit),
 
-    #[token("\"", lex_string)]
+    #[token("\"", |lex| recovering(lex, lex_string, false))]
     Str(String),
 
     /// `b"..."` — a **byte** string: the bytes as written, with no UTF-8
@@ -54,7 +54,7 @@ pub enum TokenKind {
     /// The two-character opener is what keeps this apart from the identifier
     /// `b` followed by a string: the longer match wins, so `b"hi"` is one token
     /// and `b "hi"` is still two.
-    #[token("b\"", lex_byte_string)]
+    #[token("b\"", |lex| recovering(lex, lex_byte_string, false))]
     Bytes(Vec<u8>),
 
     /// `c"..."` — a **C** string: the bytes as written plus a trailing NUL,
@@ -64,7 +64,7 @@ pub enum TokenKind {
     /// It lexes exactly as a `"..."` does — same escapes, same UTF-8 — and is
     /// kept apart from the identifier `c` by the two-character opener, as
     /// `b"..."` and `f"..."` are.
-    #[token("c\"", lex_string)]
+    #[token("c\"", |lex| recovering(lex, lex_string, false))]
     CStr(String),
 
     #[token("'", lex_char)]
@@ -81,7 +81,7 @@ pub enum TokenKind {
     ///
     /// The two-character opener is what keeps this apart from the identifier
     /// `f` followed by a string, exactly as `b"..."` is kept apart.
-    #[token("f\"", lex_interp_string)]
+    #[token("f\"", |lex| recovering(lex, lex_interp_string, true))]
     InterpStr(Vec<InterpPiece>),
 
     /// The `f"` that opens an interpolated string. Synthesized.
@@ -557,6 +557,71 @@ fn exceeds_f64(text: &str, value: f64) -> bool {
 /// The decimal digits an `f64` round-trips (`f64::DIGITS` is the *guaranteed*
 /// 15; 17 is the number that always recovers the same bit pattern).
 const F64_ROUND_TRIP_DIGITS: usize = 17;
+
+/// Run a string literal's callback, and when it fails, **skip the rest of the
+/// literal** before reporting.
+///
+/// A callback that fails leaves the cursor just past the opener, so the lexer
+/// would carry on reading the literal's text as code: `f"a \q {x} b"` reported
+/// the bad escape and then an unexpected character, an identifier `b` and an
+/// unterminated string at the closing quote — one mistake, four diagnostics,
+/// and the parser's recovery reading `{x:q}` as a closure header. Skipping to
+/// the closing quote makes the error token the whole literal, and the one
+/// mistake one diagnostic.
+fn recovering<T>(
+    lex: &mut logos::Lexer<TokenKind>,
+    callback: fn(&mut logos::Lexer<TokenKind>) -> Result<T, LexErrorKind>,
+    interp: bool,
+) -> Result<T, LexErrorKind> {
+    let result = callback(lex);
+    if result.is_err() {
+        let end = string_end(lex.remainder(), interp);
+        lex.bump(end);
+    }
+    result
+}
+
+/// Where the literal whose body `rest` starts ends: just past its closing
+/// quote, or at the end of the line when it has none.
+///
+/// The one knowledge this needs is what may hide a quote: an escape, and — in
+/// an `f"..."` — a string written inside an embedded expression. `{{` and `}}`
+/// are literal braces, not a hole.
+fn string_end(rest: &str, interp: bool) -> usize {
+    let mut depth = 0usize;
+    let mut chars = rest.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\n' => return i,
+            '\\' if depth == 0 => {
+                chars.next();
+            }
+            '{' if interp && depth == 0 && rest[i..].starts_with("{{") => {
+                chars.next();
+            }
+            '}' if interp && depth == 0 && rest[i..].starts_with("}}") => {
+                chars.next();
+            }
+            '{' if interp => depth += 1,
+            '}' if interp && depth > 0 => depth -= 1,
+            '"' if depth == 0 => return i + 1,
+            // A string inside a hole: its quotes are its own.
+            '"' => {
+                while let Some((_, d)) = chars.next() {
+                    match d {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' | '\n' => break,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    rest.len()
+}
 
 /// Decode the body of a `"..."` string, resolving escapes. Called with the
 /// cursor positioned just past the opening quote.

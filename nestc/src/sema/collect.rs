@@ -849,7 +849,8 @@ impl Collector<'_> {
             | NodeKind::StructType { directives, .. }
             | NodeKind::EnumType { directives, .. }
             | NodeKind::TraitType { directives, .. }
-            | NodeKind::NamespaceExpr { directives, .. } => self.directives(directives),
+            | NodeKind::NamespaceExpr { directives, .. }
+            | NodeKind::DistinctType { directives, .. } => self.directives(directives),
             _ => Vec::new(),
         }
     }

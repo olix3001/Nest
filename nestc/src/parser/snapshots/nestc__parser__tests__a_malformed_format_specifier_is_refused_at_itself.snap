@@ -13,13 +13,7 @@ File
         Path `str`
       Block
         Return
-          Closure
-            Param n:
-              TypePath
-                Path `q`
-            Block
+          Lit Str("")
 
 --- errors ---
-36..38: `q` is not a format specifier; write `{value:[[fill]align][+][#][0][width][.precision][type]}`, where `align` is `<`, `^` or `>` and `type` is `?`, `x`, `X`, `b` or `o`
-43..44: unterminated string literal
-42..43: expected `in` to end the closure's parameters
+36..44: `q` is not a format specifier; write `{value:[[fill]align][+][#][0][width][.precision][type]}`, where `align` is `<`, `^` or `>` and `type` is `?`, `x`, `X`, `b` or `o`

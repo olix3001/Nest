@@ -419,13 +419,28 @@ fn an_interpolation_holds_an_ordinary_expression() {
 ///
 /// The span is the literal's, as it is for every other lexing failure inside an
 /// `f"..."`: the specifier is read by a `logos` callback, which yields a reason
-/// and lets the lexer place it. What follows the failure is re-lexed as ordinary
-/// source, which is where the errors after the first come from.
+/// and lets the lexer place it. The rest of the literal is skipped, and an empty
+/// one stands in its place, so the failure is the only error.
 #[test]
 fn a_malformed_format_specifier_is_refused_at_itself() {
     assert_snapshot!(tree_with_errors(
         "go :: func (n: i32) -> str { return f\"{n:q}\" }\n"
     ));
+}
+
+/// A string literal that fails to lex is **one** error: its text is not read
+/// again as code, and the statements after it parse.
+#[test]
+fn a_bad_string_literal_is_one_error() {
+    for src in [
+        "go :: func () { const s := f\"a \\q {x} b\"\n const t := 1 }\n",
+        "go :: func () { const s := \"a \\q b\"\n const t := 1 }\n",
+        "go :: func () { const s := b\"\\u{e9}\"\n const t := 1 }\n",
+        "go :: func () { const s := f\"{ g(\"}\") } \\q\"\n const t := 1 }\n",
+    ] {
+        let (_, errors) = Parser::parse_file(src, FileId(0));
+        assert_eq!(errors.len(), 1, "{src}: {errors:#?}");
+    }
 }
 
 /// Several statements may share a line when a `;` separates them, and the
