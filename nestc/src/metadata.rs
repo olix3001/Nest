@@ -15,7 +15,8 @@
 //! place a type is described is stable from one build to the next.
 //!
 //! The format is versioned by [`FORMAT`]; a field is added without a bump, and
-//! one that changes meaning or goes away is a bump.
+//! one that changes meaning or goes away is a bump. The shape is documented for
+//! generator authors in `docs/src/content/docs/toolchain/metadata.md`.
 
 use std::collections::HashMap;
 
@@ -25,12 +26,12 @@ use crate::common::source::FileId;
 use crate::ir::const_eval::ConstValue;
 use crate::parser::ast::NodeKind;
 use crate::sema::decl::{Decl, Decls};
-use crate::sema::def::{Def, DefId, DefKind, Visibility};
+use crate::sema::def::{Def, DefId, DefKind, DirectiveArg, Visibility};
 use crate::sema::session::Session;
 use crate::sema::ty::Ty;
 
 /// The version of the shape written. See the module documentation.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// The package `entry` is the root file of, described. `package` is its name
 /// when it was compiled as one (`--package`), and `null` for a program.
@@ -39,15 +40,46 @@ pub fn describe(session: &Session, entry: FileId) -> Value {
         return json!({ "format": FORMAT, "package": null, "root": null });
     };
     let package = session.pkg_of.get(&entry).cloned();
+    let entry_dir = session
+        .sources
+        .file(entry)
+        .and_then(|f| std::path::Path::new(&f.name).parent().map(|p| p.to_path_buf()));
     let mut w = Walker {
         s: session,
         decls: Decls::new(&session.defs, &session.asts, &session.decls),
         seen: HashMap::new(),
         methods: methods_by_type(session),
+        tags: variant_tags(session),
+        pins: pins_by_base(session),
+        entry_dir,
     };
     let name = package.clone().unwrap_or_else(|| "main".to_string());
-    let root = w.namespace(meta.ns, &name, &name);
-    json!({ "format": FORMAT, "package": package, "root": root })
+    let root = w.namespace(meta.ns, &name, &name, None);
+    // Every impl this package wrote that no type above lists: a blanket
+    // `impl <T: Default> Fill for T`, one for a primitive, one for another
+    // package's type. Without these, a trait's implementors are incomplete.
+    let mut impls = Vec::new();
+    for (i, imp) in session.impls.impls.iter().enumerate() {
+        let listed = imp.self_head.is_some_and(|h| w.seen.contains_key(&h));
+        if listed || imp.trait_def.is_none() || session.pkg_of.get(&imp.file) != package.as_ref() {
+            continue;
+        }
+        impls.push(w.impl_json(i));
+    }
+    json!({ "format": FORMAT, "package": package, "root": root, "impls": impls })
+}
+
+/// Each enum variant's discriminant, by its def.
+fn variant_tags(s: &Session) -> HashMap<DefId, i128> {
+    let mut out = HashMap::new();
+    for ir in s.ir.values() {
+        for t in &ir.types {
+            if let crate::ir::TypeDefKind::Enum { variants } = &t.kind {
+                out.extend(variants.iter().map(|v| (v.def, v.tag)));
+            }
+        }
+    }
+    out
 }
 
 struct Walker<'a> {
@@ -56,33 +88,58 @@ struct Walker<'a> {
     /// Each definition already described, and the public path it is described
     /// under.
     seen: HashMap<DefId, String>,
-    /// The trait impls written for each type, from the impl table.
-    methods: HashMap<DefId, Vec<(Option<DefId>, Vec<DefId>, Option<Ty>)>>,
+    /// The impls written for each type, from the impl table: each one's index
+    /// there and its members in written order.
+    methods: HashMap<DefId, Vec<(usize, Vec<DefId>)>>,
+    /// Each enum variant's discriminant.
+    tags: HashMap<DefId, i128>,
+    /// The associated-type parameters synthesized for each type parameter's
+    /// bounds, as `(trait, associated type, the parameter)` — where a pin such
+    /// as `Func(i32) -> R`'s `Output = R` is recorded.
+    pins: HashMap<DefId, Vec<(DefId, String, DefId)>>,
+    /// The directory of the program described, when it is not a package, for
+    /// locations to be relative to.
+    entry_dir: Option<std::path::PathBuf>,
 }
 
-/// Every impl in the table, grouped by the type it is for: `(trait, members,
-/// self type)`.
-fn methods_by_type(s: &Session) -> HashMap<DefId, Vec<(Option<DefId>, Vec<DefId>, Option<Ty>)>> {
+/// The synthesized projection parameters, by the parameter they project
+/// through.
+fn pins_by_base(s: &Session) -> HashMap<DefId, Vec<(DefId, String, DefId)>> {
     let mut out: HashMap<DefId, Vec<_>> = HashMap::new();
-    for imp in &s.impls.impls {
+    for (i, d) in s.defs.iter().enumerate() {
+        if let Some(p) = &d.projection {
+            out.entry(p.base)
+                .or_default()
+                .push((p.trait_def, p.assoc.to_string(), DefId(i as u32)));
+        }
+    }
+    out
+}
+
+/// Every impl in the table, grouped by the type it is for.
+fn methods_by_type(s: &Session) -> HashMap<DefId, Vec<(usize, Vec<DefId>)>> {
+    let mut out: HashMap<DefId, Vec<_>> = HashMap::new();
+    for (i, imp) in s.impls.impls.iter().enumerate() {
         let Some(head) = imp.self_head else { continue };
         let mut members: Vec<DefId> = imp.members.values().copied().collect();
         members.sort_by_key(|d| s.defs.get(*d).span.map(|sp| sp.start));
-        out.entry(head).or_default().push((
-            imp.trait_def,
-            members,
-            imp.typed.as_ref().map(|t| t.self_ty.clone()),
-        ));
+        out.entry(head).or_default().push((i, members));
     }
     out
 }
 
 impl Walker<'_> {
-    /// A namespace and everything public in it.
-    fn namespace(&mut self, ns: DefId, name: &str, path: &str) -> Value {
+    /// A namespace and everything public in it. `binding` is the `::` that
+    /// named it, whose `///` documents a namespace a file is.
+    fn namespace(&mut self, ns: DefId, name: &str, path: &str, binding: Option<DefId>) -> Value {
         let ns = self.s.defs.resolve_alias(ns);
         self.seen.insert(ns, path.to_string());
         let mut item = self.header(ns, name, path, "namespace");
+        if let Some(b) = binding
+            && !item.contains_key("doc")
+        {
+            self.notes(b, &mut item);
+        }
         let members = self.members(ns, path);
         item.insert("members".into(), Value::Array(members));
         Value::Object(item)
@@ -178,7 +235,7 @@ impl Walker<'_> {
         }
         let t = self.s.defs.get(target);
         match t.kind {
-            DefKind::Namespace => Some(self.namespace(target, name, path)),
+            DefKind::Namespace => Some(self.namespace(target, name, path, Some(d))),
             DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias => {
                 Some(self.ty(target, name, path))
             }
@@ -228,32 +285,47 @@ impl Walker<'_> {
             DefKind::Trait => "trait",
             _ => "type",
         };
-        let mut item = self.header(d, name, path, kind);
+        let distinct = matches!(self.decls.get(d), Some(Decl::Alias(a)) if a.repr.is_some());
+        let mut item = self.header(d, name, path, if distinct { "distinct" } else { kind });
         if let Some(Decl::Type(t)) = self.decls.get(d) {
-            let generics: Vec<Value> = t
-                .generics
-                .iter()
-                .filter_map(|g| g.def)
-                .map(|g| Value::String(self.s.defs.get(g).name.to_string()))
-                .collect();
+            let generics = self.generics(&t.generics);
             if !generics.is_empty() {
                 item.insert("generics".into(), Value::Array(generics));
             }
         }
-        if let Some(Decl::Alias(a)) = self.decls.get(d)
-            && let Some(repr) = &a.repr
-        {
-            item.insert("repr".into(), self.show(repr).into());
+        if let Some(Decl::Alias(a)) = self.decls.get(d) {
+            if let Some(repr) = &a.repr {
+                item.insert("repr".into(), self.show(repr).into());
+            }
+            if let Some(to) = &a.expands_to {
+                item.insert("expands_to".into(), self.show(to).into());
+            }
         }
+        // Discriminants are listed only where one was not simply the
+        // variant's position — where the program wrote them.
+        let positional = {
+            let mut vs: Vec<DefId> = def
+                .ns
+                .members
+                .values()
+                .copied()
+                .filter(|c| self.s.defs.get(*c).kind == DefKind::Variant)
+                .collect();
+            vs.sort_by_key(|c| self.order(*c));
+            vs.iter()
+                .enumerate()
+                .all(|(i, v)| self.tags.get(v).is_none_or(|t| *t == i as i128))
+        };
+        let show_tags = !positional;
         let mut children: Vec<DefId> = def.ns.members.values().copied().collect();
         children.sort_by_key(|c| self.order(*c));
         let (mut fields, mut variants, mut members) = (Vec::new(), Vec::new(), Vec::new());
         for c in children {
             let cd = self.s.defs.get(c);
             match cd.kind {
-                // A private field is the type's own business, and no reader
-                // of its documentation can name it.
-                DefKind::Field if cd.vis == Visibility::Private => {}
+                // A field that is not public is the package's own business,
+                // and no reader of its documentation can name it.
+                DefKind::Field if cd.vis != Visibility::Public => {}
                 DefKind::Field => {
                     let mut f = Map::new();
                     f.insert("name".into(), cd.name.to_string().into());
@@ -275,6 +347,9 @@ impl Walker<'_> {
                         if !p.is_empty() {
                             v.insert("payload".into(), Value::Array(p));
                         }
+                    }
+                    if show_tags && let Some(t) = self.tags.get(&c) {
+                        v.insert("value".into(), big_int(*t));
                     }
                     self.notes(c, &mut v);
                     variants.push(Value::Object(v));
@@ -312,17 +387,35 @@ impl Walker<'_> {
     /// A trait member: a method, or an associated type or constant.
     fn member(&mut self, d: DefId, name: &str, path: &str) -> Option<Value> {
         let def = self.s.defs.get(d);
-        match def.kind {
-            DefKind::Func => Some(self.func(d, name, path)),
-            _ => {
-                let kind = match self.decls.get(d) {
-                    Some(Decl::Assoc(a)) if a.ty.is_none() && a.value.is_none() => "assoc",
-                    _ if def.kind == DefKind::TypeAlias => "assoc_type",
-                    _ => "assoc_const",
-                };
-                Some(Value::Object(self.header(d, name, path, kind)))
+        if def.kind == DefKind::Func {
+            let mut f = self.func(d, name, path);
+            // A method with no body is one every impl must write; one with a
+            // body is a default an impl may inherit.
+            if let (Value::Object(m), Some(Decl::Func(fd))) = (&mut f, self.decls.get(d)) {
+                m.insert("required".into(), (!fd.has_body).into());
             }
+            return Some(f);
         }
+        let Some(Decl::Assoc(a)) = self.decls.get(d) else {
+            return Some(Value::Object(self.header(d, name, path, "assoc_type")));
+        };
+        let kind = match a.kind {
+            crate::sema::decl::Requirement::AssocConst => "assoc_const",
+            _ => "assoc_type",
+        };
+        let mut item = self.header(d, name, path, kind);
+        if let Some(ty) = &a.ty {
+            item.insert("type".into(), self.show(ty).into());
+        }
+        if let Some(v) = &a.value {
+            item.insert("value".into(), const_json(v));
+        }
+        item.insert("required".into(), (!a.answered).into());
+        let bounds = self.bounds(d);
+        if !bounds.is_empty() {
+            item.insert("bounds".into(), Value::Array(bounds));
+        }
+        Some(Value::Object(item))
     }
 
     /// The public methods of `ty`'s inherent impls, and the traits it
@@ -330,29 +423,131 @@ impl Walker<'_> {
     fn impls(&mut self, ty: DefId, path: &str) -> (Vec<Value>, Vec<Value>) {
         let (mut methods, mut impls) = (Vec::new(), Vec::new());
         let list = self.methods.get(&ty).cloned().unwrap_or_default();
-        for (trait_def, members, self_ty) in list {
-            match trait_def {
-                None => {
-                    for m in members {
-                        let md = self.s.defs.get(m);
-                        if md.kind != DefKind::Func || md.vis != Visibility::Public {
-                            continue;
-                        }
-                        let n = md.name.to_string();
-                        methods.push(self.func(m, &n, &format!("{path}.{n}")));
-                    }
+        for (index, members) in list {
+            if self.s.impls.impls[index].trait_def.is_some() {
+                impls.push(self.impl_json(index));
+                continue;
+            }
+            for m in members {
+                let md = self.s.defs.get(m);
+                if md.kind != DefKind::Func || md.vis != Visibility::Public {
+                    continue;
                 }
-                Some(t) => {
-                    let mut i = Map::new();
-                    i.insert("trait".into(), self.s.defs.canonical_string(t).into());
-                    if let Some(st) = self_ty {
-                        i.insert("for".into(), self.show(&st).into());
-                    }
-                    impls.push(Value::Object(i));
-                }
+                let n = md.name.to_string();
+                methods.push(self.func(m, &n, &format!("{path}.{n}")));
             }
         }
         (methods, impls)
+    }
+
+    /// A trait impl: which trait, for what, over which generics, and where it
+    /// was written — the package matters, since a type's impls include the
+    /// ones other packages wrote for it.
+    fn impl_json(&self, index: usize) -> Value {
+        let imp = &self.s.impls.impls[index];
+        let mut i = Map::new();
+        if let Some(t) = imp.trait_def {
+            i.insert("trait".into(), self.s.defs.canonical_string(t).into());
+        }
+        if let Some(typed) = &imp.typed {
+            i.insert("for".into(), self.show(&typed.self_ty).into());
+            if !typed.trait_args.is_empty() {
+                let args: Vec<Value> = typed.trait_args.iter().map(|t| self.show(t).into()).collect();
+                i.insert("trait_args".into(), Value::Array(args));
+            }
+            if !typed.assoc.is_empty() {
+                let mut assoc: Vec<(String, String)> = typed
+                    .assoc
+                    .iter()
+                    .map(|(n, t)| (n.to_string(), self.show(t)))
+                    .collect();
+                assoc.sort();
+                let assoc: Map<String, Value> = assoc.into_iter().map(|(n, t)| (n, t.into())).collect();
+                i.insert("assoc".into(), Value::Object(assoc));
+            }
+        }
+        let generics: Vec<Value> = imp
+            .generics
+            .iter()
+            .filter(|g| self.s.defs.get(**g).projection.is_none())
+            .map(|g| self.generic(*g))
+            .collect();
+        if !generics.is_empty() {
+            i.insert("generics".into(), Value::Array(generics));
+        }
+        i.insert("package".into(), self.s.pkg_of.get(&imp.file).cloned().into());
+        // Where the `for` target is written: an impl has no span of its own.
+        let start = imp
+            .syntax
+            .as_ref()
+            .and_then(|syn| Some(self.s.asts.get(&imp.file)?.node(syn.self_node).span.start));
+        if let Some(loc) = start.and_then(|at| self.at(imp.file, at)) {
+            i.insert("location".into(), loc);
+        }
+        Value::Object(i)
+    }
+
+    /// A declaration's generic parameters, with their bounds.
+    fn generics(&self, list: &[crate::sema::decl::GenericParam]) -> Vec<Value> {
+        list.iter()
+            .filter_map(|g| Some(self.generic(g.def?)))
+            .collect()
+    }
+
+    fn generic(&self, g: DefId) -> Value {
+        let mut out = Map::new();
+        let def = self.s.defs.get(g);
+        out.insert("name".into(), def.name.to_string().into());
+        if def.kind == DefKind::ConstParam {
+            out.insert("const".into(), true.into());
+        }
+        let bounds = self.bounds(g);
+        if !bounds.is_empty() {
+            out.insert("bounds".into(), Value::Array(bounds));
+        }
+        Value::Object(out)
+    }
+
+    /// What bounds a type parameter or an associated type, each written the way
+    /// a type is: `core.cmp.Ord`, `core.ops.Func.<Args = (i32), Output = T>`.
+    fn bounds(&self, g: DefId) -> Vec<Value> {
+        let written: Vec<(DefId, Vec<Ty>)> = match self.decls.get(g) {
+            Some(Decl::Param(p)) => p.bounds.clone(),
+            _ => self
+                .s
+                .defs
+                .get(g)
+                .param_bounds
+                .iter()
+                .flatten()
+                .map(|t| (*t, Vec::new()))
+                .collect(),
+        };
+        written
+            .iter()
+            .map(|(t, args)| {
+                let mut shown: Vec<String> = args.iter().map(|a| self.show(a)).collect();
+                for (trait_def, assoc, param) in self.pins.get(&g).into_iter().flatten() {
+                    if trait_def != t {
+                        continue;
+                    }
+                    if let Some(Decl::Param(p)) = self.decls.get(*param)
+                        && let Some(pinned) = &p.pinned
+                    {
+                        shown.push(format!("{assoc} = {}", self.show(pinned)));
+                    }
+                }
+                // By name: the table's order is the order the parameters were
+                // synthesized in, which is not stable from one build to the next.
+                shown[args.len()..].sort();
+                let name = self.s.defs.canonical_string(*t);
+                if shown.is_empty() {
+                    name.into()
+                } else {
+                    format!("{name}.<{}>", shown.join(", ")).into()
+                }
+            })
+            .collect()
     }
 
     /// A function: its parameters, what it returns, and whether it is a method.
@@ -361,16 +556,30 @@ impl Walker<'_> {
         let mut item = self.header(d, name, path, "func");
         if let Some(Decl::Func(f)) = self.decls.get(d) {
             item.insert("method".into(), f.recv.into());
-            let generics: Vec<Value> = f
-                .generics
-                .iter()
-                .filter_map(|g| g.def)
-                .map(|g| Value::String(self.s.defs.get(g).name.to_string()))
-                .collect();
+            let generics = self.generics(&f.generics);
             if !generics.is_empty() {
                 item.insert("generics".into(), Value::Array(generics));
             }
+            // `<Self: Sized, Self.Item: Ord>`, written the way a bound is.
+            let mut self_bounds: Vec<Value> = Vec::new();
+            if f.sized_self {
+                let sized = self.s.lang_items.get("sized");
+                let bound = sized.map_or_else(|| "Sized".to_string(), |d| self.s.defs.canonical_string(d));
+                self_bounds.push(json!({ "on": "Self", "bound": bound }));
+            }
+            for (assoc, t) in &f.self_assoc_bounds {
+                let bound = self.s.defs.canonical_string(*t);
+                self_bounds.push(json!({ "on": format!("Self.{assoc}"), "bound": bound }));
+            }
+            if !self_bounds.is_empty() {
+                item.insert("self_bounds".into(), Value::Array(self_bounds));
+            }
             if let Some(Ty::Func { params, ret, .. }) = &f.sig {
+                if f.recv
+                    && let Some(r) = params.first()
+                {
+                    item.insert("receiver".into(), self.show(r).into());
+                }
                 let tys = &params[usize::from(f.recv).min(params.len())..];
                 let ps: Vec<Value> = f
                     .params
@@ -404,6 +613,26 @@ impl Walker<'_> {
         }
         if let Some(loc) = self.location(def) {
             item.insert("location".into(), loc);
+        }
+        let directives: Vec<Value> = def
+            .directives
+            .iter()
+            .map(|dir| {
+                let args: Vec<Value> = dir
+                    .args
+                    .iter()
+                    .map(|a| match a {
+                        DirectiveArg::Int(n) => big_int(*n),
+                        DirectiveArg::Str(s) => s.to_string().into(),
+                        DirectiveArg::Name(s) => json!({ "name": s.to_string() }),
+                        DirectiveArg::Other => Value::Null,
+                    })
+                    .collect();
+                json!({ "name": dir.name.to_string(), "args": args })
+            })
+            .collect();
+        if !directives.is_empty() {
+            item.insert("directives".into(), Value::Array(directives));
         }
         self.notes(d, &mut item);
         item
@@ -465,9 +694,25 @@ impl Walker<'_> {
     }
 
     fn location(&self, def: &Def) -> Option<Value> {
-        let file = self.s.sources.file(def.file?)?;
-        let at = file.line_col(def.span?.start);
-        Some(json!({ "file": file.name, "line": at.line, "column": at.column }))
+        self.at(def.file?, def.span?.start)
+    }
+
+    /// A place in the source: the package it is in and the file's path
+    /// relative to that package's directory (the program's, for a program), so
+    /// a description does not depend on where it was built.
+    fn at(&self, file: FileId, offset: usize) -> Option<Value> {
+        let src = self.s.sources.file(file)?;
+        let at = src.line_col(offset);
+        let package = self.s.pkg_of.get(&file);
+        let dir = match package {
+            Some(p) => self.s.package_dir(p).map(|d| d.to_path_buf()),
+            None => self.entry_dir.clone(),
+        };
+        let path = std::path::Path::new(&src.name);
+        let name = dir
+            .and_then(|d| path.strip_prefix(d).ok().map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| src.name.clone());
+        Some(json!({ "package": package, "file": name, "line": at.line, "column": at.column }))
     }
 
     fn show(&self, ty: &Ty) -> String {
@@ -481,6 +726,12 @@ fn vis(v: Visibility) -> &'static str {
         Visibility::Package => "package",
         Visibility::Private => "private",
     }
+}
+
+/// An integer as a JSON number where one holds it exactly, and as a string
+/// where it does not.
+fn big_int(n: i128) -> Value {
+    i64::try_from(n).map_or_else(|_| n.to_string().into(), Value::from)
 }
 
 fn const_json(v: &ConstValue) -> Value {
@@ -557,5 +808,101 @@ impl Point {
         let shapes = named("shapes");
         assert_eq!(shapes["members"][0]["kind"], "enum");
         assert_eq!(shapes["members"][0]["variants"][1]["name"], "blue");
+    }
+
+    /// What format 2 added for a generator: bounds and their pins, receivers,
+    /// required trait members, directives, discriminants, `distinct` types,
+    /// the impls no listed type carries, and a namespace's doc on its binding.
+    #[test]
+    fn a_program_is_described_for_a_generator() {
+        let src = "\
+@public Show :: trait {
+    Out :: type
+    /// Required.
+    show :: func (self: *Self) -> i32
+    /// Provided.
+    twice :: func (self: *Self) -> i32 { return self.show() * 2 }
+}
+
+@public Id :: distinct u32
+
+@public Code :: enum { ok = 0, bad = 7 }
+@public Plain :: enum { a, b }
+
+@public(all)
+Box :: struct {
+    value: i32,
+    @public(package) inner: i32,
+}
+
+impl Box {
+    @public get :: func (self: *mut Self) -> i32 { return self.value }
+}
+
+impl <T: Default> Show for T {
+    Out :: i32
+    show :: func (self: *Self) -> i32 { return 0 }
+}
+
+/// Things.
+@public things :: namespace {
+    @public x :: 1
+}
+
+@public apply :: #inline func <A, F: Func(A) -> i32> (f: F, a: A) -> i32 { return f(a) }
+
+{ Default } :: import <core/default>
+";
+        let session = crate::sema::analyze_source("main", src, &[]);
+        assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+        let entry = session
+            .files
+            .keys()
+            .copied()
+            .find(|f| !session.pkg_of.contains_key(f))
+            .unwrap();
+        let v = describe(&session, entry);
+        let members = v["root"]["members"].as_array().unwrap();
+        let named = |n: &str| members.iter().find(|m| m["name"] == n).unwrap().clone();
+
+        let show = named("Show");
+        let m = |n: &str| {
+            show["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["name"] == n)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(m("Out")["kind"], "assoc_type");
+        assert_eq!(m("show")["required"], true);
+        assert_eq!(m("twice")["required"], false);
+
+        let id = named("Id");
+        assert_eq!(id["kind"], "distinct");
+        assert_eq!(id["repr"], "u32");
+
+        assert_eq!(named("Code")["variants"][1]["value"], 7);
+        assert!(named("Plain")["variants"][1].get("value").is_none());
+
+        let bx = named("Box");
+        let fields = bx["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 1, "a package field is not documented: {fields:#?}");
+        assert_eq!(bx["methods"][0]["receiver"], "*mut Box");
+
+        let apply = named("apply");
+        assert_eq!(apply["directives"][0]["name"], "inline");
+        assert_eq!(apply["generics"][0], json!({ "name": "A" }));
+        let bound = apply["generics"][1]["bounds"][0].as_str().unwrap();
+        assert!(bound.ends_with("Func.<Args = (A), Output = i32>"), "{bound}");
+
+        assert_eq!(named("things")["doc"], "Things.");
+
+        let impls = v["impls"].as_array().unwrap();
+        let blanket = impls.iter().find(|i| i["for"] == "T").expect("the blanket impl");
+        assert!(blanket["trait"].as_str().unwrap().ends_with("Show"));
+        assert!(blanket["generics"][0]["bounds"][0].as_str().unwrap().ends_with("Default"));
+        assert_eq!(blanket["location"]["line"], 24);
     }
 }

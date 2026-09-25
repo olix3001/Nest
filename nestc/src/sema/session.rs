@@ -513,6 +513,11 @@ impl Session {
         );
     }
 
+    /// The directory package `name`'s root file is in, when it is known.
+    pub fn package_dir(&self, name: &str) -> Option<&std::path::Path> {
+        std::path::Path::new(&self.packages.get(name)?.root_path).parent()
+    }
+
     /// Add a directory to search for packages nothing registered (`-L`).
     ///
     /// Call before analysis: a package is found the first time it is imported,
