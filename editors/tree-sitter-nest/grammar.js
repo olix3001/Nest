@@ -58,6 +58,8 @@ module.exports = grammar({
   ],
 
   conflicts: $ => [
+    [$._type, $._tuple_element],
+    [$.capture_list, $._expression],
     [$._expression, $.literal_pattern],
     [$.static_declaration, $._pattern],
     [$.type_path, $._expression],
@@ -75,10 +77,7 @@ module.exports = grammar({
     [$.defer_statement, $._expression],
     [$.static_declaration, $.closure_parameter, $._pattern],
     [$._expression, $.mut_pattern],
-    [$.block, $.composite_literal],
-    [$.static_declaration, $.closure_parameter, $.field_initializer, $._pattern],
     [$.closure_parameter, $._expression],
-    [$.expression_statement, $._composite_body],
     [$.type_path],
     [$.type_path, $._pattern],
     [$.tuple_type, $.tuple_pattern],
@@ -253,7 +252,10 @@ module.exports = grammar({
 
     array_type: $ => prec.right(seq('[', field('length', $._expression), ']', optional('mut'), $._type)),
 
-    tuple_type: $ => seq('(', commaSep($._type), ')'),
+    tuple_type: $ => seq('(', commaSep(choice($._type, $.spread_type)), ')'),
+
+    // `..R` — every element of the tuple `R` (spec §3.3).
+    spread_type: $ => seq('..', $._type),
 
     dyn_type: $ => prec.right(seq('dyn', $._type)),
 
@@ -265,7 +267,7 @@ module.exports = grammar({
     callable_type: $ => prec.right(1, seq(
       field('trait', $.type_path),
       '(',
-      commaSep($._type),
+      commaSep(choice($._type, $.spread_type)),
       ')',
       optional(seq('->', field('return_type', $._type))),
     )),
@@ -543,11 +545,18 @@ module.exports = grammar({
       '}',
     )),
 
-    // A trailing block always follows a call's `)` (spec §5.3): after a bare
-    // name, `{` opens a composite literal.
-    trailing_closure: $ => prec.dynamic(-1, seq(
-      field('function', $.call_expression),
-      field('closure', choice($.closure_expression, $.block)),
+    // A trailing block follows a call's `)` (spec §5.3). After a bare path,
+    // `{` opens a composite literal unless it is a closure — a header ending
+    // in `in` — which makes it a call with no `()`: `app.use { ctx, next in … }`.
+    trailing_closure: $ => prec.dynamic(-1, choice(
+      seq(
+        field('function', $.call_expression),
+        field('closure', choice($.closure_expression, $.block)),
+      ),
+      seq(
+        field('function', choice($.identifier, $.field_expression, $.generic_expression)),
+        field('closure', $.closure_expression),
+      ),
     )),
 
     enum_literal: $ => seq('.', field('name', $.identifier)),

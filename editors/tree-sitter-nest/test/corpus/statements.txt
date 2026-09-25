@@ -350,3 +350,57 @@ apply :: func (f: impl Func(i32) -> i32, g: *func(i32) -> i32, h: *extern("c") f
               (identifier)
               (arguments
                 (integer)))))))))
+
+==================
+Bare trailing closures and spread types
+==================
+
+h :: func <Rest> (t: (i32, ..Rest)) {
+    app.use { ctx, next in next.run(ctx) }
+    const p := P { a, b }
+}
+
+---
+
+(source_file
+  (declaration
+    (const_binding
+      pattern: (identifier)
+      value: (func_expression
+        generics: (generic_parameters
+          (generic_parameter
+            name: (type_identifier)))
+        parameters: (parameters
+          (parameter
+            name: (identifier)
+            type: (tuple_type
+              (type_path
+                (type_identifier))
+              (spread_type
+                (type_path
+                  (type_identifier))))))
+        body: (block
+          (expression_statement
+            (trailing_closure
+              function: (field_expression
+                value: (identifier)
+                field: (field_identifier))
+              closure: (closure_expression
+                (closure_parameter
+                  name: (identifier))
+                (closure_parameter
+                  name: (identifier))
+                (expression_statement
+                  (call_expression
+                    function: (field_expression
+                      value: (identifier)
+                      field: (field_identifier))
+                    arguments: (arguments
+                      (identifier)))))))
+          (declaration
+            (let_declaration
+              pattern: (identifier)
+              value: (composite_literal
+                type: (identifier)
+                (identifier)
+                (identifier)))))))))
