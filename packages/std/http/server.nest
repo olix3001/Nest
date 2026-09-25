@@ -1,12 +1,17 @@
-// HTTP/1.1 over `std/net`: read a request, answer it, close the connection.
+// HTTP/1.1 over `std/net`: read requests, answer them, close the connections.
 //
-// One connection at a time, and one request per connection (`Connection:
-// close`): the simplest server that a browser, `curl` and a test all talk to.
-// Keep-alive, chunked bodies and concurrency are what comes next, and each fits
-// here without changing what a handler sees.
+// One thread, many connections: `listen` watches the listening socket and every
+// open connection with `poll`, reads whatever has arrived on each, and answers
+// a connection as soon as its request is whole. A connection that is slow, or
+// that a browser opened ahead of time and sends nothing on, waits without
+// holding anyone else up. One request per connection (`Connection: close`),
+// bodies with a `Content-Length`. Keep-alive and chunked bodies are what comes
+// next, and each fits here without changing what a handler sees.
 
 io :: import "../io/io.nest"
 net :: import "../net/net.nest"
+libc :: import "../os/libc.nest"
+{ PollFd } :: import "../os/libc.nest"
 strs :: import "../text/str.nest"
 string :: import "../text/string.nest"
 { String } :: import "../text/string.nest"
@@ -14,60 +19,122 @@ collections :: import "../collections/collections.nest"
 { Vec } :: import "../collections/collections.nest"
 { Header, Request, Response, reason, split_target, same_ascii, status } :: import "message.nest"
 { App } :: import "router.nest"
+c :: import <core/c>
 { make } :: import <core/mem>
 
 /// How large a request's head and body may be before it is refused (`413`).
 @public MAX_REQUEST: usize :: 1048576
 
+/// How many connections may be waiting for their request at once; past it the
+/// one that has waited longest is dropped.
+@public MAX_PENDING: usize :: 256
+
+// A connection whose request has not all arrived.
+Pending :: struct {
+    conn: net.TcpStream,
+    buf: Vec.<u8>,
+}
+
 impl App {
     /// Serve on `addr` — `"127.0.0.1:8080"` — until the process ends.
     @public listen :: func (self: *mut Self, addr: str) -> Result.<void, io.Error> {
         let mut server: net.TcpListener := net.listen(addr).?
+        let mut pending: Vec.<Pending> := collections.vec.new.<Pending>()
+        const chunk: []mut u8 := make.<[]u8>(16384)
         loop {
-            self.serve_one(&mut server).?
+            // The listener first, then every waiting connection, in order.
+            const fds: []mut PollFd := make.<[]PollFd>(pending.len() + 1)
+            fds[0] = PollFd { fd: server.fd, events: libc.POLLIN, revents: 0 }
+            for i in 0..<pending.len() {
+                fds[i + 1] = PollFd { fd: pending.as_slice()[i].conn.fd, events: libc.POLLIN, revents: 0 }
+            }
+            if libc.poll(c.from_ptr.<PollFd>(&fds[0]), cast.<c.ulong>(fds.len()), -1) < 0 {
+                continue
+            }
+            // Answer or drop what is ready, from the back so a removal leaves
+            // the indices still to visit where they were.
+            let mut i: usize := pending.len()
+            while i > 0 {
+                i = i - 1
+                if fds[i + 1].revents == 0 { continue }
+                const done: bool := self.advance(&mut pending.as_mut_slice()[i], chunk)
+                if done { pending.swap_remove(i).match { .some(_) => (), .none => () } }
+            }
+            if fds[0].revents != 0 {
+                server.accept().match {
+                    .ok(conn) => {
+                        if pending.len() >= MAX_PENDING {
+                            pending.as_mut_slice()[0].conn.close().match { .ok(_) => (), .err(_) => () }
+                            pending.swap_remove(0).match { .some(_) => (), .none => () }
+                        }
+                        pending.push(Pending { conn: conn, buf: collections.vec.new.<u8>() })
+                    },
+                    .err(_) => (),
+                }
+            }
         }
     }
 
-    /// Accept one connection on `server`, answer its request, and close it.
-    /// A connection that fails is that connection's problem: the error is
-    /// answered where it can be and not returned, so a server keeps serving.
+    /// Accept one connection on `server`, wait for its request, answer it and
+    /// close it — the whole of one exchange, for a test or a tool that wants
+    /// exactly one. A connection that fails is that connection's problem: the
+    /// error is answered where it can be and not returned.
     @public serve_one :: func (self: *mut Self, server: *mut net.TcpListener) -> Result.<void, io.Error> {
-        let mut conn: net.TcpStream := server.accept().?
-        const res: Response := read_request(&mut conn).match {
-            .ok(req) => self.respond(req),
-            .err(r) => r,
-        }
-        write_response(&mut conn, &res).match { .ok(_) => (), .err(_) => () }
-        conn.close().match { .ok(_) => (), .err(_) => () }
+        let mut p: Pending := Pending { conn: server.accept().?, buf: collections.vec.new.<u8>() }
+        const chunk: []mut u8 := make.<[]u8>(16384)
+        while self.advance(&mut p, chunk) == false { }
         return .ok(())
+    }
+
+    // Read what has arrived on `p`, and answer it once its request is whole.
+    // Whether `p` is finished — answered, or gone.
+    advance :: func (self: *mut Self, p: *mut Pending, chunk: []mut u8) -> bool {
+        const n: usize := io.Read.read(&mut p.conn, chunk).match {
+            .ok(n) => n,
+            .err(_) => 0,
+        }
+        if n == 0 {
+            // The peer went away before its request was whole.
+            p.conn.close().match { .ok(_) => (), .err(_) => () }
+            return true
+        }
+        p.buf.extend(cast.<[]u8>(chunk[0..<n]))
+        const res: Response := parse(p.buf.as_slice()).match {
+            .more => { return false },
+            .done(req) => self.respond(req),
+            .bad(r) => r,
+        }
+        write_response(&mut p.conn, &res).match { .ok(_) => (), .err(_) => () }
+        p.conn.close().match { .ok(_) => (), .err(_) => () }
+        return true
     }
 }
 
 // ===< Reading >===
 
-// The request on `conn`, or the response that says why there is none.
-@public(package) read_request :: func (conn: *mut net.TcpStream) -> Result.<Request, Response> {
-    let mut buf: Vec.<u8> := collections.vec.new.<u8>()
-    let chunk: []mut u8 := make.<[]u8>(4096)
+// What the bytes of a connection come to so far.
+Parsed :: enum {
+    // Not a whole request yet.
+    more,
+    done(Request),
+    // Never going to be one: the answer that says why.
+    bad(Response),
+}
+
+// The request `all` holds, when it is all there.
+@public(package) parse :: func (all: []u8) -> Parsed {
     // The head ends at the first blank line.
-    let mut head_end: usize := 0
-    loop {
-        const n: usize := io.Read.read(conn, chunk).match {
-            .ok(n) => n,
-            .err(_) => { return .err(status(400, "could not read the request")) },
-        }
-        if n == 0 { return .err(status(400, "the request ended early")) }
-        buf.extend(cast.<[]u8>(chunk[0..<n]))
-        const at: Option.<usize> := strs.find(cast.<str>(buf.as_slice()), "\r\n\r\n")
-        const found: bool := at.match { .some(i) => { head_end = i; true }, .none => false }
-        if found { break }
-        if buf.len() > MAX_REQUEST { return .err(status(413, "request too large")) }
+    const head_end: usize := strs.find(cast.<str>(all), "\r\n\r\n").match {
+        .some(i) => i,
+        .none => {
+            if all.len() > MAX_REQUEST { return .bad(status(413, "request too large")) }
+            return .more
+        },
     }
-    const all: []u8 := buf.as_slice()
     const head: str := cast.<str>(all[0..<head_end])
     const lines: []str := strs.split(head, "\r\n")
     const first: []str := strs.split(lines[0], " ")
-    if first.len() != 3 { return .err(status(400, "malformed request line")) }
+    if first.len() != 3 { return .bad(status(400, "malformed request line")) }
     let mut headers: Vec.<Header> := collections.vec.new.<Header>()
     for line in lines[1..<lines.len()] {
         strs.find(line, ":").match {
@@ -83,29 +150,20 @@ impl App {
         if same_ascii(h.name, "Content-Length") {
             length = strs.parse_usize(h.value).match {
                 .some(n) => n,
-                .none => { return .err(status(400, "bad Content-Length")) },
+                .none => { return .bad(status(400, "bad Content-Length")) },
             }
         }
     }
-    if length > MAX_REQUEST { return .err(status(413, "request too large")) }
-    // What arrived after the head is the start of the body; read the rest.
-    let mut body: Vec.<u8> := collections.vec.from_slice.<u8>(all[head_end + 4..<all.len()])
-    while body.len() < length {
-        const n: usize := io.Read.read(conn, chunk).match {
-            .ok(n) => n,
-            .err(_) => { return .err(status(400, "could not read the body")) },
-        }
-        if n == 0 { break }
-        body.extend(cast.<[]u8>(chunk[0..<n]))
-    }
-    const b: []u8 := body.as_slice()
+    if length > MAX_REQUEST { return .bad(status(413, "request too large")) }
+    const body_start: usize := head_end + 4
+    if all.len() - body_start < length { return .more }
     let (path, query) := split_target(first[1])
-    return .ok(Request {
+    return .done(Request {
         method: first[0],
         path: path,
         query: query,
         headers: headers.as_slice(),
-        body: if b.len() > length { b[0..<length] } else { b },
+        body: all[body_start..<body_start + length],
     })
 }
 
@@ -123,4 +181,26 @@ impl App {
     io.write_all(conn, out.as_bytes()).?
     io.write_all(conn, res.body).?
     return .ok(())
+}
+
+tests :: #when(test) namespace {
+    is_more :: func (p: Parsed) -> bool { return p.match { .more => true, _ => false } }
+
+    // What `listen` relies on to serve many connections at once: a request
+    // that has not all arrived is "more", not an error, and not a wait.
+    @test
+    a_request_is_parsed_as_it_arrives :: func () {
+        const whole: str := "POST /a?x=1 HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"
+        assert(is_more(parse("".as_bytes())))
+        assert(is_more(parse("POST /a HT".as_bytes())))
+        assert(is_more(parse(strs.slice(whole, 0, whole.len() - 2).as_bytes())), "the body is not all there")
+        parse(whole.as_bytes()).match {
+            .done(r) => {
+                assert(r.method == "POST" && r.path == "/a" && r.query == "x=1")
+                assert(r.text() == "hello")
+            },
+            _ => assert(false, "a whole request parses"),
+        }
+        assert(parse("nonsense\r\n\r\n".as_bytes()).match { .bad(r) => r.status == 400, _ => false })
+    }
 }

@@ -251,7 +251,28 @@ extern("c") {
   @public getaddrinfo  :: func (node: c.cstr, service: c.cstr, hints: c.ptr.<AddrInfo>, res: c.ptr.<c.ptr.<AddrInfo>>) -> c.int
   @public freeaddrinfo :: func (list: c.ptr.<AddrInfo>) -> void
   @public gai_strerror :: func (code: c.int) -> c.cstr
+
+  /// Wait until one of `fds` can be read or written, or `timeout` ms pass
+  /// (`-1` waits for ever). `nfds_t` is an `unsigned int` on the BSDs and an
+  /// `unsigned long` on Linux; a count passed as the wider one reads right on
+  /// both, since it arrives in a register either way.
+  @public poll :: func (fds: c.ptr.<PollFd>, n: c.ulong, timeout: c.int) -> c.int
 }
+
+/// One descriptor `poll` watches: what to watch it for, and what happened.
+/// The same layout on every POSIX system.
+@public(all) PollFd :: #repr("C") struct {
+  fd: c.int,
+  events: i16,
+  revents: i16,
+}
+
+/// `poll`'s events: data to read (or a connection to accept), and the two it
+/// reports without being asked — the other end hung up, or the descriptor
+/// failed.
+@public POLLIN: i16 :: 1
+@public POLLERR: i16 :: 8
+@public POLLHUP: i16 :: 16
 
 /// One address `getaddrinfo` found, Linux's layout.
 @public(all)
