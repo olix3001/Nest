@@ -56,9 +56,10 @@
 //
 // A type with a `Resolve` impl is not looked up: a parameter or `@inject`
 // member of that type is built by its own `resolve`, from the scope. That is
-// how a generic type is supplied — `std/http`'s `Json.<T>` decodes a request
-// body into any `T` — where a registration would have to name each `T`. An
-// error from `resolve` comes back `rejected`.
+// how a generic type is supplied — a request body decoded into any `T` —
+// where a registration would have to name each `T`. It fails with a type of
+// its own choosing (`Resolve.Failure`), which the provider does not interpret:
+// the `Error` from `invoke` carries it, and `error.cause.<T>()` reads it back.
 //
 // ### Lifetimes
 //
@@ -90,22 +91,35 @@ collections :: import "../collections/collections.nest"
 }
 
 /// What went wrong resolving a service: which one, and why.
-@public(all) Error :: struct {
-    message: str,
-    /// Whether a `Resolve` impl refused what it was given, which is the
-    /// input's fault rather than the registrations': `std/http` answers `400`
-    /// for one, and `500` for a service that is missing.
-    rejected: bool,
+@public(fields: package) Error :: struct {
+    /// What went wrong, in words.
+    @public message: str,
+    // The failure a `Resolve` impl returned, of whatever type it chose; `.none`
+    // for an error of the provider's own (a missing registration, a cycle).
+    origin: Option.<Cause>,
 }
 
-/// An `Error` saying `message`: something the registrations could not answer.
+// A value of any type, with the identity of that type.
+Cause :: struct { id: u128, value: *mut void }
+
+impl Error {
+    /// The failure a `Resolve` impl returned, when it is a `T`. The provider
+    /// does not look inside it; whoever called `invoke` knows what types its
+    /// own `Resolve` impls fail with.
+    @public cause :: func <T> (self: *Self) -> Option.<*T> {
+        return self.origin.match {
+            .some(c) => {
+                if c.id == cast.<u128>(type_id.<T>()) { return .some(transmute.<*T>(c.value)) }
+                return .none
+            },
+            .none => .none,
+        }
+    }
+}
+
+/// An `Error` saying `message`, with no cause.
 @public fail :: func (message: str) -> Error {
-    return Error { message: message, rejected: false }
-}
-
-/// An `Error` a `Resolve` impl returns when what it was given is unusable.
-@public reject :: func (message: str) -> Error {
-    return Error { message: message, rejected: true }
+    return Error { message: message, origin: .none }
 }
 
 /// The registrations a provider is built from.
@@ -465,13 +479,16 @@ by_value_singleton :: func (name: str) -> Error {
 
 /// A type that builds itself from a scope, rather than being registered: a
 /// parameter or `@inject` member of this type is resolved by calling
-/// `resolve` on it, before any registration is looked at. `std/http`'s
-/// `Json.<T>` is one — a request body decoded into whatever `T` a handler
-/// asks for, which no registration could be written for one `T` at a time.
+/// `resolve` on it, before any registration is looked at. A generic type is
+/// supplied this way — a decoded request body of whatever `T` is asked for —
+/// where a registration would have to be written for each `T`.
 ///
-/// An error from `resolve` is marked `rejected`: the input was unusable.
+/// It fails with a `Failure` of its own choosing. The provider does not look
+/// inside it: the `Error` that comes back from `invoke` carries it as its
+/// cause (`Error.cause.<T>()`), for the caller to read.
 @public Resolve :: trait {
-    resolve :: func (self: *mut Self, sp: *mut Scope) -> Result.<void, Error>
+    Failure :: type
+    resolve :: func (self: *mut Self, sp: *mut Scope) -> Result.<void, Self.Failure>
 }
 
 // Whether a member resolved itself: `false` for every type without a
@@ -489,7 +506,13 @@ impl <T: Resolve> Resolver for T {
     try_resolve :: func (self: *Self, sp: *mut Scope) -> Result.<bool, Error> {
         return transmute.<*mut T>(self).resolve(sp).match {
             .ok(_) => .ok(true),
-            .err(e) => .err(reject(e.message)),
+            .err(failure) => .err(Error {
+                message: f"`{type_info.<T>().name}` could not resolve itself",
+                origin: .some(Cause {
+                    id: cast.<u128>(type_id.<T.Failure>()),
+                    value: transmute.<*mut void>(boxed(failure)),
+                }),
+            }),
         }
     }
 }
@@ -587,10 +610,15 @@ tests :: #when(test) namespace {
 
     // Resolves itself from what the scope holds, as `std/http`'s `Json` does.
     Doubled :: struct { n: i32 }
+    NoTime :: struct { at: i32 }
     impl Resolve for Doubled {
-        resolve :: func (self: *mut Doubled, sp: *mut Scope) -> Result.<void, Error> {
-            const c: *Clock := sp.get.<Clock>().?
-            if c.now < 0 { return .err(fail("no time")) }
+        Failure :: NoTime
+        resolve :: func (self: *mut Doubled, sp: *mut Scope) -> Result.<void, NoTime> {
+            const c: *Clock := sp.get.<Clock>().match {
+                .ok(c) => c,
+                .err(_) => { return .err(NoTime { at: 0 }) },
+            }
+            if c.now < 0 { return .err(NoTime { at: c.now }) }
             self.n = c.now * 2
             return .ok(())
         }
@@ -611,7 +639,11 @@ tests :: #when(test) namespace {
         let mut bad: Services := services()
         bad.add_instance(Clock { now: -1 })
         const failed := bad.build().invoke({ d: Doubled in d.n })
-        assert(failed.match { .ok(_) => false, .err(e) => e.rejected }, "its error is a rejection")
+        const why: Option.<i32> := failed.match {
+            .ok(_) => .none,
+            .err(e) => e.cause.<NoTime>().match { .some(t) => .some(t.at), .none => .none },
+        }
+        assert(why.match { .some(at) => at == -1, .none => false }, "its failure is the error's cause")
         return .ok(())
     }
 

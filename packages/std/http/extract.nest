@@ -7,8 +7,10 @@
 //         http.text("added")
 //     }
 //
-// One that cannot be built — a body that is not the JSON `T` wants — is
-// answered with a `400` and its reason, and the handler does not run.
+// One that cannot be built fails with a `Rejection` — a body that is not the
+// JSON `T` wants is a `400` — and the router answers with it instead of
+// running the handler. `std/di` carries the `Rejection` as its error's cause
+// and knows nothing about what is in it.
 
 di :: import "../di/di.nest"
 json :: import "../serialize/json/json.nest"
@@ -16,17 +18,36 @@ json :: import "../serialize/json/json.nest"
 { Header, same_ascii } :: import "message.nest"
 { Context } :: import "router.nest"
 
+/// Why a request could not supply a handler's parameter: the response to send
+/// instead. What every extractor here fails with (`di.Resolve.Failure`), and
+/// what one written elsewhere should fail with for the router to answer it.
+@public(all) Rejection :: struct {
+    status: u16,
+    message: str,
+}
+
+// The request's `*Context`, which every request's scope is given.
+context :: func (sp: *mut di.Scope) -> Result.<*Context, Rejection> {
+    return sp.get.<Context>().match {
+        .ok(c) => .ok(c),
+        .err(e) => .err(Rejection { status: 500, message: e.message }),
+    }
+}
+
 /// The request's body, decoded as JSON into a `T`.
 @public(all) Json :: struct <T> {
     value: T,
 }
 
 impl <T: Decode> di.Resolve for Json.<T> {
-    resolve :: func (self: *mut Self, sp: *mut di.Scope) -> Result.<void, di.Error> {
-        const ctx: *Context := sp.get.<Context>().?
+    Failure :: Rejection
+    resolve :: func (self: *mut Self, sp: *mut di.Scope) -> Result.<void, Rejection> {
+        const ctx: *Context := context(sp).?
         self.value = json.from_str.<T>(ctx.body()).match {
             .ok(v) => v,
-            .err(e) => { return .err(di.reject(f"the body is not valid JSON for this request: {e}")) },
+            .err(e) => {
+                return .err(Rejection { status: 400, message: f"the body is not valid JSON for this request: {e}" })
+            },
         }
         return .ok(())
     }
@@ -38,8 +59,9 @@ impl <T: Decode> di.Resolve for Json.<T> {
 }
 
 impl di.Resolve for Body {
-    resolve :: func (self: *mut Body, sp: *mut di.Scope) -> Result.<void, di.Error> {
-        self.text = sp.get.<Context>().?.body()
+    Failure :: Rejection
+    resolve :: func (self: *mut Body, sp: *mut di.Scope) -> Result.<void, Rejection> {
+        self.text = context(sp).?.body()
         return .ok(())
     }
 }
@@ -60,8 +82,9 @@ impl Headers {
 }
 
 impl di.Resolve for Headers {
-    resolve :: func (self: *mut Headers, sp: *mut di.Scope) -> Result.<void, di.Error> {
-        self.list = sp.get.<Context>().?.request().headers
+    Failure :: Rejection
+    resolve :: func (self: *mut Headers, sp: *mut di.Scope) -> Result.<void, Rejection> {
+        self.list = context(sp).?.request().headers
         return .ok(())
     }
 }

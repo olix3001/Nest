@@ -47,7 +47,7 @@
 @public { Header, Request, Response, request, text, html, json_of, status, not_found, with_body, reason } :: import "message.nest"
 @public { Handler, Middleware, Next, Context, Router, App, app } :: import "router.nest"
 @public { MAX_REQUEST } :: import "server.nest"
-@public { Json, Body, Headers } :: import "extract.nest"
+@public { Json, Body, Headers, Rejection } :: import "extract.nest"
 
 tests :: #when(test) namespace {
     di :: import "../di/di.nest"

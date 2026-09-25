@@ -11,6 +11,7 @@ collections :: import "../collections/collections.nest"
 { Vec } :: import "../collections/collections.nest"
 di :: import "../di/di.nest"
 { Request, Response, not_found, status } :: import "message.nest"
+{ Rejection } :: import "extract.nest"
 { boxed, new } :: import <core/mem>
 
 /// A route's handler once its parameters are bound: the request's context
@@ -152,9 +153,12 @@ impl Router {
             ctx.sp.invoke_with((ctx,), handler).match {
                 .ok(r) => r,
                 // A parameter the request could not supply (`http.Json` of a
-                // bad body) is the client's mistake; a service no one
-                // registered is the application's.
-                .err(e) => status(if e.rejected { 400 } else { 500 }, e.message),
+                // bad body) says what to answer; a service no one registered
+                // is the application's mistake.
+                .err(e) => e.cause.<Rejection>().match {
+                    .some(r) => status(r.status, r.message),
+                    .none => status(500, e.message),
+                },
             }
         })
         const chain: []Middleware := collections.vec.from_slice.<Middleware>(self.middleware.as_slice()).as_slice()
