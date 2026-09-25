@@ -52,6 +52,14 @@
 //         }
 //     }
 //
+// ### Types that resolve themselves
+//
+// A type with a `Resolve` impl is not looked up: a parameter or `@inject`
+// member of that type is built by its own `resolve`, from the scope. That is
+// how a generic type is supplied — `std/http`'s `Json.<T>` decodes a request
+// body into any `T` — where a registration would have to name each `T`. An
+// error from `resolve` comes back `rejected`.
+//
 // ### Lifetimes
 //
 // A **singleton** is built once, by the root, and shared by every scope. A
@@ -84,6 +92,20 @@ collections :: import "../collections/collections.nest"
 /// What went wrong resolving a service: which one, and why.
 @public(all) Error :: struct {
     message: str,
+    /// Whether a `Resolve` impl refused what it was given, which is the
+    /// input's fault rather than the registrations': `std/http` answers `400`
+    /// for one, and `500` for a service that is missing.
+    rejected: bool,
+}
+
+/// An `Error` saying `message`: something the registrations could not answer.
+@public fail :: func (message: str) -> Error {
+    return Error { message: message, rejected: false }
+}
+
+/// An `Error` a `Resolve` impl returns when what it was given is unusable.
+@public reject :: func (message: str) -> Error {
+    return Error { message: message, rejected: true }
 }
 
 /// The registrations a provider is built from.
@@ -269,7 +291,9 @@ impl Scope {
         // arguments it only passes on.
         let args: F.Args := zeroed.<F.Args>()
         for m in type_info.<F.Args>().members {
-            self.supply(member_ptr.<F.Args>(&mut args, m), m, "parameter").?
+            if not member_resolver.<F.Args>(&mut args, m).try_resolve(self).? {
+                self.supply(member_ptr.<F.Args>(&mut args, m), m, "parameter").?
+            }
         }
         return .ok(f.call(args))
     }
@@ -291,7 +315,7 @@ impl Scope {
             const into: *mut void := member_ptr.<F.Args>(&mut args, all[i])
             if i < given.len() {
                 copy_bytes(into, member_ptr.<P>(&pre, given[i]), all[i].size)
-            } else {
+            } else if not member_resolver.<F.Args>(&mut args, all[i]).try_resolve(self).? {
                 self.supply(into, all[i], "parameter").?
             }
         }
@@ -310,7 +334,7 @@ impl Scope {
             _ => {
                 const found: (*mut void, bool) := self.lookup(cast.<u128>(m.id), Label { what: what, name: m.name }).?
                 if found.1 {
-                    return .err(Error { message: f"{what} `{m.name}` takes a singleton by value; take a pointer to it" })
+                    return .err(fail(f"{what} `{m.name}` takes a singleton by value; take a pointer to it"))
                 }
                 copy_bytes(into, found.0, m.size)
                 return .ok(())
@@ -340,11 +364,11 @@ impl Scope {
         }
         const at: usize := self.services.index.get(key).match {
             .some(i) => i,
-            .none => { return .err(Error { message: missing(name) }) },
+            .none => { return .err(fail(missing(name))) },
         }
         const e: Entry := self.services.entries.get(at).match {
             .some(e) => e,
-            .none => { return .err(Error { message: missing(name) }) },
+            .none => { return .err(fail(missing(name))) },
         }
         return e.lifetime.match {
             .Singleton => self.root.build(at, e),
@@ -368,7 +392,7 @@ impl Scope {
     // `e`, built now, with a cycle reported rather than followed.
     make :: func (self: *mut Self, at: usize, e: Entry) -> Result.<*mut void, Error> {
         for r in self.root.resolving.iter() {
-            if r == at { return .err(Error { message: f"`{e.name}` depends on itself" }) }
+            if r == at { return .err(fail(f"`{e.name}` depends on itself")) }
         }
         self.root.resolving.push(at)
         const made: Result.<*mut void, Error> := e.make(self)
@@ -396,7 +420,11 @@ autowire :: func <T> (sp: *mut Scope) -> Result.<*mut void, Error> {
     const v: *mut T := new.<T>()
     for m in type_info.<T>().members {
         attr_of.<inject>(m.attrs).match {
-            .some(_) => sp.supply(member_ptr.<T>(v, m), m, f"`@inject` member of `{type_info.<T>().name}`").?,
+            .some(_) => {
+                if not member_resolver.<T>(v, m).try_resolve(sp).? {
+                    sp.supply(member_ptr.<T>(v, m), m, f"`@inject` member of `{type_info.<T>().name}`").?
+                }
+            },
             .none => member_fill.<T>(v, m).fill(),
         }
     }
@@ -432,8 +460,42 @@ missing :: func (l: Label) -> str {
 }
 
 by_value_singleton :: func (name: str) -> Error {
-    return Error { message: f"`{name}` is a singleton; take a pointer to it, not a copy" }
+    return fail(f"`{name}` is a singleton; take a pointer to it, not a copy")
 }
+
+/// A type that builds itself from a scope, rather than being registered: a
+/// parameter or `@inject` member of this type is resolved by calling
+/// `resolve` on it, before any registration is looked at. `std/http`'s
+/// `Json.<T>` is one — a request body decoded into whatever `T` a handler
+/// asks for, which no registration could be written for one `T` at a time.
+///
+/// An error from `resolve` is marked `rejected`: the input was unusable.
+@public Resolve :: trait {
+    resolve :: func (self: *mut Self, sp: *mut Scope) -> Result.<void, Error>
+}
+
+// Whether a member resolved itself: `false` for every type without a
+// `Resolve` impl, and the impl's answer for one with — the bounded blanket
+// impl is the more specific, so it is the one a `Resolve` type gets.
+Resolver :: trait {
+    try_resolve :: func (self: *Self, sp: *mut Scope) -> Result.<bool, Error>
+}
+
+impl <T> Resolver for T {
+    try_resolve :: func (self: *Self, sp: *mut Scope) -> Result.<bool, Error> { return .ok(false) }
+}
+
+impl <T: Resolve> Resolver for T {
+    try_resolve :: func (self: *Self, sp: *mut Scope) -> Result.<bool, Error> {
+        return transmute.<*mut T>(self).resolve(sp).match {
+            .ok(_) => .ok(true),
+            .err(e) => .err(reject(e.message)),
+        }
+    }
+}
+
+// Member `m` of `v`, as its own `Resolver` impl.
+member_resolver :: #intrinsic("member_dyn") func <T> (v: *T, m: Member) -> *dyn Resolver
 
 // Member `m` of `v`, as its own `Fill` impl.
 member_fill :: #intrinsic("member_dyn") func <T> (v: *T, m: Member) -> *dyn Fill
@@ -520,6 +582,36 @@ tests :: #when(test) namespace {
         assert(n == 12)
         const m := root.invoke.<i32>({ c: *Clock in c.now })
         assert(m.match { .ok(v) => v == 5, .err(_) => false }, "`R` written")
+        return .ok(())
+    }
+
+    // Resolves itself from what the scope holds, as `std/http`'s `Json` does.
+    Doubled :: struct { n: i32 }
+    impl Resolve for Doubled {
+        resolve :: func (self: *mut Doubled, sp: *mut Scope) -> Result.<void, Error> {
+            const c: *Clock := sp.get.<Clock>().?
+            if c.now < 0 { return .err(fail("no time")) }
+            self.n = c.now * 2
+            return .ok(())
+        }
+    }
+    Uses :: struct { @inject d: Doubled }
+
+    @test
+    a_type_can_resolve_itself :: func () -> Result.<void, Error> {
+        let mut s: Services := services()
+        s.add_instance(Clock { now: 5 })
+        s.add_scoped_auto.<Uses>()
+        const root := s.build()
+        const n: i32 := root.invoke({ d: Doubled, c: *Clock in d.n + c.now }).?
+        assert(n == 15, "a parameter")
+        const u: *Uses := root.get.<Uses>().?
+        assert(u.d.n == 10, "an `@inject` member")
+
+        let mut bad: Services := services()
+        bad.add_instance(Clock { now: -1 })
+        const failed := bad.build().invoke({ d: Doubled in d.n })
+        assert(failed.match { .ok(_) => false, .err(e) => e.rejected }, "its error is a rejection")
         return .ok(())
     }
 

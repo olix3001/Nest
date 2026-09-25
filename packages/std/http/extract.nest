@@ -1,0 +1,67 @@
+// Handler parameters that come from the request rather than from a
+// registration: each is a `di.Resolve` type, so a handler names it after `ctx`
+// and `std/di` builds it for the request being answered.
+//
+//     app.post("/users") { ctx, user: http.Json.<User>, repo: *Repo in
+//         repo.add(user.value)
+//         http.text("added")
+//     }
+//
+// One that cannot be built — a body that is not the JSON `T` wants — is
+// answered with a `400` and its reason, and the handler does not run.
+
+di :: import "../di/di.nest"
+json :: import "../serialize/json/json.nest"
+{ Decode } :: import "../serialize/decode.nest"
+{ Header, same_ascii } :: import "message.nest"
+{ Context } :: import "router.nest"
+
+/// The request's body, decoded as JSON into a `T`.
+@public(all) Json :: struct <T> {
+    value: T,
+}
+
+impl <T: Decode> di.Resolve for Json.<T> {
+    resolve :: func (self: *mut Self, sp: *mut di.Scope) -> Result.<void, di.Error> {
+        const ctx: *Context := sp.get.<Context>().?
+        self.value = json.from_str.<T>(ctx.body()).match {
+            .ok(v) => v,
+            .err(e) => { return .err(di.reject(f"the body is not valid JSON for this request: {e}")) },
+        }
+        return .ok(())
+    }
+}
+
+/// The request's body, as text.
+@public(all) Body :: struct {
+    text: str,
+}
+
+impl di.Resolve for Body {
+    resolve :: func (self: *mut Body, sp: *mut di.Scope) -> Result.<void, di.Error> {
+        self.text = sp.get.<Context>().?.body()
+        return .ok(())
+    }
+}
+
+/// The request's headers.
+@public(all) Headers :: struct {
+    list: []Header,
+}
+
+impl Headers {
+    /// The value of header `name`, matched without regard to case.
+    @public get :: func (self: *Self, name: str) -> Option.<str> {
+        for h in self.list {
+            if same_ascii(h.name, name) { return .some(h.value) }
+        }
+        return .none
+    }
+}
+
+impl di.Resolve for Headers {
+    resolve :: func (self: *mut Headers, sp: *mut di.Scope) -> Result.<void, di.Error> {
+        self.list = sp.get.<Context>().?.request().headers
+        return .ok(())
+    }
+}

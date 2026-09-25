@@ -47,6 +47,7 @@
 @public { Header, Request, Response, request, text, html, json_of, status, not_found, with_body, reason } :: import "message.nest"
 @public { Handler, Middleware, Next, Context, Router, App, app } :: import "router.nest"
 @public { MAX_REQUEST } :: import "server.nest"
+@public { Json, Body, Headers } :: import "extract.nest"
 
 tests :: #when(test) namespace {
     di :: import "../di/di.nest"
@@ -114,6 +115,32 @@ tests :: #when(test) namespace {
             if h.name == "X-Served-By" { served = true }
         }
         assert(served, "the app's middleware changes what comes back")
+    }
+
+    User :: struct { name: str, age: i32 }
+
+    posting :: func (target: str, body: str) -> Request {
+        let mut r: Request := request("POST", target)
+        const hs: []Header := .{ Header { name: "X-Tag", value: "t1" } }
+        r.headers = hs
+        r.body = body.as_bytes()
+        return r
+    }
+
+    @test
+    handlers_take_the_request_s_parts :: func () {
+        let mut a: App := make_app()
+        a.post("/user") { ctx, u: Json.<User>, g: *Greeter in
+            text(f"{g.greeting} {u.value.name} ({u.value.age})")
+        }
+        a.post("/raw") { ctx, b: Body, h: Headers in
+            text(f"{b.text} {h.get("x-tag").match { .some(v) => v, .none => "-" }}")
+        }
+        const ok: Response := a.respond(posting("/user", "{\"name\": \"ada\", \"age\": 36}"))
+        assert(ok.status == 200 && ok.text() == "hello ada (36)", ok.text())
+        const bad: Response := a.respond(posting("/user", "{\"name\": 5}"))
+        assert(bad.status == 400, "a body that is not the `T` is the client's mistake")
+        assert(a.respond(posting("/raw", "hi")).text() == "hi t1")
     }
 
     @test

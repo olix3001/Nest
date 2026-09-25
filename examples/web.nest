@@ -2,6 +2,7 @@
 //
 //     nestc examples/web.nest -o web && ./web
 //     curl localhost:8080/api/hello/ada -H 'Authorization: yes'
+//     curl localhost:8080/greet -d '{"name": "ada", "times": 2}'
 
 io :: import <std/io>
 di :: import <std/di>
@@ -10,6 +11,9 @@ http :: import <std/http>
 
 /// Says hello. A singleton: one for the whole application.
 Greeter :: struct { greeting: str }
+
+/// A `/greet` request's body, decoded from JSON by `http.Json`.
+Greeting :: struct { name: str, times: i32 }
 
 /// What one request knows about itself. Scoped: one per request, built by
 /// autowiring its `@inject` member from the request's scope; `n` is not
@@ -36,6 +40,14 @@ main :: func () -> i32 {
     // A handler's first parameter is the request's context, its type left
     // out; every one after it is resolved from the request's scope.
     app.get("/") { ctx in http.html("<h1>nest</h1>") }
+
+    // A parameter can come from the request itself: `http.Json.<T>` is the
+    // body decoded into a `T`, and a body that is not one is answered `400`.
+    app.post("/greet") { ctx, body: http.Json.<Greeting>, g: *Greeter in
+        let mut out := ""
+        for i in 0..<body.value.times { out = f"{out}{g.greeting}, {body.value.name}\n" }
+        http.text(out)
+    }
 
     app.route("/api") { r in
         // Everything under `/api` needs an `Authorization` header.

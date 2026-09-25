@@ -151,7 +151,10 @@ impl Router {
         const h: Handler := boxed({ ctx: *Context in
             ctx.sp.invoke_with((ctx,), handler).match {
                 .ok(r) => r,
-                .err(e) => status(500, e.message),
+                // A parameter the request could not supply (`http.Json` of a
+                // bad body) is the client's mistake; a service no one
+                // registered is the application's.
+                .err(e) => status(if e.rejected { 400 } else { 500 }, e.message),
             }
         })
         const chain: []Middleware := collections.vec.from_slice.<Middleware>(self.middleware.as_slice()).as_slice()
