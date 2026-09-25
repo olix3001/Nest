@@ -198,7 +198,7 @@ iterator. An iterator writes only `next`; the rest are default methods on
 
 | Adapters (lazy) | Consumers (run the loop) |
 |---|---|
-| `map(f)`, `filter(keep)`, `enumerate()`, `zip(other)`, `chain(other)`, `take(n)`, `skip(n)`, `step(n)` | `each(f)`, `fold(init, f)`, `count()`, `any(p)`, `all(p)`, `find(p)`, `collect()` |
+| `map(f)`, `filter(keep)`, `enumerate()`, `zip(other)`, `chain(other)`, `take(n)`, `skip(n)`, `step(n)`, `take_while(p)`, `skip_while(p)`, `flatten()`, `flat_map(f)`, `peekable()` | `each(f)`, `fold(init, f)`, `reduce(f)`, `count()`, `any(p)`, `all(p)`, `find(p)`, `last()`, `max()`, `min()`, `max_by(cmp)`, `min_by(cmp)`, `collect()` |
 
 ```nest
 { Vec } :: import <std/collections>
@@ -217,6 +217,33 @@ elements through `next`. Being monomorphized, the chain compiles to the loop
 it stands for.
 
 `collect` builds whatever collection the turbofish or the context names, as
-long as it implements `FromIterator` (`Vec` does, in `std`). An iterator is
-also its own `IntoIterator`, so `for` walks a chain directly:
+long as it implements `FromIterator` — in `std`, `Vec`, `HashMap` (from
+`(key, value)` pairs) and `String` (from `char`s). An iterator is also its own
+`IntoIterator`, so `for` walks a chain directly:
 `for x in xs.iter().map(f) { ... }`.
+
+`reduce` is `fold` seeded with the first element, answering `.none` for an
+empty iterator. `max`/`min` need an element with an order of its own (`Ord`,
+which the integers, `char` and `bool` have); floats go through
+`max_by`/`min_by` with a comparison. `peekable()` gives an iterator whose
+`peek()` answers what `next` will, without taking it.
+
+```nest
+{ Ordering } :: import <core/cmp>
+
+(1..=4).reduce({ a, b in a + b })     // .some(10)
+xs.iter().max()                       // the greatest element
+fs.iter().max_by({ a, b in            // floats need a comparison
+    if a < b { Ordering.less } else if a > b { Ordering.greater } else { Ordering.equal }
+})
+```
+
+**Writing through an iterator:** `xs.iter_mut()` (on a `[]mut T` or a `Vec`)
+hands out a `*mut T` per element — `for p in xs.iter_mut() { p.* = 0 }`.
+A `HashMap`'s `iter()` hands out `(key, value)` copies, `keys()` and
+`values()` one half of each, and `iter_mut()` a pointer to each value.
+
+**As a trait object:** `*mut dyn Iterator.<Item = i32>` works — `next` goes
+through the vtable, and the adapters still apply to the pointer. The adapters
+and consumers are bounded `<Self: Sized>`, which is what keeps them out of the
+vtable ([traits](../traits/#self-sized--methods-for-implementing-types-only)).

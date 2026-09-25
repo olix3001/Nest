@@ -142,9 +142,17 @@ An iterator writes only `next`. Everything else is a **default method** on
 `Iterator` (`core/iter`), so every iterator has it:
 
 - **Adapters**, lazy: `map(f)`, `filter(keep)`, `enumerate()`, `zip(other)`,
-  `chain(other)`, `take(n)`, `skip(n)`, `step(n)`.
-- **Consumers**, which run the loop: `each(f)`, `fold(init, f)`, `count()`,
-  `any(p)`, `all(p)`, `find(p)`, `collect()`.
+  `chain(other)`, `take(n)`, `skip(n)`, `step(n)`, `take_while(p)`,
+  `skip_while(p)`, `flatten()`, `flat_map(f)`, `peekable()` (whose `peek()`
+  answers what `next` will, by value, without taking it).
+- **Consumers**, which run the loop: `each(f)`, `fold(init, f)`,
+  `reduce(f)` (the first element seeds it; `.none` when empty), `count()`,
+  `any(p)`, `all(p)`, `find(p)`, `last()`, `max()`/`min()` (for an `Ord`
+  element; of equals, the last and the first), `max_by(cmp)`/`min_by(cmp)`
+  (with a comparison, which is how floats are ordered), `collect()`.
+
+Every one of them is bounded `<Self: Sized>` (§3.4). The integers, `usize`/
+`isize`, `char` and `bool` implement `Ord` for generic callers; floats do not.
 
 ```
 const urls := cats
@@ -180,7 +188,19 @@ FromIterator :: trait {
 
 The collection is named by a turbofish (`.collect.<Vec.<i32>>()`) or by the
 context (`const v: Vec.<i32> := xs.iter().collect()`). `core` declares the
-trait and `std` implements it, so `core` knows nothing about `std`'s types.
+trait and `std` implements it — for `Vec.<T>`, for `HashMap.<K, V>` from
+`(K, V)` pairs (a later pair replaces an earlier one's value), and for `String`
+from `char`s — so `core` knows nothing about `std`'s types.
 
-Because the adapters are generic methods and take `self` by value, `Iterator`
-is **not object-safe** (§3.4): there is no `*dyn Iterator`.
+**Writing through an iterator.** `xs.iter_mut()` on a `[]mut T` (and
+`v.iter_mut()` on a `Vec`) hands out a `*mut T` per element:
+`for p in xs.iter_mut() { p.* = 0 }`.
+
+**Maps.** `m.iter()` hands out `(K, V)` copies, in no particular order;
+`m.keys()` and `m.values()` one half of each; `m.iter_mut()` `(K, *mut V)`; and
+`for (k, v) in m` walks the entries the map holds when the loop starts.
+
+**Iterators as trait objects.** The adapters and consumers have no vtable
+slots (`<Self: Sized>`), so `Iterator` is object-safe: `*mut dyn
+Iterator.<Item = T>` calls `next` through its vtable, and the adapters still
+apply through `impl <I: Iterator> Iterator for *mut I`.

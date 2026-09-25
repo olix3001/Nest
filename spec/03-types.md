@@ -688,6 +688,11 @@ syntax a bound uses (§3.7):
 dyn Iterator.<Item = i32>          // pins Iterator's Item
 ```
 
+**Every** associated type the trait declares must be pinned: `dyn Iterator`
+alone is an error, because a call through the vtable answers `Self.Item`, and
+nothing but the object's type can say what that is. A method called on a
+`*dyn T.<Item = X>` answers in `X`.
+
 `Func` additionally has its own call-shaped sugar (§5.5), which applies here
 too: `dyn Func(i32) -> i32` is exactly `dyn Func.<Args = (i32), Output = i32>`,
 just as the unerased bound is. `*dyn Func(A) -> R` is how a closure is stored
@@ -712,6 +717,43 @@ and most useful traits are not object-safe:
 `self: *Self` and `self: *mut Self` are always fine: a pointer is one word
 whatever it points at. That is the whole rule — erasing the type erases the
 *size*, and every row above is a place the size was still needed.
+
+#### `Sized`, and methods for implementing types only
+
+`Sized` (in the prelude, `core/ops`) is a marker trait the compiler implements
+for **every type but `dyn T`**, whose size is what a trait object erased. A
+trait's method may be bounded by it:
+
+```
+Iterator :: trait {
+    Item :: type
+    next :: func (self: *mut Self) -> Option.<Self.Item>
+    map :: func <Self: Sized, B, F: Func(Self.Item) -> B> (self: Self, f: F) -> Map.<Self, F> { ... }
+}
+```
+
+`<Self: Sized>` says the method exists for implementing types only, never for
+`dyn T`. It has **no vtable slot**, so nothing in its signature — generic
+parameters, `self` by value — counts against object safety: `Iterator` above
+is object-safe, with `next` its one slot. Calling such a method on a `*dyn T`
+is an error at the call ("it is bounded `Self: Sized`"), unless the pointer
+type itself implements the trait — `core` has `impl <I: Iterator> Iterator for
+*mut I`, so `it.map(f)` on a `*mut dyn Iterator.<Item = i32>` maps the pointer.
+
+`Self` in a generic list is not a parameter: it is the trait's, and only a
+trait's own method may bound it. `Sized` is the only bound it takes. A generic
+parameter is sized without saying so — nothing holds a `dyn T` but through a
+pointer — which is why `*mut I` above accepts `I = dyn Iterator`.
+
+A method may also bound one of the trait's **associated types**, Rust's
+`where Self::Item: Ord`:
+
+```
+max :: func <Self: Sized, Self.Item: Ord> (self: Self) -> Option.<Self.Item> { ... }
+```
+
+The body may use `Self.Item` as an `Ord`; each call proves it of the
+receiver's `Item` (`floats.iter().max()` is an error: `f64` has no `Ord`).
 
 `dyn` is the **only** place a vtable appears; everything else is static.
 

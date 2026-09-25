@@ -59,7 +59,7 @@ small closed language over what the **build** is.
 - **`test`** — true in a test build (`nestc --test`) of the package the
   declaration belongs to.
 - **`os = .Variant`** — the target OS: `.Linux`, `.Macos`, `.Windows`,
-  `.Freebsd`, `.Bare`.
+  `.Freebsd`, `.Bare` (a freestanding target: `-C os=none`).
 - **`arch = .Variant`** — the target architecture: `.X86_64`, `.Aarch64`,
   `.Riscv64`, `.Wasm32`.
 - **`profile = .Variant`** — the build profile: `.Debug`, `.Release`.
@@ -91,11 +91,13 @@ A key the compiler doesn't know, or a variant outside its enum, is an
 - **`#soa`** — on a slice/array type, store it struct-of-arrays: each field
   of the element type becomes its own contiguous column, while
   `s[i].field` access stays the same. Only valid for record element types.
-- **`#repr("C")`** — on a `struct` or `enum`, guarantee the type's
+- **`#repr("C")`** — on a `struct`, `enum` or `distinct` type, guarantee the type's
   representation is what a C declaration of it would have. On a struct this
   is a promise (Nest already lays fields out in declaration order at
   natural alignment); on an enum it changes the tag to C's `int`, whatever
-  the discriminants would otherwise have fit in.
+  the discriminants would otherwise have fit in. On a `distinct`, it promises
+  that what the type is distinct from is C's — an enum underneath must itself
+  be `#repr("C")`.
 
 ```nest
 Vec3   :: #align(16) struct { x: f32, y: f32, z: f32, _pad: f32 }

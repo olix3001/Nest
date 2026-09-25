@@ -21,6 +21,11 @@ Uninhabited:       never  (the type of an expression that does not return)
 Sizeless:          opaque (a pointee this program does not describe)
 ```
 
+The floats are the IEEE-754 binary formats. `f128` is the same type on every
+target: where the machine has no quad-precision arithmetic, the runtime does
+it in software, and it prints its own shortest round-tripping digits like the
+other widths.
+
 ### Integers of any width
 
 Integers are two generic families, and the familiar names are sugar for them:

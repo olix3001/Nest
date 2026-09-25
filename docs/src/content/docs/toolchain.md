@@ -65,7 +65,7 @@ usage: twig <command> [options]
 | `init` | create a package in the current directory |
 | `build` | compile the package's targets |
 | `run [-- <args>]` | build a binary, then run it with `<args>` |
-| `test` | build the package's `@test` functions and run them |
+| `test [filter]` | build the package's `@test` functions and run them — the ones beside its code, then each file in `tests/` against its library; with a filter, only the tests whose names contain it |
 | `metadata` | how each package is compiled, as JSON, for tools |
 
 Options:

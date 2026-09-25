@@ -304,8 +304,9 @@ impl Add.<Vec3> for Vec3 { ... }
 
 What belongs in it is decided by one question: *does a program that writes no
 imports at all need this name to be readable?* `Option`, `Result`,
-`ControlFlow`, `str`, `cast`, `panic` and `size_of` pass — they appear in
-signatures and bodies everywhere, and `.?` / `.!` desugar to two of them. The
+`ControlFlow`, `str`, `usize`/`isize`, `Func`, `Sized`, `cast`, `panic`,
+`assert` and `size_of` pass — they appear in signatures and bodies everywhere,
+and `.?` / `.!` desugar to two of them. The
 operator traits do not: `a + b` finds `Add` by its `#lang` tag rather than by
 name, so the name is needed only in order to *write* an impl, which is a
 deliberate act that can afford a line of import.

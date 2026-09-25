@@ -164,6 +164,7 @@ extern_spec = 'extern' '(' string ')'      // ABI selector, next to `func`; stri
 
 generics      = '<' generic_param { ',' generic_param } '>'
 generic_param = identifier [ ':' constraint ]     // type param; bare `T` is unconstrained
+              | 'Self' [ '.' identifier ] ':' constraint  // on a trait's method only (§3.4)
               | 'const' identifier ':' type        // compile-time value param
 constraint    = type { '+' type }                 // trait bounds; a bare param is already a type
 

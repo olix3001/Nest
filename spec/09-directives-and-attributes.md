@@ -204,7 +204,8 @@ closed language over what the **build** is:
   the declaration belongs to**; a dependency compiled in the same build is not
   under test.
 - **`os = .Variant`** — the target's operating system: a variant of `core`'s
-  `Os` (`.Linux`, `.Macos`, `.Windows`, `.Freebsd`, `.Bare`).
+  `Os` (`.Linux`, `.Macos`, `.Windows`, `.Freebsd`, `.Bare`). `.Bare` is a
+  freestanding target, `-C os=none` on the command line.
 - **`arch = .Variant`** — the target's architecture: a variant of `Arch`
   (`.X86_64`, `.Aarch64`, `.Riscv64`, `.Wasm32`).
 - **`profile = .Variant`** — the build profile: a variant of `Profile`
@@ -257,7 +258,7 @@ says what a function is *for*, and `#when` says whether it is built.
   the element type becomes its own contiguous column. Element access presents the
   same `s[i].field` interface; the layout differs. Only valid for record element
   types.
-- **`#repr("C")`** — on a `struct` or an `enum`, guarantee that the type's
+- **`#repr("C")`** — on a `struct`, an `enum` or a `distinct` type, guarantee that the type's
   representation is the one a C declaration of it has. It is a **promise**, not a
   rearrangement: the language already lays a struct's fields out in declaration
   order at their natural alignment, so on a struct this changes nothing today and
@@ -267,7 +268,10 @@ says what a function is *for*, and `#when` says whether it is built.
   declaration can name: a slice, a tuple, a trait object and `str` are refused,
   since C cannot state their layout; a pointer to one is fine, as is a nested
   struct or enum. Pairs with explicit discriminants (§3.3), which is what gives
-  the enum C's *numbering*.
+  the enum C's *numbering*. On a `distinct` type — which *is* its
+  representation (§2.4) — it promises that the representation is C's: a slice
+  or `str` underneath is refused, and so is an enum that is not itself
+  `#repr("C")`, since its tag is C's `int` only if it says so.
 
 ```
 Vec3 :: #align(16) struct { x: f32, y: f32, z: f32, _pad: f32 }

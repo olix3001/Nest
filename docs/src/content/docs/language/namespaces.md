@@ -184,8 +184,8 @@ To resolve an unqualified name, the compiler searches, in order:
    every file. Primitive types aren't part of it; they're built in and
    always nameable.
 
-The prelude is small and deliberate: `Option`, `Result`, `str`, `cast`,
-`panic`, `size_of` — names that appear in signatures and bodies everywhere,
+The prelude is small and deliberate: `Option`, `Result`, `ControlFlow`, `str`,
+`usize`/`isize`, `Func`, `Sized`, `cast`, `panic`, `assert`, `size_of` — names that appear in signatures and bodies everywhere,
 with nothing else globbed. `.?`/`.!` desugar to prelude names, but operator
 traits like `Add` are found by `#lang` tag rather than by name, so writing
 an `impl` for one is the deliberate act that affords a line of import:

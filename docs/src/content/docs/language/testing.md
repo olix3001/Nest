@@ -51,7 +51,8 @@ tests :: #when(test) namespace {
 ## Running tests
 
 ```sh
-twig test
+twig test            # every test
+twig test parse      # only the tests whose names contain `parse`
 ```
 
 builds the package's `@test` functions and runs them. Directly through the
@@ -60,7 +61,41 @@ compiler:
 ```sh
 nestc --test entry.nest -o test_binary
 ./test_binary
+NEST_TEST_FILTER=parse ./test_binary
 ```
 
 `nestc --test` builds a test binary: it keeps the entry package's `@test`
-functions and runs them instead of its `main`.
+functions and runs them instead of its `main`. The filter reaches a test
+binary through the `NEST_TEST_FILTER` environment variable, which `twig test
+<filter>` sets; a test runs when its name (`path.tests.joining`) contains it,
+and the summary counts the rest as filtered out.
+
+## Integration tests
+
+A package's `tests/` directory holds **integration tests**: each `.nest` file
+directly in it is a program of its own, built with `--test` against the
+package's library — so it sees only what the library makes `@public`, which
+is the point of writing a test there rather than beside the code.
+
+```text
+mylib/
+  nest.toml
+  src/package.nest
+  tests/api.nest      # one test binary
+```
+
+```nest
+// tests/api.nest
+{ double } :: import <mylib>
+
+main :: func () {}
+
+tests :: #when(test) namespace {
+    @test
+    doubles_through_the_api :: func () { assert(double(21) == 42) }
+}
+```
+
+`twig test` runs the package's own tests first, then each integration test in
+name order, and fails if any of them did. A subdirectory of `tests/` is not a
+test itself — it is where several of them keep code they share.

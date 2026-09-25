@@ -88,6 +88,9 @@ dyn Iterator.<Item = i32>          // pins Iterator's Item
 dyn Func(i32) -> i32               // Func's own call-shaped sugar for the same thing
 ```
 
+Every associated type must be pinned — `dyn Iterator` alone is an error — and
+a method called through the object answers in the pinned types.
+
 ### Object safety
 
 A trait can become a trait object only if a vtable could hold it:
@@ -103,6 +106,31 @@ A trait can become a trait object only if a vtable could hold it:
 whatever it points at. Each violation is reported **at the coercion**, not
 at the trait's declaration, since a trait nobody erases is under no
 obligation.
+
+### `Self: Sized` — methods for implementing types only
+
+`Sized` (in the prelude) is every type but `dyn T`. A method bounded
+`<Self: Sized>` exists for implementing types only: it takes **no vtable
+slot**, so being generic or taking `self` by value no longer stops the trait
+being a trait object. That is how `Iterator` is object-safe while `map`,
+`fold` and the rest are generic:
+
+```nest
+Shape :: trait {
+    area :: func (self: *Self) -> f64
+    scaled :: func <Self: Sized, F: Func(f64) -> f64> (self: Self, f: F) -> f64 {
+        return f(self.area())
+    }
+}
+
+const d: *dyn Shape := &square     // fine: `scaled` has no slot
+d.area()                           // through the vtable
+d.scaled({ a in a * 2.0 })         // error: `scaled` is bounded `Self: Sized`
+```
+
+A method may also bound one of the trait's associated types — `<Self.Item:
+Ord>` is Rust's `where Self::Item: Ord`: the body may compare items, and each
+call proves the receiver's `Item` is `Ord`.
 
 ## Blanket and generic impls
 
