@@ -182,6 +182,11 @@ impl Parser {
                 self.bump();
                 UnOp::BitNot
             }
+            // No expression begins with `*` — a dereference is the postfix
+            // `.*` — so one here is a pointer *type* written where a value
+            // goes: `Item :: (K, *mut V)` in an impl, whose right side is
+            // parsed as an expression until it is known to be a type.
+            Some(TokenKind::Star) => return self.parse_type(),
             _ => return self.parse_postfix(),
         };
         let operand = self.parse_unary();

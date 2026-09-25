@@ -539,8 +539,7 @@ impl <T> IntoIterator for []T {
 
 // The cursor hands out **elements**, not pointers to them: `for x in xs` binds a
 // copy, and writing to it writes to the copy. Iterating for the sake of writing
-// — `for p in xs.iter_mut()` — is a second cursor handing out `*mut T`, and it
-// belongs with the rest of the adapters (§10.4) rather than here.
+// — `for p in xs.iter_mut()` — is `SliceIterMut`, below.
 impl <T> Iterator for SliceIter.<T> {
   Item :: T
   next :: func (self: *mut SliceIter.<T>) -> Option.<T> {
@@ -548,5 +547,28 @@ impl <T> Iterator for SliceIter.<T> {
     let v: T := self.data[self.pos]
     self.pos = self.pos + 1
     return .some(v)
+  }
+}
+
+// `xs.iter_mut()` — a cursor handing out a pointer to each element, so that
+// writing through one writes the slice: `for p in xs.iter_mut() { p.* = 0 }`.
+@public(all) SliceIterMut :: struct <T> {
+  data: []mut T,
+  pos: usize,
+}
+
+impl <T> []mut T {
+  @public iter_mut :: func (self: []mut T) -> SliceIterMut.<T> {
+    return SliceIterMut.<T> { data: self, pos: 0 }
+  }
+}
+
+impl <T> Iterator for SliceIterMut.<T> {
+  Item :: *mut T
+  next :: func (self: *mut SliceIterMut.<T>) -> Option.<*mut T> {
+    if self.pos >= self.data.len() { return .none }
+    const at := self.pos
+    self.pos = at + 1
+    return .some(&mut self.data[at])
   }
 }

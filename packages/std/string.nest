@@ -20,6 +20,7 @@ collections :: import "collections.nest"
 io :: import "io.nest"
 { Buf, Display } :: import <core/fmt>
 { Eq } :: import <core/cmp>
+{ Iterator, FromIterator } :: import <core/iter>
 
 @public String :: struct {
   bytes: Vec.<u8>,
@@ -115,6 +116,16 @@ impl String {
   @public clone :: func (self: *Self) -> String { return from(self.as_str()) }
 }
 
+// `chars.collect.<String>()` — the characters, encoded one after another.
+impl FromIterator for String {
+  Item :: char
+  from_iter :: func <I: Iterator.<Item = char>> (it: I) -> String {
+    let mut s := new()
+    for c in it { s.push(c) }
+    return s
+  }
+}
+
 impl Display for String {
   display :: func (self: Self, out: *mut Buf) -> void {
     out.bytes(self.as_bytes())
@@ -135,4 +146,13 @@ impl io.Write for String {
     self.bytes.extend(bytes)
     return .ok(bytes.len())
   }
+}
+
+tests :: #when(test) namespace {
+    @test
+    a_string_is_collected_from_chars :: func () {
+        const cs := [_]char { 'n', 'e', 's', 't' }
+        const s := cs[..].iter().collect.<String>()
+        assert(s.as_str() == "nest")
+    }
 }

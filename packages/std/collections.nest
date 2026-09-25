@@ -15,14 +15,13 @@
 //
 // ### What the table does not do
 //
-// It does not shrink, it does not keep insertion order, and it has no iterator
-// yielding pairs — `keys()` answers a list. Each of those is a real thing to
-// want and none is needed by what `std` exists for yet
+// It does not shrink and it does not keep insertion order. Each of those is a
+// real thing to want and neither is needed by what `std` exists for yet
 // (`design/toolchain.md`: the floor `twig` and the language server stand on).
 
 { make, copy_nonoverlapping, set_bytes } :: import <core/mem>
 { Eq } :: import <core/cmp>
-{ Iterator, IntoIterator, FromIterator, SliceIter } :: import <core/iter>
+{ Iterator, IntoIterator, FromIterator, SliceIter, SliceIterMut } :: import <core/iter>
 
 // ===< Vec >===
 
@@ -168,9 +167,14 @@ impl <T> Vec.<T> {
 }
 
 // `v.iter()` — a cursor over the elements it holds now, to start a chain from.
+// `v.iter_mut()` — the same, handing out a pointer to each, so that writing
+// through one writes the element.
 impl <T> Vec.<T> {
   @public iter :: func (self: *Self) -> SliceIter.<T> {
     return SliceIter.<T> { data: self.as_slice(), pos: 0 }
+  }
+  @public iter_mut :: func (self: *mut Self) -> SliceIterMut.<T> {
+    return SliceIterMut.<T> { data: self.data[0..<self.count], pos: 0 }
   }
 }
 
@@ -283,8 +287,8 @@ DELETED:  u8 :: 2
 // time and there is no allocation per entry. The capacity is a power of two, so
 // the bucket is a mask rather than a division.
 @public HashMap :: struct <K, V> {
-  keys: []mut K,
-  values: []mut V,
+  slot_keys: []mut K,
+  slot_values: []mut V,
   state: []mut u8,
   // How many slots hold an entry. `count` rather than `len` for the reason
   // `Vec`'s is.
@@ -297,8 +301,8 @@ DELETED:  u8 :: 2
 // An empty table, with no storage until the first insert.
 @public map :: func <K, V> () -> HashMap.<K, V> {
   return HashMap.<K, V> {
-    keys: make.<[]K>(0),
-    values: make.<[]V>(0),
+    slot_keys: make.<[]K>(0),
+    slot_values: make.<[]V>(0),
     state: make.<[]u8>(0),
     count: 0,
     used: 0,
@@ -327,7 +331,7 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
       if s == DELETED {
         if first_free == self.state.len() { first_free = at }
       } else {
-        if self.keys[at].eq(key) { return Probe { at: at, found: true } }
+        if self.slot_keys[at].eq(key) { return Probe { at: at, found: true } }
       }
       at = (at + 1) & mask
     }
@@ -341,11 +345,11 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
   grow :: func (self: *mut Self) -> void {
     let mut cap: usize := self.state.len() * 2
     if cap < 8 { cap = 8 }
-    let old_keys: []mut K := self.keys
-    let old_values: []mut V := self.values
+    let old_keys: []mut K := self.slot_keys
+    let old_values: []mut V := self.slot_values
     let old_state: []mut u8 := self.state
-    self.keys = make.<[]K>(cap)
-    self.values = make.<[]V>(cap)
+    self.slot_keys = make.<[]K>(cap)
+    self.slot_values = make.<[]V>(cap)
     self.state = make.<[]u8>(cap)
     self.count = 0
     self.used = 0
@@ -368,14 +372,14 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
     if (self.used + 1) * 4 > self.state.len() * 3 { self.grow() }
     let p: Probe := self.probe(key)
     if p.found {
-      let held: V := self.values[p.at]
-      self.values[p.at] = value
+      let held: V := self.slot_values[p.at]
+      self.slot_values[p.at] = value
       return .some(held)
     }
     if self.state[p.at] == EMPTY { self.used = self.used + 1 }
     self.state[p.at] = OCCUPIED
-    self.keys[p.at] = key
-    self.values[p.at] = value
+    self.slot_keys[p.at] = key
+    self.slot_values[p.at] = value
     self.count = self.count + 1
     return .none
   }
@@ -384,7 +388,7 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
   @public get :: func (self: *Self, key: K) -> Option.<V> {
     if self.count == 0 { return .none }
     let p: Probe := self.probe(key)
-    if p.found { return .some(self.values[p.at]) }
+    if p.found { return .some(self.slot_values[p.at]) }
     return .none
   }
 
@@ -402,7 +406,7 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
     if self.count == 0 { return .none }
     let p: Probe := self.probe(key)
     if p.found == false { return .none }
-    let held: V := self.values[p.at]
+    let held: V := self.slot_values[p.at]
     self.state[p.at] = DELETED
     self.count = self.count - 1
     return .some(held)
@@ -415,7 +419,7 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
     let mut have: usize := 0
     for i in 0..<self.state.len() {
       if self.state[i] == OCCUPIED {
-        out[have] = self.keys[i]
+        out[have] = self.slot_keys[i]
         have = have + 1
       }
     }
@@ -430,8 +434,134 @@ impl <K: Hash + Eq, V> HashMap.<K, V> {
   }
 }
 
+// ===< Walking a table >===
+//
+// The entries are scattered through the table, so every iterator here walks
+// the slots and skips the ones that hold nothing, in no particular order. Each
+// hands out **copies**, as `SliceIter` does — except `iter_mut`, whose values
+// are pointers into the table, so that writing through one writes the entry.
+
+impl <K, V> HashMap.<K, V> {
+  // Every `(key, value)`.
+  @public iter :: func (self: *Self) -> MapIter.<K, V> {
+    return MapIter.<K, V> { slot_keys: self.slot_keys, slot_values: self.slot_values, state: self.state, pos: 0 }
+  }
+
+  // Every key, with a pointer to its value.
+  @public iter_mut :: func (self: *mut Self) -> MapIterMut.<K, V> {
+    return MapIterMut.<K, V> { slot_keys: self.slot_keys, slot_values: self.slot_values, state: self.state, pos: 0 }
+  }
+
+  // Every key.
+  @public keys :: func (self: *Self) -> impl Iterator.<Item = K> {
+    return self.iter().map({ e in e.0 })
+  }
+
+  // Every value.
+  @public values :: func (self: *Self) -> impl Iterator.<Item = V> {
+    return self.iter().map({ e in e.1 })
+  }
+}
+
+@public MapIter :: struct <K, V> {
+  slot_keys: []K,
+  slot_values: []V,
+  state: []u8,
+  pos: usize,
+}
+
+impl <K, V> Iterator for MapIter.<K, V> {
+  Item :: (K, V)
+  next :: func (self: *mut MapIter.<K, V>) -> Option.<(K, V)> {
+    while self.pos < self.state.len() {
+      const at := self.pos
+      self.pos = at + 1
+      if self.state[at] == OCCUPIED { return .some((self.slot_keys[at], self.slot_values[at])) }
+    }
+    return .none
+  }
+}
+
+@public MapIterMut :: struct <K, V> {
+  slot_keys: []K,
+  slot_values: []mut V,
+  state: []u8,
+  pos: usize,
+}
+
+impl <K, V> Iterator for MapIterMut.<K, V> {
+  Item :: (K, *mut V)
+  next :: func (self: *mut MapIterMut.<K, V>) -> Option.<(K, *mut V)> {
+    while self.pos < self.state.len() {
+      const at := self.pos
+      self.pos = at + 1
+      if self.state[at] == OCCUPIED { return .some((self.slot_keys[at], &mut self.slot_values[at])) }
+    }
+    return .none
+  }
+}
+
+// `for (k, v) in m` — the entries the table holds when the loop starts.
+impl <K, V> IntoIterator for HashMap.<K, V> {
+  Iter :: MapIter.<K, V>
+  into_iter :: func (self: HashMap.<K, V>) -> MapIter.<K, V> {
+    return MapIter.<K, V> { slot_keys: self.slot_keys, slot_values: self.slot_values, state: self.state, pos: 0 }
+  }
+}
+
+// `pairs.collect.<HashMap.<K, V>>()` — a later pair under an earlier key
+// replaces it, as `insert` does.
+impl <K: Hash + Eq, V> FromIterator for HashMap.<K, V> {
+  Item :: (K, V)
+  from_iter :: func <I: Iterator.<Item = (K, V)>> (it: I) -> HashMap.<K, V> {
+    let mut m := map.<K, V>()
+    for e in it { m.insert(e.0, e.1).match { .some(_) => (), .none => () } }
+    return m
+  }
+}
+
 // What `probe` answers: a slot, and whether the key is already in it.
 Probe :: struct {
   at: usize,
   found: bool,
+}
+
+tests :: #when(test) namespace {
+    @test
+    a_vec_is_written_through_iter_mut :: func () {
+        let mut v := new.<i32>()
+        v.push(1)
+        v.push(2)
+        for p in v.iter_mut() { p.* = p.* * 10 }
+        assert(v.iter().fold(0, { a, x in a + x }) == 30)
+    }
+
+    @test
+    a_map_is_walked :: func () {
+        let mut m := map.<i32, i32>()
+        for i in 0..<5 { m.insert(i, i * i).match { .some(_) => (), .none => () } }
+        let mut keys := 0
+        let mut values := 0
+        for e in m.iter() {
+            keys = keys + e.0
+            values = values + e.1
+        }
+        assert(keys == 10)
+        assert(values == 30)
+        assert(m.keys().count() == 5)
+        assert(m.values().fold(0, { a, x in a + x }) == 30)
+        for e in m.iter_mut() { e.1.* = 0 }
+        assert(m.values().all({ x in x == 0 }))
+        let mut n := 0
+        for e in m { n = n + 1 }
+        assert(n == 5)
+    }
+
+    @test
+    a_map_is_collected :: func () {
+        const xs := [_]i32 { 1, 2, 3 }
+        const m := xs[..].iter().map({ x in (x, x * 2) }).collect.<HashMap.<i32, i32>>()
+        assert(m.len() == 3)
+        assert(m.get(2).match { .some(v) => v == 4, .none => false })
+    }
 }

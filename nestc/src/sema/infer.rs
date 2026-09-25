@@ -2983,6 +2983,7 @@ impl Inferer<'_> {
                     match minted {
                         Some(synth) => {
                             let t = self.param_ty(synth);
+                            let t = self.through_opaque(&head, t);
                             self.expect(*origin, &t, out);
                             Outcome::Solved
                         }
@@ -4131,6 +4132,26 @@ impl Inferer<'_> {
             }
             _ => None,
         }
+    }
+
+    /// `t`, a pin of `head`'s bound, in the terms of this use of `head`.
+    ///
+    /// An `impl` return type's pin is written in its function's parameters —
+    /// `impl Iterator.<Item = V>` in `impl <K, V> HashMap.<K, V>` — and the
+    /// type's arguments are what this use has them at. Anything else is
+    /// answered as it is.
+    fn through_opaque(&self, head: &Ty, t: Ty) -> Ty {
+        let Ty::Nominal { def, args } = head else {
+            return t;
+        };
+        if !self.defs.get(*def).opaque {
+            return t;
+        }
+        let mut map = Subst::default();
+        for (p, a) in self.opaque_params(*def).into_iter().zip(args) {
+            map.tys.insert(p, a.clone());
+        }
+        self.subst_type_params(&t, &map)
     }
 
     /// The type parameters an `impl` return type is generic over, in the
@@ -5958,6 +5979,7 @@ impl Inferer<'_> {
                 if let Some(&bound) = self.defs.get(*head_def).ns.members.get(&name) {
                     let bound = self.defs.resolve_alias(bound);
                     let t = self.param_ty(bound);
+                    let t = self.through_opaque(&head, t);
                     tys.insert(adef, t);
                 }
             }
