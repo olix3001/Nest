@@ -520,6 +520,30 @@ fn completion_offers_members_and_names_in_scope() {
     );
 }
 
+/// A struct lends the members of its `@using` field (§3.10): `app.get` is
+/// `app.router.get`, and a `.` on `app` offers it.
+#[test]
+fn completion_offers_what_a_using_field_lends() {
+    let (_dir, file, mut client) = program();
+    let text = "\
+Router :: struct { prefix: i32 }
+impl Router {
+    get :: func (self: *Self) -> i32 { return self.prefix }
+}
+App :: struct { @using router: Router, port: i32 }
+
+main :: func () {
+    const app := App { router: Router { prefix: 1 }, port: 2 }
+    const n := app.
+}
+";
+    client.change(&file, text);
+    let members = labels(&client.at(Completion::METHOD, &file, position(text, "app.\n", 0, 4)));
+    for want in ["get", "prefix", "router", "port", "match"] {
+        assert!(members.contains(&want.to_string()), "{want} in {members:?}");
+    }
+}
+
 /// Choosing a function writes the call it is: an editor that understands
 /// snippets gets the parentheses with the cursor between them, and one that does
 /// not gets them only when there is nothing to type there.

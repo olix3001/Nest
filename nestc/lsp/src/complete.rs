@@ -459,10 +459,30 @@ impl Cx<'_> {
                 return Some(self.plain(members(self.s, d)));
             }
         }
-        match ast.meta::<Ty>(base)? {
-            Ty::Error | Ty::Var(_) => None,
-            ty => Some(self.methods(&ty)),
+        let mut out = match ast.meta::<Ty>(base)? {
+            Ty::Error | Ty::Var(_) => return None,
+            ty => self.methods(&ty),
+        };
+        out.push(self.postfix_match());
+        Some(out)
+    }
+
+    /// `.match { … }` — the postfix form of `match` (§7), which any value
+    /// takes. A keyword, so no member lookup finds it.
+    fn postfix_match(&self) -> CompletionItem {
+        let mut it = CompletionItem {
+            label: "match".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("match { pattern => value, … }".to_string()),
+            // After the value's own members.
+            sort_text: Some("~match".to_string()),
+            ..Default::default()
+        };
+        if self.snippets {
+            it.insert_text = Some("match {\n\t$0\n}".to_string());
+            it.insert_text_format = Some(InsertTextFormat::SNIPPET);
         }
+        it
     }
 
     /// The type a variant pattern at `pat` is matched against.
@@ -516,6 +536,11 @@ impl Cx<'_> {
         let mut found: Vec<(DefId, Option<DefId>)> = Vec::new();
         let mut items: Vec<CompletionItem> = Vec::new();
         let mut ty = self.concrete(ty.clone());
+        // The types an `@using` field lends its members from (§3.10), each
+        // walked the same way once the one before it is done. Bounded, since
+        // two structs could each `@using` the other through a pointer.
+        let mut lenders: Vec<Ty> = Vec::new();
+        let mut lent = 0;
         loop {
             // A tuple's members are positions, not definitions: `t.0` is a
             // `TupleIndex` and there is no `Def` anywhere to offer, so the items
@@ -533,11 +558,17 @@ impl Cx<'_> {
             }
             if let Ty::Nominal { def, .. } = &ty {
                 let fields = s.defs.get(*def).ns.members.values().copied();
-                found.extend(
+                let fields: Vec<DefId> = fields
+                    .filter(|&m| s.defs.get(m).kind == DefKind::Field)
+                    .collect();
+                let decls = Decls::new(&s.defs, &s.asts, &s.decls);
+                lenders.extend(
                     fields
-                        .filter(|&m| s.defs.get(m).kind == DefKind::Field)
-                        .map(|m| (m, None)),
+                        .iter()
+                        .filter(|&&m| s.defs.get(m).using)
+                        .filter_map(|&m| decls.field_ty(m)),
                 );
+                found.extend(fields.into_iter().map(|m| (m, None)));
                 // A generic parameter has what its bounds declare.
                 if s.defs.get(*def).kind == DefKind::TypeParam {
                     for t in bounds(s, *def) {
@@ -562,13 +593,21 @@ impl Cx<'_> {
                     }
                 }
             }
-            ty = match ty {
-                Ty::Ptr { inner, .. } => *inner,
-                Ty::Nominal { def, .. } => match representation(s, def) {
-                    Some(inner) => inner,
+            let next = match ty {
+                Ty::Ptr { inner, .. } => Some(*inner),
+                Ty::Nominal { def, .. } => representation(s, def),
+                _ => None,
+            };
+            ty = match next {
+                Some(t) => t,
+                None if lent < 8 => match lenders.pop() {
+                    Some(t) => {
+                        lent += 1;
+                        t
+                    }
                     None => break,
                 },
-                _ => break,
+                None => break,
             };
         }
         // An inherent method before a trait's of the same name.
