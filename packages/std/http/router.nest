@@ -134,21 +134,22 @@ impl Router {
     /// Answer `method` requests for `path` (under this router's prefix) with
     /// `handler`. The latest route for a method and path wins.
     ///
-    /// The handler's parameters are **resolved from the request's scope**
-    /// (`std/di`), whatever they are: a service, or the request's own
-    /// `*Context`. It answers a `Response`; a parameter no one can supply
-    /// is a `500`.
+    /// The handler's first parameter is the request's `*Context`, and its
+    /// type is left out. The ones after it are **resolved from the request's
+    /// scope** (`std/di`), whatever they are, and are written with their
+    /// types. It answers a `Response`; a parameter no one can supply is a
+    /// `500`.
     ///
     /// ```nest
-    /// app.get("/users/:id") { ctx: *http.Context, repo: *Repo in
+    /// app.get("/users/:id") { ctx, repo: *Repo in
     ///     http.json_of(repo.find(ctx.param("id")))
     /// }
-    /// app.get("/health") { in http.text("ok") }
+    /// app.get("/health") { ctx in http.text("ok") }
     /// ```
-    @public handle :: func <F: Func.<Output = Response>> (self: *mut Self, method: str, path: str, handler: F) -> void {
+    @public handle :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, method: str, path: str, handler: F) -> void {
         const full: str := join_path(self.prefix, path)
         const h: Handler := boxed({ ctx: *Context in
-            ctx.sp.invoke(handler).match {
+            ctx.sp.invoke_with((ctx,), handler).match {
                 .ok(r) => r,
                 .err(e) => status(500, e.message),
             }
@@ -157,19 +158,19 @@ impl Router {
         self.routes.push(Route { method: method, segments: segments(full), handler: h, middleware: chain })
     }
 
-    @public get :: func <F: Func.<Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+    @public get :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
         self.handle("GET", path, handler)
     }
 
-    @public post :: func <F: Func.<Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+    @public post :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
         self.handle("POST", path, handler)
     }
 
-    @public put :: func <F: Func.<Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+    @public put :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
         self.handle("PUT", path, handler)
     }
 
-    @public delete :: func <F: Func.<Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+    @public delete :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
         self.handle("DELETE", path, handler)
     }
 
@@ -177,7 +178,7 @@ impl Router {
     ///
     /// ```nest
     /// app.route("/api") { r in
-    ///     r.get("/users/:id") { ctx: *http.Context in http.text(ctx.param("id")) }
+    ///     r.get("/users/:id") { ctx in http.text(ctx.param("id")) }
     /// }
     /// ```
     @public route :: func <F: Func(*mut Router)> (self: *mut Self, prefix: str, build: F) -> void {

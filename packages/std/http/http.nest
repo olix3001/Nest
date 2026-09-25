@@ -8,20 +8,20 @@
 //     services.add_singleton({ sp in Greeter { greeting: "hello" } })
 //
 //     let mut app: http.App := http.app(services.build())
-//     app.get("/") { in http.text("home") }
+//     app.get("/") { ctx in http.text("home") }
 //     app.route("/api") { r in
-//         r.get("/hello/:name") { ctx: *http.Context, g: *Greeter in
+//         r.get("/hello/:name") { ctx, g: *Greeter in
 //             http.text(f"{g.greeting}, {ctx.param("name")}")
 //         }
-//         r.post("/echo") { ctx: *http.Context in http.text(ctx.body()) }
+//         r.post("/echo") { ctx in http.text(ctx.body()) }
 //     }
 //     app.listen("127.0.0.1:8080").!
 //
-// A handler takes **whatever parameters it wants**, and each is resolved from
-// the request's scope (`std/di`'s `invoke`): a service it depends on, or the
-// request's `*Context`, which the scope is given for every request. Its
-// parameters are written with their types, because that is what they are
-// resolved by.
+// A handler's first parameter is the request's `*Context`, with its type left
+// out. It takes **whatever parameters it wants** after that, and each is
+// resolved from the request's scope (`std/di`'s `invoke_with`): a service it
+// depends on. Those are written with their types, because that is what they
+// are resolved by.
 //
 // Every request is served in a **scope** of its own (`di.Scope.scope()`), so a
 // scoped service — a unit of work, a request's user — is built once per request
@@ -62,7 +62,7 @@ tests :: #when(test) namespace {
         services.add_singleton({ sp in Greeter { greeting: "hello" } })
         let mut a: App := app(services.build())
         a.use { ctx, next in next.run(ctx).header("X-Served-By", "nest") }
-        a.get("/") { in text("home") }
+        a.get("/") { ctx in text("home") }
         a.route("/api") { r in
             r.use { ctx, next in
                 ctx.header("Authorization").match {
@@ -70,16 +70,16 @@ tests :: #when(test) namespace {
                     .none => status(401, "who are you?"),
                 }
             }
-            r.get("/hello/:name") { ctx: *Context, g: *Greeter in
+            r.get("/hello/:name") { ctx, g: *Greeter in
                 text(f"{g.greeting}, {ctx.param("name")}")
             }
-            r.get("/service") { ctx: *Context in
+            r.get("/service") { ctx in
                 const g: *Greeter := ctx.service.<Greeter>().!
                 text(g.greeting)
             }
-            r.post("/echo") { ctx: *Context in text(ctx.body()) }
-            r.get("/files/*") { ctx: *Context in text(ctx.param("*")) }
-            r.get("/missing") { m: *Missing in text("?") }
+            r.post("/echo") { ctx in text(ctx.body()) }
+            r.get("/files/*") { ctx in text(ctx.param("*")) }
+            r.get("/missing") { ctx, m: *Missing in text("?") }
         }
         return a
     }

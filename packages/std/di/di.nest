@@ -274,6 +274,30 @@ impl Scope {
         return .ok(f.call(args))
     }
 
+    /// Call `f` with its first parameters given and the rest resolved from this
+    /// scope. `pre` is a tuple of the given ones, which `f`'s parameters start
+    /// with — so a closure leaves their types out:
+    ///
+    /// ```nest
+    /// root.invoke_with((ctx, 3)) { ctx, n, log: *Log in log.write(ctx.url, n) }.!
+    /// ```
+    ///
+    /// The rest are services, exactly as `invoke`'s parameters are.
+    @public invoke_with :: func <P, Rest, R, F: Func.<Args = (..P, ..Rest), Output = R>> (self: *mut Self, pre: P, f: F) -> Result.<R, Error> {
+        let args: F.Args := zeroed.<F.Args>()
+        const given: []Member := type_info.<P>().members
+        const all: []Member := type_info.<F.Args>().members
+        for i in 0..<all.len() {
+            const into: *mut void := member_ptr.<F.Args>(&mut args, all[i])
+            if i < given.len() {
+                copy_bytes(into, member_ptr.<P>(&pre, given[i]), all[i].size)
+            } else {
+                self.supply(into, all[i], "parameter").?
+            }
+        }
+        return .ok(f.call(args))
+    }
+
     // Fill the slot `into` — a member or a parameter, described by `m` — with
     // the service it asks for: the address for a pointer, a copy for a value.
     supply :: func (self: *mut Self, into: *mut void, m: Member, what: str) -> Result.<void, Error> {
@@ -496,6 +520,18 @@ tests :: #when(test) namespace {
         assert(n == 12)
         const m := root.invoke.<i32>({ c: *Clock in c.now })
         assert(m.match { .ok(v) => v == 5, .err(_) => false }, "`R` written")
+        return .ok(())
+    }
+
+    @test
+    invoke_with_takes_leading_arguments :: func () -> Result.<void, Error> {
+        const root := setup()
+        const one: i32 := root.invoke_with((10,)) { base, c: *Clock in base + c.now }.?
+        assert(one == 15, "one given, one resolved")
+        const two: i32 := root.invoke_with((1, 2)) { a, b, c: *Clock, r: *Repo in a + b + c.now + r.hits.n }.?
+        assert(two == 15, "two given, two resolved")
+        const none: i32 := root.invoke_with((3, 4)) { a, b in a * b }.?
+        assert(none == 12, "nothing resolved")
         return .ok(())
     }
 

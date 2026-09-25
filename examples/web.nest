@@ -33,9 +33,9 @@ main :: func () -> i32 {
         res
     }
 
-    // A handler takes whatever parameters it wants; each is resolved from the
-    // request's scope. `{ in ... }` takes none.
-    app.get("/") { in http.html("<h1>nest</h1>") }
+    // A handler's first parameter is the request's context, its type left
+    // out; every one after it is resolved from the request's scope.
+    app.get("/") { ctx in http.html("<h1>nest</h1>") }
 
     app.route("/api") { r in
         // Everything under `/api` needs an `Authorization` header.
@@ -46,14 +46,14 @@ main :: func () -> i32 {
             }
         }
         // The request's own context and a singleton, side by side.
-        r.get("/hello/:name") { ctx: *http.Context, g: *Greeter in
+        r.get("/hello/:name") { ctx, g: *Greeter in
             http.text(f"{g.greeting}, {ctx.param("name")}\n")
         }
         // A scoped service, built for this request by autowiring.
-        r.get("/visit") { v: *Visit in
+        r.get("/visit") { ctx, v: *Visit in
             http.text(f"{v.greeter.greeting}: visit {v.n}\n")
         }
-        r.post("/echo") { ctx: *http.Context in http.text(ctx.body()) }
+        r.post("/echo") { ctx in http.text(ctx.body()) }
     }
 
     io.println("listening on http://127.0.0.1:8080")
