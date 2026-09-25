@@ -3441,3 +3441,58 @@ main :: func () -> i32 {
         assert_eq!(code, 7 + 30 + 7 + 1);
     }
 }
+
+// ===< Closures in a trait's default body >===
+
+/// A closure written in a default body is instantiated per `Self`, like the
+/// body: its signature, its captures and a nested closure may all say
+/// `Self.Item`, and two implementing types get two closures.
+#[test]
+fn a_closure_in_a_default_body_is_instantiated_per_self() {
+    let src = r#"
+Source :: trait {
+    Item :: type
+    get :: func (self: *Self) -> Self.Item
+    twice :: func (self: *Self) -> (Self.Item, Self.Item) {
+        const f := { x in (x, x) }
+        return f(self.get())
+    }
+    held :: func (self: *Self) -> Self.Item {
+        const v := self.get()
+        const outer := { in
+            const inner := { in v }
+            inner()
+        }
+        return outer()
+    }
+    pick :: func <B, F: Func(Self.Item) -> B> (self: *Self, f: F) -> B {
+        const g := { x: Self.Item in f(x) }
+        return g(self.get())
+    }
+}
+
+A :: struct { v: i32 }
+impl Source for A {
+    Item :: i32
+    get :: func (self: *A) -> i32 { return self.v }
+}
+
+B :: struct { v: u8 }
+impl Source for B {
+    Item :: u8
+    get :: func (self: *B) -> u8 { return self.v }
+}
+
+main :: func () -> i32 {
+    const a := A { v: 7 }
+    const b := B { v: 3 }
+    const p := a.twice()
+    const q := b.twice()
+    const w := b.pick({ x in cast.<i32>(x) * 10 })
+    return p.0 + p.1 + cast.<i32>(q.0 + q.1) + a.held() + cast.<i32>(b.held()) + w
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 14 + 6 + 7 + 3 + 30);
+    }
+}

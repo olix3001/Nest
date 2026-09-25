@@ -89,19 +89,8 @@
   }
 
   // How many elements there are.
-  //
-  // A loop rather than a `fold`: a closure written in a default body is not yet
-  // instantiated per `Self`, only per the body's own parameters.
   count :: func (self: Self) -> usize {
-    let mut it := self
-    let mut n: usize := 0
-    loop {
-      it.next().match {
-        .some(x) => { n = n + 1 },
-        .none => { break },
-      }
-    }
-    return n
+    return self.fold(cast.<usize>(0), { n, x in n + 1 })
   }
 
   // Whether `pred` holds for some element. Stops at the first that does.

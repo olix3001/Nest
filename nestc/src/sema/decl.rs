@@ -970,6 +970,15 @@ pub fn record(defs: &DefTable, asts: &HashMap<FileId, Ast>, table: &mut DeclTabl
             continue;
         }
         let decl = match d.kind {
+            // A closure's `call` has no declaration of its own — the closure's
+            // node is its type's — and nothing names it but the closure's
+            // type, so there is nothing to record.
+            DefKind::Func
+                if d.parent
+                    .is_some_and(|p| defs.get(p).kind == DefKind::Closure) =>
+            {
+                continue;
+            }
             DefKind::Overload => Decl::Overload(q.overload_members(d.id)),
             DefKind::Func => Decl::Func(FuncDecl {
                 params: q

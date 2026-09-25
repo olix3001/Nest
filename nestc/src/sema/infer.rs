@@ -3814,7 +3814,7 @@ impl Inferer<'_> {
         self.expect_return(body, &bty, &rty);
         self.ret = outer_ret;
         self.breaks = outer_breaks;
-        let generics: Vec<DefId> = match self.func.and_then(|f| self.generics_of_func(f)) {
+        let mut generics: Vec<DefId> = match self.func.and_then(|f| self.generics_of_func(f)) {
             Some(g) => g
                 .params
                 .into_iter()
@@ -3822,6 +3822,31 @@ impl Inferer<'_> {
                 .collect(),
             None => Vec::new(),
         };
+        // A default body is generic over `Self` without declaring it (mono
+        // instantiates it once per implementing type), and so is every closure
+        // written in it: its signature and captures may say `Self` or
+        // `Self.Item`. The trait stands for `Self` and each associated type's
+        // declaration for itself, so both are substituted per `Self` exactly
+        // where the body's own types are.
+        if let Some(trait_def) = self
+            .func
+            .and_then(|f| self.func_owner(f))
+            .and_then(|f| self.defs.get(f).parent)
+            .filter(|&p| self.defs.get(p).kind == DefKind::Trait)
+        {
+            generics.push(trait_def);
+            let mut assoc: Vec<(Symbol, DefId)> = self
+                .defs
+                .get(trait_def)
+                .ns
+                .members
+                .iter()
+                .map(|(n, &d)| (n.clone(), self.defs.resolve_alias(d)))
+                .filter(|&(_, d)| self.defs.get(d).kind == DefKind::TypeAlias)
+                .collect();
+            assoc.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+            generics.extend(assoc.into_iter().map(|(_, d)| d));
+        }
         let args = generics
             .iter()
             .map(|&p| Ty::Nominal {
