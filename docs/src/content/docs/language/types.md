@@ -145,7 +145,35 @@ const view: []i32 := xs             // coerces
 t.0  t.1  t.2       // positional access
 ```
 
-`void` is the zero-element tuple `()`.
+`void` is the zero-element tuple `()`, and a tuple of one is written with a
+trailing comma: `(i32,)` and `(x,)`.
+
+### Spreads — `..R`
+
+Inside a tuple type, `..R` stands for every element of the tuple `R`.
+`(A, ..R)` with `R = (B, C)` is `(A, B, C)`, and with `R = ()` it is
+`(A,)`. A spread is for generic code, where `R` is a type parameter that
+calls fill in:
+
+```nest
+// Any tuple that starts with an `i32`: `Rest` is whatever follows it.
+first :: func <Rest> (t: (i32, ..Rest)) -> i32 { return t.0 }
+
+first((1, true, "x"))     // Rest = (bool, str)
+first((7,))               // Rest = ()
+```
+
+Matched against a tuple whose elements are known, a type with **one** spread
+pairs the elements before and after it with the tuple's ends, and the spread
+is the tuple of what lies between. Two spreads whose tuples are both unknown,
+`(..P, ..Rest)`, cannot be split that way. One of them has to be settled
+first, by something earlier in the call (see
+[`Func` bounds](../closures/#spreads-in-a-func-bound)).
+
+`..R` needs a tuple (or `void`) and is written only inside a tuple type or
+`Func(...)`'s argument list. `(i32, ..i32)` and `x: ..T` are errors. A
+spread of a tuple written out is spliced where it stands:
+`(i32, ..(u8, bool))` is `(i32, u8, bool)`.
 
 ## `Option`
 

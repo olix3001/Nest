@@ -599,7 +599,36 @@ type a C enumeration has instead, write `#repr("C")`
 t.0  t.1  t.2      positional access
 ```
 
-`void` is the zero-element tuple `()`.
+`void` is the zero-element tuple `()`; a one-element tuple keeps its comma,
+`(A,)` and `(a,)`.
+
+#### Spreads
+
+`..R` in a tuple type stands for every element of the tuple `R`: `(A, ..R)`
+with `R = (B, C)` is `(A, B, C)`, and with `R = void` is `(A,)`. `R` must be a
+tuple or `void` — a type parameter the use fills in, or a tuple written out,
+which is spliced where it stands. `..` anywhere but in a tuple type (or
+`Func(...)`'s argument list, which is one) is an error.
+
+A type with a spread is matched against a tuple by position: with **one**
+spread whose tuple is unknown, the elements before and after it pair up with
+the tuple's ends, and the spread's `R` is the tuple of what is left between
+them. With two unknown spreads (`(..P, ..Rest)`) nothing decides where one
+ends, so one of them must already be known from earlier in the call — an
+argument before the one being matched, since arguments are inferred in order.
+
+```
+first :: func <Rest> (t: (i32, ..Rest)) -> i32 { return t.0 }
+first((1, true))                  // Rest = (bool,)
+
+handle :: func <Rest, F: Func(*Context, ..Rest) -> Response> (f: F) -> void
+handle({ ctx, db: *Db in ... })   // ctx: *Context from the bound; Rest = (*Db,)
+```
+
+A closure checked against a `Func` bound with a spread in `Args` takes the
+fixed elements as the types of the parameters in those positions, so they may
+be written without annotations; the parameters the spread covers are
+annotated (§5.5).
 
 ## 3.4 Traits and dynamic dispatch
 

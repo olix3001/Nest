@@ -81,6 +81,35 @@ A closure is an ordinary value — store it, pass it, call it later. Taking a
 closure as a parameter (`impl Func(...)`) makes a fresh instantiation per
 closure passed, so the call is direct with no indirection.
 
+### Spreads in a `Func` bound
+
+A bound can fix the first parameters and leave the rest open with a tuple
+[spread](../types/#spreads--r): `Func(*Context, ..Rest) -> Response` is any
+callable whose first parameter is a `*Context`, followed by any others. A
+closure passed to it leaves the fixed parameters' types out, since the bound
+says what they are, and writes the others' types:
+
+```nest
+handle :: func <Rest, F: Func(*Context, ..Rest) -> Response> (f: F) { ... }
+
+handle({ ctx in ok() })                          // Rest = ()
+handle({ ctx, db: *Db, n: i64 in ok() })         // Rest = (*Db, i64)
+```
+
+Fixed parameters may also come from an argument. With two spreads, the one
+the argument settles has to come **before** the closure in the parameter
+list, since arguments are typed in order:
+
+```nest
+with :: func <P, Rest, F: Func.<Args = (..P, ..Rest)>> (pre: P, f: F) { ... }
+
+with((1, true), { a, b, s: str in ... })         // P = (i32, bool), Rest = (str,)
+```
+
+`std/di`'s `invoke_with` and `std/http`'s handlers are built this way: the
+parameters given are typed by the bound, and the rest are resolved from a
+scope by their types.
+
 ## `*func` and `*extern("c") func`
 
 A named function used as a value is a **function pointer**, one word:

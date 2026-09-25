@@ -105,12 +105,13 @@ type_core   = qualified_name [ generic_args ]
             | '*' [ 'mut' ] type                        // pointer
             | '[' ']' [ 'mut' ] type                    // slice
             | '[' expr ']' [ 'mut' ] type               // array
-            | '(' [ type { ',' type } ] ')'             // tuple / void
+            | '(' [ tuple_elem { ',' tuple_elem } [ ',' ] ] ')'  // tuple / void; `(A,)` is a 1-tuple
             | 'dyn' type                                // trait object
             | '*' func_type                             // function pointer (§3.5); never bare
             | 'impl' type { '+' type }                  // an anonymous generic parameter (§5.4)
-            | qualified_name '(' [ type { ',' type } ] ')' [ '->' type ]
+            | qualified_name '(' [ tuple_elem { ',' tuple_elem } ] ')' [ '->' type ]
                                                         // `Func(A) -> R` = `Func.<(A), Output = R>` (§5.5)
+tuple_elem   = type | '..' type                         // `..R`: every element of the tuple `R` (§3.3)
 generic_args = '.<' generic_arg { ',' generic_arg } '>'   // always dotted; bare `<...>` never valid here
 generic_arg  = type_or_hole | assoc_binding
 type_or_hole = type | '_'                               // '_' = infer this argument
