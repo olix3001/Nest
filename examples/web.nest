@@ -1,0 +1,68 @@
+// A small web application: `std/http` routes, `std/di` services, middleware.
+//
+//     nestc examples/web.nest -o web && ./web
+//     curl localhost:8080/api/hello/ada -H 'Authorization: yes'
+
+io :: import <std/io>
+di :: import <std/di>
+http :: import <std/http>
+{ inject } :: import <std/di>
+
+/// Says hello. A singleton: one for the whole application.
+Greeter :: struct { greeting: str }
+
+/// What one request knows about itself. Scoped: one per request, built by
+/// autowiring its `@inject` member from the request's scope; `n` is not
+/// injected, so it starts at zero.
+Visit :: struct {
+    @inject greeter: *Greeter,
+    n: i32,
+}
+
+main :: func () -> i32 {
+    let mut services: di.Services := di.services()
+    services.add_singleton({ sp in Greeter { greeting: "hello" } })
+    services.add_scoped_auto.<Visit>()
+
+    let mut app: http.App := http.app(services.build())
+
+    // Every request is logged, whatever answers it.
+    app.use() { ctx, next in
+        const res := next.run(ctx)
+        io.println(f"{ctx.request().method} {ctx.request().path} -> {res.status}")
+        res
+    }
+
+    // A handler takes whatever parameters it wants; each is resolved from the
+    // request's scope. `{ in ... }` takes none.
+    app.get("/") { in http.html("<h1>nest</h1>") }
+
+    app.route("/api") { r in
+        // Everything under `/api` needs an `Authorization` header.
+        r.use() { ctx, next in
+            ctx.header("Authorization").match {
+                .some(_) => next.run(ctx),
+                .none => http.status(401, "who are you?"),
+            }
+        }
+        // The request's own context and a singleton, side by side.
+        r.get("/hello/:name") { ctx: *http.Context, g: *Greeter in
+            http.text(f"{g.greeting}, {ctx.param("name")}\n")
+        }
+        // A scoped service, built for this request by autowiring.
+        r.get("/visit") { v: *Visit in
+            http.text(f"{v.greeter.greeting}: visit {v.n}\n")
+        }
+        r.post("/echo") { ctx: *http.Context in http.text(ctx.body()) }
+    }
+
+    io.println("listening on http://127.0.0.1:8080")
+    app.listen("127.0.0.1:8080").match {
+        .ok(_) => (),
+        .err(e) => {
+            io.eprintln(e.describe())
+            return 1
+        },
+    }
+    return 0
+}

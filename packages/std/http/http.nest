@@ -1,0 +1,144 @@
+// A small web framework: routes answered by closures, and services from
+// `std/di` handed to them per request. Ktor's shape:
+//
+//     http :: import <std/http>
+//     di :: import <std/di>
+//
+//     let mut services: di.Services := di.services()
+//     services.add_singleton({ sp in Greeter { greeting: "hello" } })
+//
+//     let mut app: http.App := http.app(services.build())
+//     app.get("/") { in http.text("home") }
+//     app.route("/api") { r in
+//         r.get("/hello/:name") { ctx: *http.Context, g: *Greeter in
+//             http.text(f"{g.greeting}, {ctx.param("name")}")
+//         }
+//         r.post("/echo") { ctx: *http.Context in http.text(ctx.body()) }
+//     }
+//     app.listen("127.0.0.1:8080").!
+//
+// A handler takes **whatever parameters it wants**, and each is resolved from
+// the request's scope (`std/di`'s `invoke`): a service it depends on, or the
+// request's `*Context`, which the scope is given for every request. Its
+// parameters are written with their types, because that is what they are
+// resolved by.
+//
+// Every request is served in a **scope** of its own (`di.Scope.scope()`), so a
+// scoped service — a unit of work, a request's user — is built once per request
+// and a singleton once per application.
+//
+// `App.respond(http.request("GET", "/api/hello/ada"))` answers a request
+// without a socket, which is how an application's routes are tested.
+//
+// **Middleware** wraps the routes registered after it, on its router and the
+// routers `route` makes from it — logging, authentication, headers:
+//
+//     app.use() { ctx, next in
+//         const res := next.run(ctx)
+//         io.println(f"{ctx.request().method} {ctx.request().path} {res.status}")
+//         res
+//     }
+//
+// What is here is the floor: one connection at a time, one request per
+// connection, bodies with a `Content-Length`. Keep-alive and concurrency are
+// additions to `server.nest` that leave the handler's side — a `Context` in, a
+// `Response` out — as it is.
+
+@public { Header, Request, Response, request, text, html, json_of, status, not_found, with_body, reason } :: import "message.nest"
+@public { Handler, Middleware, Next, Context, Router, App, app } :: import "router.nest"
+@public { MAX_REQUEST } :: import "server.nest"
+
+tests :: #when(test) namespace {
+    di :: import "../di/di.nest"
+    net :: import "../net/net.nest"
+    io :: import "../io/io.nest"
+    strs :: import "../text/str.nest"
+
+    Greeter :: struct { greeting: str }
+    Missing :: struct { n: i32 }
+
+    make_app :: func () -> App {
+        let mut services: di.Services := di.services()
+        services.add_singleton({ sp in Greeter { greeting: "hello" } })
+        let mut a: App := app(services.build())
+        a.use() { ctx, next in next.run(ctx).header("X-Served-By", "nest") }
+        a.get("/") { in text("home") }
+        a.route("/api") { r in
+            r.use() { ctx, next in
+                ctx.header("Authorization").match {
+                    .some(_) => next.run(ctx),
+                    .none => status(401, "who are you?"),
+                }
+            }
+            r.get("/hello/:name") { ctx: *Context, g: *Greeter in
+                text(f"{g.greeting}, {ctx.param("name")}")
+            }
+            r.get("/service") { ctx: *Context in
+                const g: *Greeter := ctx.service.<Greeter>().!
+                text(g.greeting)
+            }
+            r.post("/echo") { ctx: *Context in text(ctx.body()) }
+            r.get("/files/*") { ctx: *Context in text(ctx.param("*")) }
+            r.get("/missing") { m: *Missing in text("?") }
+        }
+        return a
+    }
+
+    with_auth :: func (method: str, target: str) -> Request {
+        let mut r: Request := request(method, target)
+        const hs: []Header := .{ Header { name: "authorization", value: "yes" } }
+        r.headers = hs
+        return r
+    }
+
+    @test
+    routes_match :: func () {
+        let mut a: App := make_app()
+        assert(a.respond(request("GET", "/")).text() == "home")
+        assert(a.respond(with_auth("GET", "/api/hello/ada")).text() == "hello, ada")
+        assert(a.respond(with_auth("GET", "/api/files/a/b.txt")).text() == "a/b.txt")
+        assert(a.respond(with_auth("GET", "/api/service")).text() == "hello")
+        assert(a.respond(with_auth("GET", "/api/missing")).status == 500, "a parameter nothing supplies")
+        assert(a.respond(request("GET", "/nope")).status == 404)
+        assert(a.respond(request("DELETE", "/")).status == 405)
+    }
+
+    @test
+    middleware_wraps_routes :: func () {
+        let mut a: App := make_app()
+        const denied: Response := a.respond(request("GET", "/api/hello/ada"))
+        assert(denied.status == 401, "the `/api` middleware answers by itself")
+        const home: Response := a.respond(request("GET", "/"))
+        let mut served := false
+        for h in home.headers.iter() {
+            if h.name == "X-Served-By" { served = true }
+        }
+        assert(served, "the app's middleware changes what comes back")
+    }
+
+    @test
+    queries_and_headers :: func () {
+        const r: Request := request("GET", "/x?a=1&b=two")
+        assert(r.path == "/x")
+        assert(r.query_param("b").match { .some(v) => v == "two", .none => false })
+        assert(r.query_param("c").match { .some(_) => false, .none => true })
+    }
+
+    // A server and its client in one process: the client's request sits in
+    // the socket's buffer until `serve_one` reads it.
+    @test
+    a_request_is_served_over_tcp :: func () -> Result.<void, io.Error> {
+        let mut a: App := make_app()
+        let mut server: net.TcpListener := net.listen("127.0.0.1:0").?
+        let mut client: net.TcpStream := net.connect(server.local_addr().?).?
+        const body: str := "echo me"
+        io.write_all(&mut client, f"POST /api/echo HTTP/1.1\r\nHost: x\r\nAuthorization: y\r\nContent-Length: {body.len()}\r\n\r\n{body}".as_bytes()).?
+        a.serve_one(&mut server).?
+        const got: str := cast.<str>(io.read_to_end(&mut client).?)
+        assert(strs.starts_with(got, "HTTP/1.1 200 OK\r\n"), got)
+        assert(strs.ends_with(got, "\r\n\r\necho me"), got)
+        client.close().?
+        server.close().?
+        return .ok(())
+    }
+}

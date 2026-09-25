@@ -1,0 +1,165 @@
+// Requests and responses: what a handler reads and what it answers.
+
+strs :: import "../text/str.nest"
+{ String } :: import "../text/string.nest"
+string :: import "../text/string.nest"
+collections :: import "../collections/collections.nest"
+{ Vec } :: import "../collections/collections.nest"
+json :: import "../serialize/json/json.nest"
+{ Encode } :: import "../serialize/encode.nest"
+
+/// One header line, `name: value`, as written.
+@public(all) Header :: struct {
+    name: str,
+    value: str,
+}
+
+/// A request, as it arrived.
+@public(all) Request :: struct {
+    /// `GET`, `POST`, … as the client wrote it.
+    method: str,
+    /// The path, without the query: `/users/7`.
+    path: str,
+    /// What followed a `?`, undecoded: `page=2&sort=name`.
+    query: str,
+    headers: []Header,
+    body: []u8,
+}
+
+/// A response to send.
+@public(all) Response :: struct {
+    status: u16,
+    headers: Vec.<Header>,
+    body: []u8,
+}
+
+/// A request for `method` and `target` (`/path?query`), with no headers and no
+/// body: how a test drives an `App` without a socket.
+@public request :: func (method: str, target: str) -> Request {
+    let (path, query) := split_target(target)
+    return Request { method: method, path: path, query: query, headers: .{}, body: .{} }
+}
+
+impl Request {
+    /// The value of header `name`, matched without regard to case.
+    @public header :: func (self: *Self, name: str) -> Option.<str> {
+        for h in self.headers {
+            if same_ascii(h.name, name) { return .some(h.value) }
+        }
+        return .none
+    }
+
+    /// The query parameter `name`, undecoded, or `.none`.
+    @public query_param :: func (self: *Self, name: str) -> Option.<str> {
+        if self.query.len() == 0 { return .none }
+        for pair in strs.split(self.query, "&") {
+            const at: Option.<usize> := strs.find(pair, "=")
+            const key: str := at.match { .some(i) => strs.slice(pair, 0, i), .none => pair }
+            if key == name {
+                return .some(at.match { .some(i) => strs.slice(pair, i + 1, pair.len()), .none => "" })
+            }
+        }
+        return .none
+    }
+
+    /// The body, as text.
+    @public text :: #inline func (self: *Self) -> str { return cast.<str>(self.body) }
+}
+
+/// `status` with `body` as plain text.
+@public text :: func (body: str) -> Response {
+    return with_body(200, "text/plain; charset=utf-8", body.as_bytes())
+}
+
+/// `body` as an HTML page.
+@public html :: func (body: str) -> Response {
+    return with_body(200, "text/html; charset=utf-8", body.as_bytes())
+}
+
+/// `value` written as JSON (`std/serialize`); a value that cannot be written
+/// is a `500`.
+@public json_of :: func <T: Encode> (value: T) -> Response {
+    return json.to_string(value).match {
+        .ok(s) => with_body(200, "application/json", s.as_str().as_bytes()),
+        .err(e) => status(500, e.message),
+    }
+}
+
+/// `code` with `message` as its text body: `status(404, "no such user")`.
+@public status :: func (code: u16, message: str) -> Response {
+    return with_body(code, "text/plain; charset=utf-8", message.as_bytes())
+}
+
+/// The `404` a request no route matched gets.
+@public not_found :: func () -> Response { return status(404, "not found") }
+
+/// A body of `content_type`.
+@public with_body :: func (code: u16, content_type: str, body: []u8) -> Response {
+    let mut headers: Vec.<Header> := collections.vec.new.<Header>()
+    headers.push(Header { name: "Content-Type", value: content_type })
+    return Response { status: code, headers: headers, body: body }
+}
+
+impl Response {
+    /// The same response with one more header.
+    @public header :: func (self: Self, name: str, value: str) -> Response {
+        let mut r: Response := self
+        r.headers.push(Header { name: name, value: value })
+        return r
+    }
+
+    /// The same response with another status.
+    @public with_status :: func (self: Self, code: u16) -> Response {
+        let mut r: Response := self
+        r.status = code
+        return r
+    }
+
+    /// The body, as text.
+    @public text :: #inline func (self: *Self) -> str { return cast.<str>(self.body) }
+}
+
+/// The phrase a status line carries after the code.
+@public reason :: func (code: u16) -> str {
+    return code.match {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        500 => "Internal Server Error",
+        _ => "",
+    }
+}
+
+// `/path?query` apart.
+@public(package) split_target :: func (target: str) -> (str, str) {
+    return strs.find(target, "?").match {
+        .some(i) => (strs.slice(target, 0, i), strs.slice(target, i + 1, target.len())),
+        .none => (target, ""),
+    }
+}
+
+// Whether `a` and `b` are the same, ASCII letters compared without case: how
+// header names compare.
+@public(package) same_ascii :: func (a: str, b: str) -> bool {
+    if a.len() != b.len() { return false }
+    const x: []u8 := a.as_bytes()
+    const y: []u8 := b.as_bytes()
+    for i in 0..<x.len() {
+        if lower(x[i]) != lower(y[i]) { return false }
+    }
+    return true
+}
+
+lower :: func (b: u8) -> u8 {
+    if b >= 65 && b <= 90 { return b + 32 }
+    return b
+}

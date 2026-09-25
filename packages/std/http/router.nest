@@ -1,0 +1,292 @@
+// Routes: a method and a path pattern, and the handler that answers them.
+//
+// A pattern is split on `/`; a segment written `:name` matches any one segment
+// and hands it to the handler as `ctx.param("name")`, and a last segment `*`
+// matches whatever is left. A router made by `route(prefix)` adds to the same
+// table as the one it was made from, with its prefix in front of every path —
+// so nesting is a way of writing, not a structure the lookup walks.
+
+strs :: import "../text/str.nest"
+collections :: import "../collections/collections.nest"
+{ Vec } :: import "../collections/collections.nest"
+di :: import "../di/di.nest"
+{ Request, Response, not_found, status } :: import "message.nest"
+{ boxed, new } :: import <core/mem>
+
+/// A route's handler once its parameters are bound: the request's context
+/// in, a response out. What `handle` stores; what a middleware's `next` ends at.
+@public Handler :: *dyn Func(*Context) -> Response
+
+/// What a handler is given: the request, the path's parameters, and the
+/// request's own services.
+@public(fields: package) Context :: struct {
+    // `req` and `sp` rather than the methods' names: a field and a method may
+    // not share one.
+    req: Request,
+    params: Vec.<(str, str)>,
+    sp: *mut di.Scope,
+}
+
+impl Context {
+    /// The request.
+    @public request :: #inline func (self: *Self) -> *Request { return &self.req }
+
+    /// The path parameter `name` — the segment a `:name` in the route matched —
+    /// or `""` when the route has none of that name.
+    @public param :: func (self: *Self, name: str) -> str {
+        for p in self.params.iter() {
+            if p.0 == name { return p.1 }
+        }
+        return ""
+    }
+
+    /// The query parameter `name`, undecoded.
+    @public query :: func (self: *Self, name: str) -> Option.<str> {
+        return self.req.query_param(name)
+    }
+
+    /// The header `name`.
+    @public header :: func (self: *Self, name: str) -> Option.<str> {
+        return self.req.header(name)
+    }
+
+    /// The body, as text.
+    @public body :: func (self: *Self) -> str { return self.req.text() }
+
+    /// The `T` this request's scope provides (`std/di`): a scoped service is
+    /// one per request, a singleton the application's.
+    @public service :: func <T> (self: *Self) -> Result.<*T, di.Error> {
+        return self.sp.get.<T>()
+    }
+
+    /// Call `f` with its parameters resolved from this request's scope.
+    @public invoke :: func <F: Func> (self: *Self, f: F) -> Result.<F.Output, di.Error> {
+        return self.sp.invoke(f)
+    }
+
+    /// The request's scope, for what `service` does not cover.
+    @public scope :: #inline func (self: *Self) -> *mut di.Scope { return self.sp }
+}
+
+/// A step a request passes through on its way to the handler: it may answer
+/// by itself, or call `next.run(ctx)` and look at — or change — what comes back.
+///
+/// ```nest
+/// app.use() { ctx, next in
+///     if ctx.header("Authorization").match { .some(_) => false, .none => true } {
+///         return http.status(401, "who are you?")
+///     }
+///     next.run(ctx).header("X-Served-By", "nest")
+/// }
+/// ```
+@public Middleware :: *dyn Func(*Context, *Next) -> Response
+
+/// The rest of the chain, as a middleware sees it.
+@public(fields: package) Next :: struct {
+    chain: []Middleware,
+    at: usize,
+    handler: Handler,
+}
+
+impl Next {
+    /// Run the rest of the chain — the next middleware, or the handler when
+    /// there is none left — and answer what it answered.
+    @public run :: func (self: *Self, ctx: *Context) -> Response {
+        if self.at < self.chain.len() {
+            const m: Middleware := self.chain[self.at]
+            const rest: Next := Next { chain: self.chain, at: self.at + 1, handler: self.handler }
+            return m(ctx, &rest)
+        }
+        const h: Handler := self.handler
+        return h(ctx)
+    }
+}
+
+// One route, with the middleware that was in force when it was registered.
+Route :: struct {
+    method: str,
+    segments: []str,
+    handler: Handler,
+    middleware: []Middleware,
+}
+
+/// A set of routes under one prefix, and the middleware they pass through.
+/// `App` is one, at `/`; `route` makes more.
+@public(fields: package) Router :: struct {
+    prefix: str,
+    // Shared by every router made from one app, so a nested one adds to the
+    // table the app looks in.
+    routes: *mut Vec.<Route>,
+    // In the order added, outermost first. A sub-router starts with its
+    // parent's, so a check added at `/api` guards everything under it.
+    middleware: Vec.<Middleware>,
+}
+
+impl Router {
+    /// Pass every route registered on this router **from here on** — and on
+    /// the routers `route` makes from it — through `m`. The first added runs
+    /// first.
+    @public use :: func <F: Func(*Context, *Next) -> Response> (self: *mut Self, m: F) -> void {
+        const erased: Middleware := boxed({ ctx: *Context, next: *Next in m(ctx, next) })
+        self.middleware.push(erased)
+    }
+
+    /// Answer `method` requests for `path` (under this router's prefix) with
+    /// `handler`. The latest route for a method and path wins.
+    ///
+    /// The handler's parameters are **resolved from the request's scope**
+    /// (`std/di`), whatever they are: a service, or the request's own
+    /// `*Context`. It answers a `Response`; a parameter no one can supply
+    /// is a `500`.
+    ///
+    /// ```nest
+    /// app.get("/users/:id") { ctx: *http.Context, repo: *Repo in
+    ///     http.json_of(repo.find(ctx.param("id")))
+    /// }
+    /// app.get("/health") { in http.text("ok") }
+    /// ```
+    @public handle :: func <F: Func.<Output = Response>> (self: *mut Self, method: str, path: str, handler: F) -> void {
+        const full: str := join_path(self.prefix, path)
+        const h: Handler := boxed({ ctx: *Context in
+            ctx.sp.invoke(handler).match {
+                .ok(r) => r,
+                .err(e) => status(500, e.message),
+            }
+        })
+        const chain: []Middleware := collections.vec.from_slice.<Middleware>(self.middleware.as_slice()).as_slice()
+        self.routes.push(Route { method: method, segments: segments(full), handler: h, middleware: chain })
+    }
+
+    @public get :: func <F: Func.<Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+        self.handle("GET", path, handler)
+    }
+
+    @public post :: func <F: Func.<Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+        self.handle("POST", path, handler)
+    }
+
+    @public put :: func <F: Func.<Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+        self.handle("PUT", path, handler)
+    }
+
+    @public delete :: func <F: Func.<Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+        self.handle("DELETE", path, handler)
+    }
+
+    /// The routes `build` adds, under `prefix` — Ktor's `route("/api") { … }`:
+    ///
+    /// ```nest
+    /// app.route("/api") { r in
+    ///     r.get("/users/:id") { ctx: *http.Context in http.text(ctx.param("id")) }
+    /// }
+    /// ```
+    @public route :: func <F: Func(*mut Router)> (self: *mut Self, prefix: str, build: F) -> void {
+        let mut sub: Router := Router {
+            prefix: join_path(self.prefix, prefix),
+            routes: self.routes,
+            middleware: collections.vec.from_slice.<Middleware>(self.middleware.as_slice()),
+        }
+        build(&mut sub)
+    }
+
+    // The route for `req`, and what its parameters matched; or the answer when
+    // there is none — a `405` when the path exists for another method.
+    find :: func (self: *Self, req: *Request) -> Result.<(Route, Vec.<(str, str)>), Response> {
+        const path: []str := segments(req.path)
+        let mut other_method := false
+        let mut i: usize := self.routes.len()
+        // Newest first, so a later registration overrides an earlier one.
+        while i > 0 {
+            i = i - 1
+            const r: Route := self.routes.as_slice()[i]
+            let mut params: Vec.<(str, str)> := collections.vec.new.<(str, str)>()
+            if matches(r.segments, path, &mut params) {
+                if r.method == req.method { return .ok((r, params)) }
+                other_method = true
+            }
+        }
+        if other_method { return .err(status(405, "method not allowed")) }
+        return .err(not_found())
+    }
+}
+
+// Whether `pattern` matches `path`, collecting what its `:name`s matched.
+matches :: func (pattern: []str, path: []str, params: *mut Vec.<(str, str)>) -> bool {
+    let mut i: usize := 0
+    while i < pattern.len() {
+        const p: str := pattern[i]
+        if p == "*" {
+            params.push(("*", strs.join(path[i..<path.len()], "/")))
+            return true
+        }
+        if i >= path.len() { return false }
+        if strs.starts_with(p, ":") {
+            params.push((strs.slice(p, 1, p.len()), path[i]))
+        } else if p != path[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return i == path.len()
+}
+
+// A path's segments, empty ones dropped: `/a//b/` is `a`, `b`.
+segments :: func (path: str) -> []str {
+    let mut out: Vec.<str> := collections.vec.new.<str>()
+    for s in strs.split(path, "/") {
+        if s.len() > 0 { out.push(s) }
+    }
+    return out.as_slice()
+}
+
+// `prefix` and `path` with one `/` between them.
+join_path :: func (prefix: str, path: str) -> str {
+    if prefix.len() == 0 || prefix == "/" { return path }
+    if path.len() == 0 || path == "/" { return prefix }
+    const a: str := if strs.ends_with(prefix, "/") { strs.slice(prefix, 0, prefix.len() - 1) } else { prefix }
+    const b: str := if strs.starts_with(path, "/") { path } else { f"/{path}" }
+    return f"{a}{b}"
+}
+
+/// An application: a router at `/`, and the services every request's scope is
+/// opened from.
+@public(fields: package) App :: struct {
+    @using router: Router,
+    services: *mut di.Scope,
+}
+
+/// An application whose handlers resolve services from `services` — the root
+/// scope `di.Services.build()` made. Each request gets a scope of its own.
+@public app :: func (services: *mut di.Scope) -> App {
+    return App {
+        router: Router {
+            prefix: "",
+            routes: boxed(collections.vec.new.<Route>()),
+            middleware: collections.vec.new.<Middleware>(),
+        },
+        services: services,
+    }
+}
+
+impl App {
+    /// The response to `req`: what a server does with each request it reads,
+    /// and what a test calls to exercise the routes without a socket.
+    @public respond :: func (self: *mut Self, req: Request) -> Response {
+        return self.router.find(&req).match {
+            .ok(found) => {
+                // On the heap, because the request's scope hands it out: a
+                // handler asking for `*Context` gets this one.
+                const ctx: *mut Context := boxed(Context {
+                    req: req,
+                    params: found.1,
+                    sp: self.services.scope(),
+                })
+                ctx.sp.provide.<Context>(ctx)
+                const r: Route := found.0
+                const next: Next := Next { chain: r.middleware, at: 0, handler: r.handler }
+                next.run(ctx)
+            },
+            .err(r) => r,
+        }
+    }
+}

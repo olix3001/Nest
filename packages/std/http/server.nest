@@ -1,0 +1,126 @@
+// HTTP/1.1 over `std/net`: read a request, answer it, close the connection.
+//
+// One connection at a time, and one request per connection (`Connection:
+// close`): the simplest server that a browser, `curl` and a test all talk to.
+// Keep-alive, chunked bodies and concurrency are what comes next, and each fits
+// here without changing what a handler sees.
+
+io :: import "../io/io.nest"
+net :: import "../net/net.nest"
+strs :: import "../text/str.nest"
+string :: import "../text/string.nest"
+{ String } :: import "../text/string.nest"
+collections :: import "../collections/collections.nest"
+{ Vec } :: import "../collections/collections.nest"
+{ Header, Request, Response, reason, split_target, same_ascii, status } :: import "message.nest"
+{ App } :: import "router.nest"
+{ make } :: import <core/mem>
+
+/// How large a request's head and body may be before it is refused (`413`).
+@public MAX_REQUEST: usize :: 1048576
+
+impl App {
+    /// Serve on `addr` — `"127.0.0.1:8080"` — until the process ends.
+    @public listen :: func (self: *mut Self, addr: str) -> Result.<void, io.Error> {
+        let mut server: net.TcpListener := net.listen(addr).?
+        loop {
+            self.serve_one(&mut server).?
+        }
+    }
+
+    /// Accept one connection on `server`, answer its request, and close it.
+    /// A connection that fails is that connection's problem: the error is
+    /// answered where it can be and not returned, so a server keeps serving.
+    @public serve_one :: func (self: *mut Self, server: *mut net.TcpListener) -> Result.<void, io.Error> {
+        let mut conn: net.TcpStream := server.accept().?
+        const res: Response := read_request(&mut conn).match {
+            .ok(req) => self.respond(req),
+            .err(r) => r,
+        }
+        write_response(&mut conn, &res).match { .ok(_) => (), .err(_) => () }
+        conn.close().match { .ok(_) => (), .err(_) => () }
+        return .ok(())
+    }
+}
+
+// ===< Reading >===
+
+// The request on `conn`, or the response that says why there is none.
+@public(package) read_request :: func (conn: *mut net.TcpStream) -> Result.<Request, Response> {
+    let mut buf: Vec.<u8> := collections.vec.new.<u8>()
+    let chunk: []mut u8 := make.<[]u8>(4096)
+    // The head ends at the first blank line.
+    let mut head_end: usize := 0
+    loop {
+        const n: usize := io.Read.read(conn, chunk).match {
+            .ok(n) => n,
+            .err(_) => { return .err(status(400, "could not read the request")) },
+        }
+        if n == 0 { return .err(status(400, "the request ended early")) }
+        buf.extend(cast.<[]u8>(chunk[0..<n]))
+        const at: Option.<usize> := strs.find(cast.<str>(buf.as_slice()), "\r\n\r\n")
+        const found: bool := at.match { .some(i) => { head_end = i; true }, .none => false }
+        if found { break }
+        if buf.len() > MAX_REQUEST { return .err(status(413, "request too large")) }
+    }
+    const all: []u8 := buf.as_slice()
+    const head: str := cast.<str>(all[0..<head_end])
+    const lines: []str := strs.split(head, "\r\n")
+    const first: []str := strs.split(lines[0], " ")
+    if first.len() != 3 { return .err(status(400, "malformed request line")) }
+    let mut headers: Vec.<Header> := collections.vec.new.<Header>()
+    for line in lines[1..<lines.len()] {
+        strs.find(line, ":").match {
+            .some(i) => headers.push(Header {
+                name: strs.trim(strs.slice(line, 0, i)),
+                value: strs.trim(strs.slice(line, i + 1, line.len())),
+            }),
+            .none => (),
+        }
+    }
+    let mut length: usize := 0
+    for h in headers.iter() {
+        if same_ascii(h.name, "Content-Length") {
+            length = strs.parse_usize(h.value).match {
+                .some(n) => n,
+                .none => { return .err(status(400, "bad Content-Length")) },
+            }
+        }
+    }
+    if length > MAX_REQUEST { return .err(status(413, "request too large")) }
+    // What arrived after the head is the start of the body; read the rest.
+    let mut body: Vec.<u8> := collections.vec.from_slice.<u8>(all[head_end + 4..<all.len()])
+    while body.len() < length {
+        const n: usize := io.Read.read(conn, chunk).match {
+            .ok(n) => n,
+            .err(_) => { return .err(status(400, "could not read the body")) },
+        }
+        if n == 0 { break }
+        body.extend(cast.<[]u8>(chunk[0..<n]))
+    }
+    const b: []u8 := body.as_slice()
+    let (path, query) := split_target(first[1])
+    return .ok(Request {
+        method: first[0],
+        path: path,
+        query: query,
+        headers: headers.as_slice(),
+        body: if b.len() > length { b[0..<length] } else { b },
+    })
+}
+
+// ===< Writing >===
+
+// `res`, as HTTP/1.1, closing the connection after it.
+@public(package) write_response :: func (conn: *mut net.TcpStream, res: *Response) -> Result.<void, io.Error> {
+    let mut out: String := string.new()
+    out.push_str(f"HTTP/1.1 {res.status} {reason(res.status)}\r\n")
+    for h in res.headers.iter() {
+        out.push_str(f"{h.name}: {h.value}\r\n")
+    }
+    out.push_str(f"Content-Length: {res.body.len()}\r\n")
+    out.push_str("Connection: close\r\n\r\n")
+    io.write_all(conn, out.as_bytes()).?
+    io.write_all(conn, res.body).?
+    return .ok(())
+}
