@@ -23,8 +23,8 @@
 // Linux, macOS and the BSDs. A Windows backing is a second file under `sys`
 // rather than a change here, which is the whole reason `sys` is a layer at all.
 //
-// **There is no `#when` in the language yet**, so what cannot be written
-// portably is not here: `errno` is a macro rather than a symbol, and
+// **What differs per target** was written before `#when` existed, so some of
+// it is not here: `errno` is a macro rather than a symbol, and
 // `struct stat` and `struct dirent` have layouts that differ between Linux and
 // macOS. What each of those costs `std` is written where `std` goes without it.
 // The four `open` flags that differ are the one case handled rather than
@@ -222,3 +222,123 @@ bsd_flags :: #inline func () -> bool {
 /// What `getcwd` answers when the buffer is too small for the path. Also the
 /// same number on both.
 @public ERANGE: c.int :: 34
+
+// ===< Sockets >===
+//
+// What `std/net` is written on. The calls are POSIX's and the same everywhere;
+// two things are not, and `#when` picks them per target: the numbers
+// (`SOL_SOCKET` is `1` on Linux and `0xffff` on the BSDs) and the layout of
+// `struct addrinfo`, whose `ai_addr` and `ai_canonname` swap places between
+// Linux and the BSDs. A `struct sockaddr` is only ever handled as bytes (see
+// `std/net`), which is what keeps its own difference — a length byte before the
+// family on the BSDs — out of the declarations here.
+
+extern("c") {
+  @public socket      :: func (domain: c.int, kind: c.int, protocol: c.int) -> c.int
+  @public setsockopt  :: func (fd: c.int, level: c.int, name: c.int, value: c.ptr.<c.int>, len: c.uint) -> c.int
+  @public bind        :: func (fd: c.int, addr: c.ptr.<u8>, len: c.uint) -> c.int
+  @public listen      :: func (fd: c.int, backlog: c.int) -> c.int
+  @public accept      :: func (fd: c.int, addr: c.ptr.<u8>, len: c.ptr.<c.uint>) -> c.int
+  @public connect     :: func (fd: c.int, addr: c.ptr.<u8>, len: c.uint) -> c.int
+  @public getsockname :: func (fd: c.int, addr: c.ptr.<u8>, len: c.ptr.<c.uint>) -> c.int
+  @public send        :: func (fd: c.int, buf: c.ptr.<c.uchar>, n: c.size_t, flags: c.int) -> c.ssize_t
+  @public recv        :: func (fd: c.int, buf: c.ptr.<c.uchar>, n: c.size_t, flags: c.int) -> c.ssize_t
+  @public shutdown    :: func (fd: c.int, how: c.int) -> c.int
+  @public inet_ntop   :: func (family: c.int, src: c.ptr.<u8>, dst: c.ptr.<c.uchar>, size: c.uint) -> c.cstr
+
+  /// Resolve `node` and `service` to a list of addresses, written to `res`; a
+  /// non-zero answer is `getaddrinfo`'s own code, not an `errno`.
+  @public getaddrinfo  :: func (node: c.cstr, service: c.cstr, hints: c.ptr.<AddrInfo>, res: c.ptr.<c.ptr.<AddrInfo>>) -> c.int
+  @public freeaddrinfo :: func (list: c.ptr.<AddrInfo>) -> void
+  @public gai_strerror :: func (code: c.int) -> c.cstr
+}
+
+/// One address `getaddrinfo` found, Linux's layout.
+@public(all)
+#when(os = .Linux)
+AddrInfo :: #repr("C") struct {
+  flags: c.int,
+  family: c.int,
+  socktype: c.int,
+  protocol: c.int,
+  addrlen: c.uint,
+  addr: c.ptr.<u8>,
+  canonname: c.cstr,
+  next: c.ptr.<AddrInfo>,
+}
+
+/// One address `getaddrinfo` found, the BSDs' layout: `canonname` before `addr`.
+@public(all)
+#when(not(os = .Linux))
+AddrInfo :: #repr("C") struct {
+  flags: c.int,
+  family: c.int,
+  socktype: c.int,
+  protocol: c.int,
+  addrlen: c.uint,
+  canonname: c.cstr,
+  addr: c.ptr.<u8>,
+  next: c.ptr.<AddrInfo>,
+}
+
+/// The families and the one socket type `std/net` uses.
+@public AF_UNSPEC: c.int :: 0
+@public AF_INET: c.int :: 2
+@public SOCK_STREAM: c.int :: 1
+
+/// IPv6's family: a number each system chose for itself.
+@public
+#when(os = .Linux)
+AF_INET6: c.int :: 10
+@public
+#when(os = .Macos)
+AF_INET6: c.int :: 30
+@public
+#when(not(any(os = .Linux, os = .Macos)))
+AF_INET6: c.int :: 28
+
+/// `getaddrinfo` for an address to bind to rather than to connect to.
+@public AI_PASSIVE: c.int :: 1
+
+/// `shutdown`'s directions.
+@public SHUT_RD: c.int :: 0
+@public SHUT_WR: c.int :: 1
+@public SHUT_RDWR: c.int :: 2
+
+/// The socket-level options.
+@public
+#when(os = .Linux)
+SOL_SOCKET: c.int :: 1
+@public
+#when(not(os = .Linux))
+SOL_SOCKET: c.int :: 65535
+
+/// Let a server rebind its port at once after a restart.
+@public
+#when(os = .Linux)
+SO_REUSEADDR: c.int :: 2
+@public
+#when(not(os = .Linux))
+SO_REUSEADDR: c.int :: 4
+
+/// A write to a peer that has gone away is an `EPIPE`, not a `SIGPIPE` that
+/// stops the process. The BSDs set it on the socket; Linux passes
+/// `MSG_NOSIGNAL` on each `send` instead, and has no such option.
+@public
+#when(not(os = .Linux))
+SO_NOSIGPIPE: c.int :: 4130
+@public
+#when(os = .Linux)
+MSG_NOSIGNAL: c.int :: 16384
+@public
+#when(not(os = .Linux))
+MSG_NOSIGNAL: c.int :: 0
+
+/// What a name that does not resolve is reported as: the address could not be
+/// reached, which is what a caller can act on.
+@public
+#when(os = .Linux)
+EHOSTUNREACH: c.int :: 113
+@public
+#when(not(os = .Linux))
+EHOSTUNREACH: c.int :: 65

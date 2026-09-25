@@ -66,7 +66,7 @@ fn recursive_layouts(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Ve
         }
         let mut path = Vec::new();
         let mut visiting = HashSet::new();
-        if let Some(cycle) = find_cycle(meta, linked, t.def, &mut visiting, &mut path) {
+        if let Some(cycle) = find_cycle(defs, meta, linked, t.def, &mut visiting, &mut path) {
             // Mark every type in the cycle, so the layout pass does not say the
             // same thing again in its own words: a type that contains itself has
             // no size *because* of the cycle, and one mistake gets one
@@ -109,6 +109,7 @@ fn recursive_layouts(defs: &DefTable, meta: &Meta, linked: &Linked, out: &mut Ve
 
 /// Depth-first search for a by-value cycle reachable from `def`.
 fn find_cycle(
+    defs: &DefTable,
     meta: &Meta,
     linked: &Linked,
     def: DefId,
@@ -121,9 +122,9 @@ fn find_cycle(
         return Some(path[start..].to_vec());
     }
     path.push(def);
-    let found = by_value_members(meta, linked, def)
+    let found = by_value_members(defs, meta, linked, def)
         .into_iter()
-        .find_map(|next| find_cycle(meta, linked, next, visiting, path));
+        .find_map(|next| find_cycle(defs, meta, linked, next, visiting, path));
     path.pop();
     visiting.remove(&def);
     found
@@ -134,48 +135,82 @@ fn find_cycle(
 /// A pointer or a slice stops the walk: both are one word, whatever they refer
 /// to. An array does not — `[4]Node` is four `Node`s laid end to end, so a type
 /// containing an array of itself is just as unsized.
-fn by_value_members(meta: &Meta, linked: &Linked, def: DefId) -> Vec<DefId> {
-    let Some(t) = linked.ty(def) else {
-        return Vec::new();
-    };
+fn by_value_members(defs: &DefTable, meta: &Meta, linked: &Linked, def: DefId) -> Vec<DefId> {
     let mut out = Vec::new();
-    let mut add = |ty: Ty| collect_nominals(&ty, &mut out);
-    match &t.kind {
-        TypeDefKind::Struct { members } => {
-            for m in members {
-                add(meta.ty_or_error(m.id));
-            }
-        }
-        TypeDefKind::Enum { variants } => {
-            for v in variants {
-                for m in &v.members {
-                    add(meta.ty_or_error(m.id));
-                }
-            }
-        }
-        TypeDefKind::Distinct { repr } => add(meta.ty_or_error(repr.id)),
-        // A trait is not laid out; it has no size of its own to be infinite.
-        TypeDefKind::Trait { .. } => {}
+    for ty in member_tys(meta, linked, def) {
+        collect_nominals(defs, meta, linked, &ty, &mut out);
     }
     out
 }
 
-fn collect_nominals(ty: &Ty, out: &mut Vec<DefId>) {
+/// The types of `def`'s members, as declared.
+fn member_tys(meta: &Meta, linked: &Linked, def: DefId) -> Vec<Ty> {
+    let Some(t) = linked.ty(def) else {
+        return Vec::new();
+    };
+    match &t.kind {
+        TypeDefKind::Struct { members } => members.iter().map(|m| meta.ty_or_error(m.id)).collect(),
+        TypeDefKind::Enum { variants } => variants
+            .iter()
+            .flat_map(|v| v.members.iter().map(|m| meta.ty_or_error(m.id)))
+            .collect(),
+        TypeDefKind::Distinct { repr } => vec![meta.ty_or_error(repr.id)],
+        // A trait is not laid out; it has no size of its own to be infinite.
+        TypeDefKind::Trait { .. } => Vec::new(),
+    }
+}
+
+fn collect_nominals(defs: &DefTable, meta: &Meta, linked: &Linked, ty: &Ty, out: &mut Vec<DefId>) {
     match ty {
         Ty::Nominal { def, args } => {
             out.push(*def);
-            // A type argument is part of the layout: `Pair.<Node>` embeds a
-            // `Node`. Walking it is what catches a cycle that only closes
-            // through a generic.
-            for a in args {
-                collect_nominals(a, out);
+            // A type argument is part of the layout when the generic type holds
+            // its parameter by value: `Pair.<Node>` embeds a `Node`. Walking it
+            // is what catches a cycle that only closes through a generic. One
+            // that holds it only behind a pointer does not — `c.ptr.<Node>` is
+            // an address — so a C struct may name a pointer to itself that way.
+            if !args.is_empty() && holds_a_parameter(defs, meta, linked, *def) {
+                for a in args {
+                    collect_nominals(defs, meta, linked, a, out);
+                }
             }
         }
-        Ty::Tuple(elems) => elems.iter().for_each(|t| collect_nominals(t, out)),
-        Ty::Array { inner, .. } => collect_nominals(inner, out),
+        Ty::Tuple(elems) => elems
+            .iter()
+            .for_each(|t| collect_nominals(defs, meta, linked, t, out)),
+        Ty::Array { inner, .. } => collect_nominals(defs, meta, linked, inner, out),
         // A pointer or slice is one word: the walk stops.
         _ => {}
     }
+}
+
+/// Whether the generic type `def` has one of its type parameters among what it
+/// holds by value — directly, or through a generic it holds that does.
+fn holds_a_parameter(defs: &DefTable, meta: &Meta, linked: &Linked, def: DefId) -> bool {
+    fn walk(defs: &DefTable, meta: &Meta, linked: &Linked, ty: &Ty, seen: &mut HashSet<DefId>) -> bool {
+        match ty {
+            Ty::Nominal { def, args } => {
+                if defs.get(*def).kind == crate::sema::def::DefKind::TypeParam {
+                    return true;
+                }
+                if args.is_empty() || !seen.insert(*def) {
+                    return false;
+                }
+                // The arguments count only where this type holds its own.
+                member_tys(meta, linked, *def)
+                    .iter()
+                    .any(|m| walk(defs, meta, linked, m, seen))
+                    && args.iter().any(|a| walk(defs, meta, linked, a, seen))
+            }
+            Ty::Tuple(elems) => elems.iter().any(|t| walk(defs, meta, linked, t, seen)),
+            Ty::Array { inner, .. } => walk(defs, meta, linked, inner, seen),
+            _ => false,
+        }
+    }
+    let mut seen = HashSet::from([def]);
+    member_tys(meta, linked, def)
+        .iter()
+        .any(|m| walk(defs, meta, linked, m, &mut seen))
 }
 
 // ===< Directive legality >===

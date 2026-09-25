@@ -1,0 +1,330 @@
+// TCP: listening for connections, and making them.
+//
+//     net :: import <std/net>
+//
+//     let mut server: net.TcpListener := net.listen("127.0.0.1:8080").!
+//     loop {
+//         let mut conn: net.TcpStream := server.accept().!
+//         io.write_all(&mut conn, "hello\n".as_bytes()).!
+//         conn.close().!
+//     }
+//
+// A stream is `io.Read` and `io.Write`, so everything written for a file —
+// `write_all`, `read_to_end` — works on a connection unchanged.
+//
+// ### Blocking, one call at a time
+//
+// `accept`, `read` and `write` wait. That is the whole concurrency story for
+// now: a server serves one connection at a time, which is what `std/http`
+// builds on and what is enough to answer a browser. The descriptor is a plain
+// socket, so a non-blocking layer can be put over it later without changing
+// what these types are.
+//
+// ### Addresses are text
+//
+// `"host:port"`, where the host is a name (`localhost`), an IPv4 address, or an
+// IPv6 one in brackets (`[::1]:8080`), and an empty host (`":8080"`) listens on
+// every interface. `getaddrinfo` does the resolving, so both families work and
+// the first address that accepts the call is the one used.
+
+io :: import "../io/io.nest"
+sys :: import "../os/sys.nest"
+libc :: import "../os/libc.nest"
+{ AddrInfo } :: import "../os/libc.nest"
+c :: import <core/c>
+{ make, new } :: import <core/mem>
+{ OS } :: import <core/target>
+
+/// A socket waiting for connections, made by `listen`.
+@public(fields: package) TcpListener :: struct {
+  fd: c.int,
+}
+
+/// One connection, made by `connect` or handed out by `TcpListener.accept`.
+///
+/// It is **not closed for you**: `close` it when done, as a `File` is.
+@public(fields: package) TcpStream :: struct {
+  fd: c.int,
+  /// The other end, `host:port`.
+  peer: str,
+}
+
+/// Listen for connections on `addr` — `"127.0.0.1:8080"`, `":8080"` for every
+/// interface, or port `0` for whichever one the system has free (ask
+/// `local_addr()` which it was).
+@public listen :: func (addr: str) -> Result.<TcpListener, io.Error> {
+  let fd: c.int := open(addr, true).?
+  return .ok(TcpListener { fd: fd })
+}
+
+/// Connect to `addr`, `"example.com:80"` or `"[::1]:8080"`.
+@public connect :: func (addr: str) -> Result.<TcpStream, io.Error> {
+  let fd: c.int := open(addr, false).?
+  return .ok(TcpStream { fd: fd, peer: addr })
+}
+
+impl TcpListener {
+  /// The next connection, waiting for one if none has arrived.
+  @public accept :: func (self: *mut Self) -> Result.<TcpStream, io.Error> {
+    let room: []mut u8 := make.<[]u8>(SOCKADDR_ROOM)
+    let len: *mut c.uint := new.<c.uint>()
+    loop {
+      len.* = cast.<c.uint>(SOCKADDR_ROOM)
+      let fd: c.int := libc.accept(self.fd, c.from_ptr.<u8>(&room[0]), c.from_ptr.<c.uint>(len))
+      if fd >= 0 {
+        no_sigpipe(fd)
+        return .ok(TcpStream { fd: fd, peer: address_text(cast.<[]u8>(room)) })
+      }
+      let r: sys.Res := failure()
+      if r.interrupted() == false { return .err(io.error_of("accept", "", r)) }
+    }
+  }
+
+  /// The address it is listening on, `host:port`: how a listener on port `0`
+  /// learns which port it got.
+  @public local_addr :: func (self: *Self) -> Result.<str, io.Error> {
+    return local(self.fd)
+  }
+
+  /// Stop listening.
+  @public close :: func (self: *mut Self) -> Result.<void, io.Error> {
+    return close_fd(self.fd)
+  }
+}
+
+impl TcpStream {
+  /// The other end's address, `host:port`.
+  @public peer_addr :: #inline func (self: *Self) -> str { return self.peer }
+
+  /// This end's address, `host:port`.
+  @public local_addr :: func (self: *Self) -> Result.<str, io.Error> {
+    return local(self.fd)
+  }
+
+  /// Say that nothing more will be written: the peer reads the end of the
+  /// stream, and this side can still read what it sends back.
+  @public shutdown_write :: func (self: *mut Self) -> Result.<void, io.Error> {
+    if libc.shutdown(self.fd, libc.SHUT_WR) < 0 {
+      return .err(io.error_of("shutdown", self.peer, failure()))
+    }
+    return .ok(())
+  }
+
+  /// Close the connection.
+  @public close :: func (self: *mut Self) -> Result.<void, io.Error> {
+    return close_fd(self.fd)
+  }
+}
+
+impl io.Read for TcpStream {
+  read :: func (self: *mut TcpStream, into: []mut u8) -> Result.<usize, io.Error> {
+    if into.len() == 0 { return .ok(0) }
+    loop {
+      let n: c.ssize_t := libc.recv(self.fd, c.from_ptr.<u8>(&into[0]), into.len(), 0)
+      if n >= 0 { return .ok(cast.<usize>(n)) }
+      let r: sys.Res := failure()
+      if r.interrupted() == false { return .err(io.error_of("read", self.peer, r)) }
+    }
+  }
+}
+
+impl io.Write for TcpStream {
+  write :: func (self: *mut TcpStream, bytes: []u8) -> Result.<usize, io.Error> {
+    if bytes.len() == 0 { return .ok(0) }
+    loop {
+      let n: c.ssize_t := libc.send(self.fd, c.from_ptr.<u8>(&bytes[0]), bytes.len(), libc.MSG_NOSIGNAL)
+      if n >= 0 { return .ok(cast.<usize>(n)) }
+      let r: sys.Res := failure()
+      if r.interrupted() == false { return .err(io.error_of("write", self.peer, r)) }
+    }
+  }
+}
+
+// ===< Opening a socket >===
+
+// Room for any `struct sockaddr`: `sockaddr_storage` is 128 bytes everywhere.
+SOCKADDR_ROOM: usize :: 128
+
+// A socket for `addr`, listening on it or connected to it: the first address
+// `getaddrinfo` answers that takes the call.
+open :: func (addr: str, listening: bool) -> Result.<c.int, io.Error> {
+  let (host, port) := split(addr).match {
+    .some(hp) => hp,
+    .none => { return .err(io.error_of("resolve", addr, sys.Res { n: -1, err: libc.EHOSTUNREACH })) },
+  }
+  let hints: *mut AddrInfo := new.<AddrInfo>()
+  hints.family = libc.AF_UNSPEC
+  hints.socktype = libc.SOCK_STREAM
+  if listening { hints.flags = libc.AI_PASSIVE }
+  let found: *mut c.ptr.<AddrInfo> := new.<c.ptr.<AddrInfo>>()
+  let node: c.cstr := if host.len() == 0 { c.null.<c.char>() } else { c.to_cstr(host) }
+  if libc.getaddrinfo(node, c.to_cstr(port), c.from_ptr.<AddrInfo>(hints), c.from_ptr.<c.ptr.<AddrInfo>>(found)) != 0 {
+    return .err(io.error_of("resolve", addr, sys.Res { n: -1, err: libc.EHOSTUNREACH }))
+  }
+  let mut last: sys.Res := sys.Res { n: -1, err: libc.EHOSTUNREACH }
+  let mut at: c.ptr.<AddrInfo> := found.*
+  let mut fd: c.int := -1
+  while at.is_null() == false {
+    let a: AddrInfo := at.read()
+    fd = libc.socket(a.family, a.socktype, a.protocol)
+    if fd >= 0 {
+      no_sigpipe(fd)
+      let ok: bool := if listening {
+        set_option(fd, libc.SO_REUSEADDR)
+        libc.bind(fd, a.addr, a.addrlen) == 0 && libc.listen(fd, BACKLOG) == 0
+      } else {
+        libc.connect(fd, a.addr, a.addrlen) == 0
+      }
+      if ok { break }
+      last = failure()
+      libc.close(fd)
+      fd = -1
+    } else {
+      last = failure()
+    }
+    at = a.next
+  }
+  libc.freeaddrinfo(found.*)
+  if fd < 0 {
+    return .err(io.error_of(if listening { "listen" } else { "connect" }, addr, last))
+  }
+  return .ok(fd)
+}
+
+// How many connections may wait for `accept` before the system refuses more.
+BACKLOG: c.int :: 128
+
+// `host:port` apart, with an IPv6 host's brackets taken off. `.none` when there
+// is no port.
+@public(package) split :: func (addr: str) -> Option.<(str, str)> {
+  let b: []u8 := addr.as_bytes()
+  let mut colon: usize := b.len()
+  let mut i: usize := b.len()
+  while i > 0 {
+    i = i - 1
+    if b[i] == COLON {
+      colon = i
+      break
+    }
+  }
+  if colon == b.len() || colon + 1 == b.len() { return .none }
+  let mut host: []u8 := b[0..<colon]
+  if host.len() >= 2 && host[0] == OPEN && host[host.len() - 1] == CLOSE {
+    host = host[1..<host.len() - 1]
+  }
+  return .some((cast.<str>(host), cast.<str>(b[colon + 1..<b.len()])))
+}
+
+COLON: u8 :: 58
+OPEN: u8 :: 91
+CLOSE: u8 :: 93
+
+// Turn on a socket-level flag.
+set_option :: func (fd: c.int, name: c.int) -> void {
+  let one: *mut c.int := new.<c.int>()
+  one.* = 1
+  // A flag that does not take is not worth failing the socket over: each one
+  // here makes a socket behave better, and none is what makes it work.
+  if libc.setsockopt(fd, libc.SOL_SOCKET, name, c.from_ptr.<c.int>(one), cast.<c.uint>(size_of.<c.int>())) < 0 { return }
+}
+
+// A write to a closed peer answers `EPIPE` rather than stopping the process.
+// Linux says so on every `send` (`MSG_NOSIGNAL`); the BSDs say it once, here.
+no_sigpipe :: func (fd: c.int) -> void {
+  OS.match {
+    .Linux => (),
+    _ => set_option(fd, SO_NOSIGPIPE_BSD),
+  }
+}
+
+// `SO_NOSIGPIPE`, which Linux does not have: named here rather than through
+// `libc`, where it exists only on the targets that have it.
+SO_NOSIGPIPE_BSD: c.int :: 4130
+
+// The address `fd` is bound to.
+local :: func (fd: c.int) -> Result.<str, io.Error> {
+  let room: []mut u8 := make.<[]u8>(SOCKADDR_ROOM)
+  let len: *mut c.uint := new.<c.uint>()
+  len.* = cast.<c.uint>(SOCKADDR_ROOM)
+  if libc.getsockname(fd, c.from_ptr.<u8>(&room[0]), c.from_ptr.<c.uint>(len)) < 0 {
+    return .err(io.error_of("local address", "", failure()))
+  }
+  return .ok(address_text(cast.<[]u8>(room)))
+}
+
+// A `struct sockaddr`, as `host:port`.
+//
+// Read as bytes: the family is a `u16` at offset 0 on Linux and a `u8` at
+// offset 1 on the BSDs (after a length byte); from there on the two agree —
+// the port at 2, big-endian, then an IPv4 address at 4 or an IPv6 one at 8.
+address_text :: func (sa: []u8) -> str {
+  let family: c.int := OS.match {
+    .Linux => cast.<c.int>(sa[0]) + cast.<c.int>(sa[1]) * 256,
+    _ => cast.<c.int>(sa[1]),
+  }
+  let port: u32 := cast.<u32>(sa[2]) * 256 + cast.<u32>(sa[3])
+  let text: []mut u8 := make.<[]u8>(64)
+  let (at, v6) := if family == libc.AF_INET { (4, false) } else if family == libc.AF_INET6 { (8, true) } else { return "" }
+  let host: c.cstr := libc.inet_ntop(family, c.from_ptr.<u8>(&sa[at]), c.from_ptr.<u8>(&text[0]), 64)
+  if host.is_null() { return "" }
+  if v6 { return f"[{c.from_cstr(host)}]:{port}" }
+  return f"{c.from_cstr(host)}:{port}"
+}
+
+close_fd :: func (fd: c.int) -> Result.<void, io.Error> {
+  if libc.close(fd) < 0 { return .err(io.error_of("close", "", failure())) }
+  return .ok(())
+}
+
+// A failed call, reading `errno` now.
+failure :: func () -> sys.Res {
+  let e: c.int := libc.nest_errno()
+  return sys.Res { n: -1, err: if e == 0 { -1 } else { e } }
+}
+
+tests :: #when(test) namespace {
+    // One process is both ends: `connect` completes against the listener's
+    // backlog before `accept` is called, so no second thread is needed.
+    round_trip :: func (addr: str) -> Result.<void, io.Error> {
+        let mut server: TcpListener := listen(addr).?
+        const at: str := server.local_addr().?
+        let mut client: TcpStream := connect(at).?
+        let mut conn: TcpStream := server.accept().?
+        io.write_all(&mut client, "ping".as_bytes()).?
+        client.shutdown_write().?
+        assert(cast.<str>(io.read_to_end(&mut conn).?) == "ping")
+        io.write_all(&mut conn, "pong".as_bytes()).?
+        conn.close().?
+        assert(cast.<str>(io.read_to_end(&mut client).?) == "pong")
+        client.close().?
+        server.close().?
+        return .ok(())
+    }
+
+    @test
+    a_connection_round_trips_over_ipv4 :: func () -> Result.<void, io.Error> {
+        return round_trip("127.0.0.1:0")
+    }
+
+    @test
+    a_connection_round_trips_over_ipv6 :: func () -> Result.<void, io.Error> {
+        return round_trip("[::1]:0")
+    }
+
+    @test
+    addresses_split :: func () {
+        assert(split("127.0.0.1:80").match { .some(hp) => hp.0 == "127.0.0.1" && hp.1 == "80", .none => false })
+        assert(split("[::1]:8080").match { .some(hp) => hp.0 == "::1" && hp.1 == "8080", .none => false })
+        assert(split(":9").match { .some(hp) => hp.0 == "" && hp.1 == "9", .none => false })
+        assert(split("nohost").match { .some(_) => false, .none => true })
+    }
+
+    @test
+    a_closed_port_refuses :: func () {
+        // Bind a port, learn it, close it: nothing is listening there now.
+        let mut server: TcpListener := listen("127.0.0.1:0").!
+        const at: str := server.local_addr().!
+        server.close().!
+        assert(connect(at).match { .ok(_) => false, .err(_) => true })
+    }
+}

@@ -2679,6 +2679,11 @@ fn a_type_may_not_contain_itself_by_value() {
         ("Arr :: struct { xs: [4]Arr }\n", "`Arr` contains itself"),
         // Through an enum payload.
         ("E :: enum { leaf, node(E) }\n", "`E` contains itself"),
+        // Through a generic that holds its parameter by value.
+        (
+            "Box :: struct <T> { v: T }\nN :: struct { b: Box.<N> }\n",
+            "`N` contains itself",
+        ),
     ] {
         let msgs = messages(src);
         assert_eq!(
@@ -2702,6 +2707,10 @@ fn recursion_through_a_pointer_is_fine() {
 OkPtr :: struct { next: *OkPtr }
 OkOpt :: struct { next: Option.<*OkOpt> }
 List  :: enum { nil, cons(i32, *List) }
+Addr  :: struct <T> { addr: usize }
+OkGen :: struct { next: Addr.<OkGen> }
+Hold  :: struct <T> { p: *T }
+OkVia :: struct { h: Hold.<OkVia> }
 ";
     assert!(messages(src).is_empty(), "{:#?}", messages(src));
 }
