@@ -2796,10 +2796,83 @@ impl Inferer<'_> {
             for ob in deferred {
                 self.cx.register(ob);
             }
-            if !progressed && !self.default_anon_structs() {
+            if !progressed && !self.default_anon_structs() && !self.default_variant_enums() {
                 break;
             }
         }
+    }
+
+    /// Give a variant literal whose enum nothing named the one enum its
+    /// bounds allow, and report whether that unstuck anything.
+    ///
+    /// `.some(x)` returned where a generic `R: IntoResponse` is wanted has no
+    /// expected type, only the bound. When the sweep stalls, the enums with an
+    /// impl of **every** trait the variable is held to, and with a variant of
+    /// that name, are the candidates; exactly one is the answer (`Option`
+    /// among `IntoResponse`'s implementors has `some`, `Result` does not).
+    /// Anything else stays the "type annotations needed" it was.
+    fn default_variant_enums(&mut self) -> bool {
+        let pending = self.cx.take_obligations();
+        let mut progressed = false;
+        for ob in &pending {
+            let Obligation::VariantPayload { recv, variant, .. } = ob else {
+                continue;
+            };
+            let Ty::Var(v) = self.cx.shallow(recv) else {
+                continue;
+            };
+            let traits: Vec<DefId> = pending
+                .iter()
+                .filter_map(|o| match o {
+                    Obligation::Trait {
+                        self_ty, trait_def, ..
+                    } if self.cx.shallow(self_ty) == Ty::Var(v) => Some(*trait_def),
+                    _ => None,
+                })
+                .collect();
+            if traits.is_empty() {
+                continue;
+            }
+            let has_variant = |defs: &DefTable, e: DefId| {
+                defs.get(e).kind == DefKind::Enum
+                    && defs
+                        .get(e)
+                        .ns
+                        .members
+                        .get(variant)
+                        .is_some_and(|&m| defs.get(m).kind == DefKind::Variant)
+            };
+            let mut enums: Vec<DefId> = Vec::new();
+            for imp in &self.impls.impls {
+                if let (Some(t), Some(head)) = (imp.trait_def, imp.self_head)
+                    && t == traits[0]
+                    && has_variant(self.defs, head)
+                    && !enums.contains(&head)
+                {
+                    enums.push(head);
+                }
+            }
+            enums.retain(|&e| {
+                traits.iter().all(|&t| {
+                    self.impls
+                        .impls
+                        .iter()
+                        .any(|imp| imp.trait_def == Some(t) && imp.self_head == Some(e))
+                })
+            });
+            if let [e] = enums[..] {
+                let args = (0..self.decls().generic_arity(e))
+                    .map(|_| self.cx.fresh())
+                    .collect();
+                if self.cx.unify(recv, &Ty::Nominal { def: e, args }).is_ok() {
+                    progressed = true;
+                }
+            }
+        }
+        for ob in pending {
+            self.cx.register(ob);
+        }
+        progressed
     }
 
     /// Give a `.{ name: value, ... }` that nothing typed the **anonymous

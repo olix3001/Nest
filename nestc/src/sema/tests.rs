@@ -10675,3 +10675,47 @@ impl R {
     assert!(d.message.contains("cannot resolve name `n`"), "{}", d.message);
     assert!(d.notes.iter().any(|n| n.contains("self.n")), "{:?}", d.notes);
 }
+
+/// A variant literal with only a bound for context (§7): the one enum among
+/// the bound's implementors with that variant is its type. With two such
+/// enums, or no bound at all, it stays ambiguous.
+#[test]
+fn a_variant_literal_takes_the_one_enum_its_bound_allows() {
+    let head = "\
+Show :: trait { show :: func (self: Self) -> i32 }
+impl <T> Show for Option.<T> {
+    show :: func (self: Option.<T>) -> i32 { return self.match { .some(_) => 1, .none => 0 } }
+}
+impl <T, E> Show for Result.<T, E> {
+    show :: func (self: Result.<T, E>) -> i32 { return 2 }
+}
+impl Show for str { show :: func (self: str) -> i32 { return 5 } }
+run :: func <R: Show, F: Func.<Args = (i32,), Output = R>> (f: F) -> i32 { return f(1).show() }
+plain :: func <R, F: Func(i32) -> R> (f: F) -> R { return f(1) }
+";
+    analyze_clean(&format!(
+        "{head}
+main :: func () -> i32 {{
+    const a := run {{ n in
+        if n == 1 {{ return .some(\"one\") }}
+        return .none
+    }}
+    return a
+}}
+"
+    ));
+    // No bound says which enum `.some` is.
+    let err = first_error(&format!(
+        "{head}\nmain :: func () {{ const c := plain {{ n in .some(n) }} }}\n"
+    ));
+    assert!(err.contains("type annotations needed"), "{err}");
+    // Two enums both have `.some` and implement the bound.
+    let err = first_error(&format!(
+        "{head}
+Maybe :: enum <T> {{ some(T), nothing }}
+impl <T> Show for Maybe.<T> {{ show :: func (self: Maybe.<T>) -> i32 {{ return 3 }} }}
+main :: func () -> i32 {{ return run {{ n in .some(n) }} }}
+"
+    ));
+    assert!(err.contains("type annotations needed"), "{err}");
+}
