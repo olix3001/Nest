@@ -10401,7 +10401,11 @@ fn a_local_import_is_scoped_to_its_block() {
                 }\n\
                 other :: func () -> i32 { return twice(1) }\n";
     let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
-    let msgs: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    let msgs: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
     assert_eq!(
         msgs,
         [
