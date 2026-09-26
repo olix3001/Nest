@@ -147,20 +147,41 @@ tests :: #when(test) namespace {
         assert(a.respond(posting("/raw", "hi")).text() == "hi t1")
     }
 
+    named :: func (name: str) -> Result.<str, Rejection> {
+        if name == "" { return .err(Rejection { status: 422, message: "a name is needed" }) }
+        return .ok(name)
+    }
+
     @test
     handlers_answer_anything_into_a_response :: func () {
         let mut a: App := make_app()
         a.get("/str") { ctx in "plain" }
         a.get("/created") { ctx in (201, Json { value: User { name: "ada", age: 36 } }) }
         a.get("/empty") { ctx in () }
-        a.get("/maybe/:n") { ctx -> Option.<str> in
+        a.get("/maybe/:n") { ctx in
             if ctx.param("n") == "1" { return .some("one") }
             return .none
         }
-        a.get("/checked/:n") { ctx -> Result.<str, (u16, str)> in
+        a.get("/checked/:n") { ctx in
             if ctx.param("n") == "0" { return .err((400, "zero")) }
             return .ok("fine")
         }
+        a.get("/nested") { ctx in (201, (202, "inner")) }
+        a.get("/teapot") { ctx -> Result.<str, Rejection> in
+            .err(Rejection { status: 418, message: "teapot" })
+        }
+        a.post("/named") { ctx, u: Json.<User> in
+            const name: str := named(u.value.name).?
+            return .ok((201, name))
+        }
+        const nested: Response := a.respond(request("GET", "/nested"))
+        assert(nested.status == 201 && nested.text() == "inner", "the outer status wins")
+        assert(a.respond(request("GET", "/teapot")).status == 418)
+        const ada: Response := a.respond(posting("/named", "{\"name\": \"ada\", \"age\": 1}"))
+        assert(ada.status == 201 && ada.text() == "ada", ada.text())
+        const empty: Response := a.respond(posting("/named", "{\"name\": \"\", \"age\": 1}"))
+        assert(empty.status == 422, "`.?` answers the handler's own rejection")
+        assert(a.respond(posting("/named", "nope")).status == 400, "the extractor's rejection")
         const created: Response := a.respond(request("GET", "/created"))
         assert(created.status == 201 && created.text() == "{\"name\":\"ada\",\"age\":36}", created.text())
         assert(a.respond(request("GET", "/str")).text() == "plain")
