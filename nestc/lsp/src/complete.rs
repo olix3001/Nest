@@ -536,9 +536,9 @@ impl Cx<'_> {
         let mut found: Vec<(DefId, Option<DefId>)> = Vec::new();
         let mut items: Vec<CompletionItem> = Vec::new();
         let mut ty = self.concrete(ty.clone());
-        // The types an `@using` field lends its members from (§3.10), each
-        // walked the same way once the one before it is done. Bounded, since
-        // two structs could each `@using` the other through a pointer.
+        // The type an `@using` field lends its members from (§3.10), walked
+        // the same way once the value's own type is done. One hop, as the
+        // compiler takes: a lender's own `@using` lends nothing further.
         let mut lenders: Vec<Ty> = Vec::new();
         let mut lent = 0;
         loop {
@@ -556,18 +556,23 @@ impl Cx<'_> {
                     ..Default::default()
                 }));
             }
-            if let Ty::Nominal { def, .. } = &ty {
+            if let Ty::Nominal { def, args } = &ty {
                 let fields = s.defs.get(*def).ns.members.values().copied();
                 let fields: Vec<DefId> = fields
                     .filter(|&m| s.defs.get(m).kind == DefKind::Field)
                     .collect();
                 let decls = Decls::new(&s.defs, &s.asts, &s.decls);
-                lenders.extend(
-                    fields
-                        .iter()
-                        .filter(|&&m| s.defs.get(m).using)
-                        .filter_map(|&m| decls.field_ty(m)),
-                );
+                if lent == 0 {
+                    // `@using value: T` lends what this use's `T` is.
+                    let params = decls.type_param_defs(*def);
+                    lenders.extend(
+                        fields
+                            .iter()
+                            .filter(|&&m| s.defs.get(m).using)
+                            .filter_map(|&m| decls.field_ty(m))
+                            .map(|t| substitute(&t, &params, args)),
+                    );
+                }
                 // A private field still lends through `@using`, but is only
                 // offered where the compiler lets it be named.
                 found.extend(
@@ -607,7 +612,7 @@ impl Cx<'_> {
             };
             ty = match next {
                 Some(t) => t,
-                None if lent < 8 => match lenders.pop() {
+                None if lent == 0 => match lenders.pop() {
                     Some(t) => {
                         lent += 1;
                         t
@@ -1306,6 +1311,25 @@ fn params_of(s: &Session, def: DefId) -> Option<usize> {
         .map(|p| p.len())
 }
 
+
+/// `ty` with each of a type's generic `params` replaced by the `args` a use
+/// gave it: `T` in `Json.<User>`'s field is `User`.
+fn substitute(ty: &Ty, params: &[DefId], args: &[Ty]) -> Ty {
+    match ty {
+        Ty::Nominal { def, args: inner } => match params.iter().position(|p| p == def) {
+            Some(i) if inner.is_empty() => args.get(i).cloned().unwrap_or_else(|| ty.clone()),
+            _ => Ty::Nominal {
+                def: *def,
+                args: inner.iter().map(|a| substitute(a, params, args)).collect(),
+            },
+        },
+        Ty::Ptr { mutable, inner } => Ty::Ptr {
+            mutable: *mutable,
+            inner: Box::new(substitute(inner, params, args)),
+        },
+        other => other.clone(),
+    }
+}
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

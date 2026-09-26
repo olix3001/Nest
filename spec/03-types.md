@@ -932,25 +932,24 @@ const view: []int := xs.slice()        // borrow as a read-only slice
 Maps and other containers (`HashMap.<K, V>`, …) are likewise std structs with
 `.new()` constructors.
 
-## 3.10 `@using` fields (implicit upcast)
+## 3.10 `@using` fields
 
-An `@using` attribute on a struct field whose type is a struct (or a pointer to
-one) marks that field for an **implicit upcast** — a deliberately narrow
-Odin-style `using`. `@using` applies only to struct fields; it is not permitted on
-function parameters, locals, or imports. **At most one** field per struct may be
-`@using`.
+An `@using` attribute on a struct field whose type is a struct, a generic
+parameter, or a pointer to either marks that field as one the outer struct
+**lends from** — a deliberately narrow Odin-style `using`. `@using` applies only
+to struct fields; it is not permitted on function parameters, locals, or
+imports. **At most one** field per struct may be `@using`.
 
 ```
 Transform :: struct { x: f32, y: f32, angle: f32 }
 
 Entity :: struct {
-  @using t: Transform,     // Entity upcasts to Transform
+  @using t: Transform,     // Entity lends Transform's members
   hp: int,
 }
 ```
 
-`@using` has exactly one effect — the **implicit upcast** — and, unlike Odin, it
-does **not** promote the embedded type's members onto the outer struct:
+It has three effects, each filling in only what the outer struct lacks:
 
 1. **Implicit upcast.** The outer struct implicitly coerces to the `@using`
    field's type. An `Entity` value coerces to `Transform` (yielding a copy of
@@ -963,14 +962,34 @@ does **not** promote the embedded type's members onto the outer struct:
    translate(&mut e, 1.0, 0.0)     // &mut Entity coerces to *mut Transform
    ```
 
-2. **No field promotion.** `e.x` is **not** valid — reach the embedded field's
-   members through the field name (`e.t.x`, `e.t.angle = 0.0`). The one
-   ergonomic exception is **method calls**: `e.method()` where `method` is defined
-   on `Transform` (and not on `Entity`) resolves through the upcast, binding the
-   receiver to `&e.t` (see [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.6).
+2. **Field promotion.** `e.x` where `Entity` has no field `x` is `e.t.x`, read
+   and written alike (`e.angle = 0.0`). The outer struct's own fields win: with
+   both an `Entity.hp` and a `Transform.hp`, `e.hp` is the entity's.
 
-**One per struct.** Allowing a single `@using` field keeps both the upcast target
-and method resolution unambiguous — there is never a question of *which* embedded
-type a value coerces to, or whose method `e.method()` means. Two `@using` fields
-in one struct is a compile error. Only struct-typed (or pointer-to-struct) fields
-may be `@using`.
+3. **Method calls.** `e.method()` where `method` is defined on `Transform` (and
+   not on `Entity`) resolves through the upcast, binding the receiver to `&e.t`
+   (see [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.6).
+
+**One hop.** Only the `@using` field's own members are lent: if `Transform`
+itself had an `@using` field, its members would not reach `Entity`. The same
+holds for the upcast.
+
+**A generic parameter** lends whatever a use makes it: with `Json :: struct <T>
+{ @using value: T }`, a `Json.<User>` has `User`'s fields and methods, and a
+`Json.<i32>` has none to lend but still upcasts to `i32`.
+
+**Privacy.** The `@using` field is named under its own visibility like any
+other field — a private one cannot be read by name outside its struct's
+namespace — but what it lends is not gated on it: a private `@using` field
+still promotes the lent type's (visible) fields and methods and still upcasts.
+That is how a wrapper hides its field and exposes only what it wraps:
+
+```
+Json :: struct <T> { @using _value: T }     // `data._value` is private
+data.name                                    // `User`'s field, lent
+```
+
+**One per struct.** Allowing a single `@using` field keeps the upcast target,
+field promotion and method resolution unambiguous — there is never a question of
+*which* embedded type a value coerces to, or whose member `e.x` means. Two
+`@using` fields in one struct is a compile error.

@@ -1,0 +1,30 @@
+// using_fields.nest — an `@using` field lends its fields, methods and the
+// upcast, through a pointer and through a generic parameter, and a private
+// one lends as a public one does. No imports. Exits 42 when all of it works.
+
+Inner :: struct { a: i32, b: i32 }
+impl Inner { sum :: func (self: *Self) -> i32 { self.a + self.b } }
+
+ByPtr :: struct { @using p: *mut Inner, b: i32 }
+
+lib :: namespace {
+    @public Json :: struct <T> { @using _value: T }
+    @public wrap :: func <T> (v: T) -> Json.<T> { Json { _value: v } }
+}
+
+main :: func () -> i32 {
+    let mut i := Inner { a: 1, b: 2 }
+    let mut w := ByPtr { p: &mut i, b: 100 }
+    // Written through the pointer the `@using` field holds.
+    w.a = 10
+    const pw := &w
+    if w.b != 100 || pw.a != 10 || i.a != 10 || w.sum() != 12 { return 1 }
+
+    let mut data: lib.Json.<Inner> := lib.wrap(Inner { a: 3, b: 4 })
+    data.b = 20
+    const up: Inner := data
+    if data.a + data.b != 23 || data.sum() != 23 || up.b != 20 { return 2 }
+
+    const n: i32 := lib.wrap(42)
+    n
+}

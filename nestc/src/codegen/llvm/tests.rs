@@ -1640,6 +1640,16 @@ fn local_items_run() {
     assert_eq!(out.status.code(), Some(42), "{out:?}");
 }
 
+/// An `@using` field's lent fields read and write the sub-object they name.
+#[test]
+fn using_fields_run() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let out = run_on_host(include_str!("../../testdata/programs/using_fields.nest"));
+    assert_eq!(out.status.code(), Some(42), "{out:?}");
+}
+
 /// **Recursion too deep to fit is a trap, not a segmentation fault.**
 ///
 /// The stack has an end, and reaching it used to be a `SIGSEGV` from whichever

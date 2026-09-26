@@ -328,12 +328,10 @@ member of `a`, then `c` as a member of `a.b`. Each hop must be visible: crossing
 into another namespace sees only its `@public` members. An intrinsic is an
 ordinary `core` member and resolves like one (§6.4).
 
-An `@using` field does **not** contribute promoted members to `a.b` field lookup:
-`@using` grants only an implicit upcast to the field's type, never name promotion.
-The embedded field's members are reached through the field name (e.g. `a.t.x`),
-not directly on `a`. Method
-resolution is the one place the upcast participates — see below. See
-[03-types.md](03-types.md) §3.10.
+A **field** access `a.b` on a value whose type has no field `b` looks for `b`
+on the type of its `@using` field, if it has one: `a.b` is then `a.t.b`. The
+outer type's own fields win, and only one hop is taken. Methods follow the same
+rule — see below, and [03-types.md](03-types.md) §3.10.
 
 ### Methods and trait methods
 
@@ -346,7 +344,7 @@ resolution is the one place the upcast participates — see below. See
    matched, retrying the lookup on `U` through the implicit upcast — `value`
    coerces to `U` (or `*U` for a method receiver) and `method` resolves on `U`.
    Because at most one `@using` field is allowed per struct, this step is
-   unambiguous. Fields are still never promoted, so only method calls benefit.
+   unambiguous.
 
 A trait method is only callable where that trait is in scope; this is what makes
 the merging exception in §4.3 sound. Ambiguity between two in-scope traits

@@ -94,12 +94,14 @@ even against an identical anonymous or named twin, with no implicit
 conversion either way (`cast`, or an `@using` field, cross the boundary).
 Only named structs get `impl` methods; anonymous structs are plain data.
 
-## `@using` fields — implicit upcast
+## `@using` fields
 
-`@using` on a struct field whose type is a struct (or a pointer to one)
-marks that field for an implicit upcast — deliberately narrow, unlike Odin's
-`using`: it does **not** promote the embedded type's members onto the outer
-struct. At most one field per struct may be `@using`.
+`@using` on a struct field whose type is a struct, a generic parameter, or a
+pointer to either lends that field to the outer struct: the outer struct
+upcasts to it, and its fields and methods can be reached directly where the
+outer struct has none of that name. At most one field per struct may be
+`@using`, and only its own members are lent — not those of *its* `@using`
+field.
 
 ```nest
 Transform :: struct { x: f32, y: f32, angle: f32 }
@@ -115,7 +117,19 @@ translate(&mut e, 1.0, 0.0)   // &mut Entity coerces to *mut Transform
 
 An `Entity` value coerces to `Transform` (a copy of `t`); a `*Entity`/`*mut
 Entity` coerces to `*Transform`/`*mut Transform` — the address of the
-sub-object, `&e.t`, at zero cost.
+sub-object, `&e.t`, at zero cost. `e.x` is `e.t.x`, read or written, while
+`e.hp` stays the entity's own.
+
+The `@using` field keeps its own visibility, but what it lends does not depend
+on it. A wrapper can hide its field and expose only what it wraps:
+
+```nest
+Json :: struct <T> { @using _value: T }
+
+const data: Json.<User> := ...
+data.name          // User's field
+data._value        // error outside Json's namespace: the field is private
+```
 
 ## Layout
 

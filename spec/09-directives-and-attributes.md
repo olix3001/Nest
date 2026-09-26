@@ -86,14 +86,14 @@ variants could not be named is an enum nothing could match on.
 
 The one further built-in attribute that the compiler acts on is `@using`, which
 belongs to the same name-resolution family: on a struct field it grants an
-**implicit upcast** from the outer struct to that field's type. It does **not**
-promote the field's members onto the outer struct (see
-[03-types.md](03-types.md) §3.10). `@using` applies only to struct fields, and
-**at most one** field per struct may be `@using`.
+**implicit upcast** from the outer struct to that field's type, and lends the
+field's fields and methods to the outer struct where it has none of the name
+(see [03-types.md](03-types.md) §3.10). `@using` applies only to struct fields,
+and **at most one** field per struct may be `@using`.
 
 ```
 Entity :: struct {
-  @using t: Transform,     // Entity implicitly casts to Transform (no promotion)
+  @using t: Transform,     // Entity casts to Transform; e.x is e.t.x
   hp: int,
 }
 ```

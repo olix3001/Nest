@@ -569,6 +569,58 @@ main :: func () -> i32 {
     }
 }
 
+/// An `@using` field of a generic parameter's type lends what the use makes
+/// the parameter: `Json.<User>` offers `User`'s fields and methods.
+#[test]
+fn completion_offers_what_a_generic_using_field_lends() {
+    let (_dir, file, mut client) = program();
+    let text = "\
+Json :: struct <T> { @using _value: T }
+User :: struct { name: str, age: i32 }
+impl User {
+    greet :: func (self: *Self) -> str { return self.name }
+}
+
+main :: func () {
+    const data: Json.<User> := Json { _value: User { name: \"ada\", age: 36 } }
+    const n := data.
+}
+";
+    client.change(&file, text);
+    let members = labels(&client.at(Completion::METHOD, &file, position(text, "data.\n", 0, 5)));
+    for want in ["name", "age", "greet"] {
+        assert!(members.contains(&want.to_string()), "{want} in {members:?}");
+    }
+}
+
+/// A private `@using` field is not offered where it cannot be named, but what
+/// it lends is: the compiler accepts `data.name` and refuses `data._value`.
+#[test]
+fn completion_offers_what_a_private_using_field_lends_but_not_the_field() {
+    let (_dir, file, mut client) = program();
+    let text = "\
+User :: struct { name: str, age: i32 }
+impl User {
+    greet :: func (self: *Self) -> str { return self.name }
+}
+lib :: namespace {
+    @public Json :: struct <T> { @using _value: T }
+    @public wrap :: func <T> (v: T) -> Json.<T> { return Json { _value: v } }
+}
+
+main :: func () {
+    const data: lib.Json.<User> := lib.wrap(User { name: \"ada\", age: 36 })
+    const n := data.
+}
+";
+    client.change(&file, text);
+    let members = labels(&client.at(Completion::METHOD, &file, position(text, "data.\n", 0, 5)));
+    for want in ["name", "age", "greet"] {
+        assert!(members.contains(&want.to_string()), "{want} in {members:?}");
+    }
+    assert!(!members.contains(&"_value".to_string()), "{members:?}");
+}
+
 /// A private field is offered only where the compiler lets it be named (§4.4):
 /// inside the namespace that declares its struct, not outside it.
 #[test]

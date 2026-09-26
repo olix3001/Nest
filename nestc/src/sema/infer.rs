@@ -285,6 +285,17 @@ pub struct Upcast {
     pub target: Ty,
 }
 
+/// Records that a field access `e.x` found `x` not on `e`'s own type but on
+/// its `@using` field's (§3.10): `e.x` is `e.t.x`. Stamped on the access, so
+/// [`super::fields`] binds the inner field and [`super::lower`] writes the hop.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Promoted {
+    /// The `@using` field the access goes through.
+    pub field: DefId,
+    /// That field's type at this use — a struct, or a pointer to one.
+    pub inner: Ty,
+}
+
 /// Stamped on a method call's receiver when the method was found on the type a
 /// `distinct` type is distinct *from*, rather than on the distinct type itself
 /// (§2.4).
@@ -1769,6 +1780,10 @@ impl Inferer<'_> {
                 let target = self.cx.finalize(&up.target, &mut || {});
                 self.ast.set_meta(node, Upcast { target, ..up });
             }
+            if let Some(p) = self.ast.meta::<Promoted>(node) {
+                let inner = self.cx.finalize(&p.inner, &mut || {});
+                self.ast.set_meta(node, Promoted { inner, ..p });
+            }
             if let Some(m) = self.ast.meta::<MethodRes>(node) {
                 let self_ty = self.cx.finalize(&m.self_ty, &mut || {});
                 // A bound's trait arguments may name the enclosing function's
@@ -2033,6 +2048,9 @@ impl Inferer<'_> {
                 let bty = self.pin_str(&bty);
                 let bty = self.settle(&bty);
                 if let Some(ft) = self.field_ty_at(Some(node), &bty, name.as_str()) {
+                    return ft;
+                }
+                if let Some(ft) = self.promoted_field_ty(node, &bty, name.as_str()) {
                     return ft;
                 }
                 // Not *absent* — **not yet known**. A base that is still a
@@ -3223,7 +3241,11 @@ impl Inferer<'_> {
                     self.expect(origin, &t, &out);
                     return Outcome::Solved;
                 }
-                match self.field_ty_at(Some(origin), &target, name.as_str()) {
+                let found = match self.field_ty_at(Some(origin), &target, name.as_str()) {
+                    Some(t) => Some(t),
+                    None => self.promoted_field_ty(origin, &target, name.as_str()),
+                };
+                match found {
                     Some(t) => self.expect(origin, &t, &out),
                     None => {
                         self.no_such_field(origin, &target, name.as_str());
@@ -7841,6 +7863,26 @@ impl Inferer<'_> {
 
     fn field_ty(&mut self, base: &Ty, name: &str) -> Option<Ty> {
         self.field_ty_at(None, base, name)
+    }
+
+    /// A field `base` does not have itself, found on its `@using` field's type
+    /// (§3.10): `e.x` read as `e.t.x`, recorded as [`Promoted`] on `at`. The
+    /// outer type's own fields were already tried, so they win. One hop, as the
+    /// upcast is: a chain of `@using`s is deliberately not implicit.
+    ///
+    /// Privacy is the inner field's, judged where the access is written. The
+    /// `@using` field itself is not checked: marking it `@using` is the struct
+    /// lending its members, private or not.
+    fn promoted_field_ty(&mut self, at: NodeId, base: &Ty, name: &str) -> Option<Ty> {
+        let outer = self.autoderef(base);
+        let Ty::Nominal { def, .. } = &outer else {
+            return None;
+        };
+        let field = self.defs.using_field(*def)?;
+        let inner = self.field_ty(&outer, self.defs.get(field).name.as_str())?;
+        let ty = self.field_ty_at(Some(at), &inner, name)?;
+        self.ast.set_meta(at, Promoted { field, inner });
+        Some(ty)
     }
 
     /// The same, for a field the **program wrote** at `at`: its privacy is

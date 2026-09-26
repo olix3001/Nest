@@ -42,7 +42,12 @@ pub fn resolve_fields(
             // resolution from name resolution.
             NodeKind::FieldAccess { base, name } => {
                 if ast.meta::<Resolution>(id).is_none() {
-                    if let Some(f) = pass.field_of(pass.ty(base), &name) {
+                    // A field lent by an `@using` field is its struct's.
+                    let owner = match ast.meta::<super::infer::Promoted>(id) {
+                        Some(p) => p.inner,
+                        None => pass.ty(base),
+                    };
+                    if let Some(f) = pass.field_of(owner, &name) {
                         ast.set_meta(id, Resolution::Def(f));
                     }
                 }
@@ -112,7 +117,9 @@ impl Fields<'_> {
     }
 
     /// `@using` marks a field for the implicit upcast, which only makes sense
-    /// when the field is itself a struct (or a pointer to one) — §3.10.
+    /// when the field is itself a struct (or a pointer to one) — §3.10 — or a
+    /// generic parameter, which is whatever a use makes it: `Json.<User>` lends
+    /// `User`'s members, and `Json.<i32>` has none to lend.
     fn check_using_field(
         &self,
         node: NodeId,
@@ -139,11 +146,13 @@ impl Fields<'_> {
                 Resolution::Def(d) => Some(self.defs.resolve_alias(d)),
                 _ => None,
             })
-            .is_some_and(|d| self.defs.get(d).kind == DefKind::Struct);
+            .is_some_and(|d| matches!(self.defs.get(d).kind, DefKind::Struct | DefKind::TypeParam));
         if !ok {
             let span = FileSpan::new(self.file, self.ast.node(node).span);
             diags.push(
-                Diagnostic::error("an `@using` field must be a struct, or a pointer to one")
+                Diagnostic::error(
+                    "an `@using` field must be a struct, a generic parameter, or a pointer to one",
+                )
                     .with_primary(span, ""),
             );
         }

@@ -50,7 +50,7 @@ use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::{
     ArgOrder, Coercion, DistinctRecv, DynCoerce, FuncCall, FuncCallMethod, Generics, Instantiation,
-    MethodDispatch, MethodRes, RangeReported, RecvAdjust, SliceCoerce, Upcast,
+    MethodDispatch, MethodRes, Promoted, RangeReported, RecvAdjust, SliceCoerce, Upcast,
 };
 use super::infer::{OpResolution, StaticTraitSelf};
 use super::ty::Ty;
@@ -941,7 +941,20 @@ impl Lowerer<'_> {
                     Some(_) => return self.lower_name(node, ty),
                 }
                 let base = self.lower_expr(base);
-                let base = self.autoderef(base);
+                let mut base = self.autoderef(base);
+                // `e.x` lent by an `@using` field is `e.t.x`: write the hop.
+                if let Some(p) = self.ast.meta::<Promoted>(node) {
+                    let hop = self.expr(
+                        node,
+                        p.inner,
+                        ExprKind::Field {
+                            base: Box::new(base),
+                            name: self.defs.get(p.field).name.clone(),
+                            def: Some(p.field),
+                        },
+                    );
+                    base = self.autoderef(hop);
+                }
                 self.expr(
                     node,
                     ty,

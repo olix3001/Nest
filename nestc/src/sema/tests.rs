@@ -5699,6 +5699,77 @@ fn break_and_continue_require_an_enclosing_loop() {
 fn an_using_field_must_be_a_struct() {
     assert!(first_error("P :: struct { @using n: i32 }\n").contains("must be a struct"));
     analyze_clean("A :: struct { v: i32 }\nP :: struct { @using a: *A }\n");
+    analyze_clean("P :: struct <T> { @using v: T }\nQ :: struct <T> { @using v: *T }\n");
+}
+
+/// An `@using` field lends its fields (§3.10): `e.x` is `e.t.x` when `e`'s own
+/// type has no `x`, read and written, through a pointer on either side, and
+/// through a generic parameter as whatever the use makes it.
+#[test]
+fn an_using_field_lends_its_fields() {
+    analyze_clean(
+        "Inner :: struct { a: i32, b: i32 }\n\
+         ByPtr :: struct { @using p: *mut Inner, b: i32 }\n\
+         Gen :: struct <T> { @using v: T }\n\
+         go :: func () -> i32 {\n\
+             let mut i := Inner { a: 1, b: 2 }\n\
+             let mut w := ByPtr { p: &mut i, b: 100 }\n\
+             w.a = 10\n\
+             const pw := &w\n\
+             let mut g: Gen.<Inner> := Gen { v: Inner { a: 3, b: 4 } }\n\
+             g.b = 20\n\
+             const b: i32 := w.b\n\
+             return w.a + pw.a + g.b + b\n\
+         }\n",
+    );
+}
+
+/// A private `@using` field is private by name — reading it outside its
+/// struct's namespace is refused — while everything it lends works there:
+/// its fields, its methods, and the upcast.
+#[test]
+fn a_private_using_field_still_lends() {
+    let src = "User :: struct { name: i32, age: i32 }\n\
+               impl User { total :: func (self: *Self) -> i32 { return self.name + self.age } }\n\
+               lib :: namespace {\n\
+                   @public Json :: struct <T> { @using _value: T }\n\
+                   @public wrap :: func <T> (v: T) -> Json.<T> { return Json { _value: v } }\n\
+               }\n\
+               go :: func () -> i32 {\n\
+                   let mut data: lib.Json.<User> := lib.wrap(User { name: 1, age: 2 })\n\
+                   data.age = 3\n\
+                   const u: User := data\n\
+                   return data.name + data.total() + u.age\n\
+               }\n";
+    analyze_clean(src);
+    let msgs = messages(&src.replace("u.age\n", "u.age + data._value.age\n"));
+    assert_eq!(
+        msgs,
+        ["the field `_value` of `Json` is private"],
+        "{msgs:#?}"
+    );
+}
+
+/// What an `@using` field's type does not have is still missing, and a
+/// lender's own `@using` lends nothing further: one hop, as the upcast.
+#[test]
+fn an_using_field_lends_one_hop() {
+    let msgs = messages(
+        "C :: struct { z: i32 }\n\
+         B :: struct { @using c: C }\n\
+         A :: struct { @using b: B }\n\
+         go :: func (a: A, g: Gen.<i32>) -> i32 { return a.c.z + a.nope + a.z + g.x }\n\
+         Gen :: struct <T> { @using v: T }\n",
+    );
+    assert_eq!(
+        msgs,
+        [
+            "no field `nope` on `A`",
+            "no field `z` on `A`",
+            "no field `x` on `Gen.<i32>`"
+        ],
+        "{msgs:#?}"
+    );
 }
 
 #[test]
