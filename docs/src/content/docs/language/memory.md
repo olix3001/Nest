@@ -100,15 +100,59 @@ object stays alive whether anything reaches it or not, until `drop(p)`
 releases it. Without the `drop`, it lives as long as the process — a leak,
 by request.
 
-## Allocation on the heap for storage — `boxed`
+## Where `&` points: escape and promotion
 
-`core/mem`'s `boxed(value)` puts a value whose type has no name onto the
-heap, returning a `*dyn Trait` — the way to store several closures (or
-other values known only by a bound) behind one uniform pointer type. See
-[Closures and Func](../closures/) for the full picture.
+`&` works on anything — a local, a parameter, a field, an array element, or
+a temporary (`&P { x: 1 }`, `&{ x in x + 1 }`). A pointer is valid for as
+long as it is reachable, so the compiler decides where the thing it points
+at lives:
+
+- If the address **doesn't escape** the function, the value stays in the
+  function's frame. `v.push(1)`, `bump(&mut n)`, `const p := &pt; p.x` — the
+  common case, and free.
+- If it **escapes**, the value is **promoted**: placed in a garbage-collected
+  object instead, and `&` gives that object's address. A promoted local is
+  read and written through the object from then on, so nothing can tell the
+  difference except that the pointer stays valid.
 
 ```nest
-{ boxed } :: import <core/mem>
+Holder :: struct { p: *P }
 
-const a: *dyn Func(i32) -> i32 := boxed({ x in x + 1 })
+stays :: func () -> i32 {
+    const h := Holder { p: &P { x: 1 } }   // stays in the frame
+    return h.p.x
+}
+goes :: func () -> Holder {
+    return Holder { p: &P { x: 2 } }       // promoted: it leaves inside a Holder
+}
+counter :: func () -> *dyn Func() -> i32 {
+    let n := 0
+    return &{ in n += 1; n }               // promoted: the closure outlives the call
+}
 ```
+
+An address **escapes** when it — or a pointer derived from it — can still be
+reached after the function returns. It escapes when it is:
+
+1. **returned** (or given to `break`);
+2. **stored through a pointer**, into memory that isn't one of the
+   function's own locals;
+3. **passed to a call that keeps it**. Each function is analyzed for which
+   of its parameters it keeps — stores, returns out of reach, or passes on to
+   a call that keeps them — so `list.push(x)` doesn't promote `list`. A call
+   the compiler can't see into (through a `*dyn`, a function pointer, or to
+   a C function) keeps everything. A function that only *returns* its
+   argument doesn't keep it: its result is followed instead.
+
+*Derived* covers `&x.field`, `&arr[i]`, sub-slices, casts, a `*dyn` made
+from the pointer, and any value **holding** one: a struct, tuple or enum
+built with it, a closure that copies it, a field read out of such a value,
+and a local any of these is stored in. That is why `h` above keeps its
+temporary in the frame while `goes` promotes its own: the question is
+whether the *holder* escapes.
+
+The analysis doesn't follow control flow: a pointer that escapes on one path
+promotes its target on every path. It can promote something that could have
+stayed on the stack — an extra allocation — but never the other way round. A
+promoted value is an ordinary collected object: the collector finds it from
+any live pointer and frees it once nothing reaches it.

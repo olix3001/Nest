@@ -139,6 +139,7 @@ pub fn lower_against_libraries(
         lang,
         sources,
         drops: super::escape::analyze(linked.funcs()),
+        promoted: super::promote::analyze(linked.funcs()),
         types: Vec::new(),
         type_index: HashMap::new(),
         globals: Vec::new(),
@@ -308,6 +309,9 @@ struct Cx<'a> {
     /// Which allocations each IR block may free on the way out (§5), from
     /// [`super::escape`].
     drops: super::escape::Drops,
+    /// Which locals and temporaries live on the heap because their address
+    /// escapes, from [`super::promote`].
+    promoted: super::promote::Promotions,
     /// The flattened type table being built, indexed by [`TypeId`].
     types: Vec<TypeDef>,
     /// Where each type is, by [`crate::ir::mono::type_key`].
@@ -1943,11 +1947,16 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             _ => Ty::Void,
         };
         let unguarded = cx.meta.has_directive(f.id, "unsafe");
-        let shared = cx
+        // What a closure shares, and what has its address escape: both
+        // outlive the frame, so both live in a cell.
+        let mut shared: std::collections::HashSet<DefId> = cx
             .meta
             .get::<crate::ir::Boxed>(f.id)
             .map(|b| b.0.into_iter().collect())
             .unwrap_or_default();
+        if let Some(p) = cx.promoted.locals.get(&f.id) {
+            shared.extend(p.iter().copied());
+        }
         Lowerer {
             cx,
             f,
@@ -2626,6 +2635,12 @@ impl<'a, 'c> Lowerer<'a, 'c> {
             ExprKind::ConstParam(_) => Some(Rvalue::Use(Operand::Const(Constant::Undef))),
             // `&x` and `&mut x` are one instruction: what the second permits was
             // decided in sema, and no target has two kinds of address (§9).
+            // A temporary whose address escapes is built in a cell instead of a
+            // slot (see [`super::promote`]).
+            ExprKind::Ref { place, .. } if self.cx.promoted.temps.contains(&e.id) => {
+                let p = self.heap_place_of(place, span)?;
+                Some(Rvalue::Ref(p))
+            }
             ExprKind::Ref { place, .. } => {
                 let p = self.place_of(place)?;
                 Some(Rvalue::Ref(p))
@@ -4503,6 +4518,47 @@ impl<'a, 'c> Lowerer<'a, 'c> {
                 }))
             }
             _ => self.materialize(e),
+        }
+    }
+
+    /// [`Self::place_of`] for a place rooted in a temporary that has to outlive
+    /// the frame: the temporary is evaluated into a fresh cell on the heap.
+    fn heap_place_of(&mut self, e: &Expr, span: Option<FileSpan>) -> Option<Place> {
+        match &e.kind {
+            ExprKind::Field { base, name, .. } => {
+                let bty = self.cx.ty_of(base.id);
+                let index = self.field_index(&bty, name)?;
+                Some(self.heap_place_of(base, span)?.then(Projection::Field {
+                    index,
+                    name: name.clone(),
+                }))
+            }
+            ExprKind::TupleIndex { base, index } => {
+                Some(self.heap_place_of(base, span)?.then(Projection::Field {
+                    index: *index as u32,
+                    name: Symbol::new(&index.to_string()),
+                }))
+            }
+            _ => {
+                let ty = self.cx.ty_of(e.id);
+                let value = self.eval(e);
+                let cell_ty = Ty::Ptr {
+                    mutable: true,
+                    inner: Box::new(ty),
+                };
+                let cell = self.new_local(None, &cell_ty, span);
+                self.push(
+                    LirStmtKind::Call {
+                        dest: Some(Place::local(cell)),
+                        callee: Callee::Intrinsic(Intrinsic::New),
+                        args: Vec::new(),
+                    },
+                    span,
+                );
+                let at = Place::local(cell).then(Projection::Deref);
+                self.assign(at.clone(), Rvalue::Use(value), span);
+                Some(at)
+            }
         }
     }
 

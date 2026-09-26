@@ -3596,3 +3596,70 @@ main :: func () -> i32 { return build()[0] }
         .count();
     assert_eq!(calls, 1, "`.{{ next(); 3 }}` called `next` {calls} times");
 }
+
+// ===< Escape and promotion (§6.6) >===
+
+/// Whether the function named `name` allocates on the collected heap.
+fn allocates(unit: &Unit, name: &str) -> bool {
+    let f = unit
+        .funcs
+        .iter()
+        .find(|f| f.name == name)
+        .unwrap_or_else(|| panic!("no function `{name}`"));
+    f.blocks.iter().flat_map(|b| &b.stmts).any(|s| {
+        matches!(
+            &s.kind,
+            crate::lir::StmtKind::Call {
+                callee: crate::lir::Callee::Intrinsic(crate::lir::Intrinsic::New),
+                ..
+            }
+        )
+    })
+}
+
+/// `&` of a local or a temporary stays in the frame unless the address
+/// escapes: returned, stored through a pointer, kept by a callee, or carried
+/// out inside a value that holds it. A callee that only reads through a
+/// pointer, or only hands it back, keeps nothing.
+#[test]
+fn only_an_escaping_address_is_promoted() {
+    let unit = lir_unit(
+        "P :: struct { x: i32 }\n\
+         H :: struct { p: *P }\n\
+         bump :: func (p: *mut P) { p.x = p.x + 1 }\n\
+         first :: func (p: *P) -> *P { return p }\n\
+         stash :: func (h: *mut H, p: *P) { h.p = p }\n\
+         reads :: func () -> i32 {\n\
+             let mut a := P { x: 1 }\n\
+             bump(&mut a)\n\
+             const b := P { x: 2 }\n\
+             const q := first(&b)\n\
+             const h := H { p: &P { x: 3 } }\n\
+             let mut g := H { p: &a }\n\
+             g.p = &b\n\
+             const r := &g\n\
+             const f: *dyn Func(i32) -> i32 := &{ x: i32 in x + 1 }\n\
+             return a.x + q.x + h.p.x + r.p.x + f(0)\n\
+         }\n\
+         returns_local :: func () -> *P {\n\
+             const c := P { x: 4 }\n\
+             return first(&c)\n\
+         }\n\
+         returns_holder :: func () -> H { return H { p: &P { x: 5 } } }\n\
+         holder_assigned :: func () -> H {\n\
+             const t := P { x: 6 }\n\
+             let mut g := H { p: &t }\n\
+             return g\n\
+         }\n\
+         stored :: func (h: *mut H) {\n\
+             const t := P { x: 7 }\n\
+             stash(h, &t)\n\
+         }\n\
+         closure :: func (n: i32) -> *dyn Func(i32) -> i32 { return &{ [n] x: i32 in x + n } }\n\
+         main :: func () -> i32 { return reads() }\n",
+    );
+    assert!(!allocates(&unit, "reads"), "nothing `reads` takes the address of leaves it");
+    for f in ["returns_local", "returns_holder", "holder_assigned", "stored", "closure"] {
+        assert!(allocates(&unit, f), "`{f}` lets an address escape");
+    }
+}

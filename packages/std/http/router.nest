@@ -12,7 +12,6 @@ collections :: import "../collections/collections.nest"
 di :: import "../di/di.nest"
 { IntoResponse, Request, Response, not_found, status } :: import "message.nest"
 { Rejection } :: import "extract.nest"
-{ boxed, new } :: import <core/mem>
 
 /// A route's handler once its parameters are bound: the request's context
 /// in, a response out. What `handle` stores; what a middleware's `next` ends at.
@@ -129,7 +128,7 @@ impl Router {
     /// first.
     /// It answers anything that is `IntoResponse`, as a handler does.
     @public use :: func <R: IntoResponse, F: Func(*Context, *Next) -> R> (self: *mut Self, m: F) -> void {
-        const erased: Middleware := boxed({ ctx: *Context, next: *Next in m(ctx, next).into_response() })
+        const erased: Middleware := &{ ctx: *Context, next: *Next in m(ctx, next).into_response() }
         self.middleware.push(erased)
     }
 
@@ -151,7 +150,7 @@ impl Router {
     /// ```
     @public handle :: func <Rest, R: IntoResponse, F: Func.<Args = (*Context, ..Rest), Output = R>> (self: *mut Self, method: str, path: str, handler: F) -> void {
         const full: str := join_path(self.prefix, path)
-        const h: Handler := boxed({ ctx: *Context in
+        const h: Handler := &{ ctx: *Context in
             ctx.sp.invoke_with((ctx,), handler).match {
                 .ok(r) => r.into_response(),
                 // A parameter the request could not supply (`http.Json` of a
@@ -162,7 +161,7 @@ impl Router {
                     .none => status(500, e.message),
                 },
             }
-        })
+        }
         const chain: []Middleware := collections.vec.from_slice.<Middleware>(self.middleware.as_slice()).as_slice()
         self.routes.push(Route { method: method, segments: segments(full), handler: h, middleware: chain })
     }
@@ -271,7 +270,7 @@ join_path :: func (prefix: str, path: str) -> str {
     return App {
         router: Router {
             prefix: "",
-            routes: boxed(collections.vec.new.<Route>()),
+            routes: &mut collections.vec.new.<Route>(),
             middleware: collections.vec.new.<Middleware>(),
         },
         services: services,
@@ -284,13 +283,14 @@ impl App {
     @public respond :: func (self: *mut Self, req: Request) -> Response {
         return self.router.find(&req).match {
             .ok(found) => {
-                // On the heap, because the request's scope hands it out: a
-                // handler asking for `*Context` gets this one.
-                const ctx: *mut Context := boxed(Context {
+                // The request's scope hands it out — a handler asking for
+                // `*Context` gets this one — so it outlives this frame, and
+                // the compiler places it on the heap.
+                const ctx: *mut Context := &mut Context {
                     req: req,
                     params: found.1,
                     sp: self.services.scope(),
-                })
+                }
                 ctx.sp.provide.<Context>(ctx)
                 const r: Route := found.0
                 const next: Next := Next { chain: r.middleware, at: 0, handler: r.handler }

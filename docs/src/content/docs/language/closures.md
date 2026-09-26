@@ -126,17 +126,15 @@ spoken about behind a pointer.
 
 ## `*dyn Func` — closures behind a pointer
 
-To keep closures of *different* types together, put each on the heap and
-hold it as a trait object. `*dyn Func(i32) -> i32` is, like every trait
-object, a data pointer plus a vtable — the vtable's one entry is the
-closure's body. `core/mem`'s `boxed(value)` puts a value whose type has no
-name onto the heap:
+To keep closures of *different* types together, hold each through a trait
+object. `*dyn Func(i32) -> i32` is, like every trait object, a data pointer
+plus a vtable — the vtable's one entry is the closure's body. `&` of the
+closure is the pointer; if it outlives the function, the compiler puts the
+closure on the heap (see [escape and promotion](../memory/#where--points-escape-and-promotion)):
 
 ```nest
-{ boxed } :: import <core/mem>
-
-const a: *dyn Func(i32) -> i32 := boxed({ x in x + n })
-const b: *dyn Func(i32) -> i32 := boxed({ x in x * 3 })
+const a: *dyn Func(i32) -> i32 := &{ x in x + n }
+const b: *dyn Func(i32) -> i32 := &{ x in x * 3 }
 const fs: [2]*dyn Func(i32) -> i32 := .{ a, b }
 fs[1](2)   // 6
 ```
@@ -144,13 +142,11 @@ fs[1](2)   // 6
 Only a closure becomes a `*dyn Func` — a `*func` is already one word and is
 passed as-is; coercing one to `*dyn Func` is refused (there's no data half
 for the vtable's `self` to point at), so wrap it in a closure first:
-`boxed({ x in raw_fn(x) })`.
+`&{ x in raw_fn(x) }`.
 
 ## Full example
 
 ```nest
-{ boxed } :: import <core/mem>
-
 // A parameter written `impl Func(...)` takes a closure or a function
 // pointer, and each closure passed makes its own instantiation.
 apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 {
@@ -200,7 +196,7 @@ main :: func () -> i32 {
     let d := tick()   // 2
 
     // Closures of different types, held as one trait object.
-    const fs: [2]*dyn Func(i32) -> i32 := .{ boxed(make_adder(3)), boxed({ x in x - 1 }) }
+    const fs: [2]*dyn Func(i32) -> i32 := .{ &make_adder(3), &{ x in x - 1 } }
     let e := fs[0](1) + fs[1](1)   // 4 + 0
 
     return a + b + total + c + d + e - 42   // 0

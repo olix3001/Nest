@@ -81,6 +81,7 @@ pub mod entry;
 pub mod escape;
 pub mod lower;
 pub mod pretty;
+pub mod promote;
 pub mod recursion;
 pub mod safepoint;
 pub mod unit;

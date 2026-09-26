@@ -1,0 +1,33 @@
+// promotes.nest — a local or temporary whose address escapes is promoted to the
+// collected heap, and stays alive while anything reaches it: through a returned
+// struct, a `*dyn Func`, and a pointer into an array. Collections run in between,
+// with `NEST_GC_POISON=1` so a read of freed memory is seen. Exits 0 when all
+// reads agree, 1 otherwise.
+
+{ gc_collect } :: import <core/gc>
+
+P :: struct { x: i64, pad: [8]i64 }
+Holder :: struct { p: *P, f: *dyn Func(i64) -> i64, arr: *[4]i64 }
+
+make :: func (n: i64) -> Holder {
+    const local := P { x: n, pad: .{ 1, 2, 3, 4, 5, 6, 7, 8 } }
+    const arr: [4]i64 := .{ n, n, n, n }
+    let h := Holder { p: &local, f: &{ x: i64 in x + n }, arr: &arr }
+    return h
+}
+churn :: func () {
+    let i := 0
+    while i < 2000 {
+        const junk := make(i)
+        i = i + 1
+    }
+}
+main :: func () -> i32 {
+    const h := make(7)
+    churn()
+    gc_collect()
+    churn()
+    gc_collect()
+    if h.p.x != 7 || h.f(0) != 7 || h.arr[3] != 7 || h.p.pad[7] != 8 { return 1 }
+    0
+}

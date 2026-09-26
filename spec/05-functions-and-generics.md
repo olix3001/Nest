@@ -464,17 +464,15 @@ apply({ x in x + n }, 3)      // a closure
 
 A closure is an ordinary value: store it, pass it, call it later.
 
-To keep closures of **different** types together, put each on the heap and
-hold it as a trait object. `*dyn Func(i32) -> i32` is, like every trait object,
-the data pointer and the vtable (§3.4); the vtable's one entry is the closure's
-body. `core/mem`'s `boxed(value)` puts a value whose type has no name on the
-heap:
+To keep closures of **different** types together, hold each through a trait
+object. `*dyn Func(i32) -> i32` is, like every trait object, the data pointer
+and the vtable (§3.4); the vtable's one entry is the closure's body. `&` of the
+closure is the pointer, and a closure whose pointer outlives the call is placed
+on the heap by the compiler (§6.6, escape and promotion):
 
 ```
-{ boxed } :: import <core/mem>
-
-const a: *dyn Func(i32) -> i32 := boxed({ x in x + n })
-const b: *dyn Func(i32) -> i32 := boxed({ x in x * 3 })
+const a: *dyn Func(i32) -> i32 := &{ x in x + n }
+const b: *dyn Func(i32) -> i32 := &{ x in x * 3 }
 const fs: [2]*dyn Func(i32) -> i32 := .{ a, b }
 fs[1](2)                               // 6
 ```

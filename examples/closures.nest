@@ -1,6 +1,5 @@
 // Closures (§5.5): written where a value goes, sharing the locals they name.
 
-{ boxed } :: import <core/mem>
 
 // A parameter written `impl Func(...)` takes a closure or a function pointer,
 // and each closure passed makes its own instantiation.
@@ -51,7 +50,7 @@ main :: func () -> i32 {
     let d := tick()                           // 2
 
     // Closures of different types, held as one trait object.
-    const fs: [2]*dyn Func(i32) -> i32 := .{ boxed(make_adder(3)), boxed({ x in x - 1 }) }
+    const fs: [2]*dyn Func(i32) -> i32 := .{ &make_adder(3), &{ x in x - 1 } }
     let e := fs[0](1) + fs[1](1)              // 4 + 0
 
     return a + b + total + c + d + e - 42     // 0

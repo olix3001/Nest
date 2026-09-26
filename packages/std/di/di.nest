@@ -72,7 +72,7 @@
 collections :: import "../collections/collections.nest"
 { Vec, HashMap } :: import "../collections/collections.nest"
 { TypeId, Member, Kind, type_id, type_info, member_ptr, attr_of } :: import <core/reflect>
-{ new, boxed, transmute, zeroed } :: import <core/mem>
+{ new, transmute, zeroed } :: import <core/mem>
 { Default } :: import <core/default>
 
 /// Marks a member an autowired service gets from the provider: `*T` to read a
@@ -164,25 +164,26 @@ impl Services {
 
     /// `value`, as a singleton that is already built.
     @public add_instance :: func <T> (self: *mut Self, value: T) -> void {
-        const made: *mut T := boxed(value)
-        self.register.<T>(.Singleton, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in
+        let mut kept := value
+        const made: *mut T := &mut kept
+        self.register.<T>(.Singleton, &{ sp: *mut Scope -> Result.<*mut void, Error> in
             .ok(transmute.<*mut void>(made))
-        }))
+        })
     }
 
     /// A singleton `T`, autowired: its `@inject` members from the provider.
     @public add_singleton_auto :: func <T> (self: *mut Self) -> void {
-        self.register.<T>(.Singleton, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in autowire.<T>(sp) }))
+        self.register.<T>(.Singleton, &{ sp: *mut Scope -> Result.<*mut void, Error> in autowire.<T>(sp) })
     }
 
     /// A scoped `T`, autowired.
     @public add_scoped_auto :: func <T> (self: *mut Self) -> void {
-        self.register.<T>(.Scoped, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in autowire.<T>(sp) }))
+        self.register.<T>(.Scoped, &{ sp: *mut Scope -> Result.<*mut void, Error> in autowire.<T>(sp) })
     }
 
     /// A transient `T`, autowired.
     @public add_transient_auto :: func <T> (self: *mut Self) -> void {
-        self.register.<T>(.Transient, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in autowire.<T>(sp) }))
+        self.register.<T>(.Transient, &{ sp: *mut Scope -> Result.<*mut void, Error> in autowire.<T>(sp) })
     }
 
     /// Whether a `T` is registered.
@@ -193,9 +194,10 @@ impl Services {
     /// The root scope, which owns the singletons. The registrations are copied
     /// into it: registering more on `self` afterwards changes nothing it sees.
     @public build :: func (self: *Self) -> *mut Scope {
+        let mut services := self.*
         const root: *mut Scope := new.<Scope>()
         root.* = Scope {
-            services: boxed(self.*),
+            services: &mut services,
             root: root,
             cache: collections.hash_map.new.<usize, *mut void>(),
             provided: collections.hash_map.new.<u128, *mut void>(),
@@ -205,9 +207,10 @@ impl Services {
     }
 
     add :: func <T, F: Func(*mut Scope) -> T> (self: *mut Self, lifetime: Lifetime, make: F) -> void {
-        self.register.<T>(lifetime, boxed({ sp: *mut Scope -> Result.<*mut void, Error> in
-            .ok(transmute.<*mut void>(boxed.<T>(make(sp))))
-        }))
+        self.register.<T>(lifetime, &{ sp: *mut Scope -> Result.<*mut void, Error> in
+            let mut made: T := make(sp)
+            return .ok(transmute.<*mut void>(&mut made))
+        })
     }
 
     // The latest registration of a type wins, as it does in .NET.
@@ -510,7 +513,7 @@ impl <T: Resolve> Resolver for T {
                 message: f"`{type_info.<T>().name}` could not resolve itself",
                 origin: .some(Cause {
                     id: cast.<u128>(type_id.<T.Failure>()),
-                    value: transmute.<*mut void>(boxed(failure)),
+                    value: transmute.<*mut void>(&failure),
                 }),
             }),
         }

@@ -306,6 +306,61 @@ unary =
 Dereference is **not** a prefix operator; it is the postfix `p.*` (§6.3). The
 prefix `*` appears only in type positions (`*T`, `*mut T`).
 
+### Where `&` points: escape and promotion
+
+`&x` may be taken of anything — a local, a parameter, a field of one, an
+element of a local array, or a **temporary** (`&P { x: 1 }`, `&{ x in x + 1 }`,
+`&make(sp)`). A pointer is always valid while it is reachable (§3.2), so what
+`&` points at lives as long as the pointer does:
+
+- When the address **does not escape** the function, the operand stays in the
+  frame, and `&x` is the address of its slot. This is the common case —
+  `v.push(1)`, `bump(&mut n)`, `const p := &pt; p.x` — and costs nothing.
+- When it **escapes**, the operand is **promoted**: the compiler places it in
+  an object the collector owns, initialized with the operand's value, and `&x`
+  is that object's address. Every later use of a promoted local reads and
+  writes the object, so the frame and the pointer see the same value.
+
+An address escapes when it, or a pointer derived from it, can be reached once
+the function has returned. *Derived* means `&x.field`, `&arr[i]`, a sub-slice,
+a `cast`/`transmute` of it, a `*dyn` made from it, a call's result that hands
+its argument back, and any **value holding one** — a struct, tuple or enum
+value built with it, a closure copying it, a field read out of such a value,
+`&` of such a value, and a local any of these is bound or assigned to. It
+escapes when such a value is:
+
+1. **returned** from the function (or given to `break`);
+2. **stored through a pointer** — into memory that is not one of the
+   function's own locals;
+3. **passed to a call that keeps it**: a callee keeps an argument when, in its
+   own body, that parameter escapes by these same rules. A call through a
+   `*dyn`, a function pointer, or to a function with no body in the
+   compilation keeps everything it is given. A callee that only *returns* a
+   parameter does not keep it — the call's result is derived instead.
+
+```
+Holder :: struct { p: *P }
+
+stays :: func () -> i32 {
+    const h := Holder { p: &P { x: 1 } }   // stays in the frame: h does not escape
+    return h.p.x
+}
+goes :: func () -> Holder {
+    return Holder { p: &P { x: 2 } }       // promoted: returned inside a Holder
+}
+handler :: func () -> *dyn Func(i32) -> i32 {
+    const n := 10
+    return &{ x in x + n }                 // promoted: the closure outlives the call
+}
+```
+
+The analysis is **flow-insensitive**: a local that holds a derived pointer on
+one path is taken to hold it on all of them, and an address that escapes on one
+path is promoted on every path. It may therefore promote something that could
+have stayed — which costs an allocation — and never the reverse. A promoted
+object is an ordinary collected object: it is traced from wherever a pointer to
+it is live, and freed once none is.
+
 ## 6.7 Binary operators and precedence
 
 Highest to lowest; same-row operators associate left-to-right unless noted.

@@ -295,7 +295,7 @@ fn expr_exits(e: &Expr) -> bool {
 }
 
 /// Every block directly inside `e`.
-fn each_block(e: &Expr, f: &mut impl FnMut(&Block)) {
+pub(super) fn each_block(e: &Expr, f: &mut impl FnMut(&Block)) {
     match &e.kind {
         ExprKind::Block(b) | ExprKind::Loop { body: b } => f(b),
         ExprKind::If { then, els, .. } => {
@@ -309,7 +309,7 @@ fn each_block(e: &Expr, f: &mut impl FnMut(&Block)) {
 }
 
 /// Every expression directly inside `e`, blocks excluded.
-fn each_child(e: &Expr, f: &mut impl FnMut(&Expr)) {
+pub(super) fn each_child(e: &Expr, f: &mut impl FnMut(&Expr)) {
     match &e.kind {
         ExprKind::Lit(_)
         | ExprKind::Local(_)

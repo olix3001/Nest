@@ -1614,6 +1614,21 @@ fn nothing_is_freed_while_something_still_reaches_it() {
     );
 }
 
+/// What promotion put on the heap is traced from every pointer that reaches
+/// it, so collections in between leave it intact (§6.6).
+#[test]
+fn a_promoted_value_survives_collection() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let out = run_on_host_in(
+        include_str!("../../testdata/gc/promotes.nest"),
+        &[],
+        &[("NEST_GC_POISON", "1")],
+    );
+    assert_eq!(out.status.code(), Some(0), "a promoted value was freed: {out:?}");
+}
+
 /// A leaked object outlives everything that reached it, until it is dropped,
 /// and dropping some leaked objects keeps the rest.
 #[test]
@@ -3069,12 +3084,11 @@ fn a_function_returns_a_closure_as_impl_func() {
 /// generic `impl Func` parameter.
 #[test]
 fn a_closure_is_stored_as_a_dyn_func() {
-    let src = "{ boxed } :: import <core/mem>\n\
-               apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }\n\
+    let src = "apply :: func (f: impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }\n\
                main :: func () -> i32 {\n\
                    let n := 10\n\
-                   const a: *dyn Func(i32) -> i32 := boxed({ x in x + n })\n\
-                   const b: *dyn Func(i32) -> i32 := boxed({ x in x * 3 })\n\
+                   const a: *dyn Func(i32) -> i32 := &{ x in x + n }\n\
+                   const b: *dyn Func(i32) -> i32 := &{ x in x * 3 }\n\
                    const fs: [2]*dyn Func(i32) -> i32 := .{ a, b }\n\
                    return fs[0](1) + fs[1](2) + apply(a, 5)\n\
                }\n";
@@ -3088,15 +3102,14 @@ fn a_closure_is_stored_as_a_dyn_func() {
 /// a tuple written in place and one held in a local.
 #[test]
 fn func_call_takes_the_arguments_as_a_tuple() {
-    let src = "{ boxed } :: import <core/mem>\n\
-               apply :: func <F: Func(i32, i32) -> i32> (f: F, args: (i32, i32)) -> i32 { return f.call(args) }\n\
+    let src = "apply :: func <F: Func(i32, i32) -> i32> (f: F, args: (i32, i32)) -> i32 { return f.call(args) }\n\
                twice :: func (x: i32) -> i32 { return x * 2 }\n\
                main :: func () -> i32 {\n\
                    let n := 1\n\
                    const add := { a: i32, b: i32 -> i32 in a + b + n }\n\
                    const t: (i32, i32) := (2, 3)\n\
                    const p: *func(i32) -> i32 := twice\n\
-                   const d: *dyn Func(i32) -> i32 := boxed({ x in x + 100 })\n\
+                   const d: *dyn Func(i32) -> i32 := &{ x in x + 100 }\n\
                    const unit := { in 7 }\n\
                    const r := &add\n\
                    return add.call((1, 1)) + add.call(t) + apply(add, (4, 4)) + p.call((5,)) + d.call((1,)) + unit.call(()) + r.call((0, 0))\n\
@@ -3161,11 +3174,10 @@ fn a_more_specific_impl_wins_in_generic_code() {
 /// through whichever signature was laid out first.
 #[test]
 fn dyn_funcs_of_different_signatures_do_not_share_a_vtable() {
-    let src = "{ boxed } :: import <core/mem>\n\
-               Big :: struct { a: i64, b: i64, c: i64 }\n\
+    let src = "Big :: struct { a: i64, b: i64, c: i64 }\n\
                main :: func () -> i32 {\n\
-                   const f: *dyn Func(i64) -> Big := boxed({ x: i64 -> Big in Big { a: x, b: 2, c: 3 } })\n\
-                   const g: *dyn Func(i32, i32) -> i32 := boxed({ x: i32, y: i32 -> i32 in x * y })\n\
+                   const f: *dyn Func(i64) -> Big := &{ x: i64 -> Big in Big { a: x, b: 2, c: 3 } }\n\
+                   const g: *dyn Func(i32, i32) -> i32 := &{ x: i32, y: i32 -> i32 in x * y }\n\
                    const r := f(1)\n\
                    return cast.<i32>(r.a + r.b + r.c) + g(4, 5)\n\
                }\n";
@@ -3194,10 +3206,9 @@ fn unpinned_func_args_forward_through_generics() {
 /// like any closure is.
 #[test]
 fn an_impl_func_return_is_stored_as_a_dyn_func() {
-    let src = "{ boxed } :: import <core/mem>\n\
-               make_adder :: func (n: i32) -> impl Func(i32) -> i32 { return { x in x + n } }\n\
+    let src = "make_adder :: func (n: i32) -> impl Func(i32) -> i32 { return { x in x + n } }\n\
                main :: func () -> i32 {\n\
-                   const f: *dyn Func(i32) -> i32 := boxed(make_adder(3))\n\
+                   const f: *dyn Func(i32) -> i32 := &make_adder(3)\n\
                    return f(4)\n\
                }\n";
     if let Some(code) = run_status(src) {

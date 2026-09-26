@@ -31,8 +31,6 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 </div>
 
 ```nest title="adder.nest"
-{ boxed } :: import <core/mem>
-
 // A closure returned as `impl Func`: the caller knows it only by its bound.
 make_adder :: func (n: i32) -> impl Func(i32) -> i32 {
     return { x in x + n }
