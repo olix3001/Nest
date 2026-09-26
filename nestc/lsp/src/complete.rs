@@ -420,7 +420,7 @@ impl Cx<'_> {
         // values rather than names.
         let fields: Vec<DefId> = members(self.s, def)
             .into_iter()
-            .filter(|&m| self.s.defs.get(m).kind == DefKind::Field)
+            .filter(|&m| self.s.defs.get(m).kind == DefKind::Field && self.field_visible(m))
             .collect();
         if fields.is_empty() {
             return None;
@@ -568,7 +568,14 @@ impl Cx<'_> {
                         .filter(|&&m| s.defs.get(m).using)
                         .filter_map(|&m| decls.field_ty(m)),
                 );
-                found.extend(fields.into_iter().map(|m| (m, None)));
+                // A private field still lends through `@using`, but is only
+                // offered where the compiler lets it be named.
+                found.extend(
+                    fields
+                        .into_iter()
+                        .filter(|&m| self.field_visible(m))
+                        .map(|m| (m, None)),
+                );
                 // A generic parameter has what its bounds declare.
                 if s.defs.get(*def).kind == DefKind::TypeParam {
                     for t in bounds(s, *def) {
@@ -640,6 +647,49 @@ impl Cx<'_> {
             out.push(it);
         }
         out
+    }
+
+    /// Whether the field `field` may be named at the cursor — the compiler's
+    /// rule (§4.4, `check_field_visible`): exported far enough to reach this
+    /// package, or written inside the namespace that declares its struct.
+    fn field_visible(&self, field: DefId) -> bool {
+        let s = self.s;
+        let d = s.defs.get(field);
+        let home = d.file.and_then(|f| s.pkg_of.get(&f)).map(String::as_str);
+        let at = s.pkg_of.get(&self.file).map(String::as_str);
+        if d.vis.reaches(home, at) {
+            return true;
+        }
+        let Some(owner) = d.parent else {
+            return true;
+        };
+        let home = s.defs.get(owner).parent.unwrap_or(owner);
+        let mut at = self.here();
+        while let Some(d) = at {
+            if d == home || d == owner {
+                return true;
+            }
+            at = s.defs.get(d).parent;
+        }
+        false
+    }
+
+    /// The innermost function of this file around the cursor, else the file's
+    /// namespace: where privacy is judged from, as inference does.
+    fn here(&self) -> Option<DefId> {
+        let s = self.s;
+        let ast = self.ast;
+        s.defs
+            .iter()
+            .filter(|d| d.kind == DefKind::Func && d.file == Some(self.file))
+            .filter_map(|d| {
+                let span = ast.node(d.node?).span;
+                (span.start <= self.offset && self.offset <= span.end)
+                    .then_some((span.end - span.start, d.id))
+            })
+            .min()
+            .map(|(_, id)| id)
+            .or_else(|| s.files.get(&self.file).map(|meta| meta.ns))
     }
 
     /// `ty` with a literal's type made the type it would become.

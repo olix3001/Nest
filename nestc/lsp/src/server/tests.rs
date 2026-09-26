@@ -544,6 +544,38 @@ main :: func () {
     }
 }
 
+/// A private field is offered only where the compiler lets it be named (§4.4):
+/// inside the namespace that declares its struct, not outside it.
+#[test]
+fn completion_offers_a_private_field_only_where_it_is_visible() {
+    let (_dir, file, mut client) = program();
+    let text = "\
+geo :: namespace {
+    @public
+    Point :: struct { secret: i32, @public x: i32 }
+    @public
+    make :: func () -> Point {
+        const p := Point { secret: 1, x: 2 }
+        const n := p.
+        return p
+    }
+}
+
+main :: func () {
+    const p := geo.make()
+    const n := p.
+}
+";
+    client.change(&file, text);
+    let inside = labels(&client.at(Completion::METHOD, &file, position(text, "p.\n", 0, 2)));
+    for want in ["secret", "x"] {
+        assert!(inside.contains(&want.to_string()), "{want} in {inside:?}");
+    }
+    let outside = labels(&client.at(Completion::METHOD, &file, position(text, "p.\n", 1, 2)));
+    assert!(outside.contains(&"x".to_string()), "{outside:?}");
+    assert!(!outside.contains(&"secret".to_string()), "{outside:?}");
+}
+
 /// Choosing a function writes the call it is: an editor that understands
 /// snippets gets the parentheses with the cursor between them, and one that does
 /// not gets them only when there is nothing to type there.
