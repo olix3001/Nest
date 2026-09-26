@@ -230,6 +230,7 @@ foo :: import <std/io>                             // bind the whole namespace a
 { CatImage, CatId, HttpPort } :: import "models.nest"        // selective
 { http: { Client, Router, Response } } :: import "network.nest" // nested selective
 { http: * } :: import <std>                        // pull member `http`, glob ITS members in
+{ self, Json } :: import <std/http>                // bind `http` itself AND its member `Json`
 ```
 
 - `name :: import …` binds the whole namespace to `name`.
@@ -240,6 +241,13 @@ foo :: import <std/io>                             // bind the whole namespace a
   [07-patterns-and-matching.md](07-patterns-and-matching.md)).
 - `*` may also appear **inside** a destructuring field, `{ member: * }`, to select
   a sub-namespace and glob *its* members into scope in one step.
+- `self` inside a destructuring binds the namespace being destructured beside
+  the members picked: under the name the import wrote — a package path's last
+  segment (`http` for `<std/http>`), the field's name inside a nested pattern
+  (`{ net: { self, TcpStream } }` binds `net`), a file's name without `.nest`
+  — or under the one given, `{ self: h }`. A file name that is not a name
+  (`my-routes.nest`) needs the `self: name` form. `self` binds a name only; it
+  takes no nested pattern.
 - Prefix any of these with `@public` to additionally re-export what it brings in.
 - `import` only ever grants access to `@public` items of the target; private
   items are invisible.

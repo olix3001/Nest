@@ -66,6 +66,10 @@ pub enum ImportTarget {
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
     pub pattern: NodeId,
+    /// The name the target was written under — `http` in `<std/http>` — which
+    /// a `{ self }` binds when the pattern names no other. `None` for a file,
+    /// whose namespace is named after it already.
+    pub written: Option<Symbol>,
     pub bind: NodeId,
     pub scope: DefId,
     pub reexport: bool,
@@ -135,6 +139,7 @@ pub fn wire(session: &mut Session, file: crate::common::source::FileId) {
             defs,
             ast,
             imp.pattern,
+            imp.written.clone(),
             imp.scope,
             base,
             imp.reexport,
@@ -166,6 +171,7 @@ fn bind_pattern(
     defs: &mut DefTable,
     ast: &Ast,
     pattern: NodeId,
+    written: Option<Symbol>,
     scope: DefId,
     base: Option<DefId>,
     reexport: bool,
@@ -193,10 +199,22 @@ fn bind_pattern(
                 }
             }
         }
-        // `{ a, b: pat, c: * } :: import ...` — selective destructuring.
+        // `{ a, b: pat, c: * } :: import ...` — selective destructuring, where
+        // `self` names the namespace itself (see `bind_self`).
         NodeKind::StructPat { fields, .. } => {
             for field in fields {
-                bind_field(defs, ast, field, scope, base, reexport, file, missing, at);
+                bind_field(
+                    defs,
+                    ast,
+                    field,
+                    written.clone(),
+                    scope,
+                    base,
+                    reexport,
+                    file,
+                    missing,
+                    at,
+                );
             }
         }
         // Anything else in import position is meaningless; ignore (collection
@@ -211,6 +229,7 @@ fn bind_field(
     defs: &mut DefTable,
     ast: &Ast,
     field: NodeId,
+    written: Option<Symbol>,
     scope: DefId,
     base: Option<DefId>,
     reexport: bool,
@@ -221,6 +240,12 @@ fn bind_field(
     let NodeKind::FieldPat { name, pattern, .. } = ast.node(field).kind.clone() else {
         return;
     };
+    if name.as_str() == "self" {
+        bind_self(
+            defs, ast, field, pattern, written, scope, base, reexport, file, missing,
+        );
+        return;
+    }
     // Look the member up in the target namespace.
     let member = base.and_then(|b| lookup_visible(defs, b, &name, at));
     // A name the namespace does not publish is an error **here**, where it is
@@ -278,11 +303,80 @@ fn bind_field(
         Some(NodeKind::StructPat { .. }) => {
             let sub = member.map(|m| defs.resolve_alias(m));
             if let Some(p) = pattern {
-                bind_pattern(defs, ast, p, scope, sub, reexport, file, missing, at);
+                bind_pattern(
+                    defs,
+                    ast,
+                    p,
+                    Some(name.clone()),
+                    scope,
+                    sub,
+                    reexport,
+                    file,
+                    missing,
+                    at,
+                );
             }
         }
         _ => {}
     }
+}
+
+/// `{ self, … }`: the namespace being destructured, bound beside its members —
+/// under its own name (`{ self, Json } :: import <std/http>` binds `http`, a
+/// file's namespace is named after the file), or under the one written
+/// (`{ self: h }`). Inside a nested pattern it is that member's namespace:
+/// `{ net: { self, TcpStream } } :: import <std>` binds `net`.
+#[allow(clippy::too_many_arguments)]
+fn bind_self(
+    defs: &mut DefTable,
+    ast: &Ast,
+    field: NodeId,
+    pattern: Option<NodeId>,
+    written: Option<Symbol>,
+    scope: DefId,
+    base: Option<DefId>,
+    reexport: bool,
+    file: crate::common::source::FileId,
+    missing: &mut Vec<(NodeId, String)>,
+) {
+    let base = base.map(|b| defs.resolve_alias(b));
+    let name = match pattern.map(|p| ast.node(p).kind.clone()) {
+        Some(NodeKind::BindingPat { name, .. }) => name,
+        Some(_) => {
+            missing.push((
+                field,
+                "`self` names the namespace itself: bind it to a name (`self: n`), \
+                 not a pattern"
+                    .to_string(),
+            ));
+            return;
+        }
+        // An unloaded import was already reported; there is no name to take.
+        None => match (written, base) {
+            (Some(n), _) => n,
+            (None, Some(b)) => defs.get(b).name.clone(),
+            (None, None) => return,
+        },
+    };
+    if !is_identifier(name.as_str()) {
+        missing.push((
+            field,
+            format!("`{name}` is not a name `self` can be bound under; write `self: name`"),
+        ));
+        return;
+    }
+    let alias = alias_def(defs, name.clone(), base, scope, file, reexport);
+    insert(defs, scope, name, alias, reexport);
+}
+
+/// Whether `s` could be written as a name: what a file's namespace is called
+/// comes from its file name, which need not be one (`my-routes.nest`).
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_alphabetic())
+        && chars.all(|c| c == '_' || c.is_alphanumeric())
 }
 
 /// Create the [`DefKind::Import`] alias def for a whole-namespace binding,

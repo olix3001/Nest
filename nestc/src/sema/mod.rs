@@ -785,8 +785,13 @@ fn collect_reachable(session: &mut Session, mut queue: Vec<FileId>) {
                 }
                 queue.push(f);
             }
+            let written = match &raw.target {
+                RawTarget::Package(path) => path.last().cloned(),
+                RawTarget::File(_) => None,
+            };
             decls.push(ImportDecl {
                 pattern: raw.pattern,
+                written,
                 bind: raw.bind,
                 scope: raw.scope,
                 reexport: raw.reexport,

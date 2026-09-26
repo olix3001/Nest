@@ -153,7 +153,12 @@ foo :: import <std/io>                                       // bind the whole n
 { CatImage, CatId, HttpPort } :: import "models.nest"          // selective
 { http: { Client, Router } }  :: import "network.nest"         // nested selective
 { http: * } :: import <std>                                    // pull member, glob its members
+{ self, Json } :: import <std/http>                            // `http` itself, and `Json`
 ```
+
+`self` in a destructuring binds the namespace itself next to the members it
+picks — under its own name (`http` above; a file's name without `.nest`), or
+under another with `{ self: h, Json }`.
 
 `import` only ever grants access to `@public` items of the target; private
 items are invisible.

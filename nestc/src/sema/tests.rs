@@ -171,6 +171,34 @@ main :: func () { foo() }
     ));
 }
 
+/// `self` in an import's destructuring binds the namespace itself beside the
+/// members it picks: under the name the import wrote (a package path's last
+/// segment, a nested field's name, a file's stem), or under the one given.
+#[test]
+fn self_in_an_import_binds_the_namespace() {
+    let lib = "@public twice :: func (n: i32) -> i32 { return n * 2 }\n\
+               @public inner :: namespace { @public one :: func () -> i32 { return 1 } }\n";
+    let main = "{ self, twice } :: import \"lib.nest\"\n\
+                { self: l } :: import \"lib.nest\"\n\
+                { inner: { self, one } } :: import \"lib.nest\"\n\
+                { inner: { self: i } } :: import \"lib.nest\"\n\
+                main :: func () -> i32 {\n\
+                    { self: local } :: import \"lib.nest\"\n\
+                    return lib.twice(1) + l.twice(1) + twice(1) + inner.one() + one() + i.one()\n\
+                        + local.twice(1)\n\
+                }\n";
+    let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+
+    let main = "{ self: { twice } } :: import \"lib.nest\"\nmain :: func () {}\n";
+    let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
+    let msgs: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        msgs.iter().any(|m| m.starts_with("`self` names the namespace itself")),
+        "{msgs:#?}"
+    );
+}
+
 #[test]
 fn glob_import_brings_members_into_scope() {
     let lib = "@public foo :: func () {}\n";
