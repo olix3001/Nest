@@ -10643,3 +10643,35 @@ fn a_spread_is_only_of_a_tuple_and_only_in_one() {
         messages("f :: func (x: (i32, ..(u8, bool))) -> (i32, u8, bool) { return x }\n").is_empty()
     );
 }
+
+/// An impl's body sees its type's namespace, but a field in it is only ever
+/// named through a value: a function around the impl with a field's name is
+/// still that function, in an inherent impl and a trait impl alike.
+#[test]
+fn a_field_does_not_hide_a_function_in_its_impl() {
+    analyze_clean(
+        "\
+Show :: trait { show :: func (self: Self) -> i32 }
+status :: func (a: i32, b: i32) -> i32 { return a + b }
+R :: struct { status: i32, message: i32 }
+impl Show for R {
+    show :: func (self: R) -> i32 { return status(self.status, self.message) }
+}
+impl R {
+    plain :: func (self: R) -> i32 { return status(self.status, 1) }
+}
+",
+    );
+    // With nothing else of the name, a bare field is unresolved — and the
+    // note says how a field is reached.
+    let session = analyze_mem(
+        &[(
+            "main",
+            "R :: struct { n: i32 }\nimpl R { get :: func (self: R) -> i32 { return n } }\n",
+        )],
+        "main",
+    );
+    let d = session.diagnostics.first().expect("a diagnostic");
+    assert!(d.message.contains("cannot resolve name `n`"), "{}", d.message);
+    assert!(d.notes.iter().any(|n| n.contains("self.n")), "{:?}", d.notes);
+}

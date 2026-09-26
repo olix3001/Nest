@@ -674,8 +674,29 @@ impl Resolver<'_> {
                 .map(Symbol::as_str)
                 .collect::<Vec<_>>()
                 .join(".");
-            self.report(id, format!("cannot resolve name `{dotted}`"));
+            let span = self.ast.node(id).span;
+            let mut diag = Diagnostic::error(format!("cannot resolve name `{dotted}`"))
+                .with_primary(FileSpan::new(self.file, span), "");
+            // Inside an impl, a bare field name is the likely slip.
+            if segments.len() == 1 && self.field_in_scope(&segments[0]) {
+                diag = diag.with_note(format!(
+                    "a field is named through a value: `self.{dotted}`"
+                ));
+            }
+            self.diags.push(diag);
         }
+    }
+
+    /// Whether a type whose namespace an enclosing `impl` pushed has a field
+    /// called `name`.
+    fn field_in_scope(&self, name: &Symbol) -> bool {
+        self.ns_stack.iter().any(|&n| {
+            self.defs
+                .get(n)
+                .ns
+                .get_direct(name)
+                .is_some_and(|d| self.defs.get(d).kind == DefKind::Field)
+        })
     }
 
     fn resolve_root(&mut self, _id: NodeId, name: &Symbol) -> Resolution {
@@ -927,7 +948,12 @@ impl Resolver<'_> {
                     break;
                 }
                 seen.push(n);
-                if let Some(d) = self.defs.get(n).ns.get_direct(name) {
+                // A field is only ever named through a value (`self.status`),
+                // so an impl pushing its type's namespace must not let one hide
+                // a function of the same name around it.
+                if let Some(d) = self.defs.get(n).ns.get_direct(name)
+                    && self.defs.get(d).kind != DefKind::Field
+                {
                     return Some(Resolution::Def(self.defs.resolve_alias(d)));
                 }
                 for &g in &self.defs.get(n).ns.globs {
