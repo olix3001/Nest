@@ -10391,8 +10391,14 @@ fn a_local_item_cannot_use_the_function_around_it() {
          }\n",
     );
     assert_eq!(msgs.len(), 2, "{msgs:#?}");
-    assert!(msgs[0].contains("`T` is a generic parameter of the function around"), "{msgs:#?}");
-    assert!(msgs[1].contains("`self` belongs to the function around"), "{msgs:#?}");
+    assert!(
+        msgs[0].contains("`T` is a generic parameter of the function around"),
+        "{msgs:#?}"
+    );
+    assert!(
+        msgs[1].contains("`self` belongs to the function around"),
+        "{msgs:#?}"
+    );
 }
 
 /// A `[n]` copy is read-only, and says so rather than naming the pointer the

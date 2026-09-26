@@ -21,9 +21,9 @@ use crate::common::source::FileSpan;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, ImportPath, NodeId, NodeKind, StructKind};
 
-use super::{BlockNs, DefMeta};
 use super::def::{DefId, DefKind, DefTable, Directive, DirectiveArg, LangItems, Visibility};
 use super::imports::{RawImport, RawTarget};
+use super::{BlockNs, DefMeta};
 
 /// Collect every namespace-level definition of `file` into `file_ns`, returning
 /// the file's (unloaded) import bindings.

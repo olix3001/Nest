@@ -524,7 +524,11 @@ impl DefTable {
     /// `Point`s apart, and mean nothing to the program, so `main.Point`.
     pub fn display_string(&self, id: DefId) -> String {
         let def = self.get(id);
-        match def.canonical.iter().any(|s| s.as_str().starts_with("{block#")) {
+        match def
+            .canonical
+            .iter()
+            .any(|s| s.as_str().starts_with("{block#"))
+        {
             true => def
                 .canonical
                 .iter()
