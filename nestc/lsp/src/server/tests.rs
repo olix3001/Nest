@@ -905,21 +905,54 @@ fn completion_imports_into_an_import_the_file_has() {
         item["additionalTextEdits"][0].clone()
     };
 
-    let e = edit_for(&mut client, "{ Vec } :: import <std/collections>\n", "HashM", "HashMap");
+    let e = edit_for(
+        &mut client,
+        "{ Vec } :: import <std/collections>\n",
+        "HashM",
+        "HashMap",
+    );
     assert_eq!(e["newText"], ", HashMap", "{e}");
-    assert_eq!(e["range"]["start"], serde_json::json!({"line": 0, "character": 5}), "{e}");
+    assert_eq!(
+        e["range"]["start"],
+        serde_json::json!({"line": 0, "character": 5}),
+        "{e}"
+    );
 
-    let e = edit_for(&mut client, "collections :: import <std/collections>\n", "HashM", "HashMap");
+    let e = edit_for(
+        &mut client,
+        "collections :: import <std/collections>\n",
+        "HashM",
+        "HashMap",
+    );
     assert_eq!(e["newText"], "{ self, HashMap }", "{e}");
-    assert_eq!(e["range"]["end"], serde_json::json!({"line": 0, "character": 11}), "{e}");
+    assert_eq!(
+        e["range"]["end"],
+        serde_json::json!({"line": 0, "character": 11}),
+        "{e}"
+    );
 
-    let e = edit_for(&mut client, "c :: import <std/collections>\n", "HashM", "HashMap");
+    let e = edit_for(
+        &mut client,
+        "c :: import <std/collections>\n",
+        "HashM",
+        "HashMap",
+    );
     assert_eq!(e["newText"], "{ self: c, HashMap }", "{e}");
 
-    let e = edit_for(&mut client, "{ io } :: import <std>\n", "collecti", "collections");
+    let e = edit_for(
+        &mut client,
+        "{ io } :: import <std>\n",
+        "collecti",
+        "collections",
+    );
     assert_eq!(e["newText"], ", collections", "{e}");
 
-    let e = edit_for(&mut client, "{ HashMap } :: import <std/collections>\n", "collecti", "collections");
+    let e = edit_for(
+        &mut client,
+        "{ HashMap } :: import <std/collections>\n",
+        "collecti",
+        "collections",
+    );
     assert_eq!(e["newText"], ", self", "{e}");
 
     // Only in a body: a line of the file's own, at its top.
@@ -938,7 +971,10 @@ fn completion_imports_into_an_import_the_file_has() {
         .expect("`HashMap` is offered")
         .clone();
     let e = &item["additionalTextEdits"][0];
-    assert_eq!(e["newText"], "{ HashMap } :: import <std/collections>\n", "{e}");
+    assert_eq!(
+        e["newText"], "{ HashMap } :: import <std/collections>\n",
+        "{e}"
+    );
     assert!(e["range"]["start"]["line"].as_u64().unwrap() < 2, "{e}");
 }
 

@@ -373,9 +373,7 @@ fn bind_self(
 /// comes from its file name, which need not be one (`my-routes.nest`).
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();
-    chars
-        .next()
-        .is_some_and(|c| c == '_' || c.is_alphabetic())
+    chars.next().is_some_and(|c| c == '_' || c.is_alphabetic())
         && chars.all(|c| c == '_' || c.is_alphanumeric())
 }
 

@@ -636,10 +636,7 @@ impl Cx<'_> {
                 .filter(|t| !self.visible.contains(t))
                 .and_then(|t| {
                     let (via, name) = importable.get(&t)?;
-                    Some((
-                        self.import(via, name, false),
-                        via.describe() + "." + name,
-                    ))
+                    Some((self.import(via, name, false), via.describe() + "." + name))
                 });
             let mut it = item(s, m, self.snippets);
             if let Some((edit, from)) = import {
@@ -842,8 +839,7 @@ impl Cx<'_> {
                 let namespace = s.defs.get(def).kind == DefKind::Namespace;
                 let mut it = item(s, def, self.snippets);
                 it.label = name.clone();
-                it.additional_text_edits =
-                    Some(vec![self.import(&via, &name, namespace)]);
+                it.additional_text_edits = Some(vec![self.import(&via, &name, namespace)]);
                 it.label_details = Some(CompletionItemLabelDetails {
                     detail: None,
                     description: Some(via.describe()),
@@ -1042,11 +1038,7 @@ impl Cx<'_> {
     }
 
     fn import_edit(&self, line: &str) -> TextEdit {
-        let last = self
-            .file_imports()
-            .into_iter()
-            .map(|(_, _, end)| end)
-            .max();
+        let last = self.file_imports().into_iter().map(|(_, _, end)| end).max();
         // Offsets into the analyzed text, which is not quite the editor's.
         let analyzed = ide::source(self.s, self.file).unwrap_or_default();
         let at = match last {

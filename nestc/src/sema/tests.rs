@@ -192,9 +192,14 @@ fn self_in_an_import_binds_the_namespace() {
 
     let main = "{ self: { twice } } :: import \"lib.nest\"\nmain :: func () {}\n";
     let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
-    let msgs: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    let msgs: Vec<&str> = session
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
     assert!(
-        msgs.iter().any(|m| m.starts_with("`self` names the namespace itself")),
+        msgs.iter()
+            .any(|m| m.starts_with("`self` names the namespace itself")),
         "{msgs:#?}"
     );
 }
