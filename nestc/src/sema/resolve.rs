@@ -388,15 +388,25 @@ impl Resolver<'_> {
                 // The block's local items are in scope for the whole block —
                 // before their declarations too, so two may name each other —
                 // and nowhere outside it.
+                //
+                // What a local `import` brought in is the block's too: a glob's
+                // public members first, so a name the block binds itself — by
+                // import or by declaration — hides one a glob supplies, as it
+                // does in a file.
                 if let Some(BlockNs(ns)) = self.ast.meta::<BlockNs>(id) {
-                    let items: Vec<(Symbol, DefId)> = self
-                        .defs
-                        .get(ns)
-                        .ns
-                        .members
-                        .iter()
-                        .map(|(n, &d)| (n.clone(), d))
-                        .collect();
+                    let block = &self.defs.get(ns).ns;
+                    let mut items: Vec<(Symbol, DefId)> = Vec::new();
+                    for &g in &block.globs {
+                        let g = self.defs.resolve_alias(g);
+                        for n in self.defs.get(g).ns.members.keys() {
+                            if let Some(d) = self.public_member(g, n) {
+                                items.push((n.clone(), d));
+                            }
+                        }
+                    }
+                    for (n, &d) in block.imported.iter().chain(&block.members) {
+                        items.push((n.clone(), self.defs.resolve_alias(d)));
+                    }
                     if let Some(frame) = self.scopes.last_mut() {
                         frame.extend(items);
                     }
@@ -437,6 +447,11 @@ impl Resolver<'_> {
             // this the pattern reached the generic child walk and was resolved
             // as if it were a use of the name it declares, which reported
             // `cannot resolve name` on the declaration itself.
+            // A local `import` was wired into its block's namespace before
+            // resolution; its pattern names what it brings in, not locals.
+            NodeKind::ConstBind { rhs, .. }
+                if !self.item_floors.is_empty()
+                    && matches!(self.ast.node(rhs).kind, NodeKind::Import { .. }) => {}
             NodeKind::ConstBind { pattern, rhs } => {
                 let owner = matches!(self.ast.node(rhs).kind, NodeKind::FuncExpr { .. })
                     .then(|| self.owner_path(id, pattern));

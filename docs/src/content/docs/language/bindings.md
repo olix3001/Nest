@@ -34,7 +34,7 @@ local type or local constant), and at namespace scope they're
 **order-independent** — mutually recursive types and functions are fine.
 
 Inside a function body, `::` declares a **local item** — a constant, type,
-trait or function — and an `impl` may sit among the statements too. A local
+trait, function or `import` — and an `impl` may sit among the statements too. A local
 item belongs to its block: it's visible anywhere in that block and nowhere
 outside it. It is a definition, not a closure, so it can't use the enclosing
 function's locals, parameters or generics.

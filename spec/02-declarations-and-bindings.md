@@ -35,8 +35,10 @@ function body (a local type or local constant).
 ### Local items
 
 A `::` binding inside a function body — a constant, a type, a trait, a
-function — and an `impl` written among a block's statements are **local
-items**. A local item is scoped to its block: it is visible throughout the
+function, an `import` — and an `impl` written among a block's statements are
+**local items**. A local `import` takes every pattern form a file's does
+(`io :: import <std/io>`, `{ a, b: c } :: import …`, `* :: import …`), and
+binds what it brings in for the block alone. A local item is scoped to its block: it is visible throughout the
 block (before its declaration too, so two local functions may call each
 other) and nowhere else — not after the block, and not through the enclosing
 function's name (`main.Point` does not resolve). An inner block may declare an

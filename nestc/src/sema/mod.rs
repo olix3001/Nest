@@ -110,7 +110,12 @@ pub fn is_local_item(ast: &Ast, stmt: NodeId) -> bool {
     let item = ast.decl_item(stmt);
     match &ast.node(item).kind {
         NodeKind::ImplBlock { .. } => true,
-        NodeKind::ConstBind { .. } => ast.meta::<DefMeta>(item).is_some(),
+        // An `import` is wired before any body is walked, whatever its pattern
+        // (a destructuring one leaves no def on the binding).
+        NodeKind::ConstBind { rhs, .. } => {
+            matches!(ast.node(*rhs).kind, NodeKind::Import { .. })
+                || ast.meta::<DefMeta>(item).is_some()
+        }
         _ => false,
     }
 }

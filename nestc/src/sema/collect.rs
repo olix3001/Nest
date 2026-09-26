@@ -364,10 +364,10 @@ impl Collector<'_> {
     /// [`Collector::collect_body`]): an `impl`, or a `::` binding — a local
     /// constant as much as a local type, since a `::` is a compile-time value
     /// wherever it is written (§2.1), and `Id :: i32` cannot be told from
-    /// `MAX :: 40` before resolution. Not an `import`, which has no stage that
-    /// looks inside bodies, and not a `#static` or `#comptime` binding: those
-    /// name a region and an unrolled loop's variable, which the resolver binds
-    /// in order.
+    /// `MAX :: 40` before resolution — an `import` among them, whose names wire
+    /// into the block's namespace as another file's would into the file's. Not
+    /// a `#static` or `#comptime` binding: those name a region and an unrolled
+    /// loop's variable, which the resolver binds in order.
     fn is_item_stmt(&self, stmt: NodeId) -> bool {
         if let NodeKind::Decl { directives, .. } = &self.ast.node(stmt).kind
             && self
@@ -380,8 +380,8 @@ impl Collector<'_> {
         match &self.ast.node(self.ast.decl_item(stmt)).kind {
             NodeKind::ImplBlock { .. } => true,
             NodeKind::ConstBind { pattern, rhs } => {
-                matches!(self.ast.node(*pattern).kind, NodeKind::BindingPat { .. })
-                    && !matches!(self.ast.node(*rhs).kind, NodeKind::Import { .. })
+                matches!(self.ast.node(*rhs).kind, NodeKind::Import { .. })
+                    || matches!(self.ast.node(*pattern).kind, NodeKind::BindingPat { .. })
             }
             _ => false,
         }

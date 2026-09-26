@@ -10373,6 +10373,46 @@ fn local_items_are_per_block() {
     assert!(msg.contains("`P` is already defined"), "{msg}");
 }
 
+/// An `import` in a body binds its names for that block alone, in every
+/// pattern form: a whole namespace, a destructuring with a rename, a glob.
+#[test]
+fn a_local_import_is_scoped_to_its_block() {
+    let lib = "@public twice :: func (n: i32) -> i32 { return n * 2 }\n\
+               @public Pt :: struct { @public x: i32 }\n";
+    let main = "go :: func () -> i32 {\n\
+                    lib :: import \"lib.nest\"\n\
+                    { twice, Pt: P } :: import \"lib.nest\"\n\
+                    const p := P { x: 20 }\n\
+                    const n: i32 := {\n\
+                        * :: import \"lib.nest\"\n\
+                        twice(1)\n\
+                    }\n\
+                    return lib.twice(p.x) + twice(n)\n\
+                }\n";
+    let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
+    assert!(!session.has_errors(), "{:#?}", session.diagnostics);
+
+    let main = "go :: func () -> i32 {\n\
+                    {\n\
+                        lib :: import \"lib.nest\"\n\
+                        * :: import \"lib.nest\"\n\
+                    }\n\
+                    return lib.twice(1) + twice(1)\n\
+                }\n\
+                other :: func () -> i32 { return twice(1) }\n";
+    let session = analyze_mem(&[("lib", lib), ("main", main)], "main");
+    let msgs: Vec<&str> = session.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        msgs,
+        [
+            "cannot resolve name `lib`",
+            "cannot resolve name `twice`",
+            "cannot resolve name `twice`"
+        ],
+        "{msgs:#?}"
+    );
+}
+
 /// A local item is a definition, not a closure: what the function around it
 /// binds — its generics, its `self` — is not the item's, and the refusal is
 /// the one error.
