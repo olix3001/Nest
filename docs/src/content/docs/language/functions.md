@@ -189,6 +189,21 @@ add5(1)   // 6
 Only the function's own type parameters may appear in the returned type —
 not an enclosing `impl <T>`'s.
 
+`impl` can also sit **inside** a parameter's or the return type — behind a
+pointer, as a slice's element, in a tuple. Each one is its own anonymous
+parameter (or, in the return type, its own hidden type):
+
+```nest
+twice  :: func (s: *impl Shape) -> i32 { return s.area() * 2 }
+total  :: func (xs: []impl Shape) -> i32 { ... }
+apply  :: func (f: *impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }
+square :: func () -> *impl Shape { return &Square { side: 3 } }
+```
+
+Calling a pointer to a closure (or to any `F: Func`) calls what it points
+at, so `f(x)` works on `f: *impl Func(...)`. Outside a signature — a `let`
+annotation, a field — `impl` is an error.
+
 ## `#const` functions
 
 `#const func` restricts the body to a compile-time-evaluable subset: no

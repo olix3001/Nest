@@ -74,7 +74,7 @@ File
       Param n:
         TypePath
           Path `i32`
-      GenericTypeParam impl#return
+      GenericTypeParam impl#return0
         Bounds +
           TypePath
             Path `Func`

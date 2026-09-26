@@ -429,82 +429,95 @@ impl Parser {
         (out, bounds, assoc)
     }
 
-    /// Turn each parameter written `impl Bounds` into an anonymous generic
-    /// parameter with those bounds (§5.4): `func (f: impl Func(i32))` is
-    /// `func <F: Func(i32)> (f: F)`, with a name nothing can write.
-    ///
-    /// Only a parameter's own type is lifted. An `impl` anywhere else in a
-    /// parameter's type is left for sema to refuse, and one in the return type
-    /// means something else — the one type the body returns.
+    /// Turn each `impl Bounds` written in a parameter's type into an anonymous
+    /// generic parameter with those bounds (§5.4): `func (f: impl Func(i32))`
+    /// is `func <F: Func(i32)> (f: F)`, and `func (s: *impl Shape)` is
+    /// `func <S: Shape> (s: *S)`, with a name nothing can write. The `impl`
+    /// may stand anywhere in the type — behind a pointer, in a slice, as a
+    /// type argument — and each one is a parameter of its own.
     fn lift_impl_params(&mut self, mut generics: Vec<NodeId>, params: &[NodeId]) -> Vec<NodeId> {
         let mut lifted = 0;
         for &p in params {
-            let (name, ty, default) = match self.clone_kind(p) {
-                NodeKind::Param {
-                    name,
-                    ty: Some(ty),
-                    default,
-                } => (name, ty, default),
-                _ => continue,
-            };
-            let NodeKind::ImplType { bounds } = self.clone_kind(ty) else {
+            let NodeKind::Param { ty: Some(ty), .. } = self.clone_kind(p) else {
                 continue;
             };
-            let span = self.node_span(ty);
-            let generic = Symbol::new(&format!("impl#{lifted}"));
-            lifted += 1;
-            let bounds = self.alloc(span, NodeKind::Bounds { bounds });
-            generics.push(self.alloc(
-                span,
-                NodeKind::GenericTypeParam {
-                    name: generic.clone(),
-                    constraint: Some(bounds),
-                },
-            ));
-            let path = self.alloc(
-                span,
-                NodeKind::Path {
-                    segments: vec![generic],
-                },
-            );
-            let named = self.alloc(
-                span,
-                NodeKind::TypePath {
-                    path,
-                    generic_args: Vec::new(),
-                },
-            );
-            let param_span = self.node_span(p);
-            self.set_node(
-                p,
-                param_span,
-                NodeKind::Param {
-                    name,
-                    ty: Some(named),
-                    default,
-                },
-            );
+            for node in self.impl_nodes(ty) {
+                let NodeKind::ImplType { bounds } = self.clone_kind(node) else {
+                    continue;
+                };
+                let span = self.node_span(node);
+                let generic = Symbol::new(&format!("impl#{lifted}"));
+                lifted += 1;
+                let bounds = self.alloc(span, NodeKind::Bounds { bounds });
+                generics.push(self.alloc(
+                    span,
+                    NodeKind::GenericTypeParam {
+                        name: generic.clone(),
+                        constraint: Some(bounds),
+                    },
+                ));
+                let path = self.alloc(
+                    span,
+                    NodeKind::Path {
+                        segments: vec![generic],
+                    },
+                );
+                // The `impl` node itself becomes the name, so whatever holds
+                // it — a pointer type, a slice — needs no rebuilding.
+                self.set_node(
+                    node,
+                    span,
+                    NodeKind::TypePath {
+                        path,
+                        generic_args: Vec::new(),
+                    },
+                );
+            }
         }
         generics
     }
 
     /// `-> impl Bounds`: the one type the body returns, which callers know only
-    /// by its bounds (§5.4). It becomes a type parameter standing in the return
-    /// slot rather than in the generic list — resolution binds it the way it
-    /// binds one, and marks it as the body's to decide.
+    /// by its bounds (§5.4). Each `impl` in the return type — the whole of it,
+    /// or one behind a pointer (`-> *impl Shape`) or inside another type —
+    /// becomes a type parameter standing in its place rather than in the
+    /// generic list: resolution binds it the way it binds one, and marks it as
+    /// the body's to decide.
     fn lift_impl_return(&mut self, ty: NodeId) -> NodeId {
-        let NodeKind::ImplType { bounds } = self.clone_kind(ty) else {
-            return ty;
-        };
-        let span = self.node_span(ty);
-        let bounds = self.alloc(span, NodeKind::Bounds { bounds });
-        self.alloc(
-            span,
-            NodeKind::GenericTypeParam {
-                name: Symbol::new("impl#return"),
-                constraint: Some(bounds),
-            },
-        )
+        for (i, node) in self.impl_nodes(ty).into_iter().enumerate() {
+            let NodeKind::ImplType { bounds } = self.clone_kind(node) else {
+                continue;
+            };
+            let span = self.node_span(node);
+            let bounds = self.alloc(span, NodeKind::Bounds { bounds });
+            self.set_node(
+                node,
+                span,
+                NodeKind::GenericTypeParam {
+                    name: Symbol::new(&format!("impl#return{i}")),
+                    constraint: Some(bounds),
+                },
+            );
+        }
+        ty
+    }
+
+    /// Every `impl` type written in `ty`, outermost first. Not one inside
+    /// another's bounds: `impl Func(impl Shape)` is not a thing to lift.
+    fn impl_nodes(&self, ty: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let mut stack = vec![ty];
+        while let Some(n) = stack.pop() {
+            let kind = self.clone_kind(n);
+            if matches!(kind, NodeKind::ImplType { .. }) {
+                out.push(n);
+                continue;
+            }
+            let mut children = kind.children();
+            children.reverse();
+            stack.extend(children);
+        }
+        out
     }
 
     /// `type { '+' type }` — a `+`-separated bound list, wrapped in

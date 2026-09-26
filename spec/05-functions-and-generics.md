@@ -260,6 +260,21 @@ apply :: func <F: Func(i32) -> i32> (f: F, x: i32) -> i32 { return f(x) }
 A call is held to its callee's bounds where it is written: passing a type that
 does not implement one is an error at the call.
 
+The `impl` may stand **anywhere inside** a parameter's type — behind a pointer,
+as a slice's element, as a type argument — and each one is an anonymous
+parameter of its own:
+
+```
+twice :: func (s: *impl Shape) -> i32 { return s.area() * 2 }   // <S: Shape> (s: *S)
+total :: func (xs: []impl Shape) -> i32 { ... }                  // <S: Shape> (xs: []S)
+apply :: func (f: *impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }
+```
+
+A pointer to a callable is called as the callable is: `f(x)` on an `f: *F` with
+`F: Func`, or on a pointer to a closure, calls what it points at.
+
+Anywhere else — a `let` annotation, a field, a type alias — `impl` is an error.
+
 As a **return type**, `impl Bound` is the other way round: the body decides
 what the type is, and a caller knows it only by its bounds. The body is held to
 them; a caller may do with the value what the bounds allow and nothing more —
@@ -272,6 +287,14 @@ make_adder :: func (n: i32) -> impl Func(i32) -> i32 {
 }
 const add5 := make_adder(5)
 add5(1)                                // 6
+```
+
+Here too the `impl` may stand inside the type, and each is decided by the body
+on its own: `-> *impl Shape` returns a pointer to some one shape,
+`-> (impl A, impl B)` two values of two types.
+
+```
+square :: func () -> *impl Shape { return &Square { side: 3 } }
 ```
 
 The returned type may mention the function's own type parameters and those of

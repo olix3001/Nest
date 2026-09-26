@@ -49,7 +49,7 @@ use crate::parser::ast::{
 use super::decl::{DeclTable, Decls};
 use super::def::{DefId, DefKind, DefTable, LangItems};
 use super::infer::{
-    ArgOrder, Coercion, DistinctRecv, DynCoerce, FuncCall, FuncCallMethod, Generics, Instantiation,
+    ArgOrder, Coercion, DistinctRecv, DynCoerce, FuncCall, FuncCallDeref, FuncCallMethod, Generics, Instantiation,
     MethodDispatch, MethodRes, Promoted, RangeReported, RecvAdjust, SliceCoerce, Upcast,
 };
 use super::infer::{OpResolution, StaticTraitSelf};
@@ -1311,13 +1311,22 @@ impl Lowerer<'_> {
                 trait_args: st.trait_args,
             },
             _ => match self.ast.meta::<FuncCall>(head) {
+                // Through a pointer, the callable is what it points at.
                 Some(FuncCall) => Dispatch::Func {
-                    self_ty: self.ty(head),
+                    self_ty: match (self.ast.meta::<FuncCallDeref>(head), self.ty(head)) {
+                        (Some(_), Ty::Ptr { inner, .. }) => *inner,
+                        (_, t) => t,
+                    },
                 },
                 None => Dispatch::Static,
             },
         };
-        let callee = Box::new(self.lower_expr(callee));
+        let callee = self.lower_expr(callee);
+        let callee = match self.ast.meta::<FuncCallDeref>(head) {
+            Some(_) => self.autoderef(callee),
+            None => callee,
+        };
+        let callee = Box::new(callee);
         let args = self.lower_args(target, slots, node);
         let call = self.expr(
             node,

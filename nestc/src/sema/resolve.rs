@@ -379,11 +379,7 @@ impl Resolver<'_> {
                     self.bind_param(*p);
                 }
                 if let Some(r) = ret {
-                    if matches!(self.ast.node(r).kind, NodeKind::GenericTypeParam { .. }) {
-                        self.bind_opaque(r, &generics);
-                    } else {
-                        self.resolve_node(r);
-                    }
+                    self.bind_opaques(r, &generics);
                 }
                 if let Some(b) = body {
                     self.resolve_node(b);
@@ -1431,9 +1427,27 @@ impl Resolver<'_> {
     /// parameters and an enclosing `impl`'s, which is what [`crate::sema::OpaqueArgs`] records: the type
     /// the body returns may mention them, and a caller's instantiation says
     /// what they are.
-    fn bind_opaque(&mut self, ret: NodeId, generics: &[NodeId]) {
-        self.bind_generics(&[ret]);
+    ///
+    /// The parser put one in place of every `impl` the return type wrote, so a
+    /// `-> *impl Shape` holds one behind a pointer; each is bound, then the
+    /// whole type is resolved around them.
+    fn bind_opaques(&mut self, ret: NodeId, generics: &[NodeId]) {
+        let mut opaques = Vec::new();
+        let mut stack = vec![ret];
+        while let Some(n) = stack.pop() {
+            match self.ast.node(n).kind {
+                NodeKind::GenericTypeParam { .. } => opaques.push(n),
+                _ => stack.extend(self.ast.children(n)),
+            }
+        }
+        self.bind_generics(&opaques);
         self.resolve_node(ret);
+        for o in opaques {
+            self.mark_opaque(o, generics);
+        }
+    }
+
+    fn mark_opaque(&mut self, ret: NodeId, generics: &[NodeId]) {
         self.introduce_bound_projections(&[ret]);
         let Some(def) = self.def_of(ret) else { return };
         self.defs.get_mut(def).opaque = true;

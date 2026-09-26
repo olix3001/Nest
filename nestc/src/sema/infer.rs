@@ -333,6 +333,13 @@ pub struct OpaqueTy(pub Ty);
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct FuncCall;
 
+/// Marks a [`FuncCall`] callee that is a **pointer** to the callable — `f(x)`
+/// where `f: *F` and `F: Func`, or `f` points at a closure. The call is the
+/// pointee's: lowering reads through the pointer and dispatches on what it
+/// points at, as `f.call((x,))` already does.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct FuncCallDeref;
+
 /// Marks the callee of `f.call(t)` — `Func`'s one method (§5.5) — on a value
 /// that implements `Func`. It is the value's own call with the tuple spread, so
 /// lowering calls the receiver (through a pointer to it when `deref`) the way a
@@ -1544,13 +1551,30 @@ impl Inferer<'_> {
             }
         }
         let declared = ret.map(|t| self.ty_from_node(t)).unwrap_or(Ty::Void);
-        // An `impl` return type is the body's to decide (§5.4): inside, it is
-        // whatever the body returns, and only the signature says `impl`.
-        let opaque =
-            ret.filter(|&r| matches!(self.ast.node(r).kind, NodeKind::GenericTypeParam { .. }));
-        self.ret = match opaque {
-            Some(_) => self.cx.fresh(),
-            None => declared.clone(),
+        // An `impl` return type is the body's to decide (§5.4): inside, each
+        // `impl` the return type wrote — the whole of it, or one behind a
+        // pointer — is whatever the body makes it, and only the signature says
+        // `impl`.
+        let mut opaque: Vec<(NodeId, Ty)> = Vec::new();
+        let mut map = Subst::default();
+        if let Some(r) = ret {
+            let mut stack = vec![r];
+            while let Some(n) = stack.pop() {
+                match self.ast.node(n).kind {
+                    NodeKind::GenericTypeParam { .. } => {
+                        if let Some(def) = self.def_of(n) {
+                            let var = self.cx.fresh();
+                            map.tys.insert(def, var.clone());
+                            opaque.push((n, var));
+                        }
+                    }
+                    _ => stack.extend(self.ast.children(n)),
+                }
+            }
+        }
+        self.ret = match opaque.is_empty() {
+            true => declared.clone(),
+            false => self.subst_type_params(&declared, &map),
         };
         let ret_ty = self.ret.clone();
         // Stash the function's return type on the `FuncExpr` node for lowering.
@@ -1560,8 +1584,8 @@ impl Inferer<'_> {
             // The body's tail value is the function's result.
             self.expect_return(b, &bty, &ret_ty);
         }
-        if let Some(r) = opaque {
-            self.reveal_opaque(r, &ret_ty);
+        for (r, var) in opaque {
+            self.reveal_opaque(r, &var);
         }
         self.stamp_generics(func);
         // A closure's body is inferred inside the body that wrote it, so the
@@ -5283,6 +5307,19 @@ impl Inferer<'_> {
         // called the way a function pointer with its signature would be, and
         // marked so lowering dispatches on its type instead (§5.5).
         let shallow = self.cx.shallow(callee_ty);
+        if let Ty::Ptr { inner, .. } = &shallow
+            && !matches!(self.cx.shallow(inner), Ty::Dyn { .. } | Ty::Func { .. })
+            && let Some((params, ret)) = self.func_value_sig(inner)
+        {
+            self.ast.set_meta(callee, FuncCall);
+            self.ast.set_meta(callee, FuncCallDeref);
+            let sig = Ty::Func {
+                params,
+                ret: Box::new(ret),
+                c: false,
+            };
+            return self.apply_call_with(callee, &sig, args, variadic);
+        }
         if !matches!(shallow, Ty::Func { .. })
             && let Some((params, ret)) = self.func_value_sig(&shallow)
         {
@@ -8480,7 +8517,7 @@ impl Inferer<'_> {
                 self.report_in(
                     file,
                     node,
-                    "`impl` is written as a parameter's type or as the return type (§5.4)",
+                    "`impl` is written in a parameter's type or in the return type (§5.4)",
                 );
                 Ty::Error
             }
@@ -9719,6 +9756,12 @@ impl Inferer<'_> {
                 || self.try_dyn_coerce(node, actual, expected)
                 || self.try_anon_to_named(node, actual, expected)
                 || self.try_upcast(node, actual, expected)
+            {
+                return;
+            }
+            // A side that holds an error — `*<error>`, whose pointee was
+            // already refused — was reported where the error came from.
+            if self.cx.resolve(actual).mentions_error() || self.cx.resolve(expected).mentions_error()
             {
                 return;
             }

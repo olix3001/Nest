@@ -221,6 +221,28 @@ fn self_in_a_pattern_is_only_for_imports() {
     assert_eq!(msgs, [want, want, want], "{msgs:#?}");
 }
 
+/// `impl` is a parameter's or the return type's to write, anywhere inside
+/// them, and nowhere else: a `let` annotation refuses it, once.
+#[test]
+fn impl_is_written_only_in_a_signature() {
+    analyze_clean(
+        "Shape :: trait { area :: func (self: *Self) -> i32 }\n\
+         S :: struct { s: i32 }\n\
+         impl Shape for S { area :: func (self: *Self) -> i32 { return self.s } }\n\
+         f :: func (a: *impl Shape, b: []impl Shape, c: *mut impl Shape) -> i32 { return a.area() }\n\
+         g :: func () -> *impl Shape { return &S { s: 1 } }\n",
+    );
+    let msgs = messages(
+        "Shape :: trait { area :: func (self: *Self) -> i32 }\n\
+         go :: func () { let x: *impl Shape := 0 }\n",
+    );
+    assert_eq!(
+        msgs,
+        ["`impl` is written in a parameter's type or in the return type (§5.4)"],
+        "{msgs:#?}"
+    );
+}
+
 #[test]
 fn glob_import_brings_members_into_scope() {
     let lib = "@public foo :: func () {}\n";

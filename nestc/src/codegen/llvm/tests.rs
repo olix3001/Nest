@@ -3119,6 +3119,40 @@ fn func_call_takes_the_arguments_as_a_tuple() {
     }
 }
 
+/// `impl` may stand anywhere in a parameter's or the return type (§5.4):
+/// behind a pointer, in a slice, in a tuple. A pointer to a callable — a
+/// closure, or an `F: Func` — is called as the callable is.
+#[test]
+fn impl_stands_inside_a_parameter_s_and_the_return_type() {
+    let src = "Shape :: trait { area :: func (self: *Self) -> i32 }\n\
+               Sq :: struct { s: i32 }\n\
+               impl Shape for Sq { area :: func (self: *Self) -> i32 { return self.s * self.s } }\n\
+               Ct :: struct { n: i32 }\n\
+               impl Shape for Ct { area :: func (self: *Self) -> i32 { return self.n } }\n\
+               twice :: func (s: *impl Shape) -> i32 { return s.area() * 2 }\n\
+               total :: func (xs: []impl Shape) -> i32 {\n\
+                   let mut t := 0\n\
+                   for x in xs { t = t + x.area() }\n\
+                   return t\n\
+               }\n\
+               apply :: func (f: *impl Func(i32) -> i32, x: i32) -> i32 { return f(x) }\n\
+               generic :: func <F: Func(i32) -> i32> (f: *F, x: i32) -> i32 { return f(x) }\n\
+               make :: func (n: i32) -> *impl Func(i32) -> i32 { return &{ [n] x: i32 in x + n } }\n\
+               pair :: func () -> (*impl Shape, impl Shape) { return (&Sq { s: 2 }, Ct { n: 5 }) }\n\
+               main :: func () -> i32 {\n\
+                   const q := Sq { s: 2 }\n\
+                   const xs: [2]Sq := .{ Sq { s: 1 }, Sq { s: 2 } }\n\
+                   const add := { x: i32 in x + 1 }\n\
+                   const r := &add\n\
+                   const m := make(10)\n\
+                   const p := pair()\n\
+                   return twice(&q) + total(xs[..]) + apply(&add, 1) + generic(&add, 2) + r(3) + m(1) + p.0.area() + p.1.area()\n\
+               }\n";
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 8 + 5 + 2 + 3 + 4 + 11 + 4 + 5);
+    }
+}
+
 /// `==` and `!=` on two pointers compare the addresses.
 #[test]
 fn pointers_compare_by_address() {
