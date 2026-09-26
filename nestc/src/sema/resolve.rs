@@ -134,6 +134,19 @@ struct Resolver<'a> {
     doc: Option<DefId>,
 }
 
+/// The attributes the compiler itself reads (§9.2): they resolve to nothing,
+/// and that is not an error.
+const BUILTIN_ATTRIBUTES: &[&str] = &[
+    "public",
+    "private",
+    "using",
+    "attribute",
+    "link_name",
+    "no_mangle",
+    "test",
+    "doc",
+];
+
 /// One entry of [`Resolver::boundaries`].
 struct Boundary {
     depth: usize,
@@ -883,7 +896,25 @@ impl Resolver<'_> {
             (Some(d), _) if self.defs.get(d).attribute => d,
             (_, Some(doc)) if name.as_str() == "doc" => doc,
             (Some(d), _) => d,
-            (None, _) => return,
+            // The compiler's own attributes are vocabulary, not program names.
+            (None, _) if BUILTIN_ATTRIBUTES.contains(&name.as_str()) => return,
+            // Anything else names an `@attribute` struct, and one that names
+            // nothing would otherwise vanish: `@rename("username")` without
+            // its import compiled, and the field was simply not renamed.
+            (None, _) => {
+                let msg = format!("cannot resolve attribute `@{name}`");
+                let note = format!(
+                    "an attribute is an `@attribute` struct, named like any other: \
+                     import it (`{{ {name} }} :: import …`) or declare it"
+                );
+                let span = self.ast.node(id).span;
+                self.diags.push(
+                    Diagnostic::error(msg)
+                        .with_primary(FileSpan::new(self.file, span), "")
+                        .with_note(note),
+                );
+                return;
+            }
         };
         if !self.defs.get(def).attribute {
             let msg = format!(

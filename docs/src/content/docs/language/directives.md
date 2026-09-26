@@ -43,6 +43,25 @@ backtrack to pick up an attribute after a `#` one.
 See [Namespaces and packages](../namespaces/) for the full table and
 [Structs](../structs/) for field visibility.
 
+## User-defined attributes
+
+Any other `@name` is a **user attribute**: a struct declared `@attribute`, named
+like any other definition — declared nearby or imported. Its arguments are
+literals, one per member, and reflection reads them back.
+
+```nest
+@attribute route :: struct { path: str, method: str }
+
+@route("/cat", method: "GET")
+get :: func () -> Response { ... }
+
+{ rename } :: import <std/serialize>
+User :: struct { @rename("username") name: str }
+```
+
+An attribute that names nothing is an error — `@rename` without its import
+would otherwise be dropped silently, and the field would not be renamed.
+
 ## `@test`
 
 `@test` marks a function as a test — see [Testing](../testing/).

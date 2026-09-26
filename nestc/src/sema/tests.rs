@@ -514,6 +514,23 @@ P :: struct { @Json(rename: \"a\") id: i32 }
     assert!(d.contains("is not an `@attribute`"), "{d}");
 }
 
+/// An attribute that names nothing is an error, not a silent no-op: without
+/// its import `@rename("username")` compiled and the field was simply not
+/// renamed. The compiler's own attributes name nothing and are fine.
+#[test]
+fn an_unresolved_attribute_is_an_error() {
+    let msgs = messages("P :: struct { @rename(\"username\") name: str }\n");
+    assert_eq!(msgs, ["cannot resolve attribute `@rename`"], "{msgs:#?}");
+    analyze_clean(
+        "@public(all) P :: struct { @private x: i32, @using q: Q }\n\
+         Q :: struct { y: i32 }\n\
+         @attribute A :: struct { v: i32 }\n\
+         /// Documented.\n\
+         @A(1) @link_name(\"f_c\") f :: func () {}\n\
+         @no_mangle g :: func () {}\n",
+    );
+}
+
 #[test]
 fn an_attribute_writes_every_member() {
     let src = "\

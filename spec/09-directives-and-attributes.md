@@ -184,19 +184,31 @@ reflection reads it (`attr_of.<doc>(type_info.<T>().attrs)`).
 
 ### User-defined attributes
 
-Any `@name` that is not a built-in visibility attribute is a **user attribute**:
-inert metadata carrying optional arguments, attached to a declaration and later
-readable via reflection. They enable data-driven tooling (routers, serializers,
-test discovery, doc generators) without compiler changes:
+Any `@name` that is not one of the compiler's own attributes (`@public`,
+`@private`, `@using`, `@attribute`, `@link_name`, `@no_mangle`, `@test`, `@doc`)
+is a **user attribute**: inert metadata carrying arguments, attached to a
+declaration and later readable via reflection. They enable data-driven tooling
+(routers, serializers, test discovery, doc generators) without compiler changes.
+
+A user attribute is a struct declared `@attribute`, and `@name(args)` names it
+like any other definition — declared in scope, or imported (`{ rename } ::
+import <std/serialize>`). Its arguments are literals, one per member, in order
+or by name:
 
 ```
+@attribute route :: struct { path: str, method: str }
+@attribute deprecated :: struct { note: str }
+
 @route("/cat", method: "GET")
 @deprecated("use get_v2")
 get :: func () -> Response { ... }
 ```
 
-Because attributes do not alter compilation, an unknown attribute is not an error
-(subject to tooling policy) — it is simply preserved as metadata.
+An attribute that names nothing is an **error** ("cannot resolve attribute
+`@rename`"), as is one that names something not declared `@attribute`. Attributes
+do not alter compilation, so a misspelled or un-imported one would otherwise be
+silently dropped — and whatever reads it (a serializer's field names, a router's
+table) would quietly go without.
 
 ## 9.3 Directives
 
