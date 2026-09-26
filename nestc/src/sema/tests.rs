@@ -10672,8 +10672,16 @@ impl R {
         "main",
     );
     let d = session.diagnostics.first().expect("a diagnostic");
-    assert!(d.message.contains("cannot resolve name `n`"), "{}", d.message);
-    assert!(d.notes.iter().any(|n| n.contains("self.n")), "{:?}", d.notes);
+    assert!(
+        d.message.contains("cannot resolve name `n`"),
+        "{}",
+        d.message
+    );
+    assert!(
+        d.notes.iter().any(|n| n.contains("self.n")),
+        "{:?}",
+        d.notes
+    );
 }
 
 /// A variant literal with only a bound for context (§7): the one enum among
@@ -10731,8 +10739,17 @@ impl Show for str { show :: func (self: str) -> i32 { return 1 } }
 take :: func <T: Show> (x: T) -> i32 { return x.show() }
 run :: func <R: Show, F: Func(i32) -> R> (f: F) -> i32 { return f(1).show() }
 ";
-    for (body, ty) in [("take(5)", "isize"), ("take(2.5)", "f64"), ("run { n in 5 }", "isize")] {
-        let err = first_error(&format!("{head}main :: func () -> i32 {{ return {body} }}\n"));
-        assert!(err.contains(&format!("`{ty}` does not implement `Show`")), "{body}: {err}");
+    for (body, ty) in [
+        ("take(5)", "isize"),
+        ("take(2.5)", "f64"),
+        ("run { n in 5 }", "isize"),
+    ] {
+        let err = first_error(&format!(
+            "{head}main :: func () -> i32 {{ return {body} }}\n"
+        ));
+        assert!(
+            err.contains(&format!("`{ty}` does not implement `Show`")),
+            "{body}: {err}"
+        );
     }
 }

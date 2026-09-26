@@ -679,9 +679,7 @@ impl Resolver<'_> {
                 .with_primary(FileSpan::new(self.file, span), "");
             // Inside an impl, a bare field name is the likely slip.
             if segments.len() == 1 && self.field_in_scope(&segments[0]) {
-                diag = diag.with_note(format!(
-                    "a field is named through a value: `self.{dotted}`"
-                ));
+                diag = diag.with_note(format!("a field is named through a value: `self.{dotted}`"));
             }
             self.diags.push(diag);
         }
