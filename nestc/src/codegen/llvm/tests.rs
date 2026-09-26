@@ -3816,3 +3816,24 @@ main :: func () -> i32 {
         assert_eq!(code, 0);
     }
 }
+
+/// A `distinct` type with no impl of its own answers a bound with its
+/// representation's impl (§2.4) — through a generic function too, where
+/// monomorphization picks the impl, not only in a direct method call.
+#[test]
+fn a_distinct_type_answers_a_bound_with_its_representation_s_impl() {
+    let src = r#"
+Show :: trait { show :: func (self: Self) -> i32 }
+impl Show for i64 { show :: func (self: i64) -> i32 { return 3 } }
+Meters :: distinct i64
+take :: func <T: Show> (x: T) -> i32 { return x.show() }
+main :: func () -> i32 {
+    const x: isize := 5
+    const m: Meters := cast.<Meters>(4)
+    return take(x) + take(m) + take(7) + m.show()
+}
+"#;
+    if let Some(code) = run_status(src) {
+        assert_eq!(code, 12);
+    }
+}

@@ -1228,6 +1228,27 @@ impl Mono<'_> {
                 (inner != *self_ty)
                     .then(|| self.match_impl_exact(linked, trait_def, &inner, trait_args))?
             })
+            // A `distinct` type with no impl of its own inherits its
+            // representation's (§2.4), as inference's `select` decided: `isize`
+            // answers a bound with `i64`'s impl.
+            .or_else(|| self.match_through_distinct(linked, trait_def, &strip_ptr(self_ty), trait_args))
+    }
+
+    fn match_through_distinct(
+        &self,
+        linked: &Linked,
+        trait_def: DefId,
+        self_ty: &Ty,
+        trait_args: &[Ty],
+    ) -> Option<(usize, Subst)> {
+        let Ty::Nominal { def, .. } = self_ty else {
+            return None;
+        };
+        if !matches!(linked.ty(*def)?.kind, super::TypeDefKind::Distinct { .. }) {
+            return None;
+        }
+        let (_, repr) = member_types(linked, &self.meta, self_ty).into_iter().next()?;
+        self.match_impl(linked, trait_def, &repr, trait_args)
     }
 
     fn match_impl_exact(
