@@ -663,7 +663,7 @@ impl Cx<'_> {
         let Some(owner) = d.parent else {
             return true;
         };
-        let home = s.defs.get(owner).parent.unwrap_or(owner);
+        let home = s.defs.privacy_home(owner);
         let mut at = self.here();
         while let Some(d) = at {
             if d == home || d == owner {

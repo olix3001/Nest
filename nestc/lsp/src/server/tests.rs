@@ -544,6 +544,31 @@ main :: func () {
     }
 }
 
+/// A struct declared in a function body is a type like any other: a `.` on a
+/// value of it — reached through a generic's field, in a closure's typed
+/// parameter — offers its fields.
+#[test]
+fn completion_offers_a_local_struct_s_fields() {
+    let (_dir, file, mut client) = program();
+    let text = "\
+Json :: struct <T> { value: T }
+run :: func <T, F: Func.<Args = (Json.<T>,), Output = i32>> (f: F) -> i32 { return 0 }
+
+main :: func () -> i32 {
+    ExampleJson :: struct { name: str, surname: str }
+    return run.<ExampleJson>({ data: Json.<ExampleJson> in
+        const n := data.value.
+        0
+    })
+}
+";
+    client.change(&file, text);
+    let members = labels(&client.at(Completion::METHOD, &file, position(text, "value.\n", 0, 6)));
+    for want in ["name", "surname"] {
+        assert!(members.contains(&want.to_string()), "{want} in {members:?}");
+    }
+}
+
 /// A private field is offered only where the compiler lets it be named (§4.4):
 /// inside the namespace that declares its struct, not outside it.
 #[test]
