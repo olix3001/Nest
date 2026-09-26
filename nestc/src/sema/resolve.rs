@@ -62,6 +62,7 @@ pub fn resolve_file(
     if let Some(root) = ast.root() {
         r.resolve_node(root);
     }
+    r.reject_self_outside_imports();
 }
 
 struct Resolver<'a> {
@@ -1577,6 +1578,37 @@ impl Resolver<'_> {
             );
         }
         true
+    }
+
+    /// `self` in a destructuring names the namespace an `import` brings in
+    /// (§4.5), and nothing anywhere else: a struct has no member `self`, and a
+    /// field pattern spelled so is a mistake to say, not a binding to make.
+    fn reject_self_outside_imports(&mut self) {
+        let ast = self.ast;
+        let mut allowed: HashSet<NodeId> = HashSet::new();
+        for id in ast.ids() {
+            if let NodeKind::ConstBind { pattern, rhs } = &ast.node(id).kind
+                && matches!(ast.node(*rhs).kind, NodeKind::Import { .. })
+            {
+                let mut stack = vec![*pattern];
+                while let Some(n) = stack.pop() {
+                    allowed.insert(n);
+                    stack.extend(ast.children(n));
+                }
+            }
+        }
+        for id in ast.ids() {
+            if let NodeKind::FieldPat { name, .. } = &ast.node(id).kind
+                && name.as_str() == "self"
+                && !allowed.contains(&id)
+            {
+                self.report(
+                    id,
+                    "`self` in a pattern names the namespace an `import` brings in, \
+                     and may only be written in an import's destructuring",
+                );
+            }
+        }
     }
 
     /// A block-local item (see [`BlockNs`]): resolved where it is written, so

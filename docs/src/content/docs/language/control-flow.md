@@ -85,6 +85,12 @@ xs.match {
 }
 ```
 
+`*` and `self` are for `import`s alone: `* :: import <std>` globs a
+namespace's members, and `{ self, Json } :: import <std/http>` binds the
+namespace itself beside a member (see
+[Namespaces and packages](../namespaces/)). Anywhere else, `self` in a pattern
+is an error.
+
 For **bindings** (`::`/`let`/`const`, not `match`), the pattern must be
 **irrefutable** — it must match every value of the operand's type. Struct,
 tuple, slice-with-rest, and namespace patterns are irrefutable; enum-variant,

@@ -199,6 +199,23 @@ fn self_in_an_import_binds_the_namespace() {
     );
 }
 
+/// `self` in a destructuring is an import's alone: in a `const`, a `let` or a
+/// `match` arm it is refused, once, where it is written.
+#[test]
+fn self_in_a_pattern_is_only_for_imports() {
+    let msgs = messages(
+        "P :: struct { x: i32 }\n\
+         go :: func (p: P) -> i32 {\n\
+             const { self, x } := p\n\
+             let { self: q, .. } := p\n\
+             return p.match { { self, .. } => x }\n\
+         }\n",
+    );
+    let want = "`self` in a pattern names the namespace an `import` brings in, \
+                and may only be written in an import's destructuring";
+    assert_eq!(msgs, [want, want, want], "{msgs:#?}");
+}
+
 #[test]
 fn glob_import_brings_members_into_scope() {
     let lib = "@public foo :: func () {}\n";

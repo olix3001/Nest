@@ -40,6 +40,7 @@ variant_payload_pat =
 field_pat =
     [ 'mut' ] identifier                  // shorthand: bind field to same name
   | identifier ':' pattern                // rename / nested destructure
+  | 'self' [ ':' identifier ]             // the namespace itself (import only)
 ```
 
 Pattern power, at a glance: wildcards, the `*` **glob** (namespace-import only),
@@ -52,6 +53,11 @@ The `*` glob is special: it is valid only when the operand is a `namespace` valu
 scope" rather than binding a name. Either as the whole pattern (`* :: import
 <std>`) or inside a field (`{ http: * } :: import <std>`). See
 [04-namespaces-and-name-resolution.md](04-namespaces-and-name-resolution.md) §4.5.
+
+`self` as a field is special the same way: in an `import`'s destructuring it
+binds the namespace being destructured beside the members picked — `{ self,
+Json } :: import <std/http>` binds `http` and `Json`, `{ self: h }` binds it as
+`h` (§4.5). Anywhere else — a `let`, a `const`, a `match` arm — it is an error.
 
 ## 7.2 Destructuring bindings
 

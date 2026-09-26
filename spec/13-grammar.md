@@ -328,6 +328,7 @@ range_pat = expr '..<' expr | expr '..=' expr | expr '..'
 variant_payload_pat = '(' pattern { ',' pattern } ')'
                     | '{' field_pat { ',' field_pat } [ ',' '..' ] '}'
 field_pat = [ 'mut' ] identifier | identifier ':' pattern
+          | 'self' [ ':' identifier ]      // import destructuring only (§4.5)
 ```
 
 Patterns appear on the LHS of `::`, `let`/`const`, `for … in`, and `match` arms.
