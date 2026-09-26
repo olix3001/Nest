@@ -755,6 +755,10 @@ impl Lowerer<'_> {
     }
 
     fn lower_stmt(&mut self, node: NodeId, out: &mut Vec<Stmt>) {
+        // A local item is lowered on its own, as the definition it is.
+        if super::is_local_item(self.ast, node) {
+            return;
+        }
         match self.ast.node(node).kind.clone() {
             // A `let`/`const` local, or a `::` binding the desugarer introduced
             // in statement position (`__it`, `__try`): both bind a pattern to an

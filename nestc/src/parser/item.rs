@@ -346,6 +346,10 @@ impl Parser {
                 let ld = self.parse_local_decl();
                 (self.finish_decl(attrs, directives, ld, start), false)
             }
+            // A local `impl`, for a type the block declares (or any other the
+            // rules allow): a definition among the statements, like a local
+            // `func` or `struct`.
+            Some(TokenKind::ImplKw) if !decorated => (self.parse_impl(), false),
             Some(TokenKind::DeferKw) if !decorated => (self.parse_defer(), false),
             Some(TokenKind::ReturnKw) if !decorated => (self.parse_return(), false),
             Some(TokenKind::BreakKw) if !decorated => (self.parse_break(), false),

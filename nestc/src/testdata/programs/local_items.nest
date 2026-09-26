@@ -1,0 +1,40 @@
+// local_items.nest — constants, types, traits, impls and functions declared
+// inside a function body. No imports. Exits 42 when every one works.
+
+Holder :: struct <T> { v: T }
+
+main :: func () -> i32 {
+    LIMIT :: 5
+    Id :: i32
+    Point :: struct { x: i32, y: i32 }
+    impl Point {
+        sum :: func (self: *Self) -> i32 { self.x + self.y }
+    }
+    Area :: trait { area :: func (self: *Self) -> i32 }
+    impl Area for Point {
+        area :: func (self: *Self) -> i32 { self.x * self.y }
+    }
+    Color :: enum { red, green }
+    Pair :: struct <T> { a: T, b: T }
+    fact :: func (n: i32) -> i32 { n.match { 0 => 1, _ => n * fact(n - 1) } }
+    // Local items see each other whatever their order.
+    even :: func (n: i32) -> bool { n.match { 0 => true, _ => odd(n - 1) } }
+    odd :: func (n: i32) -> bool { n.match { 0 => false, _ => even(n - 1) } }
+    first :: func <T> (p: Pair.<T>) -> T { p.a }
+
+    const p := Point { x: 3, y: 4 }
+    const pair: Pair.<Id> := Pair { a: 1, b: 2 }
+    const held: Holder.<Point> := Holder { v: p }
+    const c: Color := .green
+    const sum_of := { q: *Point in q.sum() }
+    // A nested block's own `Point` is another type, and ends with the block.
+    const inner: i32 := {
+        Point :: struct { z: i32 }
+        const q := Point { z: 9 }
+        q.z
+    }
+    if p.sum() != 7 || p.area() != 12 || sum_of(&held.v) != 7 { return 1 }
+    if first(pair) + pair.b != 3 || fact(LIMIT) != 120 || !even(10) { return 2 }
+    if inner != 9 || c.match { .red => true, .green => false } { return 3 }
+    42
+}

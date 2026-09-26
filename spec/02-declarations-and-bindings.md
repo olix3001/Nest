@@ -32,6 +32,31 @@ right-hand side may be:
 They may appear at the top level of a file, inside a namespace, or inside a
 function body (a local type or local constant).
 
+### Local items
+
+A `::` binding inside a function body — a constant, a type, a trait, a
+function — and an `impl` written among a block's statements are **local
+items**. A local item is scoped to its block: it is visible throughout the
+block (before its declaration too, so two local functions may call each
+other) and nowhere else — not after the block, and not through the enclosing
+function's name (`main.Point` does not resolve). An inner block may declare an
+item of a name an outer one already has; two in one block conflict.
+
+A local item is a definition, not a closure: it cannot use the enclosing
+function's locals, parameters (including `self`) or generic parameters, nor
+`Self` of an enclosing `impl`.
+
+```
+main :: func () -> i32 {
+    Point :: struct { x: i32, y: i32 }
+    impl Point { sum :: func (self: *Self) -> i32 { self.x + self.y } }
+    twice :: func (n: i32) -> i32 { n * 2 }
+    LIMIT :: 21
+    const p := Point { x: 1, y: 2 }
+    twice(LIMIT) + p.sum() - 3
+}
+```
+
 ### A constant's type
 
 `SERVER_PORT :: 8080` has **no single runtime type**. A numeric literal is a

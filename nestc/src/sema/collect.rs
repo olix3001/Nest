@@ -10,7 +10,10 @@
 //!
 //! Function-local names (params, generics, block locals) are **not** collected
 //! here; they are handled by the resolver's scope stack, where order and
-//! shadowing matter.
+//! shadowing matter. A block's **local items** — a `func`, a type, a trait or
+//! an `impl` written among its statements — are: each is a definition like any
+//! other, so it is collected into a namespace of the block's own
+//! ([`BlockNs`]), which is nobody's member and so nameable from nowhere else.
 
 use crate::common::diagnostic::Diagnostic;
 use crate::common::source::FileId;
@@ -18,7 +21,7 @@ use crate::common::source::FileSpan;
 use crate::common::symbol::Symbol;
 use crate::parser::ast::{Ast, ImportPath, NodeId, NodeKind, StructKind};
 
-use super::DefMeta;
+use super::{BlockNs, DefMeta};
 use super::def::{DefId, DefKind, DefTable, Directive, DirectiveArg, LangItems, Visibility};
 use super::imports::{RawImport, RawTarget};
 
@@ -45,6 +48,7 @@ pub fn collect_file(
         pending: Vec::new(),
         pending_attribute: false,
         anon_impls: 0,
+        blocks: 0,
     };
     if let Some(root) = ast.root() {
         if let NodeKind::File { items } = &ast.node(root).kind {
@@ -77,6 +81,9 @@ struct Collector<'a> {
     /// count names them apart (`<impl 1>`, `<impl 2>`, …) so two impls on
     /// structural targets stay distinguishable in a def dump.
     anon_impls: usize,
+    /// How many block namespaces this file has needed so far; the count names
+    /// them apart (`{block#0}`, …), as a closure's is (§5.5).
+    blocks: usize,
 }
 
 /// One argument of `@public`: a level for the item, or for its members.
@@ -300,7 +307,83 @@ impl Collector<'_> {
                     self.collect_trait_member(m, def);
                 }
             }
+            NodeKind::FuncExpr {
+                body: Some(body), ..
+            } => self.collect_body(body, def),
             _ => {}
+        }
+    }
+
+    /// Collect the local items of a function body, under `scope` (the function,
+    /// or the block namespace around this one).
+    ///
+    /// Every block that declares any gets a namespace of its own, parented where
+    /// the block is but never inserted as a member: a name the block declares
+    /// is reached through the block's scope frame and nowhere else, so two
+    /// blocks may each declare their own `Point`, and neither leaks out.
+    fn collect_body(&mut self, node: NodeId, scope: DefId) {
+        match self.ast.node(node).kind.clone() {
+            NodeKind::Block { stmts, tail } => {
+                let (items, rest): (Vec<NodeId>, Vec<NodeId>) =
+                    stmts.iter().partition(|&&s| self.is_item_stmt(s));
+                let scope = match items.is_empty() {
+                    true => scope,
+                    false => {
+                        let name = Symbol::new(&format!("{{block#{}}}", self.blocks));
+                        self.blocks += 1;
+                        let mut canonical = self.defs.get(scope).canonical.clone();
+                        canonical.push(name.clone());
+                        let ns = self.defs.alloc(
+                            name,
+                            DefKind::Namespace,
+                            Visibility::Private,
+                            Some(scope),
+                            Some(self.file),
+                            Some(self.ast.node(node).span),
+                            None,
+                            canonical,
+                        );
+                        self.ast.set_meta(node, BlockNs(ns));
+                        self.collect_items(&items, ns);
+                        ns
+                    }
+                };
+                for s in rest.into_iter().chain(tail) {
+                    self.collect_body(s, scope);
+                }
+            }
+            _ => {
+                for c in self.ast.children(node) {
+                    self.collect_body(c, scope);
+                }
+            }
+        }
+    }
+
+    /// Whether a block statement declares a local item (see
+    /// [`Collector::collect_body`]): an `impl`, or a `::` binding — a local
+    /// constant as much as a local type, since a `::` is a compile-time value
+    /// wherever it is written (§2.1), and `Id :: i32` cannot be told from
+    /// `MAX :: 40` before resolution. Not an `import`, which has no stage that
+    /// looks inside bodies, and not a `#static` or `#comptime` binding: those
+    /// name a region and an unrolled loop's variable, which the resolver binds
+    /// in order.
+    fn is_item_stmt(&self, stmt: NodeId) -> bool {
+        if let NodeKind::Decl { directives, .. } = &self.ast.node(stmt).kind
+            && self
+                .directives(directives)
+                .iter()
+                .any(|d| matches!(d.name.as_str(), "static" | "comptime"))
+        {
+            return false;
+        }
+        match &self.ast.node(self.ast.decl_item(stmt)).kind {
+            NodeKind::ImplBlock { .. } => true,
+            NodeKind::ConstBind { pattern, rhs } => {
+                matches!(self.ast.node(*pattern).kind, NodeKind::BindingPat { .. })
+                    && !matches!(self.ast.node(*rhs).kind, NodeKind::Import { .. })
+            }
+            _ => false,
         }
     }
 
@@ -505,6 +588,12 @@ impl Collector<'_> {
                     _ => DefKind::Const,
                 };
                 let def = self.define(name, kind, Visibility::Public, trait_def, member, None);
+                if let NodeKind::FuncExpr {
+                    body: Some(body), ..
+                } = self.ast.node(rhs).kind
+                {
+                    self.collect_body(body, def);
+                }
                 // An abstract associated type is known to be one from its
                 // syntax alone. Its bounds are resolved with its file, which a
                 // file importing it cyclically may be resolved before; with no

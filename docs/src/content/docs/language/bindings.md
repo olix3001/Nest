@@ -33,6 +33,22 @@ appear at the top of a file, inside a namespace, or inside a function body (a
 local type or local constant), and at namespace scope they're
 **order-independent** — mutually recursive types and functions are fine.
 
+Inside a function body, `::` declares a **local item** — a constant, type,
+trait or function — and an `impl` may sit among the statements too. A local
+item belongs to its block: it's visible anywhere in that block and nowhere
+outside it. It is a definition, not a closure, so it can't use the enclosing
+function's locals, parameters or generics.
+
+```nest
+main :: func () -> i32 {
+    Point :: struct { x: i32, y: i32 }
+    impl Point { sum :: func (self: *Self) -> i32 { self.x + self.y } }
+    twice :: func (n: i32) -> i32 { n * 2 }
+    const p := Point { x: 1, y: 2 }
+    twice(p.sum())
+}
+```
+
 ### A constant's type
 
 `SERVER_PORT :: 8080` has no single runtime type: a numeric literal is a

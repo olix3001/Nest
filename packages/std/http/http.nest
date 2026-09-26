@@ -58,6 +58,7 @@ tests :: #when(test) namespace {
     net :: import "../net/net.nest"
     io :: import "../io/io.nest"
     strs :: import "../text/str.nest"
+    { rename } :: import "../serialize/attrs.nest"
 
     Greeter :: struct { greeting: str }
     Missing :: struct { n: i32 }
@@ -145,6 +146,20 @@ tests :: #when(test) namespace {
         const bad: Response := a.respond(posting("/user", "{\"name\": 5}"))
         assert(bad.status == 400, "a body that is not the `T` is the client's mistake")
         assert(a.respond(posting("/raw", "hi")).text() == "hi t1")
+    }
+
+    @test
+    a_handler_decodes_a_type_local_to_its_function :: func () {
+        let mut a: App := make_app()
+        ExampleJson :: struct {
+            @rename("username") name: str,
+            surname: str,
+        }
+        a.post("/json") { ctx, data: Json.<ExampleJson> in
+            text(f"{data.value.name} {data.value.surname}")
+        }
+        const res: Response := a.respond(posting("/json", "{\"username\": \"ada\", \"surname\": \"lovelace\"}"))
+        assert(res.status == 200 && res.text() == "ada lovelace", res.text())
     }
 
     named :: func (name: str) -> Result.<str, Rejection> {

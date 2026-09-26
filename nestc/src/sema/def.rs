@@ -519,6 +519,23 @@ impl DefTable {
     }
 
     /// The canonical path of `id` rendered as a dotted string, e.g. `math.add`.
+    /// [`DefTable::canonical_string`] as a reader is shown it: a local item's
+    /// block namespaces (`{block#0}`) are how the compiler tells two blocks'
+    /// `Point`s apart, and mean nothing to the program, so `main.Point`.
+    pub fn display_string(&self, id: DefId) -> String {
+        let def = self.get(id);
+        match def.canonical.iter().any(|s| s.as_str().starts_with("{block#")) {
+            true => def
+                .canonical
+                .iter()
+                .map(Symbol::as_str)
+                .filter(|s| !s.starts_with("{block#"))
+                .collect::<Vec<_>>()
+                .join("."),
+            false => self.canonical_string(id),
+        }
+    }
+
     pub fn canonical_string(&self, id: DefId) -> String {
         let def = self.get(id);
         if def.canonical.is_empty() {
@@ -530,6 +547,30 @@ impl DefTable {
                 .collect::<Vec<_>>()
                 .join(".")
         }
+    }
+
+    /// Whether `id` is the namespace collection made for a block's local items
+    /// (see [`super::BlockNs`]).
+    pub fn is_block_ns(&self, id: DefId) -> bool {
+        let d = self.get(id);
+        d.kind == DefKind::Namespace && d.name.as_str().starts_with("{block#")
+    }
+
+    /// Where privacy puts `id`'s home: its parent, except that a local item
+    /// counts as declared where the function around it is — the block's
+    /// namespace and the function are only where the name is *scoped*, and
+    /// the body that uses the item belongs to neither.
+    pub fn privacy_home(&self, id: DefId) -> DefId {
+        let mut home = self.get(id).parent.unwrap_or(id);
+        while self.is_block_ns(home) {
+            home = self.get(home).parent.unwrap_or(home);
+            while self.get(home).kind == DefKind::Func
+                && let Some(p) = self.get(home).parent
+            {
+                home = p;
+            }
+        }
+        home
     }
 
     /// Follow an import-alias chain to the concrete def it names (cycle-guarded).

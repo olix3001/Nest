@@ -10295,6 +10295,106 @@ fn a_nested_function_cannot_capture() {
     assert!(msg.contains("cannot capture"), "{msg}");
 }
 
+// ===< Local items (§2.1) >===
+
+/// A type declared in a body names a type there — in an annotation, a generic
+/// argument and a closure's parameter alike — where it once resolved as a
+/// *local* and was "not a type".
+#[test]
+fn a_local_type_is_a_type() {
+    analyze_clean(
+        "Holder :: struct <T> { v: T }\n\
+         go :: func () -> i32 {\n\
+             Local :: struct { a: i32 }\n\
+             Id :: i32\n\
+             const x: Local := Local { a: 1 }\n\
+             const y: Holder.<Local> := Holder { v: x }\n\
+             const n: Id := 2\n\
+             const f := { h: Holder.<Local> in h.v.a }\n\
+             return f(y) + n\n\
+         }\n",
+    );
+}
+
+/// A local item is scoped to its block: not after the block, not in another
+/// function, and not through the function's name either.
+#[test]
+fn a_local_item_is_not_visible_outside_its_block() {
+    let msgs = messages(
+        "go :: func () -> i32 {\n\
+             {\n\
+                 Hidden :: struct { a: i32 }\n\
+                 helper :: func () -> i32 { return 1 }\n\
+             }\n\
+             const h: Hidden := Hidden { a: 1 }\n\
+             return helper()\n\
+         }\n\
+         other :: func () -> i32 {\n\
+             const h: go.Hidden := go.Hidden { a: 1 }\n\
+             return go.helper()\n\
+         }\n",
+    );
+    for name in ["Hidden", "helper", "go.Hidden"] {
+        let want = format!("cannot resolve name `{name}`");
+        assert!(msgs.iter().any(|m| *m == want), "{want}: {msgs:#?}");
+    }
+    assert!(
+        msgs.iter().all(|m| !m.contains("type annotations needed")),
+        "{msgs:#?}"
+    );
+}
+
+/// Two blocks may each declare their own item of one name; the inner one hides
+/// the outer one while it lasts. Two in one block conflict.
+#[test]
+fn local_items_are_per_block() {
+    analyze_clean(
+        "go :: func () -> i32 {\n\
+             Point :: struct { x: i32 }\n\
+             const inner: i32 := {\n\
+                 Point :: struct { z: i32 }\n\
+                 const q := Point { z: 9 }\n\
+                 q.z\n\
+             }\n\
+             const p := Point { x: 1 }\n\
+             return p.x + inner\n\
+         }\n\
+         other :: func () -> i32 {\n\
+             Point :: struct { y: i32 }\n\
+             return Point { y: 2 }.y\n\
+         }\n",
+    );
+    let msg = first_error(
+        "go :: func () {\n\
+             P :: struct { x: i32 }\n\
+             P :: struct { y: i32 }\n\
+         }\n",
+    );
+    assert!(msg.contains("`P` is already defined"), "{msg}");
+}
+
+/// A local item is a definition, not a closure: what the function around it
+/// binds — its generics, its `self` — is not the item's, and the refusal is
+/// the one error.
+#[test]
+fn a_local_item_cannot_use_the_function_around_it() {
+    let msgs = messages(
+        "gen :: func <T> (t: T) {\n\
+             Wrap :: struct { t: T }\n\
+         }\n\
+         S :: struct { v: i32 }\n\
+         impl S {\n\
+             m :: func (self: *Self) -> i32 {\n\
+                 get :: func () -> i32 { return self.v }\n\
+                 return get()\n\
+             }\n\
+         }\n",
+    );
+    assert_eq!(msgs.len(), 2, "{msgs:#?}");
+    assert!(msgs[0].contains("`T` is a generic parameter of the function around"), "{msgs:#?}");
+    assert!(msgs[1].contains("`self` belongs to the function around"), "{msgs:#?}");
+}
+
 /// A `[n]` copy is read-only, and says so rather than naming the pointer the
 /// closure reaches it through.
 #[test]

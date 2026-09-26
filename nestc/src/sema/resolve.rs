@@ -23,7 +23,7 @@ use crate::parser::ast::{Ast, NodeId, NodeKind, SliceRest};
 
 use super::def::AttrValue;
 use super::def::{DefId, DefKind, DefTable, Visibility};
-use super::{DefMeta, PathRes, Resolution};
+use super::{BlockNs, DefMeta, PathRes, Resolution};
 
 /// Resolve every name in `file`, whose file namespace is `file_ns`.
 #[allow(clippy::too_many_arguments)]
@@ -55,6 +55,7 @@ pub fn resolve_file(
         boundaries: Vec::new(),
         owners: Vec::new(),
         impl_generics: Vec::new(),
+        item_floors: Vec::new(),
         attr_parents: None,
         doc,
     };
@@ -117,6 +118,11 @@ struct Resolver<'a> {
     /// An `impl` return type inside one is generic over them as well as over
     /// its function's own (see [`Resolver::bind_opaque`]).
     impl_generics: Vec<Vec<NodeId>>,
+    /// The depth of [`Resolver::scopes`] at each block-local item being walked,
+    /// innermost last. A local item is a definition like any other, so what
+    /// the function around it binds below that depth — its locals, its
+    /// parameters, its generics — is not the item's to use.
+    item_floors: Vec<usize>,
     /// Each attribute node's parent, built the first time an attribute is
     /// resolved: [`Resolver::attr_owner`] asks it once per attribute, and a
     /// file whose declarations all carry `///` docs has as many of those as it
@@ -379,8 +385,27 @@ impl Resolver<'_> {
             } => self.resolve_closure(id, &captures, &params, ret, body),
             NodeKind::Block { stmts, tail } => {
                 self.push_scope();
+                // The block's local items are in scope for the whole block —
+                // before their declarations too, so two may name each other —
+                // and nowhere outside it.
+                if let Some(BlockNs(ns)) = self.ast.meta::<BlockNs>(id) {
+                    let items: Vec<(Symbol, DefId)> = self
+                        .defs
+                        .get(ns)
+                        .ns
+                        .members
+                        .iter()
+                        .map(|(n, &d)| (n.clone(), d))
+                        .collect();
+                    if let Some(frame) = self.scopes.last_mut() {
+                        frame.extend(items);
+                    }
+                }
                 for s in stmts {
-                    self.resolve_node(s);
+                    match super::is_local_item(self.ast, s) {
+                        true => self.resolve_local_item(s),
+                        false => self.resolve_node(s),
+                    }
                 }
                 if let Some(t) = tail {
                     self.resolve_node(t);
@@ -647,7 +672,11 @@ impl Resolver<'_> {
         }
         let mut per_seg = Vec::with_capacity(segments.len());
         // Root segment: reserved names first, then the scope search.
+        let before = self.diags.len();
         let mut cur = self.resolve_root(id, &segments[0].clone());
+        // A root refused with a reason of its own (see `note_use`) is not a
+        // name that failed to resolve, and is not reported twice.
+        let refused = self.diags.len() > before;
         per_seg.push(cur.clone());
         // Subsequent segments: member hops.
         for seg in &segments[1..] {
@@ -668,7 +697,7 @@ impl Resolver<'_> {
         if segments.len() > 1 {
             self.ast.set_meta(id, PathRes(per_seg));
         }
-        if matches!(cur, Resolution::Error) {
+        if matches!(cur, Resolution::Error) && !refused {
             let dotted = segments
                 .iter()
                 .map(Symbol::as_str)
@@ -700,10 +729,8 @@ impl Resolver<'_> {
     fn resolve_root(&mut self, _id: NodeId, name: &Symbol) -> Resolution {
         match name.as_str() {
             "self" => match self.lookup_local(name) {
-                Some(d) => {
-                    self.note_use(_id, name, d);
-                    Resolution::Def(d)
-                }
+                Some(d) if self.note_use(_id, name, d) => Resolution::Def(d),
+                Some(_) => Resolution::Error,
                 None => Resolution::Error,
             },
             "Self" => self
@@ -717,10 +744,10 @@ impl Resolver<'_> {
                     .lookup_unqualified(name)
                     .or_else(|| self.synth_primitive(name).map(Resolution::Def))
                     .unwrap_or(Resolution::Error);
-                if let Resolution::Def(d) = res {
-                    self.note_use(_id, name, d);
+                match res {
+                    Resolution::Def(d) if !self.note_use(_id, name, d) => Resolution::Error,
+                    res => res,
                 }
-                res
             }
         }
     }
@@ -1445,13 +1472,38 @@ impl Resolver<'_> {
     /// Record a use of `def` at `at`, if it reaches across a function or a
     /// closure (§5.5): a closure it crosses captures it, and a `::` function it
     /// crosses cannot see it.
-    fn note_use(&mut self, at: NodeId, name: &Symbol, def: DefId) {
-        if !matches!(self.defs.get(def).kind, DefKind::Local | DefKind::Param) {
-            return;
+    ///
+    /// `false` when the use is refused outright — a local item naming what the
+    /// function around it binds — so the name resolves to nothing and the one
+    /// error is all the program hears about it.
+    fn note_use(&mut self, at: NodeId, name: &Symbol, def: DefId) -> bool {
+        let kind = self.defs.get(def).kind;
+        if !matches!(
+            kind,
+            DefKind::Local | DefKind::Param | DefKind::TypeParam | DefKind::ConstParam
+        ) {
+            return true;
         }
         let Some(frame) = self.scopes.iter().rposition(|f| f.get(name) == Some(&def)) else {
-            return;
+            return true;
         };
+        if self.item_floors.last().is_some_and(|&floor| frame < floor) {
+            let msg = match kind {
+                DefKind::TypeParam | DefKind::ConstParam => format!(
+                    "`{name}` is a generic parameter of the function around this local \
+                     item, and a local item cannot use it"
+                ),
+                _ => format!(
+                    "`{name}` belongs to the function around this local item, which cannot \
+                     capture it; bind a closure instead: `const f := {{ x in ... }}`"
+                ),
+            };
+            self.report(at, msg);
+            return false;
+        }
+        if !matches!(kind, DefKind::Local | DefKind::Param) {
+            return true;
+        }
         let mut crossed_item = false;
         for b in self.boundaries.iter_mut().rev() {
             if frame >= b.depth {
@@ -1478,6 +1530,23 @@ impl Resolver<'_> {
                 ),
             );
         }
+        true
+    }
+
+    /// A block-local item (see [`BlockNs`]): resolved where it is written, so
+    /// the block's names are in reach, but as the definition it is — outside
+    /// any function or closure being walked, with no `Self` and no `impl`
+    /// generics of the code around it.
+    fn resolve_local_item(&mut self, stmt: NodeId) {
+        let boundaries = std::mem::take(&mut self.boundaries);
+        let self_ty = std::mem::take(&mut self.self_ty);
+        let impl_generics = std::mem::take(&mut self.impl_generics);
+        self.item_floors.push(self.scopes.len());
+        self.resolve_node(stmt);
+        self.item_floors.pop();
+        self.boundaries = boundaries;
+        self.self_ty = self_ty;
+        self.impl_generics = impl_generics;
     }
 
     fn bind_param(&mut self, param: NodeId) {

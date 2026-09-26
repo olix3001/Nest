@@ -1629,6 +1629,17 @@ fn a_leaked_object_lives_until_it_is_dropped() {
     );
 }
 
+/// Constants, types, traits, impls and functions declared inside a function
+/// body are definitions like any other, and run as ones.
+#[test]
+fn local_items_run() {
+    let Some(_) = crate::codegen::link::built_runtime() else {
+        return;
+    };
+    let out = run_on_host(include_str!("../../testdata/programs/local_items.nest"));
+    assert_eq!(out.status.code(), Some(42), "{out:?}");
+}
+
 /// **Recursion too deep to fit is a trap, not a segmentation fault.**
 ///
 /// The stack has an end, and reaching it used to be a `SIGSEGV` from whichever

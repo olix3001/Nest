@@ -96,6 +96,25 @@ pub struct SpreadBase;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DefMeta(pub DefId);
 
+/// The namespace collection made for a block's **local items** — the types,
+/// functions, traits and `impl`s written among its statements — stamped on the
+/// `Block` node. It is nobody's member: nothing outside the block can name it,
+/// and the resolver hands its members to the block's scope frame alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BlockNs(pub DefId);
+
+/// Whether a block statement is a **local item** collection turned into a def
+/// of its own (a `func`, a type, a trait, an `impl`) rather than a step the
+/// block runs. A local *constant* is not one: it stays a binding of the block.
+pub fn is_local_item(ast: &Ast, stmt: NodeId) -> bool {
+    let item = ast.decl_item(stmt);
+    match &ast.node(item).kind {
+        NodeKind::ImplBlock { .. } => true,
+        NodeKind::ConstBind { .. } => ast.meta::<DefMeta>(item).is_some(),
+        _ => false,
+    }
+}
+
 /// What the resolver made for a closure (§5.5), stamped on its node: the
 /// closure's type, its body as a function, and that function's first parameter
 /// — the closure itself, which no source names.

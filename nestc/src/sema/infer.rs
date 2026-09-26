@@ -2376,6 +2376,12 @@ impl Inferer<'_> {
     // ===< statements >===
 
     fn infer_stmt(&mut self, node: NodeId) {
+        // A local item is typed as the definition it is, on its own — a local
+        // `func` is one more inference problem of the file — so the block it
+        // is written in has nothing to do for it.
+        if super::is_local_item(self.ast, node) {
+            return;
+        }
         match self.ast.node(node).kind.clone() {
             NodeKind::LocalDecl {
                 pattern, ty, value, ..
@@ -6943,7 +6949,7 @@ impl Inferer<'_> {
             // a folded constant) asks nothing about privacy.
             return true;
         };
-        let home = self.defs.get(owner).parent.unwrap_or(owner);
+        let home = self.defs.privacy_home(owner);
         let mut at = Some(ctx);
         while let Some(d) = at {
             if d == home || d == owner {

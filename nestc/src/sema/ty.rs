@@ -701,7 +701,7 @@ impl Ty {
                 defs.get(*def).name.to_string()
             }
             Ty::Nominal { def, args } => {
-                let name = defs.canonical_string(*def);
+                let name = defs.display_string(*def);
                 if args.is_empty() {
                     name
                 } else {
@@ -766,14 +766,14 @@ impl Ty {
                 format!("*{abi}func({ps}) -> {}", ret.display_with(defs, pinned))
             }
             Ty::Dyn { def, assoc } if assoc.is_empty() => {
-                format!("dyn {}", defs.canonical_string(*def))
+                format!("dyn {}", defs.display_string(*def))
             }
             Ty::Dyn { def, assoc } => {
                 let parts: Vec<String> = assoc
                     .iter()
                     .map(|(n, t)| format!("{n} = {}", t.display_with(defs, pinned)))
                     .collect();
-                format!("dyn {}.<{}>", defs.canonical_string(*def), parts.join(", "))
+                format!("dyn {}.<{}>", defs.display_string(*def), parts.join(", "))
             }
             Ty::Error => "<error>".into(),
         }
@@ -804,7 +804,7 @@ fn opaque_bounds(
     bounds
         .iter()
         .map(|&b| {
-            let name = defs.canonical_string(b);
+            let name = defs.display_string(b);
             let of = |n: &str| {
                 assoc
                     .iter()
