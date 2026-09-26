@@ -9761,7 +9761,8 @@ impl Inferer<'_> {
             }
             // A side that holds an error — `*<error>`, whose pointee was
             // already refused — was reported where the error came from.
-            if self.cx.resolve(actual).mentions_error() || self.cx.resolve(expected).mentions_error()
+            if self.cx.resolve(actual).mentions_error()
+                || self.cx.resolve(expected).mentions_error()
             {
                 return;
             }

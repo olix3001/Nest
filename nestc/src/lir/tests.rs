@@ -3658,8 +3658,17 @@ fn only_an_escaping_address_is_promoted() {
          closure :: func (n: i32) -> *dyn Func(i32) -> i32 { return &{ [n] x: i32 in x + n } }\n\
          main :: func () -> i32 { return reads() }\n",
     );
-    assert!(!allocates(&unit, "reads"), "nothing `reads` takes the address of leaves it");
-    for f in ["returns_local", "returns_holder", "holder_assigned", "stored", "closure"] {
+    assert!(
+        !allocates(&unit, "reads"),
+        "nothing `reads` takes the address of leaves it"
+    );
+    for f in [
+        "returns_local",
+        "returns_holder",
+        "holder_assigned",
+        "stored",
+        "closure",
+    ] {
         assert!(allocates(&unit, f), "`{f}` lets an address escape");
     }
 }

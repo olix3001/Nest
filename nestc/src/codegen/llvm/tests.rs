@@ -1626,7 +1626,11 @@ fn a_promoted_value_survives_collection() {
         &[],
         &[("NEST_GC_POISON", "1")],
     );
-    assert_eq!(out.status.code(), Some(0), "a promoted value was freed: {out:?}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a promoted value was freed: {out:?}"
+    );
 }
 
 /// A leaked object outlives everything that reached it, until it is dropped,
