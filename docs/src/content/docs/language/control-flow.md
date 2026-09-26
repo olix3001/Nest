@@ -47,7 +47,7 @@ _                                        // wildcard
 mut x                                    // (mutable) binding
 x @ pattern                              // bind the whole, match inside
 .variant(a, b)  .variant { a, b }        // enum variant, tuple or record payload
-{ a, b, .. }    Type(a, b)               // struct / tuple-struct destructure
+{ a, b, .. }    Type(a, b)               // struct (also `.{ a, b }`) / tuple struct
 (a, b)          [first, .. rest]         // tuple / slice
 pattern | pattern                        // or-pattern
 &pattern                                 // dereference: match through a pointer
@@ -92,10 +92,14 @@ literal, and range patterns are refutable and only allowed in `match` (or
 `if match`, below).
 
 ```nest
-const .{ width, height } := cat        // bind two fields
+const { width, height } := cat         // bind two fields
+const { url: u, .. } := cat            // bind `url` as `u`, ignore the rest
 const (a, b) := pair                    // tuple
 let   [first, .. rest] := xs            // slice: head + remaining
 ```
+
+A struct pattern may also be written with a leading dot, `.{ width, height }`,
+the way an anonymous struct value is: the two spellings are the same pattern.
 
 ## `if match`
 

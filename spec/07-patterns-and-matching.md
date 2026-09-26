@@ -63,11 +63,15 @@ pulled apart at the binding site:
 { http: { Client, Router, Response } } :: import "network.nest"
 { http: * } :: import <std>                 // glob std.http's members into scope
 
-const .{ width, height } := cat            // bind two fields
+const { width, height } := cat             // bind two fields
 const (a, b) := pair                        // tuple
-const .{ url: u, .. } := cat                // bind `url` as `u`, ignore the rest
+const { url: u, .. } := cat                 // bind `url` as `u`, ignore the rest
 let   [first, .. rest] := xs                // slice: head + remaining
 ```
+
+A struct pattern's leading `.` is optional (§7.1): `.{ width, height }` is the
+same pattern as `{ width, height }`, spelled the way an anonymous struct value
+is.
 
 For **bindings** (not `match`), the pattern must be **irrefutable** — it must
 match every value of the operand's type. Struct, tuple, slice-with-rest, and
