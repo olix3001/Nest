@@ -33,7 +33,7 @@ use lsp_types::{
 };
 use nestc::common::source::FileId;
 use nestc::common::span::Span;
-use nestc::parser::ast::{Ast, CompositeBody, NodeId, NodeKind};
+use nestc::parser::ast::{Ast, CompositeBody, ImportPath, NodeId, NodeKind};
 use nestc::sema::decl::Decls;
 use nestc::sema::def::{Def, DefId, DefKind, Visibility};
 use nestc::sema::session::Session;
@@ -637,7 +637,7 @@ impl Cx<'_> {
                 .and_then(|t| {
                     let (via, name) = importable.get(&t)?;
                     Some((
-                        self.import_edit(&via.line(name, false)),
+                        self.import(via, name, false),
                         via.describe() + "." + name,
                     ))
                 });
@@ -843,7 +843,7 @@ impl Cx<'_> {
                 let mut it = item(s, def, self.snippets);
                 it.label = name.clone();
                 it.additional_text_edits =
-                    Some(vec![self.import_edit(&via.line(&name, namespace))]);
+                    Some(vec![self.import(&via, &name, namespace)]);
                 it.label_details = Some(CompletionItemLabelDetails {
                     detail: None,
                     description: Some(via.describe()),
@@ -926,19 +926,126 @@ impl Cx<'_> {
 
     /// The edit that writes `line` with the file's imports: after the last of
     /// them, or after the comments the file starts with.
-    fn import_edit(&self, line: &str) -> TextEdit {
-        let ast = self.ast;
-        let last = ast
-            .ids()
-            .filter(|&id| ast.node(id).file == self.file)
-            .filter_map(|id| match ast.node(id).kind {
-                NodeKind::ConstBind { rhs, .. }
-                    if matches!(ast.node(rhs).kind, NodeKind::Import { .. }) =>
-                {
-                    Some(ast.node(id).span.end)
+    /// The edit that brings `name` in through `via`: into an `import` of the
+    /// same target the file already has when there is one — a destructuring
+    /// gains the member, and a whole-namespace binding becomes one, `io ::
+    /// import <std/io>` turning into `{ self, println } :: import <std/io>` —
+    /// and a line of its own otherwise. A namespace is also a member of its
+    /// parent, so `http` joins a `{ io } :: import <std>`.
+    fn import(&self, via: &Via, name: &str, namespace: bool) -> TextEdit {
+        let mut wanted: Vec<(Target, &str)> = Vec::new();
+        match via {
+            Via::Package(segments) if namespace => {
+                let mut own = segments.clone();
+                own.push(name.to_string());
+                wanted.push((Target::Package(own), "self"));
+                wanted.push((Target::Package(segments.clone()), name));
+            }
+            Via::Package(segments) => wanted.push((Target::Package(segments.clone()), name)),
+            Via::File(path) => wanted.push((Target::File(path.clone()), name)),
+        }
+        for (target, member) in &wanted {
+            for (pattern, written, _) in self.file_imports() {
+                if written != *target {
+                    continue;
                 }
+                if let Some(edit) = self.join(pattern, target, member) {
+                    return edit;
+                }
+            }
+        }
+        self.import_edit(&via.line(name, namespace))
+    }
+
+    /// The file's own `import` bindings — not one inside a body, which binds
+    /// for its block alone — each as its pattern, what it imports, and where
+    /// the binding ends.
+    fn file_imports(&self) -> Vec<(NodeId, Target, usize)> {
+        let ast = self.ast;
+        let Some(NodeKind::File { items }) = ast.root().map(|r| ast.node(r).kind.clone()) else {
+            return Vec::new();
+        };
+        items
+            .into_iter()
+            .filter_map(|item| match ast.node(ast.decl_item(item)).kind.clone() {
+                NodeKind::ConstBind { pattern, rhs } => match ast.node(rhs).kind.clone() {
+                    NodeKind::Import { path } => {
+                        Some((pattern, Target::of(&path), ast.node(item).span.end))
+                    }
+                    _ => None,
+                },
                 _ => None,
             })
+            .collect()
+    }
+
+    /// `member` added to the import whose pattern is `pattern`, when that
+    /// pattern can take it: a destructuring without it, or a whole-namespace
+    /// binding (which then binds itself through `self`).
+    fn join(&self, pattern: NodeId, target: &Target, member: &str) -> Option<TextEdit> {
+        let analyzed = ide::source(self.s, self.file)?;
+        let span = self.ast.node(pattern).span;
+        // Answered from an analysis a few edits old, the pattern has to read
+        // the same in the editor's text, or what is edited is not what is there.
+        let old = analyzed.get(span.start..span.end)?;
+        let (from, to) = (self.edits.forward(span.start), self.edits.forward(span.end));
+        if self.text.get(from..to) != Some(old) {
+            return None;
+        }
+        match self.ast.node(pattern).kind.clone() {
+            NodeKind::StructPat { fields, .. } => {
+                let has = fields.iter().any(|&f| {
+                    matches!(&self.ast.node(f).kind, NodeKind::FieldPat { name, .. } if name.as_str() == member)
+                });
+                if has {
+                    return None;
+                }
+                let text = analyzed.get(span.start..span.end)?;
+                let close = text.rfind('}')?;
+                let inner = text[..close].trim_end();
+                let at = span.start + inner.len();
+                let insert = match inner.chars().last() {
+                    Some('{') => format!(" {member}"),
+                    Some(',') => format!(" {member}"),
+                    _ => format!(", {member}"),
+                };
+                Some(self.edit(at, at, insert))
+            }
+            NodeKind::BindingPat { name, .. } if member != "self" => {
+                let own = match target {
+                    Target::Package(segments) => segments.last().cloned(),
+                    Target::File(path) => Path::new(path)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned()),
+                };
+                let this = match own.as_deref() == Some(name.as_str()) {
+                    true => "self".to_string(),
+                    false => format!("self: {name}"),
+                };
+                Some(self.edit(span.start, span.end, format!("{{ {this}, {member} }}")))
+            }
+            _ => None,
+        }
+    }
+
+    /// Replace `start..end` of the analyzed text with `text`, in the editor's.
+    fn edit(&self, start: usize, end: usize, text: String) -> TextEdit {
+        let at = |offset: usize| {
+            let o = self.edits.forward(offset).min(self.text.len());
+            let o = (0..=o)
+                .rev()
+                .find(|&i| self.text.is_char_boundary(i))
+                .unwrap_or(0);
+            analysis::position(self.text, o)
+        };
+        TextEdit::new(Range::new(at(start), at(end)), text)
+    }
+
+    fn import_edit(&self, line: &str) -> TextEdit {
+        let last = self
+            .file_imports()
+            .into_iter()
+            .map(|(_, _, end)| end)
             .max();
         // Offsets into the analyzed text, which is not quite the editor's.
         let analyzed = ide::source(self.s, self.file).unwrap_or_default();
@@ -971,6 +1078,25 @@ impl Cx<'_> {
             ""
         };
         TextEdit::new(Range::new(position, position), format!("{prefix}{line}\n"))
+    }
+}
+
+/// What an `import` names, compared the way the LSP writes one: a package's
+/// segments, or a file's path without a leading `./`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    Package(Vec<String>),
+    File(String),
+}
+
+impl Target {
+    fn of(path: &ImportPath) -> Target {
+        match path {
+            ImportPath::Package(segments) => {
+                Target::Package(segments.iter().map(|s| s.to_string()).collect())
+            }
+            ImportPath::File(p) => Target::File(p.trim_start_matches("./").to_string()),
+        }
     }
 }
 

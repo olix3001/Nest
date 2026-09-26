@@ -874,6 +874,74 @@ fn completion_imports_what_it_offers() {
     );
 }
 
+/// An import the file already has of the same target takes what completion
+/// imports, rather than a line of its own: a destructuring gains the member,
+/// a whole-namespace binding becomes a destructuring through `self`, and a
+/// namespace joins its parent's destructuring. An import inside a body is not
+/// the file's, and is left alone.
+#[test]
+fn completion_imports_into_an_import_the_file_has() {
+    let (_dir, file, mut client) = program();
+    let edit_for = |client: &mut Client, head: &str, typed: &str, label: &str| {
+        let text = head.to_string()
+            + &PROGRAM.replace(
+                "  return p.sum() + n",
+                &format!("  let h := {typed}\n  return p.sum() + n"),
+            );
+        client.change(&file, &text);
+        client.settle(&file);
+        let answer = client.at(
+            Completion::METHOD,
+            &file,
+            position(&text, &format!("{typed}\n"), 0, typed.len() as u32),
+        );
+        let item = answer["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["label"] == label)
+            .unwrap_or_else(|| panic!("`{label}` is offered: {answer}"))
+            .clone();
+        item["additionalTextEdits"][0].clone()
+    };
+
+    let e = edit_for(&mut client, "{ Vec } :: import <std/collections>\n", "HashM", "HashMap");
+    assert_eq!(e["newText"], ", HashMap", "{e}");
+    assert_eq!(e["range"]["start"], serde_json::json!({"line": 0, "character": 5}), "{e}");
+
+    let e = edit_for(&mut client, "collections :: import <std/collections>\n", "HashM", "HashMap");
+    assert_eq!(e["newText"], "{ self, HashMap }", "{e}");
+    assert_eq!(e["range"]["end"], serde_json::json!({"line": 0, "character": 11}), "{e}");
+
+    let e = edit_for(&mut client, "c :: import <std/collections>\n", "HashM", "HashMap");
+    assert_eq!(e["newText"], "{ self: c, HashMap }", "{e}");
+
+    let e = edit_for(&mut client, "{ io } :: import <std>\n", "collecti", "collections");
+    assert_eq!(e["newText"], ", collections", "{e}");
+
+    let e = edit_for(&mut client, "{ HashMap } :: import <std/collections>\n", "collecti", "collections");
+    assert_eq!(e["newText"], ", self", "{e}");
+
+    // Only in a body: a line of the file's own, at its top.
+    let text = PROGRAM.replace(
+        "  return p.sum() + n",
+        "  { Vec } :: import <std/collections>\n  let h := HashM\n  return p.sum() + n",
+    );
+    client.change(&file, &text);
+    client.settle(&file);
+    let answer = client.at(Completion::METHOD, &file, position(&text, "HashM\n", 0, 5));
+    let item = answer["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "HashMap")
+        .expect("`HashMap` is offered")
+        .clone();
+    let e = &item["additionalTextEdits"][0];
+    assert_eq!(e["newText"], "{ HashMap } :: import <std/collections>\n", "{e}");
+    assert!(e["range"]["start"]["line"].as_u64().unwrap() < 2, "{e}");
+}
+
 /// Deleting most of a file and asking for completion in what is left still
 /// answers, import and all: every offset the answer carries is one into the
 /// text the editor has, which is shorter than the one that was analyzed.
