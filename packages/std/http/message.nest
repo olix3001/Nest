@@ -119,6 +119,57 @@ impl Response {
     @public text :: #inline func (self: *Self) -> str { return cast.<str>(self.body) }
 }
 
+/// What a handler or a middleware may answer with: anything that becomes a
+/// `Response`. A handler returns `"text"`, a `Response`, a `Json`, a
+/// `(201, value)`, a `Result` whose both sides are one of those — so `.?`
+/// answers the error as it is — or an `Option`, whose `.none` is a `404`.
+@public IntoResponse :: trait {
+    into_response :: func (self: Self) -> Response
+}
+
+impl IntoResponse for Response {
+    into_response :: func (self: Response) -> Response { return self }
+}
+
+impl IntoResponse for str {
+    into_response :: func (self: str) -> Response { return text(self) }
+}
+
+impl IntoResponse for String {
+    into_response :: func (self: String) -> Response { return text(self.as_str()) }
+}
+
+/// Nothing to say: a `204`.
+impl IntoResponse for void {
+    into_response :: func (self: void) -> Response {
+        return Response { status: 204, headers: collections.vec.new.<Header>(), body: .{} }
+    }
+}
+
+/// `value`'s response with status `code`: `(201, "created")`.
+impl <T: IntoResponse> IntoResponse for (u16, T) {
+    into_response :: func (self: (u16, T)) -> Response { return self.1.into_response().with_status(self.0) }
+}
+
+/// `.none` is a `404`.
+impl <T: IntoResponse> IntoResponse for Option.<T> {
+    into_response :: func (self: Option.<T>) -> Response {
+        return self.match {
+            .some(v) => v.into_response(),
+            .none => not_found(),
+        }
+    }
+}
+
+impl <T: IntoResponse, E: IntoResponse> IntoResponse for Result.<T, E> {
+    into_response :: func (self: Result.<T, E>) -> Response {
+        return self.match {
+            .ok(v) => v.into_response(),
+            .err(e) => e.into_response(),
+        }
+    }
+}
+
 /// The phrase a status line carries after the code.
 @public reason :: func (code: u16) -> str {
     return code.match {

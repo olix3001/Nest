@@ -8,12 +8,12 @@
 //     services.add_singleton({ sp in Greeter { greeting: "hello" } })
 //
 //     let mut app: http.App := http.app(services.build())
-//     app.get("/") { ctx in http.text("home") }
+//     app.get("/") { ctx in http.html("<h1>home</h1>") }
 //     app.route("/api") { r in
 //         r.get("/hello/:name") { ctx, g: *Greeter in
-//             http.text(f"{g.greeting}, {ctx.param("name")}")
+//             f"{g.greeting}, {ctx.param("name")}"
 //         }
-//         r.post("/echo") { ctx in http.text(ctx.body()) }
+//         r.post("/echo") { ctx in ctx.body() }
 //     }
 //     app.listen("127.0.0.1:8080").!
 //
@@ -22,6 +22,10 @@
 // resolved from the request's scope (`std/di`'s `invoke_with`): a service it
 // depends on. Those are written with their types, because that is what they
 // are resolved by.
+//
+// A handler answers anything that is `IntoResponse`: text, a `Response`, a
+// `Json`, `(status, value)`, `void` (`204`), an `Option` (`.none` is `404`) or
+// a `Result` of those, so `.?` answers its error.
 //
 // Every request is served in a **scope** of its own (`di.Scope.scope()`), so a
 // scoped service — a unit of work, a request's user — is built once per request
@@ -44,7 +48,7 @@
 // additions to `server.nest` that leave the handler's side — a `Context` in, a
 // `Response` out — as it is.
 
-@public { Header, Request, Response, request, text, html, json_of, status, not_found, with_body, reason } :: import "message.nest"
+@public { Header, IntoResponse, Request, Response, request, text, html, json_of, status, not_found, with_body, reason } :: import "message.nest"
 @public { Handler, Middleware, Next, Context, Router, App, app } :: import "router.nest"
 @public { MAX_REQUEST } :: import "server.nest"
 @public { Json, Body, Headers, Rejection } :: import "extract.nest"
@@ -141,6 +145,48 @@ tests :: #when(test) namespace {
         const bad: Response := a.respond(posting("/user", "{\"name\": 5}"))
         assert(bad.status == 400, "a body that is not the `T` is the client's mistake")
         assert(a.respond(posting("/raw", "hi")).text() == "hi t1")
+    }
+
+    @test
+    handlers_answer_anything_into_a_response :: func () {
+        let mut a: App := make_app()
+        a.get("/str") { ctx in "plain" }
+        a.get("/created") { ctx in (201, Json { value: User { name: "ada", age: 36 } }) }
+        a.get("/empty") { ctx in () }
+        a.get("/maybe/:n") { ctx -> Option.<str> in
+            if ctx.param("n") == "1" { return .some("one") }
+            return .none
+        }
+        a.get("/checked/:n") { ctx -> Result.<str, (u16, str)> in
+            if ctx.param("n") == "0" { return .err((400, "zero")) }
+            return .ok("fine")
+        }
+        const created: Response := a.respond(request("GET", "/created"))
+        assert(created.status == 201 && created.text() == "{\"name\":\"ada\",\"age\":36}", created.text())
+        assert(a.respond(request("GET", "/str")).text() == "plain")
+        assert(a.respond(request("GET", "/empty")).status == 204)
+        assert(a.respond(request("GET", "/maybe/1")).text() == "one")
+        assert(a.respond(request("GET", "/maybe/2")).status == 404)
+        assert(a.respond(request("GET", "/checked/1")).text() == "fine")
+        const zero: Response := a.respond(request("GET", "/checked/0"))
+        assert(zero.status == 400 && zero.text() == "zero", zero.text())
+    }
+
+    @test
+    middleware_answers_anything_into_a_response :: func () {
+        let mut a: App := make_app()
+        a.use { ctx, next -> Result.<Response, (u16, str)> in
+            ctx.header("X-Key").match {
+                .some(_) => .ok(next.run(ctx)),
+                .none => .err((403, "no key")),
+            }
+        }
+        a.get("/guarded") { ctx in "in" }
+        assert(a.respond(request("GET", "/guarded")).status == 403)
+        let mut r: Request := request("GET", "/guarded")
+        const hs: []Header := .{ Header { name: "X-Key", value: "k" } }
+        r.headers = hs
+        assert(a.respond(r).text() == "in")
     }
 
     @test

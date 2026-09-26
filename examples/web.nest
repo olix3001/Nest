@@ -51,21 +51,24 @@ main :: func () -> i32 {
 
     app.route("/api") { r in
         // Everything under `/api` needs an `Authorization` header.
-        r.use { ctx, next in
+        // A handler or middleware answers anything that is
+        // `http.IntoResponse`: here a `Result` of a response or a
+        // `(status, text)`.
+        r.use { ctx, next -> Result.<http.Response, (u16, str)> in
             ctx.header("Authorization").match {
-                .some(_) => next.run(ctx),
-                .none => http.status(401, "who are you?"),
+                .some(_) => .ok(next.run(ctx)),
+                .none => .err((401, "who are you?")),
             }
         }
         // The request's own context and a singleton, side by side.
         r.get("/hello/:name") { ctx, g: *Greeter in
-            http.text(f"{g.greeting}, {ctx.param("name")}\n")
+            f"{g.greeting}, {ctx.param("name")}\n"
         }
         // A scoped service, built for this request by autowiring.
         r.get("/visit") { ctx, v: *Visit in
             http.text(f"{v.greeter.greeting}: visit {v.n}\n")
         }
-        r.post("/echo") { ctx in http.text(ctx.body()) }
+        r.post("/echo") { ctx in ctx.body() }
     }
 
     io.println("listening on http://127.0.0.1:8080")

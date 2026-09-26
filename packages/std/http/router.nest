@@ -10,7 +10,7 @@ strs :: import "../text/str.nest"
 collections :: import "../collections/collections.nest"
 { Vec } :: import "../collections/collections.nest"
 di :: import "../di/di.nest"
-{ Request, Response, not_found, status } :: import "message.nest"
+{ IntoResponse, Request, Response, not_found, status } :: import "message.nest"
 { Rejection } :: import "extract.nest"
 { boxed, new } :: import <core/mem>
 
@@ -127,8 +127,9 @@ impl Router {
     /// Pass every route registered on this router **from here on** — and on
     /// the routers `route` makes from it — through `m`. The first added runs
     /// first.
-    @public use :: func <F: Func(*Context, *Next) -> Response> (self: *mut Self, m: F) -> void {
-        const erased: Middleware := boxed({ ctx: *Context, next: *Next in m(ctx, next) })
+    /// It answers anything that is `IntoResponse`, as a handler does.
+    @public use :: func <R: IntoResponse, F: Func(*Context, *Next) -> R> (self: *mut Self, m: F) -> void {
+        const erased: Middleware := boxed({ ctx: *Context, next: *Next in m(ctx, next).into_response() })
         self.middleware.push(erased)
     }
 
@@ -138,25 +139,26 @@ impl Router {
     /// The handler's first parameter is the request's `*Context`, and its
     /// type is left out. The ones after it are **resolved from the request's
     /// scope** (`std/di`), whatever they are, and are written with their
-    /// types. It answers a `Response`; a parameter no one can supply is a
-    /// `500`.
+    /// types. It answers anything that is `IntoResponse` — `"text"`, a
+    /// `Response`, `(201, http.Json { value: v })`, a `Result` of those; a
+    /// parameter no one can supply is a `500`.
     ///
     /// ```nest
     /// app.get("/users/:id") { ctx, repo: *Repo in
     ///     http.json_of(repo.find(ctx.param("id")))
     /// }
-    /// app.get("/health") { ctx in http.text("ok") }
+    /// app.get("/health") { ctx in "ok" }
     /// ```
-    @public handle :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, method: str, path: str, handler: F) -> void {
+    @public handle :: func <Rest, R: IntoResponse, F: Func.<Args = (*Context, ..Rest), Output = R>> (self: *mut Self, method: str, path: str, handler: F) -> void {
         const full: str := join_path(self.prefix, path)
         const h: Handler := boxed({ ctx: *Context in
             ctx.sp.invoke_with((ctx,), handler).match {
-                .ok(r) => r,
+                .ok(r) => r.into_response(),
                 // A parameter the request could not supply (`http.Json` of a
                 // bad body) says what to answer; a service no one registered
                 // is the application's mistake.
                 .err(e) => e.cause.<Rejection>().match {
-                    .some(r) => status(r.status, r.message),
+                    .some(r) => r.into_response(),
                     .none => status(500, e.message),
                 },
             }
@@ -165,19 +167,19 @@ impl Router {
         self.routes.push(Route { method: method, segments: segments(full), handler: h, middleware: chain })
     }
 
-    @public get :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+    @public get :: func <Rest, R: IntoResponse, F: Func.<Args = (*Context, ..Rest), Output = R>> (self: *mut Self, path: str, handler: F) -> void {
         self.handle("GET", path, handler)
     }
 
-    @public post :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+    @public post :: func <Rest, R: IntoResponse, F: Func.<Args = (*Context, ..Rest), Output = R>> (self: *mut Self, path: str, handler: F) -> void {
         self.handle("POST", path, handler)
     }
 
-    @public put :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+    @public put :: func <Rest, R: IntoResponse, F: Func.<Args = (*Context, ..Rest), Output = R>> (self: *mut Self, path: str, handler: F) -> void {
         self.handle("PUT", path, handler)
     }
 
-    @public delete :: func <Rest, F: Func.<Args = (*Context, ..Rest), Output = Response>> (self: *mut Self, path: str, handler: F) -> void {
+    @public delete :: func <Rest, R: IntoResponse, F: Func.<Args = (*Context, ..Rest), Output = R>> (self: *mut Self, path: str, handler: F) -> void {
         self.handle("DELETE", path, handler)
     }
 

@@ -15,7 +15,8 @@
 di :: import "../di/di.nest"
 json :: import "../serialize/json/json.nest"
 { Decode } :: import "../serialize/decode.nest"
-{ Header, same_ascii } :: import "message.nest"
+{ Encode } :: import "../serialize/encode.nest"
+{ Header, IntoResponse, Response, json_of, same_ascii, with_body } :: import "message.nest"
 { Context } :: import "router.nest"
 
 /// Why a request could not supply a handler's parameter: the response to send
@@ -26,6 +27,13 @@ json :: import "../serialize/json/json.nest"
     message: str,
 }
 
+impl IntoResponse for Rejection {
+    into_response :: func (self: Rejection) -> Response {
+        // `status` and `message` here are this struct's own fields.
+        return with_body(self.status, "text/plain; charset=utf-8", self.message.as_bytes())
+    }
+}
+
 // The request's `*Context`, which every request's scope is given.
 context :: func (sp: *mut di.Scope) -> Result.<*Context, Rejection> {
     return sp.get.<Context>().match {
@@ -34,7 +42,8 @@ context :: func (sp: *mut di.Scope) -> Result.<*Context, Rejection> {
     }
 }
 
-/// The request's body, decoded as JSON into a `T`.
+/// The request's body, decoded as JSON into a `T` — and, as a handler's
+/// answer, a `T` written as JSON.
 @public(all) Json :: struct <T> {
     value: T,
 }
@@ -51,6 +60,11 @@ impl <T: Decode> di.Resolve for Json.<T> {
         }
         return .ok(())
     }
+}
+
+/// As an answer: `value` written as JSON, or a `500` when it cannot be.
+impl <T: Encode> IntoResponse for Json.<T> {
+    into_response :: func (self: Json.<T>) -> Response { return json_of(self.value) }
 }
 
 /// The request's body, as text.
