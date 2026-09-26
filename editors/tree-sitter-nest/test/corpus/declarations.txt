@@ -343,3 +343,57 @@ Import destructuring with self
               (identifier)))))
       (import_expression
         (package_path)))))
+
+================================================================================
+impl inside parameter and return types
+================================================================================
+
+twice :: func (s: *impl Shape, xs: []impl Shape) -> (*impl Shape, impl Func(i32) -> i32) {
+    return (s, &{ [n] x in x })
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (func_expression
+        (parameters
+          (parameter
+            (identifier)
+            (pointer_type
+              (impl_type
+                (type_path
+                  (type_identifier)))))
+          (parameter
+            (identifier)
+            (slice_type
+              (impl_type
+                (type_path
+                  (type_identifier))))))
+        (tuple_type
+          (pointer_type
+            (impl_type
+              (type_path
+                (type_identifier))))
+          (impl_type
+            (callable_type
+              (type_path
+                (type_identifier))
+              (type_path
+                (type_identifier))
+              (type_path
+                (type_identifier)))))
+        (block
+          (return_statement
+            (tuple_expression
+              (identifier)
+              (unary_expression
+                (closure_expression
+                  (capture_list
+                    (identifier))
+                  (closure_parameter
+                    (identifier))
+                  (expression_statement
+                    (identifier)))))))))))
