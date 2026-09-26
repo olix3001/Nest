@@ -600,6 +600,10 @@
           "named": true
         },
         {
+          "type": "impl_block",
+          "named": true
+        },
+        {
           "type": "return_statement",
           "named": true
         },
@@ -823,6 +827,10 @@
         },
         {
           "type": "for_statement",
+          "named": true
+        },
+        {
+          "type": "impl_block",
           "named": true
         },
         {

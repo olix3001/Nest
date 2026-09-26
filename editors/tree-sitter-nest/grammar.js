@@ -415,6 +415,8 @@ module.exports = grammar({
 
     _statement: $ => choice(
       $.declaration,
+      // A local `impl`, for a type the block declares (spec §2.1).
+      $.impl_block,
       $.assignment,
       $.defer_statement,
       $.return_statement,

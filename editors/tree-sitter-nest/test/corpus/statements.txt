@@ -404,3 +404,60 @@ h :: func <Rest> (t: (i32, ..Rest)) {
                 type: (identifier)
                 (identifier)
                 (identifier)))))))))
+
+================================================================================
+Local items: imports, types and impls in a body
+================================================================================
+
+main :: func () {
+    io :: import <std/io>
+    Point :: struct { x: i32 }
+    impl Point {
+        sum :: func (self: *Self) -> i32 { self.x }
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (const_binding
+      (identifier)
+      (func_expression
+        (parameters)
+        (block
+          (declaration
+            (const_binding
+              (identifier)
+              (import_expression
+                (package_path))))
+          (declaration
+            (const_binding
+              (identifier)
+              (struct_type
+                (field_list
+                  (field_declaration
+                    (field_identifier)
+                    (type_path
+                      (type_identifier)))))))
+          (impl_block
+            (type_path
+              (type_identifier))
+            (item_body
+              (declaration
+                (const_binding
+                  (identifier)
+                  (func_expression
+                    (parameters
+                      (parameter
+                        (identifier)
+                        (pointer_type
+                          (type_path
+                            (type_identifier)))))
+                    (type_path
+                      (type_identifier))
+                    (block
+                      (expression_statement
+                        (field_expression
+                          (identifier)
+                          (field_identifier))))))))))))))

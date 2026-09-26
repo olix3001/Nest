@@ -2616,6 +2616,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "impl_block"
+        },
+        {
+          "type": "SYMBOL",
           "name": "assignment"
         },
         {
