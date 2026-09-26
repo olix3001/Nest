@@ -3,7 +3,7 @@
 // and `std/di` builds it for the request being answered.
 //
 //     app.post("/users") { ctx, user: http.Json.<User>, repo: *Repo in
-//         repo.add(user.value)
+//         repo.add(user)
 //         http.text("added")
 //     }
 //
@@ -43,16 +43,22 @@ context :: func (sp: *mut di.Scope) -> Result.<*Context, Rejection> {
 }
 
 /// The request's body, decoded as JSON into a `T` — and, as a handler's
-/// answer, a `T` written as JSON.
-@public(all) Json :: struct <T> {
-    value: T,
+/// answer, a `T` written as JSON. It lends the `T`: `user.name` is the decoded
+/// `User`'s `name`, and a `Json.<User>` is a `User` wherever one is wanted.
+@public Json :: struct <T> {
+    @using _value: T,
+}
+
+impl <T> Json.<T> {
+    /// `value`, to be answered as JSON: `(201, http.Json.of(user))`.
+    @public of :: func (value: T) -> Json.<T> { return Json { _value: value } }
 }
 
 impl <T: Decode> di.Resolve for Json.<T> {
     Failure :: Rejection
     resolve :: func (self: *mut Self, sp: *mut di.Scope) -> Result.<void, Rejection> {
         const ctx: *Context := context(sp).?
-        self.value = json.from_str.<T>(ctx.body()).match {
+        self._value = json.from_str.<T>(ctx.body()).match {
             .ok(v) => v,
             .err(e) => {
                 return .err(Rejection { status: 400, message: f"the body is not valid JSON for this request: {e}" })
@@ -62,9 +68,9 @@ impl <T: Decode> di.Resolve for Json.<T> {
     }
 }
 
-/// As an answer: `value` written as JSON, or a `500` when it cannot be.
+/// As an answer: the value written as JSON, or a `500` when it cannot be.
 impl <T: Encode> IntoResponse for Json.<T> {
-    into_response :: func (self: Json.<T>) -> Response { return json_of(self.value) }
+    into_response :: func (self: Json.<T>) -> Response { return json_of(self._value) }
 }
 
 /// The request's body, as text.

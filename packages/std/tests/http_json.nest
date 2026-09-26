@@ -1,0 +1,43 @@
+// `http.Json.<T>` seen from outside `std`, as a program sees it: its field is
+// private, and everything it lends — the decoded value's fields and methods,
+// and the value itself — works as if the handler had been given a `T`.
+
+di :: import <std/di>
+http :: import <std/http>
+{ rename } :: import <std/serialize>
+
+User :: struct {
+    @rename("username") name: str,
+    age: i32,
+}
+
+impl User {
+    older :: func (self: *Self) -> i32 { return self.age + 1 }
+}
+
+posting :: func (target: str, body: str) -> http.Request {
+    let mut r: http.Request := http.request("POST", target)
+    r.body = body.as_bytes()
+    return r
+}
+
+@test
+a_json_parameter_lends_what_it_decoded :: func () {
+    let mut services: di.Services := di.services()
+    let mut app: http.App := http.app(services.build())
+    // A type local to the function, with a renamed field, as a handler's
+    // parameter: the case that once failed to name its type at all.
+    Local :: struct { title: str }
+    app.post("/user") { ctx, u: http.Json.<User> in
+        const plain: User := u
+        http.text(f"{u.name} {u.older()} {plain.age}")
+    }
+    app.post("/local") { ctx, l: http.Json.<Local> in http.text(l.title) }
+    app.get("/made") { ctx in (201, http.Json.of(User { name: "bo", age: 2 })) }
+
+    const res: http.Response := app.respond(posting("/user", "{\"username\": \"ada\", \"age\": 36}"))
+    assert(res.status == 200 && res.text() == "ada 37 36", res.text())
+    assert(app.respond(posting("/local", "{\"title\": \"hi\"}")).text() == "hi")
+    const made: http.Response := app.respond(http.request("GET", "/made"))
+    assert(made.status == 201 && made.text() == "{\"username\":\"bo\",\"age\":2}", made.text())
+}

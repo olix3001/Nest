@@ -136,7 +136,7 @@ tests :: #when(test) namespace {
     handlers_take_the_request_s_parts :: func () {
         let mut a: App := make_app()
         a.post("/user") { ctx, u: Json.<User>, g: *Greeter in
-            text(f"{g.greeting} {u.value.name} ({u.value.age})")
+            text(f"{g.greeting} {u.name} ({u.age})")
         }
         a.post("/raw") { ctx, b: Body, h: Headers in
             text(f"{b.text} {h.get("x-tag").match { .some(v) => v, .none => "-" }}")
@@ -156,7 +156,7 @@ tests :: #when(test) namespace {
             surname: str,
         }
         a.post("/json") { ctx, data: Json.<ExampleJson> in
-            text(f"{data.value.name} {data.value.surname}")
+            text(f"{data.name} {data.surname}")
         }
         const res: Response := a.respond(posting("/json", "{\"username\": \"ada\", \"surname\": \"lovelace\"}"))
         assert(res.status == 200 && res.text() == "ada lovelace", res.text())
@@ -171,7 +171,7 @@ tests :: #when(test) namespace {
     handlers_answer_anything_into_a_response :: func () {
         let mut a: App := make_app()
         a.get("/str") { ctx in "plain" }
-        a.get("/created") { ctx in (201, Json { value: User { name: "ada", age: 36 } }) }
+        a.get("/created") { ctx in (201, Json.of(User { name: "ada", age: 36 })) }
         a.get("/empty") { ctx in () }
         a.get("/maybe/:n") { ctx in
             if ctx.param("n") == "1" { return .some("one") }
@@ -186,7 +186,7 @@ tests :: #when(test) namespace {
             .err(Rejection { status: 418, message: "teapot" })
         }
         a.post("/named") { ctx, u: Json.<User> in
-            const name: str := named(u.value.name).?
+            const name: str := named(u.name).?
             return .ok((201, name))
         }
         const nested: Response := a.respond(request("GET", "/nested"))

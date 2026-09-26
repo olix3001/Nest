@@ -45,7 +45,7 @@ main :: func () -> i32 {
     // body decoded into a `T`, and a body that is not one is answered `400`.
     app.post("/greet") { ctx, body: http.Json.<Greeting>, g: *Greeter in
         let mut out := ""
-        for i in 0..<body.value.times { out = f"{out}{g.greeting}, {body.value.name}\n" }
+        for i in 0..<body.times { out = f"{out}{g.greeting}, {body.name}\n" }
         http.text(out)
     }
 
