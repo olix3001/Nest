@@ -153,7 +153,7 @@ impl Fields<'_> {
                 Diagnostic::error(
                     "an `@using` field must be a struct, a generic parameter, or a pointer to one",
                 )
-                    .with_primary(span, ""),
+                .with_primary(span, ""),
             );
         }
     }

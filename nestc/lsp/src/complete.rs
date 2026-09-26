@@ -1311,7 +1311,6 @@ fn params_of(s: &Session, def: DefId) -> Option<usize> {
         .map(|p| p.len())
 }
 
-
 /// `ty` with each of a type's generic `params` replaced by the `args` a use
 /// gave it: `T` in `Json.<User>`'s field is `User`.
 fn substitute(ty: &Ty, params: &[DefId], args: &[Ty]) -> Ty {
