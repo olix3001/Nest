@@ -310,3 +310,36 @@ impl <K, V> I for M.<K, V> {
             (pointer_type
               (type_path
                 (type_identifier)))))))))
+
+================================================================================
+Import destructuring with self
+================================================================================
+
+{ self, Json } :: import <std/http>
+{ net: { self: n, TcpStream } } :: import <std>
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (const_binding
+      (destructure_pattern
+        (field_pattern
+          (identifier))
+        (field_pattern
+          (identifier)))
+      (import_expression
+        (package_path))))
+  (declaration
+    (const_binding
+      (destructure_pattern
+        (field_pattern
+          (identifier)
+          (destructure_pattern
+            (field_pattern
+              (identifier)
+              (identifier))
+            (field_pattern
+              (identifier)))))
+      (import_expression
+        (package_path)))))

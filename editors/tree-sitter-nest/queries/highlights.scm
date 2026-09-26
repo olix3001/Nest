@@ -142,6 +142,11 @@
 (field_pattern
   name: (identifier) @property)
 
+; `{ self, Json } :: import <std/http>`: the namespace itself, not a member.
+((field_pattern
+  name: (identifier) @variable.special)
+  (#eq? @variable.special "self"))
+
 ; ===< Literals >===
 
 (integer) @number
