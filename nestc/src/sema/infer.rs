@@ -1716,6 +1716,9 @@ impl Inferer<'_> {
         // obligation can concretize a variable that lets the next one commit, so
         // run to a fixpoint before finalizing.
         self.solve_to_fixpoint();
+        if self.pin_bound_literals() {
+            self.solve_to_fixpoint();
+        }
         // Any obligation still queued is stuck; report the genuinely
         // unsatisfiable ones (a concrete self with no matching impl).
         let leftover = self.cx.take_obligations();
@@ -2800,6 +2803,30 @@ impl Inferer<'_> {
                 break;
             }
         }
+    }
+
+    /// Settle a numeric literal that is still only held to a bound — `take(5)`
+    /// for `take :: func <T: Show>` with no integer impl of `Show` — to its
+    /// default, and report whether any was.
+    ///
+    /// Selection defers on an open literal, and a stuck obligation over a
+    /// variable is not reported, so without this the literal defaulted after
+    /// inference and the missing impl surfaced in monomorphization as a
+    /// compiler defect. Pinned, it is asked like any `isize` / `f64` would be.
+    fn pin_bound_literals(&mut self) -> bool {
+        let pending = self.cx.take_obligations();
+        let mut pinned = false;
+        for ob in &pending {
+            if let Obligation::Trait { self_ty, .. } | Obligation::Projection { self_ty, .. } = ob
+                && let before @ Ty::Var(_) = self.cx.shallow(self_ty)
+            {
+                pinned |= self.cx.pin_numeric(self_ty) != before;
+            }
+        }
+        for ob in pending {
+            self.cx.register(ob);
+        }
+        pinned
     }
 
     /// Give a variant literal whose enum nothing named the one enum its

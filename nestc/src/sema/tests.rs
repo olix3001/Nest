@@ -10719,3 +10719,20 @@ main :: func () -> i32 {{ return run {{ n in .some(n) }} }}
     ));
     assert!(err.contains("type annotations needed"), "{err}");
 }
+
+/// A literal only a bound holds is asked about as the type it defaults to, in
+/// inference — not left for monomorphization to find no impl and call it a
+/// compiler defect.
+#[test]
+fn a_literal_held_only_by_a_bound_is_checked_against_it() {
+    let head = "\
+Show :: trait { show :: func (self: Self) -> i32 }
+impl Show for str { show :: func (self: str) -> i32 { return 1 } }
+take :: func <T: Show> (x: T) -> i32 { return x.show() }
+run :: func <R: Show, F: Func(i32) -> R> (f: F) -> i32 { return f(1).show() }
+";
+    for (body, ty) in [("take(5)", "isize"), ("take(2.5)", "f64"), ("run { n in 5 }", "isize")] {
+        let err = first_error(&format!("{head}main :: func () -> i32 {{ return {body} }}\n"));
+        assert!(err.contains(&format!("`{ty}` does not implement `Show`")), "{body}: {err}");
+    }
+}
